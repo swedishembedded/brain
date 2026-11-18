@@ -112,11 +112,11 @@ pub async fn speech(State(state): State<AppState>, caller: CallerExt, body: Byte
     if spec.params.iter().any(|p| p.name == "max_frames") {
         call = call.set("max_frames", json!(MAX_FRAMES));
     }
-    let call = match spec.validate_served(call) {
-        Ok(call) => call,
-        Err(e) => return ApiError::invalid_request(provider, e).into_response(),
+    let outcome = match bridge::admit(&state, &model, &action, call, bridge::Naming::Params) {
+        Ok(call) => bridge::submit(&state, call).await,
+        Err(e) => Err(e),
     };
-    let outcome = match bridge::submit(&state, &model, &action, call).await {
+    let outcome = match outcome {
         Ok(o) => o,
         Err(e) => return e.into_response(),
     };

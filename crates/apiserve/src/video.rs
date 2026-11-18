@@ -194,9 +194,7 @@ pub fn is_video_model(manifests: &[Manifest], model: &str) -> bool {
 }
 
 struct Planned {
-    model: String,
-    action: String,
-    inv: Invocation,
+    call: bridge::Admitted,
     /// The server's copies of the request's frame images and references,
     /// kept until the job ends.
     inputs: Option<JobInputs>,
@@ -270,23 +268,19 @@ async fn plan(state: &AppState, body: &Bytes) -> Result<Planned, ApiError> {
         (None, Some(_)) => return Err(bad(format!("{model} {} takes no input_video", spec.name))),
         (None, None) => {}
     }
-    // `validate_served`'s two passes with the host's answers between them: a
-    // host path param the caller named is refused as unknown first, then the
-    // server fills the ones the contract gives it from the request's own
-    // inputs, then the full spec checks the result.
-    let mut inv = spec.clone().for_serving().validate(inv).map_err(bad)?;
-    let inputs = if media_in.is_empty() {
-        None
+    // The served validation with the host's answers between its two passes
+    // (`bridge::admit_with_host`): a host path param the caller named is
+    // refused as unknown, the server fills the ones the contract gives it from
+    // the request's own inputs, and the full spec checks the result.
+    let (inputs, host_params) = if media_in.is_empty() {
+        (None, serde_json::Map::new())
     } else {
         let root = private_temp_dir().map_err(|e| ApiError::internal(provider, e))?;
         let (inputs, host_params) = tokio::task::spawn_blocking(move || media_in.materialize(&root, &contract)).await.map_err(|e| ApiError::internal(provider, e.to_string()))?.map_err(bad)?;
-        if let Value::Object(params) = &mut inv.params {
-            params.extend(host_params);
-        }
-        Some(inputs)
+        (Some(inputs), host_params)
     };
-    let inv = spec.validate(inv).map_err(bad)?;
-    Ok(Planned { model, action: spec.name.clone(), inv, inputs })
+    let call = bridge::admit_with_host(state, &model, &spec.name, inv, host_params, bridge::Naming::Params)?;
+    Ok(Planned { call, inputs })
 }
 
 /// An inline `data:video/...;base64,` clip, decoded into the video blob wire
@@ -902,7 +896,7 @@ async fn create(State(state): State<AppState>, caller: CallerExt, headers: Heade
         Ok((id, false)) => return status_response(&state, id),
         Err((code, why)) => return (code, Json(json!({"error": {"message": why}}))).into_response(),
     };
-    let stream = match bridge::stream_progress(&state, &planned.model, &planned.action, planned.inv).await {
+    let stream = match bridge::stream_progress(&state, planned.call).await {
         Ok(stream) => stream,
         Err(e) => {
             state.videos.discard(id);

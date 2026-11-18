@@ -66,10 +66,10 @@ impl ResidentModel for Flood {
         Manifest::new(
             "brain-chat",
             "a chat model that never waits for its tokens",
-            vec![ActionSpec::new("generate", "generate text")
+            vec![crate::chat_contract(ActionSpec::new("generate", "generate text")
                 .streaming()
-                .param(ParamSpec::new("prompt", ParamType::Str, "the prompt").required())
-                .output(BlobSpec::new("text", Media::Text, "generated text"))],
+                .param(ParamSpec::new("prompt", ParamType::Str, "the prompt"))
+                .output(BlobSpec::new("text", Media::Text, "generated text")))],
         )
     }
     fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {

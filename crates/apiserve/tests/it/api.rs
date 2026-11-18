@@ -52,11 +52,11 @@ fn chat_manifest() -> Manifest {
     Manifest::new(
         "brain-chat",
         "a chat model",
-        vec![ActionSpec::new("generate", "generate text")
+        vec![crate::chat_contract(ActionSpec::new("generate", "generate text")
             .streaming()
-            .param(ParamSpec::new("prompt", ParamType::Str, "the prompt").required())
+            .param(ParamSpec::new("prompt", ParamType::Str, "the prompt"))
             .param(ParamSpec::new("seed", ParamType::Int, "sampling seed"))
-            .output(BlobSpec::new("text", Media::Text, "generated text"))],
+            .output(BlobSpec::new("text", Media::Text, "generated text")))],
     )
 }
 
@@ -85,7 +85,7 @@ fn plain_embed_manifest() -> Manifest {
     )
 }
 
-/// An image model: streaming `text2image(prompt, width, height, seed) -> Image`.
+/// An image model: streaming `text2image(prompt, width, height, seed, precision) -> Image`.
 fn image_manifest() -> Manifest {
     Manifest::new(
         "brain-image",
@@ -97,6 +97,7 @@ fn image_manifest() -> Manifest {
             // The tallest image this model draws.
             .param(ParamSpec::new("height", ParamType::Int, "height").default(json!(1024)).max(1024.0))
             .param(ParamSpec::new("seed", ParamType::Int, "seed"))
+            .param(ParamSpec::new("precision", ParamType::Enum(vec!["int8".into(), "fp32".into()]), "DiT precision"))
             .output(BlobSpec::new("image", Media::Image, "the generated image"))],
     )
 }
@@ -528,12 +529,12 @@ fn agent_chat_manifest() -> Manifest {
     Manifest::new(
         "brain-agent",
         "a tool-calling chat model",
-        vec![ActionSpec::new("generate", "generate text")
+        vec![crate::chat_contract(ActionSpec::new("generate", "generate text")
             .streaming()
-            .param(ParamSpec::new("prompt", ParamType::Str, "the prompt").required())
+            .param(ParamSpec::new("prompt", ParamType::Str, "the prompt"))
             .param(ParamSpec::new("max_new", ParamType::Int, "new tokens").default(json!(128)).max(8192.0))
             .param(ParamSpec::new("tools", ParamType::Str, "JSON array of tool definitions"))
-            .output(BlobSpec::new("text", Media::Text, "generated text"))],
+            .output(BlobSpec::new("text", Media::Text, "generated text")))],
     )
 }
 
@@ -542,12 +543,12 @@ fn vision_chat_manifest() -> Manifest {
     Manifest::new(
         "brain-vision",
         "a chat model that reads images",
-        vec![ActionSpec::new("generate", "generate text")
+        vec![crate::chat_contract(ActionSpec::new("generate", "generate text")
             .streaming()
-            .param(ParamSpec::new("prompt", ParamType::Str, "the prompt").required())
+            .param(ParamSpec::new("prompt", ParamType::Str, "the prompt"))
             .param(ParamSpec::new("tools", ParamType::Str, "JSON array of tool definitions"))
             .input(BlobSpec::new("image", Media::Image, "the images of the conversation"))
-            .output(BlobSpec::new("text", Media::Text, "generated text"))],
+            .output(BlobSpec::new("text", Media::Text, "generated text")))],
     )
 }
 
@@ -677,7 +678,7 @@ async fn model_card_names_the_sampling_parameters_the_model_honours_on_every_dia
         }
         assert_eq!(card["supported_parameters"], json!(["max_tokens", "temperature", "top_p", "top_k", "seed"]), "{provider}: {card}");
         let seeded = get_json(&app, provider, &format!("{uri_prefix}/brain-chat"), &key).await;
-        assert_eq!(seeded["supported_parameters"], json!(["seed"]), "{provider}: only what it declares: {seeded}");
+        assert_eq!(seeded["supported_parameters"], json!(["max_tokens", "seed"]), "{provider}: only what it declares: {seeded}");
         // The Anthropic surface lists chat models only.
         if provider != Provider::Anthropic {
             let embed = get_json(&app, provider, &format!("{uri_prefix}/brain-embed"), &key).await;
@@ -1509,7 +1510,9 @@ async fn openai_embeddings_instruction_and_max_tokens_reach_the_action_or_are_re
         body.as_object_mut().unwrap().extend(field.as_object().unwrap().clone());
         let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/embeddings", &body).await;
         assert_eq!(st, StatusCode::BAD_REQUEST, "a model that does not take it refuses it: {body}");
-        assert!(v["error"]["message"].as_str().is_some_and(|m| m.contains("unknown param")), "{v}");
+        let name = field.as_object().unwrap().keys().next().unwrap().clone();
+        assert_eq!((v["error"]["code"].clone(), v["error"]["param"].clone()), (json!("unsupported_parameter"), json!(name)), "{v}");
+        assert!(v["error"]["message"].as_str().is_some_and(|m| m.contains("brain-embed-plain")), "names the model: {v}");
     }
 }
 
@@ -1734,9 +1737,8 @@ async fn openrouter_chat_models_fallback_array_resolves_second() {
     assert_eq!(v["choices"][0]["message"]["content"], "Hello world");
 }
 
-/// OpenRouter tolerates its own extra request fields (`provider`, `route`,
-/// `transforms`, `plugins`): they parse and are ignored, so the request still 200s
-/// instead of 400-ing on the unknown keys.
+/// OpenRouter's own request fields that do not change the answer (`provider`, `route`, `transforms`, `usage`) are
+/// accepted and ignored, so the request still 200s; one that would (`plugins`) is refused by name.
 #[tokio::test]
 async fn openrouter_chat_tolerates_or_only_fields() {
     let (app, key) = chat_app(Provider::OpenRouter);
@@ -1746,11 +1748,17 @@ async fn openrouter_chat_tolerates_or_only_fields() {
         "provider": {"order": ["brain"], "allow_fallbacks": false},
         "route": "fallback",
         "transforms": ["middle-out"],
-        "plugins": [{"id": "web"}],
+        "usage": {"include": true},
     });
     let (st, v) = post_json(&app, Provider::OpenRouter, &key, "/chat/completions", &body).await;
     assert_eq!(st, StatusCode::OK, "OpenRouter-only extras must not 400: {v}");
     assert_valid("openrouter.json", "ChatResult", &v);
+    // A plugin (web search, say) changes the answer, and brain runs none: refused by name, not dropped.
+    let mut with_plugin = body.clone();
+    with_plugin["plugins"] = json!([{"id": "web"}]);
+    let (st, v) = post_json(&app, Provider::OpenRouter, &key, "/chat/completions", &with_plugin).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    assert!(v["error"]["message"].as_str().unwrap().contains("'plugins'"), "{v}");
 }
 
 /// The prefix-strip + fallback behaviour is OpenRouter-only: on the OpenAI surface a
@@ -1765,15 +1773,15 @@ async fn openai_chat_does_not_strip_prefix_or_use_models_fallback() {
     assert_eq!(st, StatusCode::NOT_FOUND, "OpenAI must not strip a slashed model: {v}");
     assert_valid("openai.json", "ErrorResponse", &v);
 
-    // `models` fallback array is an OpenRouter-only field: ignored on OpenAI, so an
-    // unresolvable primary `model` still 404s even if a `models` entry would resolve.
+    // `models` fallback array is an OpenRouter-only field: refused by name on OpenAI,
+    // never walked, even where a `models` entry would resolve.
     let body = json!({
         "model": "does/not-exist",
         "models": ["brain-chat"],
         "messages": [{"role": "user", "content": "hi"}],
     });
-    let (st, _) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
-    assert_eq!(st, StatusCode::NOT_FOUND, "OpenAI must ignore the models fallback array");
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert_eq!((st, v["error"]["param"].clone()), (StatusCode::BAD_REQUEST, json!("models")), "OpenAI does not define the models fallback array: {v}");
 }
 
 /// The prefix strip + `models` fallback apply to OpenRouter embeddings and images too
@@ -2692,7 +2700,7 @@ impl ResidentModel for FakeToolCallChat {
         Manifest::new(
             "brain-toolcall",
             "a tool-calling chat model",
-            vec![ActionSpec::new("generate", "generate text")
+            vec![crate::chat_contract(ActionSpec::new("generate", "generate text")
                 .streaming()
                 .param(ParamSpec::new("prompt", ParamType::Str, "the prompt"))
                 .param(ParamSpec::new("messages", ParamType::Str, "chat messages"))
@@ -2702,7 +2710,7 @@ impl ResidentModel for FakeToolCallChat {
                 .param(ParamSpec::new("preserve_thinking", ParamType::Bool, "preserve history reasoning"))
                 .param(ParamSpec::new("template_flavor", ParamType::Str, "chat template flavor"))
                 .input(BlobSpec::new("image", Media::Image, "an image the model reads"))
-                .output(BlobSpec::new("text", Media::Text, "generated text"))],
+                .output(BlobSpec::new("text", Media::Text, "generated text")))],
         )
     }
     fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
@@ -2775,7 +2783,7 @@ impl ResidentModel for FakeUnmetToolChoiceChat {
         Manifest::new(
             "brain-unmet",
             "a chat model with an unmet tool_choice demand",
-            vec![ActionSpec::new("generate", "generate text").streaming().param(ParamSpec::new("prompt", ParamType::Str, "the prompt")).output(BlobSpec::new("text", Media::Text, "generated text"))],
+            vec![crate::chat_contract(ActionSpec::new("generate", "generate text").streaming().param(ParamSpec::new("prompt", ParamType::Str, "the prompt")).output(BlobSpec::new("text", Media::Text, "generated text")))],
         )
     }
     fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
@@ -3058,19 +3066,19 @@ async fn openai_chat_template_flavor_reaches_the_invocation() {
 }
 
 #[tokio::test]
-async fn openai_chat_no_tools_means_unset_enable_thinking_in_the_invocation() {
+async fn openai_chat_omitted_thinking_settings_take_the_declared_defaults() {
     // The sibling of the round-trip test above: when the client sends neither
     // `tools` nor `enable_thinking` (nor `preserve_thinking`), the invocation
-    // must carry neither (an absent optional param, not a false/empty default
-    // silently injected).
+    // carries what the served action declares: `enable_thinking`'s default,
+    // and nothing for a param declared without one.
     let (app, key) = toolcall_app(Provider::OpenAI);
     let body = json!({"model": "brain-toolcall", "messages": [{"role": "user", "content": "hi"}]});
     let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
     assert_eq!(st, StatusCode::OK);
     let reasoning = v["choices"][0]["message"]["reasoning_content"].as_str().unwrap();
     assert!(reasoning.contains("tools_len:0"));
-    assert!(reasoning.contains("enable_thinking:unset"));
-    assert!(reasoning.contains("preserve_thinking:unset"));
+    assert!(reasoning.contains("enable_thinking:true"), "the declared default: {reasoning}");
+    assert!(reasoning.contains("preserve_thinking:unset"), "{reasoning}");
 }
 
 #[tokio::test]
@@ -3245,11 +3253,11 @@ impl ResidentModel for StepOnlyChat {
         Manifest::new(
             "brain-steponly",
             "a chat model that reports only coarse progress",
-            vec![ActionSpec::new("generate", "generate text")
+            vec![crate::chat_contract(ActionSpec::new("generate", "generate text")
                 .streaming()
                 .param(ParamSpec::new("prompt", ParamType::Str, "the prompt"))
                 .param(ParamSpec::new("messages", ParamType::Str, "chat messages"))
-                .output(BlobSpec::new("text", Media::Text, "generated text"))],
+                .output(BlobSpec::new("text", Media::Text, "generated text")))],
         )
     }
     fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
@@ -3429,7 +3437,7 @@ impl ResidentModel for MediaEchoChat {
         Manifest::new(
             "brain-mediaecho",
             "a chat model that echoes attached media",
-            vec![ActionSpec::new("generate", "generate text")
+            vec![crate::chat_contract(ActionSpec::new("generate", "generate text")
                 .streaming()
                 .param(ParamSpec::new("prompt", ParamType::Str, "the prompt"))
                 .param(ParamSpec::new("messages", ParamType::Str, "chat messages"))
@@ -3437,7 +3445,7 @@ impl ResidentModel for MediaEchoChat {
                 .input(BlobSpec::new("image", Media::Image, "optional HWC-f32 image"))
                 .input(BlobSpec::new("image1", Media::Image, "a further image"))
                 .input(BlobSpec::new("image2", Media::Image, "a further image"))
-                .output(BlobSpec::new("text", Media::Text, "generated text"))],
+                .output(BlobSpec::new("text", Media::Text, "generated text")))],
         )
     }
     fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
@@ -3565,13 +3573,13 @@ impl ResidentModel for MessagesEchoChat {
         Manifest::new(
             "brain-messagesecho",
             "a chat model that echoes the raw contract 'messages' JSON",
-            vec![ActionSpec::new("generate", "generate text")
+            vec![crate::chat_contract(ActionSpec::new("generate", "generate text")
                 .streaming()
                 .param(ParamSpec::new("prompt", ParamType::Str, "the prompt"))
                 .param(ParamSpec::new("messages", ParamType::Str, "chat messages"))
                 .input(BlobSpec::new("image", Media::Image, "an image the model reads"))
                 .input(BlobSpec::new("audio", Media::Audio, "a recording the model hears"))
-                .output(BlobSpec::new("text", Media::Text, "generated text"))],
+                .output(BlobSpec::new("text", Media::Text, "generated text")))],
         )
     }
     fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
@@ -3781,12 +3789,12 @@ impl ResidentModel for FakeFim {
         Manifest::new(
             "brain-fim",
             "a completion model with fill-in-the-middle",
-            vec![ActionSpec::new("generate", "generate text")
+            vec![crate::chat_contract(ActionSpec::new("generate", "generate text")
                 .streaming()
                 .param(ParamSpec::new("prompt", ParamType::Str, "the prompt"))
                 .param(ParamSpec::new("suffix", ParamType::Str, "text after the insertion point"))
                 .param(ParamSpec::new("chat", ParamType::Bool, "apply the chat template"))
-                .output(BlobSpec::new("text", Media::Text, "generated text"))],
+                .output(BlobSpec::new("text", Media::Text, "generated text")))],
         )
     }
     fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
@@ -3941,11 +3949,12 @@ impl ResidentModel for FakeReasoner {
         Manifest::new(
             "brain-reasoner",
             "a reasoning chat model",
-            vec![ActionSpec::new("generate", "generate text")
+            vec![crate::chat_contract(ActionSpec::new("generate", "generate text")
                 .streaming()
                 .param(ParamSpec::new("messages", ParamType::Str, "chat messages"))
                 .param(ParamSpec::new("enable_thinking", ParamType::Bool, "reason first"))
-                .output(BlobSpec::new("text", Media::Text, "generated text"))],
+                .param(ParamSpec::new("thinking_budget", ParamType::Int, "tokens the reasoning may take"))
+                .output(BlobSpec::new("text", Media::Text, "generated text")))],
         )
     }
     fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
@@ -4129,6 +4138,8 @@ impl ResidentModel for SiblingChat {
     fn manifest(&self) -> Manifest {
         let mut m = chat_manifest();
         m.model = self.name.clone();
+        // It reports the sampled tokens and the policy trace when asked.
+        m.actions[0] = ["logprobs", "return_token_ids", "policy_trace"].into_iter().fold(m.actions[0].clone(), |spec, name| spec.param(ParamSpec::new(name, ParamType::Bool, "token capture")));
         m
     }
     fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
@@ -4349,13 +4360,13 @@ async fn an_unserved_adapter_id_gets_the_same_404_as_an_unknown_model() {
 async fn the_reserved_adapter_param_cannot_be_set_by_a_caller() {
     let (app, _exec, key) = adapter_app(Provider::OpenAI);
 
-    // Extra body fields on a chat request are not carried to the action.
-    let mut body = chat_body(ADAPTER_BASE);
-    body[ADAPTER_PARAM] = json!(ADAPTER_ID);
-    body["adapter"] = json!(ADAPTER_ID);
-    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
-    assert_eq!(st, StatusCode::OK, "{v}");
-    assert_eq!(v["choices"][0]["message"]["content"], json!("answered by the base"), "a forged selection must not reach an adapter");
+    // A chat request's body field the dialect does not define is refused by name, never carried to the action.
+    for forged in [ADAPTER_PARAM, "adapter"] {
+        let mut body = chat_body(ADAPTER_BASE);
+        body[forged] = json!(ADAPTER_ID);
+        let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+        assert_eq!((st, v["error"]["param"].clone()), (StatusCode::BAD_REQUEST, json!(forged)), "{v}");
+    }
 
     // The generic routes validate against the served manifest, which declares
     // neither name, so both are refused as unknown params before anything runs.
@@ -4364,8 +4375,7 @@ async fn the_reserved_adapter_param_cannot_be_set_by_a_caller() {
             let run = json!({"model": model, "action": "generate", "params": {"prompt": "hi", forged: ADAPTER_ID}, "blobs": {}});
             for path in ["/v1/run", "/v1/jobs"] {
                 let (st, v) = post_json(&app, Provider::OpenAI, &key, path, &run).await;
-                assert_eq!(st, StatusCode::BAD_REQUEST, "{model} {path} {forged}: {v}");
-                assert!(v.to_string().contains("unknown param"), "{model} {path} {forged}: {v}");
+                assert_eq!((st, v["error"]["param"].clone()), (StatusCode::BAD_REQUEST, json!(forged)), "{model} {path} {forged}: {v}");
             }
         }
     }
@@ -4439,7 +4449,7 @@ impl ResidentModel for SamplerChat {
         Manifest::new(
             SAMPLER_CHAT,
             "a chat model with a declared sampler",
-            vec![ActionSpec::new("generate", "generate text")
+            vec![crate::chat_contract(ActionSpec::new("generate", "generate text")
                 .streaming()
                 .param(ParamSpec::new("prompt", ParamType::Str, "the prompt"))
                 .param(ParamSpec::new("messages", ParamType::Str, "chat turns"))
@@ -4449,7 +4459,7 @@ impl ResidentModel for SamplerChat {
                 .param(ParamSpec::new("top_p", ParamType::Float, "top-p").default(json!(0.95)))
                 .param(ParamSpec::new("min_p", ParamType::Float, "min-p"))
                 .param(ParamSpec::new("seed", ParamType::Int, "sampling seed"))
-                .output(BlobSpec::new("text", Media::Text, "generated text"))],
+                .output(BlobSpec::new("text", Media::Text, "generated text")))],
         )
     }
     fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
@@ -4601,4 +4611,123 @@ async fn a_chat_reply_returns_token_ids_and_logprobs_only_when_asked() {
 
     let (st, _) = post_json(&app, Provider::OpenAI, &key, "/v1/completions", &json!({"model": ADAPTER_BASE, "prompt": "hi", "logprobs": 1})).await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
+}
+
+// ------------------------------------------------- the served spec on every chat route
+
+/// A chat model whose `generate` declares defaults for its sampler and for its chat-template settings, and that
+/// answers with the template settings it received (its text) and the sampler it drew with (`sampler`).
+struct SpecChat;
+
+struct SpecChatInst;
+
+const SPEC_CHAT: &str = "brain-spec-chat";
+
+impl ResidentModel for SpecChat {
+    fn manifest(&self) -> Manifest {
+        let generate = crate::chat_contract(ActionSpec::new("generate", "generate text"))
+            .streaming()
+            .param(ParamSpec::new("temp", ParamType::Float, "temperature").default(json!(0.7)))
+            .param(ParamSpec::new("top_k", ParamType::Int, "top-k").default(json!(20)))
+            .param(ParamSpec::new("top_p", ParamType::Float, "top-p").default(json!(0.8)))
+            .param(ParamSpec::new("enable_thinking", ParamType::Bool, "reason first").default(json!(false)))
+            .param(ParamSpec::new("reasoning_effort", ParamType::Str, "how much to reason").default(json!("low")))
+            .param(ParamSpec::new("template_flavor", ParamType::Str, "chat template flavor").default(json!("qwen3.8")))
+            .output(BlobSpec::new("text", Media::Text, "generated text"));
+        Manifest::new(SPEC_CHAT, "a chat model with declared defaults", vec![generate])
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new(SPEC_CHAT, "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::default()
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(SpecChatInst))
+    }
+}
+
+impl Instance for SpecChatInst {
+    fn run(&mut self, _a: &str, inv: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+        let flags = format!("enable_thinking={:?} reasoning_effort={:?} template_flavor={:?}", inv.get_bool("enable_thinking"), inv.get_str("reasoning_effort"), inv.get_str("template_flavor"));
+        let sampler = json!({ "temp": inv.get_f64("temp"), "top_k": inv.get_i64("top_k"), "top_p": inv.get_f64("top_p") });
+        let out = Outcome::new().set("prompt_tokens", json!(5)).set("completion_tokens", json!(2)).set("finish_reason", json!("stop")).set("sampler", sampler);
+        Ok(out.blob("text", Blob::new(Media::Text, flags.into_bytes())))
+    }
+}
+
+fn spec_chat_app(provider: Provider) -> (Router, String) {
+    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(SpecChat)];
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 8 << 30, 0);
+    let key = "sk-brain-test-key".to_string();
+    (router(AppState::new(Executor::start(models, budgets, Policy::default()), key.clone(), provider)), key)
+}
+
+/// Every chat route validates its call against the model's served `generate` spec, streamed or not: a setting the
+/// request leaves out (sampler and chat template alike) takes the default the spec declares, a field the model does
+/// not take or the dialect does not define is refused with a 400 naming the field and the model, and a field the
+/// dialect defines and brain accepts and ignores passes.
+#[tokio::test]
+async fn every_chat_route_holds_its_call_to_the_served_spec() {
+    let messages = json!([{"role": "user", "content": "hi"}]);
+    let routes = [
+        (Provider::OpenAI, "/v1/chat/completions", json!({"model": SPEC_CHAT, "messages": messages}), "user"),
+        (Provider::OpenAI, "/v1/completions", json!({"model": SPEC_CHAT, "prompt": "hi"}), "user"),
+        (Provider::OpenRouter, "/v1/chat/completions", json!({"model": SPEC_CHAT, "messages": messages}), "provider"),
+        (Provider::Anthropic, "/v1/messages", json!({"model": SPEC_CHAT, "max_tokens": 8, "messages": messages}), "metadata"),
+    ];
+    let text = |provider: Provider, path: &str, v: &Value| match (provider, path) {
+        (Provider::Anthropic, _) => v["content"][0]["text"].as_str().map(str::to_string),
+        (_, "/v1/completions") => v["choices"][0]["text"].as_str().map(str::to_string),
+        _ => v["choices"][0]["message"]["content"].as_str().map(str::to_string),
+    };
+    for (provider, path, body, ignored) in routes {
+        let (app, key) = spec_chat_app(provider);
+        let (st, v) = post_json(&app, provider, &key, path, &body).await;
+        assert_eq!(st, StatusCode::OK, "{provider} {path}: {v}");
+        assert_eq!(text(provider, path, &v).as_deref(), Some(r#"enable_thinking=Some(false) reasoning_effort=Some("low") template_flavor=Some("qwen3.8")"#), "{provider} {path}: {v}");
+        for brain in served_objects_of(&app, &key, provider, path, &body).await {
+            assert_eq!(brain["sampler"], json!({"temperature": 0.7, "top_k": 20, "top_p": 0.8}), "{provider} {path}: {brain}");
+        }
+
+        // Accepted and ignored, streamed or not.
+        let mut accepted = body.clone();
+        accepted[ignored] = json!({"anything": "at all"});
+        if ignored == "user" {
+            accepted[ignored] = json!("end-user-7");
+        }
+        served_objects_of(&app, &key, provider, path, &accepted).await;
+
+        // Refused by name, streamed or not, before any stream opens: a field the dialect does not define, and one it
+        // reads that this model does not take.
+        for (field, value) in [("frobnicate", json!(1)), ("presence_penalty", json!(0.5))] {
+            for stream in [false, true] {
+                let mut sent = body.clone();
+                sent[field] = value.clone();
+                sent["stream"] = json!(stream);
+                let (st, v) = post_json(&app, provider, &key, path, &sent).await;
+                assert_eq!(st, StatusCode::BAD_REQUEST, "{provider} {path} {field} stream={stream}: {v}");
+                let message = v["error"]["message"].as_str().unwrap_or_default();
+                assert!(message.contains(&format!("'{field}'")) && message.contains(SPEC_CHAT), "{provider} {path} {field}: {v}");
+                if provider == Provider::OpenAI {
+                    assert_eq!((v["error"]["code"].clone(), v["error"]["param"].clone()), (json!("unsupported_parameter"), json!(field)), "{v}");
+                }
+            }
+        }
+    }
+}
+
+/// [`served_objects`] over an app already built: the `brain` object of the reply and of the streamed reply's
+/// terminal event, both of which must succeed.
+async fn served_objects_of(app: &Router, key: &str, provider: Provider, path: &str, body: &Value) -> Vec<Value> {
+    let (st, reply) = post_json(app, provider, key, path, body).await;
+    assert_eq!(st, StatusCode::OK, "{provider} {path}: {reply}");
+    let mut streamed = body.clone();
+    streamed["stream"] = json!(true);
+    let (st, sse) = post_text(app, provider, key, path, &streamed).await;
+    assert_eq!(st, StatusCode::OK, "{provider} {path}: {sse}");
+    let frames: Vec<Value> = sse_data(&sse).iter().filter(|d| *d != "[DONE]").map(|d| serde_json::from_str(d).unwrap()).collect();
+    let terminal = frames.iter().find(|f| f.get("brain").is_some()).unwrap_or_else(|| panic!("{provider} {path}: no terminal brain object: {sse}"));
+    vec![reply["brain"].clone(), terminal["brain"].clone()]
 }

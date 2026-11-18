@@ -32,10 +32,10 @@ fn chat_manifest() -> Manifest {
     Manifest::new(
         "brain-chat",
         "a chat model",
-        vec![ActionSpec::new("generate", "generate text")
+        vec![crate::chat_contract(ActionSpec::new("generate", "generate text")
             .streaming()
-            .param(ParamSpec::new("prompt", ParamType::Str, "the prompt").required())
-            .output(BlobSpec::new("text", Media::Text, "generated text"))],
+            .param(ParamSpec::new("prompt", ParamType::Str, "the prompt"))
+            .output(BlobSpec::new("text", Media::Text, "generated text")))],
     )
 }
 

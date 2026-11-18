@@ -152,7 +152,7 @@ impl ResidentModel for Qwen35Resident {
         Manifest::new(
             &self.id,
             "text generation (Qwen3.5-35B-A3B hybrid Gated-DeltaNet/GQA sparse-MoE decoder; single-GPU, f32 or packed-int8 weights as the checkpoint stores them + fp32 KV, up to --max-batch sequences per batched decode step -- see crate::resident_qwen35moe's module doc)",
-            vec![generate_spec("generate text (Qwen3.5-35B-A3B; chat template optional)", true)],
+            vec![generate_spec("generate text (Qwen3.5-35B-A3B; chat template optional)", true).params(qwen3::chat::template_params(data::qwen_chat::TemplateFlavor::Qwen3))],
         )
         .with_max_context_tokens(self.ctx() as u64)
     }
@@ -531,7 +531,7 @@ impl ResidentModel for Qwen35MoeGgufResident {
             self.plan.pool_rows,
             self.plan.ctx
         );
-        Manifest::new(&self.id, "text generation (Qwen3.5/3.6-35B-A3B sparse-MoE decoder, released GGUF)", vec![generate_spec(&summary, true)])
+        Manifest::new(&self.id, "text generation (Qwen3.5/3.6-35B-A3B sparse-MoE decoder, released GGUF)", vec![generate_spec(&summary, true).params(qwen3::chat::template_params(data::qwen_chat::TemplateFlavor::Qwen3))])
             .with_max_context_tokens(self.plan.ctx as u64)
             .with_architecture(qwen35moe::spec::CARD_FAMILY)
     }

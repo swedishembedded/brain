@@ -58,6 +58,7 @@ pub mod openai;
 pub mod openrouter;
 pub mod png;
 pub mod preprocess;
+pub mod request_fields;
 pub mod sampling;
 pub mod speech;
 pub mod state;

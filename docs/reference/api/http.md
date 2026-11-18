@@ -180,6 +180,42 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   non-streaming reply, the Anthropic stream's closing `message_delta` (which
   repeats `input_tokens`) and the OpenAI-shaped `usage` chunk carry the real
   numbers.
+- **The request is held to the model's served spec.** Every chat route (OpenAI
+  and OpenRouter chat, OpenAI completions, Anthropic messages; streamed or not)
+  validates the call it builds against the model's `generate` action as
+  `/v1/capabilities` lists it, the same check `/v1/run` and D-Bus `Run` make,
+  before anything is queued (a streamed request is refused with a plain 400,
+  never an event stream). A setting the request leaves out takes the default the
+  action declares - the sampler's and the chat template's alike
+  (`enable_thinking`, `reasoning_effort`, `template_flavor`, `preserve_thinking`
+  where the model declares them) - and a field the model's action does not take
+  is refused with 400 `unsupported_parameter` naming the field and the model
+  (OpenAI's `error.param` is the field), never dropped. A top-level field the
+  dialect does not define, or one brain does not read (`functions`,
+  `verbosity`, `audio`, OpenRouter's `plugins` and `reasoning`, Anthropic's
+  `container` and `mcp_servers`, ...), is refused the same way. These are
+  accepted and ignored, each because ignoring it answers the request the client
+  sent (`crates/apiserve/src/request_fields.rs` holds the same table):
+
+  | Field | Dialects | Accepted values | Why ignoring it is correct |
+  |---|---|---|---|
+  | `user` | OpenAI chat, OpenRouter, completions | any | an end-user id for the provider's abuse monitoring; it does not change the reply |
+  | `safety_identifier` | OpenAI chat, OpenRouter | any | the successor of `user` |
+  | `prompt_cache_key` | OpenAI chat, OpenRouter | any | a hint for routing to a warm prompt cache; brain's prefix cache matches prompts by their tokens |
+  | `metadata` | OpenAI chat, OpenRouter, Anthropic | any | stored-completion tags (OpenAI) or an end-user id (Anthropic); brain stores nothing |
+  | `store` | OpenAI chat, OpenRouter | `false` | brain keeps no copy; `true` asks it to, and is refused |
+  | `service_tier` | OpenAI chat, OpenRouter | `auto`, `default` | brain has one processing tier; `flex` or `priority` is refused |
+  | `service_tier` | Anthropic | `auto`, `standard_only` | brain has one capacity tier |
+  | `parallel_tool_calls` | OpenAI chat, OpenRouter | `true` | the default: the model may call several tools in a turn; `false` is not enforced, so it is refused |
+  | `modalities` | OpenAI chat, OpenRouter | `["text"]` | a chat reply is text; audio output is refused |
+  | `provider` | OpenRouter | any | upstream-provider preferences; brain is the provider |
+  | `route` | OpenRouter | any | brain resolves `model`, then `models`, in order |
+  | `transforms` | OpenRouter | any | a prompt that fits is not transformed; one that does not is refused with `context_length_exceeded`, never trimmed |
+  | `usage` | OpenRouter | any | brain always reports usage |
+
+  `n: 1`, `logprobs: false`, `top_logprobs: 0`, an empty `logit_bias`,
+  `response_format: {"type": "text"}` and `stream_options` are read, not
+  ignored (below).
 - **Sampling parameters.** `temperature`, `top_p`, `top_k` (an integer in
   0..=1000) and `seed` are passed on only when the request sets them; otherwise
   the request is sampled with the model's own defaults, the `generate` action's
@@ -196,7 +232,7 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   completions endpoint also `logprobs: true`. Their neutral values are accepted.
 - **Anti-repetition sampling and the thinking budget.** For the text models that
   serve through the shared scheduler, a request may add (all off unless sent;
-  a model without them refuses the field as an unknown parameter):
+  a model without them refuses the field with 400 `unsupported_parameter`):
   `presence_penalty` and `frequency_penalty` (-2..=2, subtracted from the logit
   of tokens already generated, once and per occurrence), `repetition_penalty`
   (vLLM; divides the positive logit of every token in the prompt and the
@@ -353,12 +389,14 @@ present on every surface and behind the same key, hooks and admission:
 A call is `{"model", "action", "params", "blobs": {name: {"media", "data", "meta"}}}`
 (no other field is accepted) with `data` base64 and `media` one of `image`, `mask`, `audio`, `video`, `text`,
 `bytes`. A result is `{"outputs", "blobs"}` in the same blob shape. The call is
-checked against the action's own spec first (unknown params, wrong types, values
-out of range, a missing or mistyped blob are all a 400), and the request body is
-bounded at 64 MiB.
+checked against the action's own spec first (wrong types, values out of range, a
+missing or mistyped blob are a 400; a param or blob the action does not declare is a
+400 `unsupported_parameter` naming it and the model), and the request body is
+bounded at 64 MiB. The OpenAI-shaped embeddings, images, transcription and speech
+routes hold the call they build to the same spec.
 
 A param the host resolves for itself, such as a weights path, is never offered by
-`/v1/capabilities` and is refused (400, unknown param) if a call names it: a caller
+`/v1/capabilities` and is refused (400, `unsupported_parameter`) if a call names it: a caller
 cannot point a model at a file on the machine that serves it. The host supplies its
 own answer.
 
@@ -450,8 +488,8 @@ An adapter id needs the same API key as any model. An id that is not served -
 never loaded, withdrawn after a release, or merely adapter-shaped - is an
 unknown model: the same 404 and the same body, and nothing in a request can
 make the server load or fetch an adapter. The selection travels in a reserved
-parameter the server sets itself; `/v1/run`, `/v1/jobs` and D-Bus `Run` refuse
-`__adapter` (and `adapter`) as an unknown param like any other undeclared name.
+parameter the server sets itself; every route and D-Bus `Run` refuse
+`__adapter` (and `adapter`) like any other undeclared name.
 
 ## Model card
 

@@ -4,11 +4,12 @@
 //! The sampling parameters every chat surface forwards to `generate`.
 //!
 //! A parameter the client did not send takes the default the model's served
-//! `generate` action declares ([`settle`]: for a checkpoint that declares its
-//! sampling, the declared setting), and `seed`, which declares none, a fresh
-//! random seed. Filling in a constant here would make every unseeded request
-//! decode the same sequence. A parameter brain cannot honour is refused by name
-//! rather than ignored.
+//! `generate` action declares (the validation every queued call passes,
+//! `crate::bridge::admit`: for a checkpoint that declares its sampling, the
+//! declared setting), and `seed`, which declares none, a fresh random seed.
+//! Filling in a constant here would make every unseeded request decode the
+//! same sequence. A parameter brain cannot honour is refused by name rather
+//! than ignored.
 
 use capability::{ActionSpec, Invocation};
 use serde_json::{json, Value};
@@ -103,9 +104,14 @@ const FIELDS: [Field; 16] = [
 pub const MAX_TOKENS_PARAM: &str = "max_new";
 
 /// The token-capture fields [`apply_token_capture`] forwards, each to the param of its own name.
-const TOKEN_CAPTURE: [&str; 3] = ["logprobs", "return_token_ids", "policy_trace"];
+pub const TOKEN_CAPTURE: [&str; 3] = ["logprobs", "return_token_ids", "policy_trace"];
 
-/// Set the sampling params of `inv` from `body` ([`FIELDS`]), each only when the client sent it: [`settle`] fills the
+/// The request fields [`apply`] reads ([`FIELDS`]).
+pub fn request_fields() -> impl Iterator<Item = &'static str> {
+    FIELDS.iter().map(|f| f.name)
+}
+
+/// Set the sampling params of `inv` from `body` ([`FIELDS`]), each only when the client sent it: the validation fills the
 /// action's default otherwise, which for a model that declares its own sampling defaults (its `generation_config.json`
 /// or GGUF metadata) is the setting its authors recommend, else the chat fallback. A field outside its range is
 /// refused by name; a model that has no such sampler refuses the param by name, as it does any parameter it does not
@@ -128,30 +134,30 @@ pub fn apply(provider: Provider, body: &Value, mut inv: Invocation) -> Result<In
 }
 
 /// `inv` (a chat surface's request, [`apply`]) settled against the served action `spec` of the model it is for, before
-/// it is queued: every sampling param the request did not set takes the default `spec` declares (for a checkpoint
-/// that declares its sampling, its declared `temp`, `top_k`, `top_p`, `min_p`, `repetition_penalty`), as the
-/// validation of a generic call fills it, so the settings a reply echoes ([`echo`]) are the ones the manifest
-/// advertises; and a neutral value the client sent for a sampler `spec` does not declare is dropped, so a request
-/// that asks for nothing reaches a model without that sampler as the request it always was. `spec` `None` (a model
-/// not known yet) only drops the neutral values. The seed has no default: an unseeded request draws a fresh one.
-pub fn settle(spec: Option<&ActionSpec>, mut inv: Invocation) -> Invocation {
-    let declared = |param: &str| spec.and_then(|s| s.params.iter().find(|p| p.name == param));
+/// it is validated (`crate::bridge::admit`): a neutral value the client sent for a sampler `spec` does not declare is
+/// dropped, so a request that asks for nothing reaches a model without that sampler as the request it always was
+/// instead of being refused for a field it did not mean. A neutral value for a sampler `spec` declares is kept: it
+/// overrides the default the model declares. Every other default is the validation's to fill.
+pub fn settle(spec: &ActionSpec, mut inv: Invocation) -> Invocation {
+    let declared = |param: &str| spec.params.iter().any(|p| p.name == param);
     let Some(params) = inv.params.as_object_mut() else { return inv };
     for field in &FIELDS {
-        let held = params.get(field.param);
-        match (field.kind, held) {
-            (Kind::Number { neutral: Some(n), .. }, Some(v)) if v.as_f64() == Some(n) && declared(field.param).is_none() => {
+        if let (Kind::Number { neutral: Some(n), .. }, Some(v)) = (field.kind, params.get(field.param)) {
+            if v.as_f64() == Some(n) && !declared(field.param) {
                 params.remove(field.param);
             }
-            (Kind::Number { .. } | Kind::Integer { .. }, None) => {
-                if let Some(default) = declared(field.param).and_then(|p| p.default.clone()) {
-                    params.insert(field.param.to_string(), default);
-                }
-            }
-            _ => {}
         }
     }
     inv
+}
+
+/// The chat request field that sets the `generate` param `param` (the first of [`FIELDS`] that sets it, `max_tokens`
+/// for the completion budget), or `param` itself for one a chat request sends by its own name (`messages`, `tools`).
+pub fn request_field(param: &str) -> &str {
+    if param == MAX_TOKENS_PARAM {
+        return "max_tokens";
+    }
+    FIELDS.iter().find(|f| f.param == param).map_or(param, |f| f.name)
 }
 
 /// The request fields a model whose `generate` action declares the params `declares` answers yes for honours: those
@@ -272,8 +278,9 @@ mod tests {
     }
 
     /// What the model receives for a setting the request left out is the default its served action declares (the
-    /// checkpoint's own, where it declares one), the value its manifest shows; what the request set stays the
-    /// request's, and the seed is never filled in.
+    /// checkpoint's own, where it declares one), the value its manifest shows, once the call is validated; what the
+    /// request set stays the request's, a neutral value the client sent is kept for a sampler the model has, and the
+    /// seed is never filled in.
     #[test]
     fn an_omitted_setting_takes_the_default_the_served_action_declares() {
         let spec = generate(&["temp", "top_k", "top_p", "min_p", "seed"]);
@@ -282,10 +289,18 @@ mod tests {
             Some((_, d)) => p.default(d.clone()),
             None => p,
         }).collect(), ..spec };
-        let inv = settle(Some(&spec), apply(P, &json!({"top_k": 5, "min_p": 0}), Invocation::new()).unwrap());
+        let inv = spec.validate(settle(&spec, apply(P, &json!({"top_k": 5, "min_p": 0}), Invocation::new()).unwrap())).unwrap();
         assert_eq!((inv.get_f64("temp"), inv.get_i64("top_k"), inv.get_f64("top_p"), inv.get_f64("min_p")), (Some(1.0), Some(5), Some(0.95), Some(0.0)));
         assert_eq!(inv.get_i64("seed"), None, "an unseeded request draws a fresh seed");
-        assert_eq!(settle(None, apply(P, &json!({}), Invocation::new()).unwrap()).params, json!({}), "a model not known yet gets what was sent");
+    }
+
+    /// A refusal names the field the client sent, not the param it set.
+    #[test]
+    fn a_param_is_named_by_the_request_field_that_sets_it() {
+        assert_eq!(request_field("temp"), "temperature");
+        assert_eq!(request_field(MAX_TOKENS_PARAM), "max_tokens");
+        assert_eq!(request_field("thinking_budget"), "thinking_budget");
+        assert_eq!(request_field("tools"), "tools");
     }
 
     /// A seed is any 64-bit unsigned integer, the range the actions draw their
@@ -349,12 +364,12 @@ mod tests {
     #[test]
     fn extended_sampler_fields_are_forwarded_only_when_asked_for() {
         let neutral = json!({"presence_penalty": 0, "frequency_penalty": 0.0, "min_p": 0, "repetition_penalty": 1.0, "dry_multiplier": 0});
-        let inv = settle(None, apply(P, &neutral, Invocation::new()).unwrap());
+        let inv = settle(&generate(&[]), apply(P, &neutral, Invocation::new()).unwrap());
         for k in ["presence_penalty", "frequency_penalty", "min_p", "repetition_penalty", "dry_multiplier", "thinking_budget"] {
             assert_eq!(inv.get_f64(k), None, "{k}");
         }
         let spec = generate(&["min_p", "repetition_penalty"]);
-        let inv = settle(Some(&spec), apply(P, &neutral, Invocation::new()).unwrap());
+        let inv = settle(&spec, apply(P, &neutral, Invocation::new()).unwrap());
         assert_eq!((inv.get_f64("min_p"), inv.get_f64("repetition_penalty"), inv.get_f64("presence_penalty")), (Some(0.0), Some(1.0), None), "kept where the model has the sampler");
         let asked = json!({"presence_penalty": 0.5, "frequency_penalty": -0.25, "min_p": 0.05, "repetition_penalty": 1.1,
             "dry_multiplier": 0.8, "dry_base": 1.75, "dry_allowed_length": 2, "dry_sequence_breakers": ["\n", ":"], "max_thinking_tokens": 512});

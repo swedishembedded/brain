@@ -53,13 +53,83 @@ fn refuse_training(state: &AppState, model: &str, action: &str) -> Result<(), Ap
     Ok(())
 }
 
-/// `inv` as `model` runs `action`: its sampling settings settled against the action the model serves
-/// ([`crate::sampling::settle`]), so an omitted one is the default the manifest advertises. Every queued job passes
-/// here ([`submit`], [`StreamedJob::build`]), so each surface's requests are sampled alike.
-fn settled(exec: &residency::Executor, model: &str, action: &str, inv: Invocation) -> Invocation {
+/// How a refusal from [`admit`] names the request field it is about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Naming {
+    /// By the action's own param: a surface whose callers send params by name (`/v1/run`, `/v1/jobs`, the media
+    /// routes, whose fields the route maps one to one).
+    Params,
+    /// By the chat request field that sets the param ([`crate::sampling::request_field`]: `temperature` for `temp`,
+    /// `max_tokens` for `max_new`): the chat dialects.
+    Chat,
+}
+
+/// An invocation [`admit`] validated against the action its model serves: what every dispatch ([`submit`],
+/// [`stream`], [`stream_progress`]) takes, so no route can queue a call the served spec has not checked.
+pub struct Admitted {
+    model: String,
+    action: String,
+    inv: Invocation,
+}
+
+impl Admitted {
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+    pub fn action(&self) -> &str {
+        &self.action
+    }
+    /// The validated invocation: the caller's params with every default the served action declares filled in.
+    pub fn invocation(&self) -> &Invocation {
+        &self.inv
+    }
+}
+
+/// `inv` checked as `model` serves `action`, the one validation every HTTP route runs before a call is queued (the
+/// D-Bus transport runs the same `ActionSpec::validate_served`): media the action does not read is refused
+/// ([`refuse_unread_media`]); a neutral sampling value for a sampler the action does not have is dropped
+/// ([`crate::sampling::settle`]); then the served spec validates it, so a param the action does not declare (or a
+/// host-resolved one a remote caller names) is refused naming the field and the model, a bad value is refused, and
+/// every param the request left out takes the default the manifest advertises; last, the model is asked whether it
+/// would accept the job ([`residency::Executor::check_job`]).
+pub fn admit(state: &AppState, model: &str, action: &str, inv: Invocation, naming: Naming) -> Result<Admitted, ApiError> {
+    admit_with_host(state, model, action, inv, serde_json::Map::new(), naming)
+}
+
+/// [`admit`] with the host's own answers for host-resolved params (paths a surface derived from the request's
+/// inputs), set between the served passes ([`capability::ActionSpec::check_served`]).
+pub fn admit_with_host(state: &AppState, model: &str, action: &str, inv: Invocation, host: serde_json::Map<String, serde_json::Value>, naming: Naming) -> Result<Admitted, ApiError> {
+    admit_on(&state.exec, state.provider, model, action, inv, host, naming)
+}
+
+fn admit_on(exec: &residency::Executor, provider: Provider, model: &str, action: &str, inv: Invocation, host: serde_json::Map<String, serde_json::Value>, naming: Naming) -> Result<Admitted, ApiError> {
     let manifests = exec.manifests();
-    let spec = manifests.iter().find(|m| m.model == model).and_then(|m| m.actions.iter().find(|a| a.name == action));
-    crate::sampling::settle(spec, inv)
+    let manifest = manifests.iter().find(|m| m.model == model).ok_or_else(|| ApiError::model_not_found(provider, model))?;
+    let spec = manifest.actions.iter().find(|a| a.name == action).ok_or_else(|| ApiError::not_found(provider, format!("model '{model}' has no action '{action}'")))?;
+    refuse_unread_media(exec, provider, model, action, &inv)?;
+    let inv = crate::sampling::settle(spec, inv);
+    let inv = spec.check_served(inv, host).map_err(|v| refusal(provider, model, &v, naming))?;
+    // What the spec cannot say - that a base exists, that a dataset is in the store - the model is asked at the door,
+    // so a call that can never run is a 400 here and not a job that is accepted and then fails.
+    exec.check_job(model, action, &inv).map_err(|e| ApiError::invalid_request(provider, e))?;
+    Ok(Admitted { model: model.to_string(), action: action.to_string(), inv })
+}
+
+/// The answer to an invocation the served spec refused: a field the action does not take is an
+/// `unsupported_parameter` naming it and the model; a bad or missing value is an invalid request naming the field.
+fn refusal(provider: Provider, model: &str, v: &capability::SpecViolation, naming: Naming) -> ApiError {
+    let field = match naming {
+        Naming::Params => v.field.as_str(),
+        Naming::Chat => crate::sampling::request_field(&v.field),
+    };
+    match v.kind {
+        capability::Violation::UnknownParam | capability::Violation::UnknownInput => {
+            ApiError::unsupported_parameter(provider, model, field, &format!("an unknown param of its '{}' action", v.action))
+        }
+        capability::Violation::InvalidValue | capability::Violation::MissingParam | capability::Violation::MissingInput | capability::Violation::NotConfigured => {
+            ApiError { param: Some(field.to_string()), ..ApiError::invalid_request(provider, format!("model '{model}': {v}")) }
+        }
+    }
 }
 
 /// A call that has begun (the embedder's [`RequestHooks`](crate::RequestHooks) let
@@ -80,7 +150,6 @@ impl Pending {
     /// Asks the hooks whether this call may run.
     fn begin(state: &AppState, model: &str, action: &str, invocation: &Invocation) -> Result<Pending, ApiError> {
         refuse_training(state, model, action)?;
-        refuse_unread_media(&state.exec, state.provider, model, action, invocation)?;
         // A named caller holds at most its own share in flight, for as long as
         // this call is unsettled - a background job's whole run included.
         let in_flight = match state.caller.as_ref().and_then(|p| p.clone().downcast::<crate::auth::Caller>().ok()) {
@@ -413,7 +482,9 @@ fn refused(provider: Provider, refusal: &residency::admission::Refusal) -> ApiEr
 /// the queue so it never runs wastefully), unregistered, and the caller gets a 429.
 /// Once admitted, the wait for the (possibly long) reply is UNBOUNDED — only the
 /// wait-to-start is deadlined.
-pub async fn submit(state: &AppState, model: &str, action: &str, mut inv: Invocation) -> Result<Outcome, ApiError> {
+pub async fn submit(state: &AppState, call: Admitted) -> Result<Outcome, ApiError> {
+    let Admitted { model, action, mut inv } = call;
+    let (model, action) = (model.as_str(), action.as_str());
     let provider = state.provider;
     // Before anything is registered or queued: a refused call costs nothing.
     inv.scope = state.scope();
@@ -421,7 +492,6 @@ pub async fn submit(state: &AppState, model: &str, action: &str, mut inv: Invoca
     residency::log::info(&format!("{provider:?} request: {action} {model}"));
     let (id, token) = state.register();
     inv.cancel = token.clone();
-    let inv = settled(&state.exec, model, action, inv);
     // A one-shot request is one handler future, dropped when the client hangs up: the guard then cancels the generation instead of
     // leaving it to run to its token limit for nobody (a streamed request has the same guard in its `EventStream`).
     let _guard = CancelGuard { token: token.clone(), jobs: state.jobs.clone(), id };
@@ -630,15 +700,15 @@ impl EventStream {
 /// per generated token (progress updates whose `delta` is set — coarse step-only
 /// progress is ignored), then one terminal [`StreamMsg::Done`]/[`StreamMsg::Err`].
 /// The `on_progress`/`reply` closures only touch the queue, never the model.
-pub async fn stream(state: &AppState, model: &str, action: &str, inv: Invocation) -> Result<EventStream, ApiError> {
-    stream_inner(state, model, action, inv, false).await?.settle_start().await
+pub async fn stream(state: &AppState, call: Admitted) -> Result<EventStream, ApiError> {
+    stream_inner(state, call, false).await?.settle_start().await
 }
 
 /// Like [`stream`], but also forwards coarse `(step, total)` progress ticks as
 /// [`StreamMsg::Progress`] (a denoise loop reports these with no `delta`). Used by
 /// image generation, whose "progress" is denoise steps, not token deltas.
-pub async fn stream_progress(state: &AppState, model: &str, action: &str, inv: Invocation) -> Result<EventStream, ApiError> {
-    stream_inner(state, model, action, inv, true).await
+pub async fn stream_progress(state: &AppState, call: Admitted) -> Result<EventStream, ApiError> {
+    stream_inner(state, call, true).await
 }
 
 /// What a streamed job runs and how it reports progress.
@@ -664,7 +734,6 @@ impl StreamedJob<'_> {
         let tx_progress = tx.clone();
         let exec_for_log = self.exec.clone();
         let (provider, forward_steps, model) = (self.provider, self.forward_steps, self.model.to_string());
-        let inv = settled(self.exec, self.model, self.action, inv);
         let job = Job::new(self.model.to_string(), self.action.to_string(), inv)
             .on_progress(move |p| {
                 // A refused message means the stream is over (the reader went or stalled, or the request was
@@ -705,7 +774,9 @@ impl StreamedJob<'_> {
 }
 
 /// Shared implementation of [`stream`]/[`stream_progress`].
-async fn stream_inner(state: &AppState, model: &str, action: &str, mut inv: Invocation, forward_steps: bool) -> Result<EventStream, ApiError> {
+async fn stream_inner(state: &AppState, call: Admitted, forward_steps: bool) -> Result<EventStream, ApiError> {
+    let Admitted { model, action, mut inv } = call;
+    let (model, action) = (model.as_str(), action.as_str());
     let provider = state.provider;
     inv.scope = state.scope();
     let pending = Pending::begin(state, model, action, &inv)?;
@@ -745,7 +816,7 @@ async fn stream_inner(state: &AppState, model: &str, action: &str, mut inv: Invo
 /// A 429 (admission failed after the fetch completed) becomes a terminal
 /// [`StreamMsg::Err`] here, not an HTTP 429 status — the SSE body's headers
 /// are already committed by the time admission is even attempted.
-pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn residency::ModelSupplier>, model: &str, action: &str, mut inv: Invocation, forward_steps: bool) -> Result<EventStream, ApiError> {
+pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn residency::ModelSupplier>, model: &str, action: &str, mut inv: Invocation, naming: Naming, forward_steps: bool) -> Result<EventStream, ApiError> {
     let provider = state.provider;
     // Before the download starts: a caller who may not run the call must not be
     // able to make this server fetch a model first.
@@ -797,12 +868,15 @@ pub fn stream_with_autofetch(state: &AppState, supplier: std::sync::Arc<dyn resi
             jobs.remove(&id);
             return;
         }
-        // The fetched model's manifest is known now: media it cannot read is refused before the job is queued.
-        if let Err(e) = refuse_unread_media(&exec, provider, &model_owned, &action_owned, &inv) {
-            tx.finish(StreamMsg::Err(e));
-            jobs.remove(&id);
-            return;
-        }
+        // The fetched model's manifest is known now: the call is admitted against it before the job is queued.
+        let inv = match admit_on(&exec, provider, &model_owned, &action_owned, inv, serde_json::Map::new(), naming) {
+            Ok(call) => call.inv,
+            Err(e) => {
+                tx.finish(StreamMsg::Err(e));
+                jobs.remove(&id);
+                return;
+            }
+        };
 
         // Model is ready -- submit the real job into the SAME queue the fetch
         // ticks just used, so the client sees one continuous stream (fetch

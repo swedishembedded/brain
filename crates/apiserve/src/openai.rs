@@ -110,16 +110,9 @@ fn embed_invocation(req: &EmbeddingRequest, text: &str) -> Invocation {
     call
 }
 
-/// One `embed` call per input of `req`, each validated against the resolved model's own `embed` spec.
-fn embed_calls(state: &AppState, req: &EmbeddingRequest) -> Result<Vec<Invocation>, ApiError> {
-    let provider = state.provider;
-    let manifests = state.exec.manifests();
-    let spec = manifests
-        .iter()
-        .find(|m| m.model == req.model)
-        .and_then(|m| m.actions.iter().find(|a| a.name == "embed"))
-        .ok_or_else(|| ApiError::model_not_found(provider, &req.model))?;
-    req.inputs.iter().map(|text| spec.validate_served(embed_invocation(req, text)).map_err(|e| ApiError::invalid_request(provider, e))).collect()
+/// One `embed` call per input of `req`, each admitted against the resolved model's own `embed` spec.
+fn embed_calls(state: &AppState, req: &EmbeddingRequest) -> Result<Vec<bridge::Admitted>, ApiError> {
+    req.inputs.iter().map(|text| bridge::admit(state, &req.model, "embed", embed_invocation(req, text), bridge::Naming::Params)).collect()
 }
 
 /// Parse + validate a `CreateEmbeddingRequest`. `input` accepts a single string or
@@ -243,7 +236,7 @@ pub async fn handle_embeddings(state: AppState, body: Bytes) -> Response {
         Ok(calls) => calls,
         Err(e) => return e.into_response(),
     };
-    let outcomes = match futures::future::try_join_all(calls.into_iter().map(|call| bridge::submit(&state, &req.model, "embed", call))).await {
+    let outcomes = match futures::future::try_join_all(calls.into_iter().map(|call| bridge::submit(&state, call))).await {
         Ok(o) => o,
         Err(e) => return e.into_response(),
     };
@@ -404,15 +397,19 @@ async fn handle_generate(state: AppState, body: Bytes, surface: TextSurface) -> 
             if let Err(e) = check_suffix(provider, &inv, fim) {
                 return e.into_response();
             }
+            let call = match bridge::admit(&state, &model, "generate", inv, bridge::Naming::Chat) {
+                Ok(call) => call,
+                Err(e) => return e.into_response(),
+            };
             if stream {
                 // Admit BEFORE returning the SSE body - a shed request is a
                 // plain 429, not an event-stream that immediately errors.
-                match bridge::stream(&state, &model, "generate", inv).await {
+                match bridge::stream(&state, call).await {
                     Ok(src) => surface.render_stream(src, model, want_usage()),
                     Err(e) => e.into_response(),
                 }
             } else {
-                match bridge::submit(&state, &model, "generate", inv).await {
+                match bridge::submit(&state, call).await {
                     Ok(outcome) => Json(surface.body(&model, &bridge::read_chat_outcome(&outcome))).into_response(),
                     Err(e) => e.into_response(),
                 }
@@ -428,7 +425,7 @@ async fn handle_generate(state: AppState, body: Bytes, surface: TextSurface) -> 
         // its `suffix` support is checked by the model itself.
         None if stream => match state.supplier_for_caller() {
             Some(supplier) if matches!(supplier.classify(&requested), Supply::Fetchable) => {
-                match bridge::stream_with_autofetch(&state, supplier, &requested, "generate", inv, false) {
+                match bridge::stream_with_autofetch(&state, supplier, &requested, "generate", inv, bridge::Naming::Chat, false) {
                     Ok(src) => surface.render_stream(src, requested, want_usage()),
                     Err(e) => e.into_response(),
                 }
@@ -440,7 +437,11 @@ async fn handle_generate(state: AppState, body: Bytes, surface: TextSurface) -> 
                 if let Err(e) = check_suffix(provider, &inv, fim) {
                     return e.into_response();
                 }
-                match bridge::submit(&state, &requested, "generate", inv).await {
+                let outcome = match bridge::admit(&state, &requested, "generate", inv, bridge::Naming::Chat) {
+                    Ok(call) => bridge::submit(&state, call).await,
+                    Err(e) => Err(e),
+                };
+                match outcome {
                     Ok(outcome) => Json(surface.body(&requested, &bridge::read_chat_outcome(&outcome))).into_response(),
                     Err(e) => e.into_response(),
                 }
@@ -472,6 +473,7 @@ const MAX_TOOL_NAME_LEN: usize = 64;
 pub fn to_invocation(provider: Provider, body: &Value) -> Result<(String, Invocation, bool), ApiError> {
     let model = body.get("model").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).ok_or_else(|| ApiError::invalid_request(provider, "'model' is required"))?;
     let messages = body.get("messages").and_then(|v| v.as_array()).filter(|a| !a.is_empty()).ok_or_else(|| ApiError::invalid_request(provider, "'messages' must be a non-empty array"))?;
+    crate::request_fields::refuse_unknown(provider, crate::request_fields::Dialect::chat(provider), body)?;
     if body.get("n").and_then(|v| v.as_i64()).unwrap_or(1) > 1 {
         return Err(ApiError::invalid_request(provider, "'n' > 1 is not supported"));
     }
@@ -614,6 +616,7 @@ fn to_completion_invocation(provider: Provider, body: &Value) -> Result<(String,
         Some(Value::Null) | None => return Err(ApiError::invalid_request(provider, "'prompt' is required")),
         Some(_) => return Err(ApiError::invalid_request(provider, "'prompt' must be a string")),
     };
+    crate::request_fields::refuse_unknown(provider, crate::request_fields::Dialect::OpenAiCompletion, body)?;
     for name in ["n", "best_of"] {
         if body.get(name).and_then(|v| v.as_i64()).unwrap_or(1) > 1 {
             return Err(ApiError::invalid_request(provider, format!("'{name}' > 1 is not supported")));
@@ -1298,13 +1301,18 @@ pub async fn handle_images(state: AppState, body: Bytes) -> Response {
     if req.stream {
         return stream_images(state, req, action).await;
     }
+    // Each image's call is held to the model's own action before any is queued, as `/v1/run` holds every call.
+    let calls = match (0..req.n).map(|i| bridge::admit(&state, &req.model, &action, image_invocation(&req, i), bridge::Naming::Params)).collect::<Result<Vec<_>, _>>() {
+        Ok(calls) => calls,
+        Err(e) => return e.into_response(),
+    };
 
     // The `n` images are submitted together (order preserved by position), so
     // a model that draws several at once receives them as one batch; awaiting
     // them one at a time would hand it one image per dispatch. Admission is
     // still enforced per job by `bridge::submit`, and the first failure drops
     // the rest, keeping the request all-or-nothing.
-    let outcomes = match futures::future::try_join_all((0..req.n).map(|i| bridge::submit(&state, &req.model, &action, image_invocation(&req, i)))).await {
+    let outcomes = match futures::future::try_join_all(calls.into_iter().map(|call| bridge::submit(&state, call))).await {
         Ok(o) => o,
         Err(e) => return e.into_response(),
     };
@@ -1371,7 +1379,11 @@ fn completed_event(size: &str, b64: &str) -> Value {
 async fn stream_images(state: AppState, req: ImageRequest, action: String) -> Response {
     use futures::StreamExt;
     let provider = state.provider;
-    let mut src = match bridge::stream_progress(&state, &req.model, &action, image_invocation(&req, 0)).await {
+    let call = match bridge::admit(&state, &req.model, &action, image_invocation(&req, 0), bridge::Naming::Params) {
+        Ok(call) => call,
+        Err(e) => return e.into_response(),
+    };
+    let mut src = match bridge::stream_progress(&state, call).await {
         Ok(src) => src,
         Err(e) => return e.into_response(),
     };

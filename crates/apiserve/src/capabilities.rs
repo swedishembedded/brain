@@ -112,7 +112,7 @@ struct BlobWire {
 
 /// Reads and validates a call against the action's own spec, so nothing invalid
 /// reaches the hooks or the executor.
-fn parse_call(state: &AppState, body: &Bytes) -> Result<(String, String, Invocation), ApiError> {
+fn parse_call(state: &AppState, body: &Bytes) -> Result<bridge::Admitted, ApiError> {
     let provider = state.provider;
     let call: CallBody = serde_json::from_slice(body).map_err(|e| ApiError::invalid_request(provider, format!("invalid JSON body: {e}")))?;
 
@@ -138,11 +138,7 @@ fn parse_call(state: &AppState, body: &Bytes) -> Result<(String, String, Invocat
     }
     // A param the host resolves (a weights path, a dataset folder) is refused
     // as unknown, so a remote caller can never name a file on this machine.
-    let inv = spec.validate_served(inv).map_err(|e| ApiError::invalid_request(provider, e))?;
-    // What the spec cannot say - that a base exists, that a dataset is in the store - the model is asked at the door,
-    // so a call that can never run is a 400 here and not a job that is accepted and then fails.
-    state.exec.check_job(&call.model, &call.action, &inv).map_err(|e| ApiError::invalid_request(provider, e))?;
-    Ok((call.model, call.action, inv))
+    bridge::admit(state, &call.model, &spec.name, inv, bridge::Naming::Params)
 }
 
 fn blob_json(blob: &Blob) -> Value {
@@ -225,11 +221,11 @@ async fn devices(State(state): State<AppState>) -> Json<Value> {
 
 async fn run(State(state): State<AppState>, caller: CallerExt, body: Bytes) -> Response {
     let state = state.scoped(caller);
-    let (model, action, inv) = match parse_call(&state, &body) {
+    let call = match parse_call(&state, &body) {
         Ok(call) => call,
         Err(e) => return e.into_response(),
     };
-    match bridge::submit(&state, &model, &action, inv).await {
+    match bridge::submit(&state, call).await {
         Ok(outcome) => Json(outcome_json(&outcome)).into_response(),
         Err(e) => e.into_response(),
     }
@@ -471,7 +467,7 @@ fn parse_id(raw: &str) -> Option<Uuid> {
 
 async fn create_job(State(state): State<AppState>, caller: CallerExt, body: Bytes) -> Response {
     let state = state.scoped(caller);
-    let (model, action, inv) = match parse_call(&state, &body) {
+    let call = match parse_call(&state, &body) {
         Ok(call) => call,
         Err(e) => return e.into_response(),
     };
@@ -483,7 +479,7 @@ async fn create_job(State(state): State<AppState>, caller: CallerExt, body: Byte
     };
     // Begun here, not in the background: a caller the hooks refuse learns it from
     // this response, and the model is never queued for them.
-    let stream = match bridge::stream_progress(&state, &model, &action, inv).await {
+    let stream = match bridge::stream_progress(&state, call).await {
         Ok(stream) => stream,
         Err(e) => {
             state.async_jobs.discard(id);

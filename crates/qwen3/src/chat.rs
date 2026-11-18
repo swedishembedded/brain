@@ -431,6 +431,29 @@ fn sampler_params(tok: &QwenBpe, inv: &Invocation, temp: f32, top_k: usize, top_
     Ok(p)
 }
 
+/// The chat-template settings [`render_prompt`] reads beside `enable_thinking`, as the params a `generate` action
+/// whose requests it renders declares: `reasoning_effort`, `preserve_thinking` and `template_flavor`, each defaulting
+/// to what the render does when it is left out, except the flavor, which defaults to `flavor` (the model's own: a
+/// Qwen3.8 model renders the 3.8 template). Declaring them is what lets a serving surface pass them on (it refuses a
+/// param the action does not declare) and fill an omitted one with the model's default.
+pub fn template_params(flavor: qwen_chat::TemplateFlavor) -> [capability::ParamSpec; 3] {
+    use capability::{ParamSpec, ParamType};
+    let flavor = match flavor {
+        qwen_chat::TemplateFlavor::Qwen38 => "qwen3.8",
+        _ => "qwen3",
+    };
+    [
+        ParamSpec::new("reasoning_effort", ParamType::Str, "reasoning effort level: xhigh (default, detailed deliberation), medium (no instruction), or low (brief thinking)").default(json!("xhigh")),
+        ParamSpec::new("preserve_thinking", ParamType::Bool, "Qwen3.8 chat-template kwarg: keep <think> blocks from prior assistant turns in the rendered history (inert under the Qwen3-era template, whose history framing is positional)").default(json!(true)),
+        ParamSpec::new(
+            "template_flavor",
+            ParamType::Str,
+            "chat template flavor: qwen3.8 (XML <function=> tool-call payloads, prefilled open <think>, preserve_thinking kwarg) or qwen3 (JSON <tool_call> payloads, positional think framing)",
+        )
+        .default(json!(flavor)),
+    ]
+}
+
 /// The chat-template render of one request, before tokenization: the prompt
 /// text, and what the render decided that the per-sequence scanner must
 /// follow ([`SeqState`] reads the flavor and the prefilled `<think>`, and

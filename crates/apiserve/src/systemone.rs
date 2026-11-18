@@ -317,15 +317,12 @@ async fn systemone(State(state): State<AppState>, caller: CallerExt, body: Bytes
     let mut inv = Invocation::new();
     inv = inv.set("state", json!(parsed.state)).set("state_format", json!("json")).set("questions", json!(parsed.questions));
     // The capability's own spec is the validator, exactly as for `/v1/run`.
-    let manifests = state.exec.manifests();
-    let spec = manifests.iter().find(|m| m.model == model).and_then(|m| m.actions.iter().find(|a| a.name == ACTION));
-    let inv = match spec.map(|s| s.validate_served(inv)) {
-        Some(Ok(inv)) => inv,
-        Some(Err(e)) => return ApiError::failure(provider, FailureClass::InvalidRequest, e).into_response(),
-        None => return ApiError::model_not_found(provider, &model).into_response(),
+    let call = match bridge::admit(&state, &model, ACTION, inv, bridge::Naming::Params) {
+        Ok(call) => call,
+        Err(e) => return e.into_response(),
     };
 
-    match bridge::submit(&state, &model, ACTION, inv).await {
+    match bridge::submit(&state, call).await {
         Ok(outcome) => match render(&model, &parsed.names, &outcome.outputs) {
             Ok(doc) => json_response(StatusCode::OK, doc),
             Err(e) => {
@@ -347,7 +344,7 @@ async fn resolve_model(state: &AppState, requested: &str) -> Result<String, ApiE
     }
     let mut inv = Invocation::new();
     inv = inv.set("model", json!("auto"));
-    let selected = bridge::submit(state, FAMILY, "select", inv).await?;
+    let selected = bridge::submit(state, bridge::admit(state, FAMILY, "select", inv, bridge::Naming::Params)?).await?;
     match selected.outputs.get("chosen").and_then(Value::as_str) {
         Some(id) => Ok(id.to_string()),
         None => {

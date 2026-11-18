@@ -78,11 +78,15 @@ async fn messages(State(state): State<AppState>, caller: CallerExt, raw: Bytes) 
     // (exact-match only), so it resolves directly.
     let model = brain_modelref::alias::canonical(&model).map(str::to_string).unwrap_or(model);
     if catalog::resolve_chat(&state.exec.manifests(), &model) {
+        let call = match bridge::admit(&state, &model, "generate", inv, bridge::Naming::Chat) {
+            Ok(call) => call,
+            Err(e) => return e.into_response(),
+        };
         if stream {
             let est_input = heuristic_tokens(&request_text(&body));
-            stream_messages(state, model, inv, est_input).await
+            stream_messages(state, model, call, est_input).await
         } else {
-            match bridge::submit(&state, &model, "generate", inv).await {
+            match bridge::submit(&state, call).await {
                 Ok(outcome) => message_response(&model, &outcome),
                 Err(e) => e.into_response(),
             }
@@ -101,8 +105,11 @@ async fn messages(State(state): State<AppState>, caller: CallerExt, raw: Bytes) 
         }
     } else {
         match bridge::ensure_and_recheck(&state, PROVIDER, &model, |id| catalog::resolve_chat(&state.exec.manifests(), id).then_some(())).await {
-            Ok(()) => match bridge::submit(&state, &model, "generate", inv).await {
-                Ok(outcome) => message_response(&model, &outcome),
+            Ok(()) => match bridge::admit(&state, &model, "generate", inv, bridge::Naming::Chat) {
+                Ok(call) => match bridge::submit(&state, call).await {
+                    Ok(outcome) => message_response(&model, &outcome),
+                    Err(e) => e.into_response(),
+                },
                 Err(e) => e.into_response(),
             },
             Err(e) => e.into_response(),
@@ -245,6 +252,7 @@ fn thinking(body: &Value, max_tokens: i64) -> Result<Option<bool>, ApiError> {
 pub fn to_invocation(body: &Value) -> Result<(String, Invocation, bool), ApiError> {
     let model = body.get("model").and_then(|v| v.as_str()).filter(|s| !s.is_empty()).ok_or_else(|| ApiError::invalid_request(PROVIDER, "'model' is required"))?;
     let messages = body.get("messages").and_then(|v| v.as_array()).filter(|a| !a.is_empty()).ok_or_else(|| ApiError::invalid_request(PROVIDER, "'messages' must be a non-empty array"))?;
+    crate::request_fields::refuse_unknown(PROVIDER, crate::request_fields::Dialect::AnthropicMessages, body)?;
     let max_tokens = crate::sampling::max_tokens(PROVIDER, "max_tokens", body.get("max_tokens"))?;
     let stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
 
@@ -528,10 +536,10 @@ fn attach_served(event: &mut Value, co: &bridge::ChatOutcome) {
 /// The SSE Messages event stream in Anthropic's fixed order. `est_input` is the
 /// approximate input-token count surfaced in `message_start` (the real prompt-token
 /// count is not known until generation completes).
-async fn stream_messages(state: AppState, model: String, inv: Invocation, est_input: i64) -> Response {
+async fn stream_messages(state: AppState, model: String, call: bridge::Admitted, est_input: i64) -> Response {
     // Admit BEFORE returning the SSE body — a shed request is a plain 429, not an
     // event-stream that immediately errors.
-    let src = match bridge::stream(&state, &model, "generate", inv).await {
+    let src = match bridge::stream(&state, call).await {
         Ok(src) => src,
         Err(e) => return e.into_response(),
     };
@@ -544,7 +552,7 @@ async fn stream_messages(state: AppState, model: String, inv: Invocation, est_in
 /// events — see [`bridge::stream_with_autofetch`]. Never called for a model
 /// that's already resident or classifies `Unknown`/has no supplier.
 fn stream_messages_with_autofetch(state: AppState, supplier: std::sync::Arc<dyn residency::ModelSupplier>, model: String, inv: Invocation, est_input: i64) -> Response {
-    match bridge::stream_with_autofetch(&state, supplier, &model, "generate", inv, false) {
+    match bridge::stream_with_autofetch(&state, supplier, &model, "generate", inv, bridge::Naming::Chat, false) {
         Ok(src) => render_messages_stream(src, model, est_input),
         Err(e) => e.into_response(),
     }

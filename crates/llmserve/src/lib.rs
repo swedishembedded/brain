@@ -28,7 +28,7 @@ pub mod adapter_release;
 mod resident;
 mod routing;
 mod score;
-pub use resident::generate_spec;
+pub use resident::{frontend_params, generate_spec};
 pub use routing::request_prefix_chain;
 pub use score::{score_batch_scheduled, score_spec, MAX_ANSWERS_PER_CALL, MAX_ANSWERS_PER_RECORD, MAX_SCORE_RECORDS, SCORE_ACTION};
 

@@ -4546,9 +4546,9 @@ impl ResidentModel for Qwen35GgufResident {
         .param(ParamSpec::new("tools", ParamType::Str, "JSON array of tool definitions (OpenAI function-calling schema)"))
         .param(ParamSpec::new("tool_choice", ParamType::Str, "tool_choice directive, raw JSON text (\"auto\"|\"none\"|\"required\"|{\"type\":\"function\",...}); none withholds tool schemas, required/named are enforced post-generation (finish_reason \"tool_choice_unmet\" when unmet)"))
         .param(ParamSpec::new("enable_thinking", ParamType::Bool, "allow the model to emit a <think> reasoning block").default(json!(true)))
-        .param(ParamSpec::new("reasoning_effort", ParamType::Str, "reasoning effort level: xhigh (default, detailed deliberation), medium (no instruction), or low (brief thinking)").default(json!("xhigh")))
-        .param(ParamSpec::new("preserve_thinking", ParamType::Bool, "Qwen3.8 chat-template kwarg: keep <think> blocks from prior assistant turns in the rendered history (takes effect on the Qwen3.8-flavor render, this model's default)").default(json!(true)))
-        .param(ParamSpec::new("template_flavor", ParamType::Str, "chat template flavor: qwen3.8 (default; XML <function=> tool-call payloads, prefilled open <think>, preserve_thinking kwarg) or qwen3 (JSON <tool_call> payloads, positional think framing)").default(json!("qwen3.8")))
+        .params(qwen3::chat::template_params(data::qwen_chat::TemplateFlavor::Qwen38))
+        // Its requests go through the shared text front end, which reads these too.
+        .params(llmserve::frontend_params())
         .output(BlobSpec::new("text", Media::Text, "the generated text"));
         let generate = llmserve::with_token_capture(generate);
         let generate = llmserve::with_sampling_defaults(generate, MODEL, self.sampling_defaults());

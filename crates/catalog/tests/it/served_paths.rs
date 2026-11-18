@@ -147,8 +147,9 @@ async fn v1_run_refuses_every_path_param_a_caller_names() {
                 let response = app.clone().oneshot(req).await.unwrap();
                 let status = response.status();
                 let bytes = axum::body::to_bytes(response.into_body(), 1 << 20).await.unwrap();
-                let text = serde_json::from_slice::<Value>(&bytes).map(|v| v.to_string()).unwrap_or_default();
-                if status != StatusCode::BAD_REQUEST || !text.contains(&format!("unknown param '{}'", p.name)) {
+                let reply = serde_json::from_slice::<Value>(&bytes).unwrap_or_default();
+                let text = reply.to_string();
+                if status != StatusCode::BAD_REQUEST || reply["error"]["code"] != "unsupported_parameter" || reply["error"]["param"] != p.name.as_str() {
                     accepted.push(format!("{}:{}:{} -> {status} {text}", m.model, a.name, p.name));
                 }
             }

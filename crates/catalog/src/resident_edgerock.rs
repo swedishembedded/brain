@@ -64,7 +64,7 @@ pub fn manifest() -> Manifest {
     Manifest::new(
         MODEL,
         "text generation (EdgeRock windowed hybrid Gated-DeltaNet/GQA decoder with a bounded anchor memory; state of fixed size per sequence, continuous batching with prompt-prefix reuse)",
-        vec![generate_spec("generate text (EdgeRock; chat template optional)", true)],
+        vec![generate_spec("generate text (EdgeRock; chat template optional)", true).params(qwen3::chat::template_params(data::qwen_chat::TemplateFlavor::Qwen38))],
     )
 }
 
@@ -127,7 +127,7 @@ impl ResidentModel for EdgeRockResident {
         Manifest::new(
             &self.id,
             "text generation (EdgeRock windowed hybrid Gated-DeltaNet/GQA decoder with a bounded anchor memory; state of fixed size per sequence, continuous batching with prompt-prefix reuse)",
-            vec![generate_spec("generate text (EdgeRock; chat template optional)", true)],
+            vec![generate_spec("generate text (EdgeRock; chat template optional)", true).params(qwen3::chat::template_params(data::qwen_chat::TemplateFlavor::Qwen38))],
         )
         .with_max_context_tokens(u64::from(self.max_seq_len))
     }

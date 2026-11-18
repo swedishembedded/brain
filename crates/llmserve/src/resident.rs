@@ -43,19 +43,29 @@ pub fn generate_spec(summary: &str, chat: bool) -> ActionSpec {
             ))
             .param(ParamSpec::new("top_p", ParamType::Float, "nucleus sampling threshold (>= 1 = disabled)").default(json!(1.0)))
             .param(ParamSpec::new("stop", ParamType::Str, "JSON array of stop strings"))
-            .param(ParamSpec::new("ignore_eos", ParamType::Bool, "generate to max_new past the model's end-of-sequence tokens (stop strings still apply)").default(json!(false)))
             .param(ParamSpec::new("tools", ParamType::Str, "JSON array of tool definitions (OpenAI function-calling schema)"))
             .param(ParamSpec::new("tool_choice", ParamType::Str, "tool_choice directive, raw JSON text (\"auto\"|\"none\"|\"required\"|{...})"))
             .param(ParamSpec::new("enable_thinking", ParamType::Bool, "allow the model to emit a <think> reasoning block").default(json!(true)))
-            .param(ParamSpec::new("thinking_budget", ParamType::Int, "tokens the think block may take; after that the closing tag is forced and the model answers (default: unbounded)").min(0.0).max(capability::bounds::TOKENS))
-            .param(ParamSpec::new("min_p", ParamType::Float, "drop tokens below this fraction of the best token's probability (0 = off)"))
-            .param(ParamSpec::new("presence_penalty", ParamType::Float, "subtracted from the logit of every token already generated (0 = off)"))
-            .param(ParamSpec::new("frequency_penalty", ParamType::Float, "subtracted from a token's logit once per time it was generated (0 = off)"))
-            .param(ParamSpec::new("repetition_penalty", ParamType::Float, "divides the positive logit of every token in the context, prompt included (1 = off)"))
-            .param(ParamSpec::new("dry_multiplier", ParamType::Float, "DRY repetition penalty strength over the whole context (0 = off)"))
-            .param(ParamSpec::new("dry_base", ParamType::Float, "DRY penalty growth per extra repeated token (default 1.75)"))
-            .param(ParamSpec::new("dry_allowed_length", ParamType::Int, "DRY: repeats up to this many tokens are not penalised (default 2)").min(0.0).max(1024.0))
-            .param(ParamSpec::new("dry_sequence_breakers", ParamType::Str, "JSON array of strings that end a DRY sequence (default newline, colon, quote, asterisk)"));
+            .params(frontend_params());
     }
     crate::with_token_capture(s.output(BlobSpec::new("text", Media::Text, "the generated text")))
+}
+
+/// The params a [`crate::TextFrontend`] reads beyond the prompt, the basic sampler and the chat template: `ignore_eos`
+/// (its own), the thinking budget and the extended sampler (the shared `qwen3::chat` request parser's). A resident
+/// whose requests go through the front end declares them ([`generate_spec`] does), so a serving surface, which refuses
+/// a param the action does not declare, passes them on.
+pub fn frontend_params() -> [ParamSpec; 10] {
+    [
+        ParamSpec::new("ignore_eos", ParamType::Bool, "generate to max_new past the model's end-of-sequence tokens (stop strings still apply)").default(json!(false)),
+        ParamSpec::new("thinking_budget", ParamType::Int, "tokens the think block may take; after that the closing tag is forced and the model answers (default: unbounded)").min(0.0).max(capability::bounds::TOKENS),
+        ParamSpec::new("min_p", ParamType::Float, "drop tokens below this fraction of the best token's probability (0 = off)"),
+        ParamSpec::new("presence_penalty", ParamType::Float, "subtracted from the logit of every token already generated (0 = off)"),
+        ParamSpec::new("frequency_penalty", ParamType::Float, "subtracted from a token's logit once per time it was generated (0 = off)"),
+        ParamSpec::new("repetition_penalty", ParamType::Float, "divides the positive logit of every token in the context, prompt included (1 = off)"),
+        ParamSpec::new("dry_multiplier", ParamType::Float, "DRY repetition penalty strength over the whole context (0 = off)"),
+        ParamSpec::new("dry_base", ParamType::Float, "DRY penalty growth per extra repeated token (default 1.75)"),
+        ParamSpec::new("dry_allowed_length", ParamType::Int, "DRY: repeats up to this many tokens are not penalised (default 2)").min(0.0).max(1024.0),
+        ParamSpec::new("dry_sequence_breakers", ParamType::Str, "JSON array of strings that end a DRY sequence (default newline, colon, quote, asterisk)"),
+    ]
 }

@@ -424,8 +424,19 @@ impl ActionSpec {
     /// read the served manifest); then against the full spec, which is where
     /// the host fills in its own answers.
     pub fn validate_served(&self, inv: Invocation) -> Result<Invocation, String> {
-        let inv = self.clone().for_serving().validate(inv)?;
-        self.validate(inv)
+        self.check_served(inv, serde_json::Map::new()).map_err(|e| e.to_string())
+    }
+
+    /// [`Self::validate_served`] with the violation typed, and with `host` -
+    /// the host's own answers for host-resolved params, which a surface
+    /// derives from the request's inputs (a clip it stored, say) - set between
+    /// the two passes, so the caller still cannot name one itself.
+    pub fn check_served(&self, inv: Invocation, host: serde_json::Map<String, Value>) -> Result<Invocation, SpecViolation> {
+        let mut inv = self.clone().for_serving().check(inv)?;
+        if let Value::Object(params) = &mut inv.params {
+            params.extend(host);
+        }
+        self.check(inv)
     }
 
     /// Validate + normalize an invocation against this spec: reject unknown or
@@ -437,19 +448,27 @@ impl ActionSpec {
     /// weights" once, at the boundary, so no action needs its own env fallback
     /// and no remote caller ever has to name a path.
     pub fn validate(&self, inv: Invocation) -> Result<Invocation, String> {
+        self.check(inv).map_err(|e| e.to_string())
+    }
+
+    /// [`Self::validate`] with the violation typed ([`SpecViolation`]): which
+    /// param or input it is about and what is wrong with it, so a serving
+    /// surface can answer with a status and a field instead of prose.
+    pub fn check(&self, inv: Invocation) -> Result<Invocation, SpecViolation> {
+        let action = self.name.as_str();
+        let violation = |kind: Violation, field: &str, message: String| SpecViolation { kind, field: field.to_string(), action: action.to_string(), message };
         let mut params = inv.params.as_object().cloned().unwrap_or_default();
         // reject unknown params
         for k in params.keys() {
             if !self.params.iter().any(|p| &p.name == k) {
-                return Err(format!("unknown param '{k}' for action '{}'", self.name));
+                return Err(violation(Violation::UnknownParam, k, format!("unknown param '{k}' for action '{action}'")));
             }
         }
         // type-check + host env + defaults + required
         for p in &self.params {
             match params.get(&p.name) {
                 Some(v) => {
-                    check_type(&p.name, &p.ty, v)?;
-                    check_range(p, v)?;
+                    check_type(&p.name, &p.ty, v).and_then(|()| check_range(p, v)).map_err(|m| violation(Violation::InvalidValue, &p.name, m))?;
                 }
                 None => {
                     if let Some(v) = host_env_value(p) {
@@ -461,11 +480,12 @@ impl ActionSpec {
                             // Never "you forgot a param": on the serving path
                             // there IS no param to forget, so the message has
                             // to name the machine-side setting that is missing.
-                            Some(var) => format!(
-                                "action '{}' needs '{}', which this machine has not configured: set ${var} (or pass '{}' explicitly)",
-                                self.name, p.name, p.name
+                            Some(var) => violation(
+                                Violation::NotConfigured,
+                                &p.name,
+                                format!("action '{action}' needs '{}', which this machine has not configured: set ${var} (or pass '{}' explicitly)", p.name, p.name),
                             ),
-                            None => format!("missing required param '{}' for action '{}'", p.name, self.name),
+                            None => violation(Violation::MissingParam, &p.name, format!("missing required param '{}' for action '{action}'", p.name)),
                         });
                     }
                 }
@@ -476,21 +496,58 @@ impl ActionSpec {
             match inv.blobs.get(&b.name) {
                 Some(blob) => {
                     if blob.media != b.media {
-                        return Err(format!("input '{}' expects {} but got {}", b.name, b.media.name(), blob.media.name()));
+                        return Err(violation(Violation::InvalidValue, &b.name, format!("input '{}' expects {} but got {}", b.name, b.media.name(), blob.media.name())));
                     }
                 }
-                None if b.required => return Err(format!("missing required input '{}' for action '{}'", b.name, self.name)),
+                None if b.required => return Err(violation(Violation::MissingInput, &b.name, format!("missing required input '{}' for action '{action}'", b.name))),
                 None => {}
             }
         }
         for k in inv.blobs.keys() {
             if !self.inputs.iter().any(|b| &b.name == k) {
-                return Err(format!("unknown input '{k}' for action '{}'", self.name));
+                return Err(violation(Violation::UnknownInput, k, format!("unknown input '{k}' for action '{action}'")));
             }
         }
         Ok(Invocation { params: Value::Object(params), blobs: inv.blobs, cancel: inv.cancel, scope: inv.scope })
     }
 }
+
+/// What [`ActionSpec::check`] found wrong with an invocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Violation {
+    /// A param the action does not declare: it would not be read.
+    UnknownParam,
+    /// An input blob the action does not declare.
+    UnknownInput,
+    /// A required param is absent.
+    MissingParam,
+    /// A required input blob is absent.
+    MissingInput,
+    /// A value of the wrong type, outside its range, or of the wrong medium.
+    InvalidValue,
+    /// A required host-resolved param this machine has not configured: the
+    /// host's fault, not the caller's.
+    NotConfigured,
+}
+
+/// An invocation [`ActionSpec::check`] refused: what is wrong, the param or
+/// input (`field`) it is about, the action, and the message
+/// [`ActionSpec::validate`] reports (its `Display`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpecViolation {
+    pub kind: Violation,
+    pub field: String,
+    pub action: String,
+    message: String,
+}
+
+impl std::fmt::Display for SpecViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for SpecViolation {}
 
 /// The host's answer for a [`ParamSpec::host_env`] param, when it has one: the
 /// named environment variable, empty treated as unset (an empty path is not a
@@ -1447,6 +1504,33 @@ mod tests {
         let inv = spec.validate_served(Invocation::new()).unwrap();
         assert_eq!(inv.get_str("weights").as_deref(), Some("/models/x.safetensors"));
         unsafe { std::env::remove_var("BRAIN_TEST_HOST_SERVED") };
+    }
+
+    /// A refusal names what it is about, typed, so a serving surface answers with a status and the field rather than
+    /// prose; and the host's own answers set between the served passes are kept while a caller's are refused.
+    #[test]
+    fn a_refused_invocation_names_its_field_and_what_is_wrong() {
+        let spec = ActionSpec::new("go", "test")
+            .param(ParamSpec::new("n", ParamType::Int, "").max(3.0))
+            .param(ParamSpec::new("must", ParamType::Str, "").required())
+            .param(ParamSpec::new("clip", ParamType::Str, "a file on the host").host_resolved())
+            .input(BlobSpec::new("image", Media::Image, ""));
+        let ok = || Invocation::new().set("must", json!("x"));
+        let cases = [
+            (ok().set("bogus", json!(1)), Violation::UnknownParam, "bogus"),
+            (ok().set("n", json!(9)), Violation::InvalidValue, "n"),
+            (Invocation::new(), Violation::MissingParam, "must"),
+            (ok().blob("audio", Blob::new(Media::Audio, vec![])), Violation::UnknownInput, "audio"),
+            (ok().blob("image", Blob::new(Media::Audio, vec![])), Violation::InvalidValue, "image"),
+        ];
+        for (inv, kind, field) in cases {
+            let e = spec.check(inv).unwrap_err();
+            assert_eq!((e.kind, e.field.as_str(), e.action.as_str()), (kind, field, "go"), "{e}");
+        }
+        let e = spec.check_served(ok().set("clip", json!("/etc/passwd")), serde_json::Map::new()).unwrap_err();
+        assert_eq!((e.kind, e.field.as_str()), (Violation::UnknownParam, "clip"), "a caller never names a host file");
+        let host = serde_json::Map::from_iter([("clip".to_string(), json!("/srv/clip"))]);
+        assert_eq!(spec.check_served(ok(), host).unwrap().get_str("clip").as_deref(), Some("/srv/clip"));
     }
 
     /// A caller that DOES share the filesystem (the local CLI) still wins.

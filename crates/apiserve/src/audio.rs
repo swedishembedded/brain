@@ -78,7 +78,11 @@ pub async fn transcriptions(State(state): State<AppState>, caller: CallerExt, re
     if let (true, Some(language)) = (takes_language, &req.language) {
         inv = inv.set("language", json!(language));
     }
-    let outcome = match bridge::submit(&state, &model, "transcribe", inv).await {
+    let outcome = match bridge::admit(&state, &model, "transcribe", inv, bridge::Naming::Params) {
+        Ok(call) => bridge::submit(&state, call).await,
+        Err(e) => Err(e),
+    };
+    let outcome = match outcome {
         Ok(o) => o,
         Err(e) => return e.into_response(),
     };

@@ -45,6 +45,12 @@ pub enum Kind {
     /// `context_length_exceeded` error code. Same HTTP status and dialect
     /// `type` as `InvalidRequest`; only the OpenAI `code` differs.
     ContextLengthExceeded,
+    /// A request field the dialect does not define, or one the model's action
+    /// does not declare: refused rather than dropped, since dropping it would
+    /// answer a different request than the one sent. Same HTTP status and
+    /// dialect `type` as `InvalidRequest`; OpenAI's `code` is
+    /// `unsupported_parameter` and its `param` names the field.
+    UnsupportedParameter,
     NotImplemented,
     /// Accepted at the edge but could not be ADMITTED (started on a lane) within the
     /// admission deadline — HTTP 429, carries a `Retry-After`.
@@ -71,7 +77,7 @@ impl Kind {
             Kind::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Kind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
             Kind::NotFound | Kind::ModelNotFound => StatusCode::NOT_FOUND,
-            Kind::InvalidRequest | Kind::ContextLengthExceeded => StatusCode::BAD_REQUEST,
+            Kind::InvalidRequest | Kind::ContextLengthExceeded | Kind::UnsupportedParameter => StatusCode::BAD_REQUEST,
             Kind::NotImplemented => StatusCode::NOT_IMPLEMENTED,
             Kind::Overloaded => StatusCode::TOO_MANY_REQUESTS,
             Kind::Saturated => StatusCode::SERVICE_UNAVAILABLE,
@@ -100,7 +106,7 @@ impl Kind {
             // Anthropic's error taxonomy has no distinct "context length"
             // type; it folds into invalid_request_error same as OpenAI's
             // dialect `type` (only OpenAI's `code` slug is distinct).
-            Kind::InvalidRequest | Kind::ContextLengthExceeded => "invalid_request_error",
+            Kind::InvalidRequest | Kind::ContextLengthExceeded | Kind::UnsupportedParameter => "invalid_request_error",
             // Anthropic has no "not_implemented"; api_error is its catch-all.
             Kind::NotImplemented => "api_error",
             Kind::Overloaded | Kind::Saturated => "overloaded_error",
@@ -118,7 +124,7 @@ impl Kind {
             Kind::PaymentRequired => "insufficient_quota",
             Kind::RateLimited => "rate_limit_exceeded",
             Kind::Internal => "server_error",
-            Kind::NotFound | Kind::ModelNotFound | Kind::InvalidRequest | Kind::ContextLengthExceeded => {
+            Kind::NotFound | Kind::ModelNotFound | Kind::InvalidRequest | Kind::ContextLengthExceeded | Kind::UnsupportedParameter => {
                 "invalid_request_error"
             }
             Kind::NotImplemented => "not_implemented",
@@ -141,6 +147,8 @@ impl Kind {
             Kind::InvalidRequest => "invalid_request",
             // OpenAI's real, well-known code for this exact scenario.
             Kind::ContextLengthExceeded => "context_length_exceeded",
+            // OpenAI's own code for a parameter a model does not take.
+            Kind::UnsupportedParameter => "unsupported_parameter",
             Kind::NotImplemented => "not_implemented",
             Kind::Overloaded => "rate_limit_exceeded",
             Kind::Saturated => "server_error",
@@ -168,11 +176,14 @@ pub struct ApiError {
     pub kind: Kind,
     pub provider: Provider,
     pub message: String,
+    /// The request field the error is about, when it is about one: OpenAI's
+    /// `error.param`.
+    pub param: Option<String>,
 }
 
 impl ApiError {
     pub fn new(provider: Provider, kind: Kind, message: impl Into<String>) -> ApiError {
-        ApiError { kind, provider, message: message.into() }
+        ApiError { kind, provider, message: message.into(), param: None }
     }
     pub fn unauthorized(provider: Provider, message: impl Into<String>) -> ApiError {
         ApiError::new(provider, Kind::Unauthorized, message)
@@ -197,6 +208,12 @@ impl ApiError {
     }
     pub fn invalid_request(provider: Provider, message: impl Into<String>) -> ApiError {
         ApiError::new(provider, Kind::InvalidRequest, message)
+    }
+    /// `field` of a request for `model` is not one brain may read: the dialect
+    /// does not define it, or the model's action does not declare it. `why`
+    /// completes the sentence.
+    pub fn unsupported_parameter(provider: Provider, model: &str, field: &str, why: &str) -> ApiError {
+        ApiError { param: Some(field.to_string()), ..ApiError::new(provider, Kind::UnsupportedParameter, format!("'{field}' is not supported for model '{model}': {why}")) }
     }
     pub fn context_length_exceeded(provider: Provider, message: impl Into<String>) -> ApiError {
         ApiError::new(provider, Kind::ContextLengthExceeded, message)
@@ -226,7 +243,7 @@ impl ApiError {
                 "error": {
                     "message": self.message,
                     "type": self.kind.openai_type(),
-                    "param": Value::Null,
+                    "param": self.param,
                     "code": self.kind.openai_code(),
                 },
             }),

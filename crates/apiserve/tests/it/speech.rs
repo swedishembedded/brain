@@ -65,7 +65,7 @@ impl Instance for FakeTtsInst {
 struct Chat;
 impl ResidentModel for Chat {
     fn manifest(&self) -> Manifest {
-        Manifest::new("brain-chat", "a chat model", vec![ActionSpec::new("generate", "generate").streaming().param(ParamSpec::new("prompt", ParamType::Str, "the prompt").required()).output(BlobSpec::new("text", Media::Text, "text"))])
+        Manifest::new("brain-chat", "a chat model", vec![crate::chat_contract(ActionSpec::new("generate", "generate").streaming().param(ParamSpec::new("prompt", ParamType::Str, "the prompt")).output(BlobSpec::new("text", Media::Text, "text")))])
     }
     fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
         InstanceKey::new("brain-chat", "default")

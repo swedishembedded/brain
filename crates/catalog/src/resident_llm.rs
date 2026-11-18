@@ -1288,7 +1288,10 @@ impl ResidentModel for QwenResident {
         // serving capacity - see `Manifest::max_context_tokens`'s doc comment
         // on why this must be the actual engine capacity, not the
         // checkpoint's architectural `max_position_embeddings`.
-        let generate = llmserve::with_sampling_defaults(generate_spec("generate text (Qwen3; chat template optional)", true), &self.plan.id, self.sampling_defaults());
+        // A Qwen3 checkpoint renders ChatML, whose template settings the request parser reads; one that ships its own
+        // template renders that instead, which does not read them.
+        let spec = generate_spec("generate text (Qwen3; chat template optional)", true).params(qwen3::chat::template_params(data::qwen_chat::TemplateFlavor::Qwen3));
+        let generate = llmserve::with_sampling_defaults(spec, &self.plan.id, self.sampling_defaults());
         let manifest = Manifest::new(&self.plan.id, "text generation (Qwen3 BPE decoder)", vec![generate, llmserve::score_spec()]).with_max_context_tokens(self.plan.ctx as u64);
         match self.architecture {
             Some(arch) => manifest.with_architecture(arch),

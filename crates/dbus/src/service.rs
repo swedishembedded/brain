@@ -314,7 +314,8 @@ fn served_invocation(exec: &Executor, training: bool, model: &str, action: &str,
     if spec.training && !training {
         return Err(format!("{model} {action} trains, and this server does not serve training (start it with --training)"));
     }
-    let inv = spec.validate_served(inv)?;
+    // A refusal names the model as well as the param, as the HTTP surfaces' do.
+    let inv = spec.validate_served(inv).map_err(|e| format!("model '{model}': {e}"))?;
     // What the spec cannot say is the model's to refuse at the door (`ResidentModel::check_job`).
     exec.check_job(model, action, &inv)?;
     Ok(inv)
@@ -1203,6 +1204,22 @@ mod tests {
         // A call that names only what a caller may set still runs.
         mgr.run(HOST_PATH_MODEL.into(), "ingest".into(), r#"{"prompt": "hi"}"#.into(), Default::default(), String::new(), String::new()).await.expect("a served param is accepted");
         assert_eq!(reached.load(Ordering::SeqCst), 1);
+    }
+
+    /// A chat call over the bus is held to the served spec as over HTTP, `Run` and `Subscribe` alike: a param the
+    /// action does not declare is refused naming it and the model, and one the caller left out takes the declared
+    /// default (the stub's `prompt` defaults to "").
+    #[tokio::test]
+    async fn run_and_subscribe_refuse_an_undeclared_param_naming_it_and_the_model() {
+        let (mgr, reached) = host_path_manager();
+        let params = r#"{"prompt": "hi", "temperature": 0.5}"#.to_string();
+        let err = mgr.run(HOST_PATH_MODEL.into(), "ingest".into(), params.clone(), Default::default(), String::new(), String::new()).await.expect_err("Run must refuse it");
+        assert!(err.to_string().contains(&format!("model '{HOST_PATH_MODEL}': unknown param 'temperature'")), "{err}");
+        let err = mgr.subscribe(HOST_PATH_MODEL.into(), "ingest".into(), params, Default::default(), String::new()).await.expect_err("Subscribe must refuse it");
+        assert!(err.to_string().contains("unknown param 'temperature'"), "{err}");
+        assert_eq!(reached.load(Ordering::SeqCst), 0, "a refused call never reaches the model");
+        let inv = crate::service::served_invocation(&mgr.executor, false, HOST_PATH_MODEL, "ingest", capability::Invocation::new()).expect("an empty call is valid");
+        assert_eq!(inv.get_str("prompt").as_deref(), Some(""), "the declared default");
     }
 
     /// `Devices` is the document `GET /v1/devices` answers: the executor's devices with their memory, merged with what
