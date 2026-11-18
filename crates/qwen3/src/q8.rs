@@ -1,69 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Int8 (DP4A) inference path for the Qwen encoder's 7 per-layer linears.
+//! The per-layer linears a reduced-precision Qwen3 build re-tiers.
 //!
-//! Purpose: the fp32 Qwen3-4B encoder is ~16 GB of weights, but the default
-//! wgpu backend's Vulkan HAL on a non-ReBAR Pascal card DOUBLES the resident
-//! cost of every uploaded storage buffer (measured; not a hardware limit - see
-//! `crates/gpu-core/tests/it/vram_overhead.rs`: brain's own native Vulkan backend,
-//! `--device vulkan`, measures no such overhead on the same
-//! card), so under the default backend the fp32 encoder needs ~30 GB and does
-//! not fit one 24 GB P40 (nor split alongside the 13 GB int8 DiT). Quantizing
-//! the linears to int8 (group-wise symmetric,
-//! packed 4-per-`u32`) drops the linear weights to a quarter (~12.6 GB to
-//! ~3.2 GB), so the whole encoder is ~4.8 GB of weights and ~9.5 GB resident,
-//! and fits GPU 1 alone, leaving the DiT its own card. The encode then runs
-//! on-GPU in a small fraction of what the CPU path takes - the point of a hot,
-//! resident pipeline.
-//!
-//! Same recipe as the DiT's `s3dit::int8`: weights quantized once at build;
-//! activations quantized on-device each forward with dynamic scales per 32
-//! elements (`max_abs_row` → `quant_pack`), then the DP4A GEMM (`matmul_i8`, four int8
-//! MACs per instruction on Pascal) dequantizes with `sx·sw`. Norms/RoPE/attention stay f32 (not
-//! matmuls). Inference-only (frozen, no LoRA, no backward).
+//! The fp32 Qwen3-4B encoder is ~16 GB of weights; storing its 7 per-layer linears at a narrower tier (int8
+//! group-wise symmetric, packed 4-per-`u32`, drops them to a quarter) is what lets the encoder sit on one card
+//! beside a DiT. Those linears are `model::ops::Weight`s and every product over them goes through
+//! `model::ops::Ops::matmul`, which picks the kernel per device; this module only names which linears they are.
 
-use std::collections::HashMap;
-
-use gpu_core::{DeviceBuffer, Gpu, Step};
-
-/// Group-wise (32-element) symmetric int8 weight quantization - the
-/// engine-wide shared implementation (`model::int8`, also used by `zimage`
-/// and `flux2`), re-exported so `q8::quantize_weight` callers keep their
-/// path. The packed layout is what `matmul_i8*.wgsl` consume.
-pub use model::int8::quantize_weight;
-
-/// One int8 linear: packed int8 weight (`[n, k/4]` u32) + group scale
-/// `[n, k/32]`.
-pub struct Lin8 {
-    pub packed: DeviceBuffer,
-    pub scale: DeviceBuffer,
-    pub k: u32, // input width (contraction dim)
-    pub n: u32, // output width
-}
-
-/// The 7 int8 linears of one transformer layer (attention q/k/v/o + SwiGLU
-/// gate/up/down). Norms/RoPE stay f32 and live in the fp32 `ParamStore`.
-pub struct Q8Layer {
-    pub wq: Lin8,
-    pub wk: Lin8,
-    pub wv: Lin8,
-    pub wo: Lin8,
-    pub gate: Lin8,
-    pub up: Lin8,
-    pub down: Lin8,
-}
-
-/// Resident int8 linears for every owned layer + shared activation-quant scratch.
-pub struct Q8 {
-    pub layers: HashMap<usize, Q8Layer>,
-    pub sx: DeviceBuffer, // [n_tokens, max_k/32] activation group scales
-    pub xq: DeviceBuffer, // [n_tokens * max_k/4] packed activation (reused per linear)
-    // kernel indices in the model's pipeline table.
-    k_max_abs_row: usize,
-    k_quant_pack: usize,
-    k_matmul_i8: usize,
-}
+/// The namespace of the re-tiered linears: [`Q8::LINEARS`] and [`Q8::is_i8_linear`].
+pub struct Q8;
 
 impl Q8 {
     /// The 7 leaf names that become int8 (everything else stays fp32).
@@ -93,73 +39,5 @@ impl Q8 {
         name.strip_prefix("blocks.").is_some_and(|rest| {
             rest.split_once('.').is_some_and(|(_, leaf)| Self::LINEARS.contains(&leaf))
         })
-    }
-
-    /// Quantize+upload the owned layers' 7 linears from `init`, allocate scratch.
-    /// `owned` are the absolute layer indices this shard holds; `dims(l, leaf)`
-    /// gives `(n_out, k_in)` for each linear. `n_tokens = b*t`, `max_k` the widest
-    /// contraction dim (= d_ff) so one activation-quant buffer serves every linear.
-    #[allow(clippy::too_many_arguments)]
-    pub fn build(
-        gpu: &Gpu,
-        source: &dyn checkpoint::TensorSource,
-        owned: impl Iterator<Item = usize>,
-        dims: impl Fn(&str) -> (usize, usize),
-        n_tokens: u32,
-        max_k: u32,
-        k_max_abs_row: usize,
-        k_quant_pack: usize,
-        k_matmul_i8: usize,
-    ) -> Q8 {
-        let mut up = paramstore::upload::Uploader::new(gpu);
-        let mut mk = |name: &str| -> Lin8 {
-            let leaf = name.strip_prefix("blocks.").and_then(|r| r.split_once('.')).map(|(_, l)| l).unwrap_or(name);
-            let (n, k) = dims(leaf);
-            // model::int8::upload_quantized takes the fastest route the
-            // source can serve (a Q8_0 GGUF byte repack, no fp32 anywhere,
-            // when it offers one) and applies the same staging-reclaim
-            // discipline the old gpu.write + poll_wait pair here approximated
-            // by hand.
-            let (pb, sb) = model::int8::upload_quantized(&mut up, source, name, n, k).unwrap_or_else(|e| panic!("q8: {e}"));
-            Lin8 { packed: pb, scale: sb, k: k as u32, n: n as u32 }
-        };
-        let mut layers = HashMap::new();
-        for l in owned {
-            let p = |leaf: &str| format!("blocks.{l}.{leaf}");
-            layers.insert(
-                l,
-                Q8Layer {
-                    wq: mk(&p("attn.wq.weight")),
-                    wk: mk(&p("attn.wk.weight")),
-                    wv: mk(&p("attn.wv.weight")),
-                    wo: mk(&p("attn.wo.weight")),
-                    gate: mk(&p("mlp.gate.weight")),
-                    up: mk(&p("mlp.up.weight")),
-                    down: mk(&p("mlp.down.weight")),
-                },
-            );
-        }
-        let sx = gpu.storage(model::int8::act_scale_len(n_tokens as usize, max_k as usize).max(1) as u64);
-        let xq = gpu.storage((n_tokens * max_k / 4).max(1) as u64);
-        Q8 { layers, sx, xq, k_max_abs_row, k_quant_pack, k_matmul_i8 }
-    }
-
-    /// Quantize activation `x` `[n_tokens · k]` into `self.xq` with fresh group
-    /// scales `self.sx`. Emits the two prep steps; call once per distinct input
-    /// (shared by all linears reading that input, e.g. xn1 → q/k/v).
-    pub fn quant(&self, gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, k: u32, n_tokens: u32) {
-        s.push(gpu.step(self.k_max_abs_row, &[x, &self.sx], &[n_tokens, k], n_tokens));
-        s.push(gpu.step(self.k_quant_pack, &[x, &self.sx, &self.xq], &[n_tokens, k], n_tokens * k / 4));
-    }
-
-    /// `out = dequant(xq @ wᵀ)`: group-wise activation scales `self.sx` × group-wise
-    /// weight scales. Must be preceded by a matching [`Q8::quant`] on the same input.
-    pub fn mm8(&self, gpu: &Gpu, s: &mut Vec<Step>, w: &Lin8, out: &DeviceBuffer, n_tokens: u32) {
-        s.push(gpu.dispatch(
-            self.k_matmul_i8,
-            &[&self.xq, &w.packed, &self.sx, &w.scale, out],
-            &[n_tokens, w.k / 4, w.n],
-            gpu_core::Dispatch::Workgroups(n_tokens.div_ceil(128) * w.n.div_ceil(128)),
-        ));
     }
 }
