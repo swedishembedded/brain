@@ -2180,6 +2180,10 @@ impl Asked<'_> {
     /// The examples one record is trained as: see [`Asked::read`] for which shape each kind of record takes.
     pub(crate) fn examples_of(&self, record: &ChatSample) -> std::result::Result<Vec<ChatSample>, String> {
         let invalid = |e: &dyn std::fmt::Display| e.to_string();
+        // A baseline-only record is kept whole: it is never encoded as an example, only counted in its group.
+        if record.rollout.as_ref().is_some_and(|r| r.baseline_only) {
+            return Ok(vec![record.clone()]);
+        }
         // Whole-record masking is exact for plain answers in thinking mode
         // and refuses tool turns; everywhere else each answer is asked for,
         // and a record supervising only its last message has one boundary.
@@ -2228,6 +2232,9 @@ impl Asked<'_> {
             samples.extend(examples);
         }
         for (at, sample) in samples.iter_mut().enumerate() {
+            if sample.rollout.as_ref().is_some_and(|r| r.baseline_only) {
+                continue;
+            }
             let (ids, mask) = sample
                 .encode_with(self.tok, self.tmpl, self.render)
                 .map_err(|e| Error::Backend(format!("{}: record {} (example {}) cannot be encoded for training: {e}", path.display(), origins[at] + 1, at + 1)))?;

@@ -327,3 +327,48 @@ fn a_truncated_rollout_counts_only_where_the_run_keeps_it() {
     assert!(TruncatedRollouts::Mask.counts(false) && !TruncatedRollouts::Mask.counts(true));
     assert!(TruncatedRollouts::Keep.counts(false) && TruncatedRollouts::Keep.counts(true));
 }
+
+/// A baseline-only record (`"baseline_only": true`, with a reward and group and nothing trained) is accepted, takes
+/// part in its group's rules (it makes a lone trained rollout's group a pair), is kept in the prepared split's sidecar
+/// as a baseline and never as an example; one that trains something, carries an answer's per-token fields, a teacher
+/// context or `truncated`, or has no reward is refused by rule and field.
+#[test]
+fn a_baseline_only_rollout_counts_in_its_group_and_is_never_an_example() {
+    let user = r#"{"role":"user","content":"q","train":false}"#;
+    let baseline = |extra: &str, answer: &str| format!(r#"{{"reward": 0, "group": "g", "rollout": "base", "baseline_only": true{extra}, "messages": [{user},{answer}]}}"#);
+    let quiet = r#"{"role":"assistant","content":"b","train":false}"#;
+    let parsed = ChatSample::from_json_line_with(&baseline("", quiet), &data::chat::TextOnly::TRAINER).expect("a baseline");
+    assert!(parsed.rollout.as_ref().is_some_and(|r| r.baseline_only && r.outcome.as_ref().is_some_and(|o| o.reward == 0.0)));
+
+    use chat_rollout::RecordRule::*;
+    for (line, rule, field) in [
+        (baseline("", r#"{"role":"assistant","content":"b","train":true}"#), BaselineTrains, "messages[1].train"),
+        (baseline(r#", "truncated": true"#, quiet), BaselineTrains, "truncated"),
+        (baseline(r#", "teacher_context": {"at": 1, "messages": [{"role": "system", "content": "hint"}]}"#, quiet), BaselineTrains, "teacher_context"),
+        (format!(r#"{{"baseline_only": true, "messages": [{user},{quiet}]}}"#), MissingReward, "baseline_only"),
+    ] {
+        let err = ChatSample::from_json_line_with(&line, &data::chat::TextOnly::TRAINER).expect_err(field);
+        let fault = err.fault().cloned().unwrap_or_else(|| panic!("{field}: {err}"));
+        assert_eq!((fault.rule, fault.field.as_str()), (rule, field), "{err}");
+    }
+
+    // One trained rollout and a baseline of its group: a pair, not a group of one.
+    let trained = record(Some("1"), None);
+    let records: Vec<ChatSample> = [trained.clone(), baseline("", quiet)].iter().map(|l| ChatSample::from_json_line_with(l, &data::chat::TextOnly::TRAINER).unwrap()).collect();
+    let rollouts: Vec<Option<&chat_rollout::Rollout>> = records.iter().map(|r| r.rollout.as_ref()).collect();
+    assert!(chat_rollout::check_records(&rollouts, chat_rollout::TruncatedRollouts::Mask).is_empty());
+    let alone = ChatSample::from_json_line_with(&trained, &data::chat::TextOnly::TRAINER).unwrap();
+    assert_eq!(chat_rollout::check_records(&[alone.rollout.as_ref()], chat_rollout::TruncatedRollouts::Mask).len(), 1, "without the baseline the group holds one");
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut samples = alone.answers_as_asked(&template(), true).unwrap().unwrap();
+    samples.push(records[1].clone());
+    prepare(&samples, dir.path()).unwrap();
+    let starts = binio::read_u64_bin(&dir.path().join("train.ex.bin")).unwrap();
+    let tokens = binio::read_tokens_u32(&dir.path().join("train")).unwrap();
+    let split = chat_rollout::read(dir.path(), "train", starts.len(), tokens.len()).unwrap().expect("rollouts");
+    assert_eq!((starts.len(), split.examples.len(), split.baselines.len()), (1, 1, 1), "the baseline is no example");
+    let (trained, base) = (split.examples[0].unwrap().graded.unwrap(), split.baselines[0]);
+    assert_eq!((trained.group, base.group, base.reward), (0, 0, 0.0), "one group");
+    assert_ne!(trained.member, base.member, "two rollouts");
+}

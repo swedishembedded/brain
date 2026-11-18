@@ -35,6 +35,7 @@ rollouts) and in its guide to training as a served job.
 | `invalid/advantage_removed.jsonl` | refused | version 1's `advantage` |
 | `invalid/rollout_mismatch.jsonl` | line 2 refused | a second record of rollout `cab-0` with another reward |
 | `invalid/group_of_one.jsonl` | lines 1 and 4 refused | group `cab` holds one rollout; group `ace` holds one that reached an outcome beside a truncated one |
+| `invalid/baseline_trains.jsonl` | line 3 refused | lines 1 and 2: a trained rollout and a `baseline_only` record of its group (a pair: the baseline counts); line 3 marks a supervised answer `baseline_only` |
 | `invalid/mixed_tokenizer_digest.jsonl` | line 2 refused | a record naming another tokenizer than line 1 |
 | `manifest.json` | expected verdicts | per file: the format, the record count, the valid count and each refusal as `{line, rule, field}` |
 

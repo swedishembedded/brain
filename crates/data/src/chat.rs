@@ -699,6 +699,9 @@ struct WireRecord {
     /// The rollout did not reach an outcome ([`crate::chat_rollout`]).
     #[serde(default)]
     truncated: bool,
+    /// The record only sets its group's baseline ([`crate::chat_rollout`]).
+    #[serde(default)]
+    baseline_only: bool,
     /// Messages only the teacher of a self-distillation run is shown ([`crate::chat_rollout`]).
     #[serde(default)]
     teacher_context: Option<WireTeacherContext>,
@@ -828,6 +831,27 @@ fn sample_from_wire(record: WireRecord, reader: &dyn ImageReader) -> Result<Chat
         chat_rollout::check_tokenizer_digest(digest)?;
     }
     let truncated = record.truncated;
+    if record.baseline_only {
+        let baseline = |field: String, why: &str| Err(RecordError::of(RecordFault::new(RecordRule::BaselineTrains, &field), format!("{field}: the record is baseline_only, so {why}")));
+        if outcome.is_none() {
+            return Err(RecordError::of(RecordFault::new(RecordRule::MissingReward, "baseline_only"), "baseline_only: a baseline sets its group's baseline with its \"reward\", and the record has no \"reward\" and \"group\"".to_string()));
+        }
+        if let Some(at) = messages.iter().position(|m| m.train) {
+            return baseline(format!("messages[{at}].train"), "no message of it is trained");
+        }
+        if let Some(at) = behavior_logprobs.iter().position(Option::is_some) {
+            return baseline(format!("messages[{at}].behavior_logprobs"), "it carries no sampled answer's log-probabilities");
+        }
+        if let Some(at) = token_ids.iter().position(Option::is_some) {
+            return baseline(format!("messages[{at}].token_ids"), "it carries no sampled answer's ids");
+        }
+        if teacher.is_some() {
+            return baseline("teacher_context".to_string(), "no teacher scores it");
+        }
+        if truncated {
+            return baseline("truncated".to_string(), "a truncated rollout's reward says nothing about its group; leave the record out");
+        }
+    }
     // A rollout field on a record with no outcome: the record cannot say what its tokens earned.
     let without_outcome = |field: String, what: &str| Err(RecordError::of(RecordFault::new(RecordRule::MissingReward, &field), format!("{field}: {what} to a rollout, and the record has no \"reward\" and \"group\" or \"teacher_context\"")));
     let rollout = match (outcome, teacher) {
@@ -839,7 +863,7 @@ fn sample_from_wire(record: WireRecord, reader: &dyn ImageReader) -> Result<Chat
             (None, None) => None,
         },
         // A teacher context alone trains on its per-token advantage: the scalar part is 0.
-        (outcome, teacher) => Some(Rollout { outcome, truncated, behavior_logprobs, token_ids, teacher, tokenizer_digest: record.tokenizer_digest }),
+        (outcome, teacher) => Some(Rollout { outcome, truncated, behavior_logprobs, token_ids, teacher, tokenizer_digest: record.tokenizer_digest, baseline_only: record.baseline_only }),
     };
     Ok(ChatSample { messages, tools: record.tools, rendered: None, media, rollout })
 }
@@ -1180,6 +1204,8 @@ pub struct EncodedSplit {
     pub teacher: Vec<Option<(Vec<u32>, Vec<bool>)>>,
     /// Whether each example's rollout did not reach an outcome, aligned with `starts`.
     pub truncated: Vec<bool>,
+    /// The outcomes of the baseline-only records the split read: in their groups, never examples.
+    pub baselines: Vec<chat_rollout::Outcome>,
 }
 
 impl EncodedSplit {
@@ -1228,6 +1254,10 @@ pub fn encode_sample_split_while(samples: &[ChatSample], tok: &dyn Tokenizer, tm
         if !keep_going() {
             return Ok(None);
         }
+        if let Some(outcome) = s.rollout.as_ref().filter(|r| r.baseline_only).and_then(|r| r.outcome.clone()) {
+            out.baselines.push(outcome);
+            continue;
+        }
         let encoded = s.encode_rollout(tok, tmpl, opts)?;
         out.push_rollout(&encoded, &s.media, s.rollout.as_ref().map(|r| r.outcome.clone()));
     }
@@ -1242,7 +1272,7 @@ pub fn write_split(dir: &Path, split: &str, data: &EncodedSplit) -> io::Result<(
     binio::write_mask_bin(&dir.join(format!("{split}.mask.bin")), &data.mask)?;
     let starts: Vec<u64> = data.starts.iter().map(|&s| s as u64).collect();
     binio::write_u64_bin(&dir.join(format!("{split}.ex.bin")), &starts)?;
-    chat_rollout::write(dir, split, &data.rollouts, &data.behavior, &data.truncated)?;
+    chat_rollout::write(dir, split, &data.rollouts, &data.baselines, &data.behavior, &data.truncated)?;
     chat_rollout::write_teacher(dir, split, &data.teacher)?;
     crate::chat_media::write(dir, split, &data.media)
 }

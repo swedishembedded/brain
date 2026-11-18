@@ -131,6 +131,19 @@
      "field": "tokenizer_digest"
     }
    ]
+  },
+  {
+   "path": "invalid/baseline_trains.jsonl",
+   "kind": "chat",
+   "records": 3,
+   "valid_records": 2,
+   "refusals": [
+    {
+     "line": 3,
+     "rule": "baseline_trains",
+     "field": "messages[1].train"
+    }
+   ]
   }
  ]
 }

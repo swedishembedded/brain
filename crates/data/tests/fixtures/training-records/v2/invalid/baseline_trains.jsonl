@@ -1,0 +1,3 @@
+{"reward":1.0,"group":"ace","rollout":"ace-0","messages":[{"role":"user","content":"ace","train":false},{"role":"assistant","content":"cab","train":true}]}
+{"reward":0.0,"group":"ace","rollout":"ace-reference","baseline_only":true,"messages":[{"role":"user","content":"ace","train":false},{"role":"assistant","content":"bead","train":false}]}
+{"reward":0.5,"group":"ace","rollout":"ace-other","baseline_only":true,"messages":[{"role":"user","content":"ace","train":false},{"role":"assistant","content":"fade","train":true}]}

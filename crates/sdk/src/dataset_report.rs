@@ -243,7 +243,9 @@ pub fn check_dataset(model_dir: impl AsRef<Path>, path: impl AsRef<Path>, check:
         let examples: std::result::Result<Vec<(usize, usize, usize)>, RecordError> = match check.kind {
             DatasetKind::Chat => ChatSample::from_json_line_with(line, &*images).and_then(|record| {
                 let mut out = Vec::new();
-                for example in asked.examples_of(&record)? {
+                // A baseline-only record trains as no example; it is checked between records, in its group.
+                let baseline = record.rollout.as_ref().is_some_and(|r| r.baseline_only);
+                for example in asked.examples_of(&record)?.into_iter().filter(|_| !baseline) {
                     let encoded = example.encode_rollout(&tok, &tmpl, render)?;
                     let row = encoded.ids.len().max(encoded.teacher.as_ref().map_or(0, |(ids, _)| ids.len()));
                     out.push((encoded.ids.len(), encoded.mask.iter().filter(|m| **m).count(), row));

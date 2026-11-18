@@ -594,6 +594,11 @@ lowers the probability of its action, a positive one raises it.
 - `"rollout"` (record, optional, with `"group"`): which rollout of its group the record is one call of. The records of
   one rollout carry the same reward and `truncated`, and the rollout counts once in its group however many calls it
   made; without it the record is a rollout of its own. A group needs at least two rollouts that were not truncated.
+- `"baseline_only"` (record, optional, with `"reward"` and `"group"`): `true` for a rollout of the group the run sets
+  the baseline with but never trains on (another policy's attempt, a reference answer). Its reward counts among its
+  group's, and towards the group's two rollouts; no message of it is `"train": true` and it carries no
+  `behavior_logprobs`, `token_ids`, `teacher_context` or `truncated` (rule `baseline_trains`). A prepared split keeps
+  its outcome in `<split>.rollouts.json` (`baselines`), not as an example.
 - `"tokenizer_digest"` (record, optional): `sha256:<hex>`, the tokenizer the sampler encoded the rollout with, as a
   `policy_trace` names it; the records of one run that name one name the same.
 - Version 1's precomputed `"advantage"` is refused, naming the field and its replacement (`reward` and `group`).

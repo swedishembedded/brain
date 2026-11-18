@@ -31,6 +31,10 @@
 //!   out), so its reward says nothing about the action. A policy-gradient run never trains on such a record and its
 //!   reward takes no part in its group's advantages; it is counted, not drawn. A truncated rollout is masked as a
 //!   whole, because the sampler's budget, not the policy, decided where it ended.
+//! * `"baseline_only": true` on the record (with `reward` and `group`): a rollout of the group the run does not train
+//!   on (another policy's attempt, a reference answer, a failure kept for the statistics). Its reward counts among its
+//!   group's (and towards the group's two rollouts) and nothing of it is trained: no message has `"train": true`, and
+//!   it carries no `behavior_logprobs`, `token_ids`, `teacher_context` or `truncated` (rule `baseline_trains`).
 //! * `"tokenizer_digest": "sha256:<hex>"` on the record: the tokenizer the sampler encoded the rollout with (a served
 //!   reply's `policy_trace` names it). The records of one job that name one must all name the same.
 //! * `"teacher_context": {"at": <index>, "messages": [{"role": "system"|"user", "content": "..."}, ...]}` on the
@@ -78,6 +82,10 @@ pub enum RecordRule {
     GroupOfOne,
     /// The record's `tokenizer_digest` differs from the one the job's other records name.
     MixedTokenizerDigest,
+    /// A record marked `baseline_only` supervises a message, carries the per-token fields of a trained answer
+    /// (`behavior_logprobs`, `token_ids`), a `teacher_context`, or is `truncated`: a baseline only sets its group's
+    /// baseline.
+    BaselineTrains,
 }
 
 impl RecordRule {
@@ -92,6 +100,7 @@ impl RecordRule {
             RecordRule::RolloutMismatch => "rollout_mismatch",
             RecordRule::GroupOfOne => "group_of_one",
             RecordRule::MixedTokenizerDigest => "mixed_tokenizer_digest",
+            RecordRule::BaselineTrains => "baseline_trains",
         }
     }
 }
@@ -202,6 +211,9 @@ pub struct Rollout {
     pub teacher: Option<Teacher>,
     /// The tokenizer the sampler encoded the rollout with (`sha256:<hex>`), when the record names it.
     pub tokenizer_digest: Option<String>,
+    /// The record only sets its group's baseline (`"baseline_only": true`): its reward counts among the group's, and
+    /// nothing of it is trained.
+    pub baseline_only: bool,
 }
 
 /// The teacher's view of a record: the record's conversation with the privileged messages inserted. It goes through
@@ -223,7 +235,7 @@ impl Rollout {
     /// The rollout of a sample derived from this record's (a prefix, one answer, a packing): the same outcome, with
     /// the derived sample's log-probabilities and teacher view.
     pub(crate) fn derived(&self, behavior_logprobs: Vec<Option<Vec<f32>>>, token_ids: Vec<Option<Vec<u32>>>, teacher: Option<Teacher>) -> Rollout {
-        Rollout { outcome: self.outcome.clone(), truncated: self.truncated, behavior_logprobs, token_ids, teacher, tokenizer_digest: self.tokenizer_digest.clone() }
+        Rollout { outcome: self.outcome.clone(), truncated: self.truncated, behavior_logprobs, token_ids, teacher, tokenizer_digest: self.tokenizer_digest.clone(), baseline_only: self.baseline_only }
     }
 }
 
@@ -450,6 +462,9 @@ pub struct ExampleRollout {
 struct RolloutsFile {
     groups: Vec<String>,
     examples: Vec<Option<ExampleRollout>>,
+    /// The outcomes of baseline-only records: counted in their groups, never trained.
+    #[serde(default)]
+    baselines: Vec<Graded>,
 }
 
 fn names(dir: &Path, split: &str) -> (PathBuf, PathBuf, PathBuf) {
@@ -465,7 +480,7 @@ pub fn holds_rollouts(dir: &Path, split: &str) -> bool {
 /// rollout without a reward of its own), `behavior[t]` token `t`'s log-probability (NaN for none), `truncated[i]`
 /// whether example `i`'s rollout did not reach an outcome. Groups and rollouts are numbered in the order first seen.
 /// Nothing is written, and a stale sidecar is removed, when no example is a rollout.
-pub fn write(dir: &Path, split: &str, rollouts: &[Option<Option<Outcome>>], behavior: &[f32], truncated: &[bool]) -> io::Result<()> {
+pub fn write(dir: &Path, split: &str, rollouts: &[Option<Option<Outcome>>], baselines: &[Outcome], behavior: &[f32], truncated: &[bool]) -> io::Result<()> {
     let (outcomes, blp, trn) = names(dir, split);
     for stale in [&outcomes, &blp, &trn] {
         match std::fs::remove_file(stale) {
@@ -473,30 +488,27 @@ pub fn write(dir: &Path, split: &str, rollouts: &[Option<Option<Outcome>>], beha
             _ => {}
         }
     }
-    if rollouts.iter().all(Option::is_none) {
+    if rollouts.iter().all(Option::is_none) && baselines.is_empty() {
         return Ok(());
     }
-    if let Some(o) = rollouts.iter().flatten().flatten().find(|o| !o.reward.is_finite()) {
+    if let Some(o) = rollouts.iter().flatten().flatten().chain(baselines).find(|o| !o.reward.is_finite()) {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("group {:?}: reward {} is not a finite number", o.group, o.reward)));
     }
     let mut groups: Vec<String> = Vec::new();
-    let mut group_index: BTreeMap<&str, u32> = BTreeMap::new();
-    let mut member_index: BTreeMap<(u32, &Member), u32> = BTreeMap::new();
-    let mut examples = Vec::with_capacity(rollouts.len());
-    for rollout in rollouts {
-        examples.push(rollout.as_ref().map(|outcome| ExampleRollout {
-            graded: outcome.as_ref().map(|o| {
-                let group = *group_index.entry(o.group.as_str()).or_insert_with(|| {
-                    groups.push(o.group.clone());
-                    (groups.len() - 1) as u32
-                });
-                let next = member_index.len() as u32;
-                let member = *member_index.entry((group, &o.member)).or_insert(next);
-                Graded { group, member, reward: o.reward }
-            }),
-        }));
-    }
-    let file = RolloutsFile { groups, examples };
+    let mut group_index: BTreeMap<String, u32> = BTreeMap::new();
+    let mut member_index: BTreeMap<(u32, Member), u32> = BTreeMap::new();
+    let mut grade = |o: &'_ Outcome| -> Graded {
+        let group = *group_index.entry(o.group.clone()).or_insert_with(|| {
+            groups.push(o.group.clone());
+            (groups.len() - 1) as u32
+        });
+        let next = member_index.len() as u32;
+        let member = *member_index.entry((group, o.member.clone())).or_insert(next);
+        Graded { group, member, reward: o.reward }
+    };
+    let examples: Vec<Option<ExampleRollout>> = rollouts.iter().map(|rollout| rollout.as_ref().map(|outcome| ExampleRollout { graded: outcome.as_ref().map(&mut grade) })).collect();
+    let baselines: Vec<Graded> = baselines.iter().map(&mut grade).collect();
+    let file = RolloutsFile { groups, examples, baselines };
     std::fs::write(&outcomes, serde_json::to_vec(&file).map_err(io::Error::other)?)?;
     if behavior.iter().any(|b| !b.is_nan()) {
         binio::write_f32_bin(&blp, behavior)?;
@@ -518,6 +530,9 @@ pub struct SplitRollouts {
     pub behavior: Vec<f32>,
     /// Per example: the rollout did not reach an outcome and is not trained on.
     pub truncated: Vec<bool>,
+    /// The outcomes of baseline-only records, numbered in the examples' group and rollout spaces: counted in their
+    /// groups, never trained.
+    pub baselines: Vec<Graded>,
 }
 
 /// The sidecars of `split` in `dir`, checked against the `examples` and `tokens` the split holds; `None` when the
@@ -532,7 +547,7 @@ pub fn read(dir: &Path, split: &str, examples: usize, tokens: usize) -> io::Resu
     if file.examples.len() != examples {
         return Err(bad(format!("{}: rollouts for {} examples, the split holds {examples}", outcomes.display(), file.examples.len())));
     }
-    for (e, graded) in file.examples.iter().enumerate().filter_map(|(e, r)| r.and_then(|r| r.graded).map(|g| (e, g))) {
+    for (e, graded) in file.examples.iter().enumerate().filter_map(|(e, r)| r.and_then(|r| r.graded).map(|g| (e, g))).chain(file.baselines.iter().map(|g| (usize::MAX, *g))) {
         if graded.group as usize >= file.groups.len() || !graded.reward.is_finite() {
             return Err(bad(format!("{}: example {e} names group {} of {} with reward {}", outcomes.display(), graded.group, file.groups.len(), graded.reward)));
         }
@@ -555,7 +570,7 @@ pub fn read(dir: &Path, split: &str, examples: usize, tokens: usize) -> io::Resu
     } else {
         vec![false; examples]
     };
-    Ok(Some(SplitRollouts { groups: file.groups, examples: file.examples, behavior, truncated }))
+    Ok(Some(SplitRollouts { groups: file.groups, examples: file.examples, behavior, truncated, baselines: file.baselines }))
 }
 
 /// The teacher renderings of a split: every example's tokens and supervision mask, back to back.

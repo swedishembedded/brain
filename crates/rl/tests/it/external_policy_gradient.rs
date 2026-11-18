@@ -537,6 +537,35 @@ fn the_advantages_are_each_groups_rewards_under_the_runs_normalisation() {
     assert!((factor_a - 2.0).abs() < 1e-5 && (factor_b - 4.0 / 3.0).abs() < 1e-5, "G/(G-1) per group: {factor_a}, {factor_b}");
 }
 
+/// A baseline-only outcome takes part in its group (it sets the baseline, and makes a group of one trained rollout a
+/// pair) and is never an example: group a's trained rollout (reward 1) against its baseline (0) is +0.5 mean-centred,
+/// +1 leave-one-out; group b, a trained rollout and two baselines (0.2, 0.8), is 0.5 - 0.5 = 0 mean-centred.
+#[test]
+fn a_baseline_only_outcome_sets_its_groups_baseline_and_is_never_trained() {
+    use data::chat_rollout::{Member, Outcome};
+    use rl::objective::advantage::AdvantageNorm;
+    let dir = tempfile::tempdir().unwrap();
+    let mut split = EncodedSplit::default();
+    for (k, (group, reward)) in [("a", 1.0), ("b", 0.5)].into_iter().enumerate() {
+        let ids: Vec<u32> = (0..6).map(|i| 1 + ((k + i) % 20) as u32).collect();
+        let outcome = Outcome { reward, group: group.to_string(), member: Member::Named(format!("{group}-trained")) };
+        split.push_rollout(&data::chat::EncodedSample { ids, mask: (0..6).map(|i| i >= 3).collect(), behavior: vec![f32::NAN; 6], teacher: None, truncated: false }, &[], Some(Some(outcome)));
+    }
+    for (group, rollout, reward) in [("a", "a-base", 0.0), ("b", "b-base0", 0.2), ("b", "b-base1", 0.8)] {
+        split.baselines.push(Outcome { reward, group: group.to_string(), member: Member::Named(rollout.to_string()) });
+    }
+    data::chat::write_split(dir.path(), "train", &split).unwrap();
+    data::chat::write_split(dir.path(), "val", &split).unwrap();
+    std::fs::write(dir.path().join("meta.json"), data::binio::Meta::vocab_only(29)).unwrap();
+    for (norm, want) in [(AdvantageNorm::MeanCentered, [0.5, 0.0]), (AdvantageNorm::LeaveOneOut, [1.0, 0.0])] {
+        let obj = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), PolicyGradientConfig { advantage_norm: norm, ..no_kl() }).unwrap();
+        let got: Vec<f32> = (0..2).map(|e| obj.advantage(e).unwrap()).collect();
+        assert!(got.iter().zip(want).all(|(g, w)| (f64::from(*g) - w).abs() < 1e-6), "{norm:?}: {got:?} against {want:?}");
+        assert_eq!(obj.stats().sequences_with_advantage, 2, "the baselines are no examples");
+        assert_eq!(obj.advantage(2), None);
+    }
+}
+
 /// A group with one rollout that reached an outcome, and two calls of one rollout that disagree, are refused when the
 /// run opens, by the contract's rule.
 #[test]

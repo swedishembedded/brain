@@ -74,6 +74,24 @@ fn every_named_algorithm_trains_and_the_result_records_the_settings_it_expanded_
     assert_eq!(outcome.outputs["policy_gradient"]["settings"]["clip_eps_high"].as_f64().map(|v| (v * 1e6).round() / 1e6), Some(0.4), "a named setting overrides the algorithm's");
 }
 
+/// A baseline-only record of a group is read with the rollouts: it takes part in its group and trains nothing, so the
+/// job trains the same four rollouts and the dry run counts it as a valid record of no example.
+#[test]
+fn a_baseline_only_record_sets_its_groups_baseline_and_trains_nothing() {
+    let rig = rig_qwen3("run-pg-baseline", 16 << 30);
+    let baseline = json!({"reward": 0.0, "group": "toy", "rollout": "reference", "baseline_only": true, "messages": [{"role": "user", "content": "cab", "train": false}, {"role": "assistant", "content": "wig", "train": false}]}).to_string();
+    let dataset = [rollouts(), b"\n".to_vec(), baseline.into_bytes()].concat();
+    let train = data_digest(&rig, &dataset);
+    let params = json!({
+        "base": BASE, "arch": "qwen3", "objective": "policy_gradient", "behaviour": "start_of_run_proxy", "steps": 2, "grad_accum": 2, "rank": 2, "lr": 2e-2, "seed": 7, "max_block": 128,
+        "data": json!({"train": {"digest": train.hex()}}).to_string(),
+    });
+    let outcome = run(&rig, params, &[], &Frames::default()).expect("the run");
+    assert_eq!((outcome.outputs["status"].as_str(), outcome.outputs["policy_gradient"]["sequences_with_advantage"].as_u64()), (Some("completed"), Some(4)), "{}", outcome.outputs);
+    let report = crate::support::run_action(&rig, trainjob::dryrun::ACTION, &trainjob::dryrun::spec(), json!({"base": BASE, "dataset_digest": train.hex()}), &[], &Frames::default()).expect("the dry run").outputs;
+    assert_eq!((report["records"].as_u64(), report["valid_records"].as_u64(), report["examples"].as_u64()), (Some(5), Some(5), Some(4)), "{report}");
+}
+
 #[test]
 fn a_policy_gradient_job_streams_each_step_and_hands_back_the_adapter_by_digest_and_by_blob_then_continues_it() {
     let rig = rig("run-pg", 16 << 30, true);

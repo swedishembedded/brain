@@ -246,11 +246,15 @@ impl std::str::FromStr for BehaviourSource {
 fn advantages(split: &data::chat_rollout::SplitRollouts, norm: AdvantageNorm, floor: AdvantageFloor, truncated: TruncatedRollouts) -> Result<Vec<f32>, String> {
     use data::chat_rollout::{group_members, GroupEntry, GroupFault, RecordRule};
     let graded: Vec<(usize, data::chat_rollout::Graded)> = split.examples.iter().enumerate().filter_map(|(e, r)| r.and_then(|r| r.graded).map(|g| (e, g))).collect();
-    let entries: Vec<GroupEntry<u32, u32>> = graded.iter().map(|&(e, g)| GroupEntry { group: g.group, member: g.member, reward: g.reward, truncated: split.truncated[e] }).collect();
+    // Baseline-only outcomes take part in their groups like any rollout; no example trains on them.
+    let entries: Vec<GroupEntry<u32, u32>> = graded.iter().map(|&(e, g)| GroupEntry { group: g.group, member: g.member, reward: g.reward, truncated: split.truncated[e] }).chain(split.baselines.iter().map(|g| GroupEntry { group: g.group, member: g.member, reward: g.reward, truncated: false })).collect();
     let (groups, faults) = group_members(&entries, truncated);
     if let Some(fault) = faults.first() {
         return Err(match fault {
-            GroupFault::Mismatch { entry, field } => format!("{} (field {field}): example {} differs from an earlier example of its rollout", RecordRule::RolloutMismatch.name(), graded[*entry].0),
+            GroupFault::Mismatch { entry, field } => match graded.get(*entry) {
+                Some((example, _)) => format!("{} (field {field}): example {example} differs from an earlier example of its rollout", RecordRule::RolloutMismatch.name()),
+                None => format!("{} (field {field}): a baseline-only record differs from an earlier record of its rollout", RecordRule::RolloutMismatch.name()),
+            },
             GroupFault::OfOne { group } => format!("{} (field group): group {:?} holds one rollout that takes part in it (truncated {}); a group-relative advantage needs at least two", RecordRule::GroupOfOne.name(), split.groups[*group as usize], truncated.name()),
         });
     }
