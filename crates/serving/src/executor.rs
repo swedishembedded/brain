@@ -47,6 +47,9 @@ pub struct Serving {
     /// `None` when `--checkpoint` names no checkpoint, i.e. this process
     /// serves no flag-selected Qwen3 for an adapter flag to apply to.
     pub qwen: Option<Arc<QwenResident>>,
+    /// Every Qwen3 base the model scan registered, as concrete handles: `--serve-adapters` binds each adapter of its
+    /// directory to the base its card names, among these and the others below.
+    pub qwen_scanned: Vec<Arc<QwenResident>>,
     /// The released Qwen3.8 GGUFs the model scan registered, as concrete
     /// handles for the same reason: an adapter flag (or a watcher) offers its
     /// adapters on the allocation the executor holds. When `--checkpoint`
@@ -405,6 +408,7 @@ pub fn build_executor(machine: &Machine, reserve: Reserve, store: &catalog::Serv
     // The released Qwen3.8 `--checkpoint` named, by served id.
     let mut qwen35_discovered_pick: Option<String> = None;
     let mut ricursive_discovered = Vec::new();
+    let mut qwen_scanned = Vec::new();
     if let Some(dir) = store.models_dir() {
         let existing: std::collections::BTreeSet<String> = models.iter().map(|m| m.manifest().model).collect();
         let settings = crate::model_dir::ScanSettings { qwen: qwen_cfg, qwen35: qwen35.clone(), ricursive, gpus: gpus.clone(), reserved, encoder_batch: max_batch, worker_hosting: worker_hosting.clone() };
@@ -437,6 +441,8 @@ pub fn build_executor(machine: &Machine, reserve: Reserve, store: &catalog::Serv
             }
         }
         ricursive_discovered = discovered.ricursive.clone();
+        // Only the ones registered: a base shadowed by an env-gated resident of its id is not served.
+        qwen_scanned = discovered.qwen.iter().filter(|q| !existing.contains(&q.manifest().model)).cloned().collect();
         for r in discovered.residents {
             let id = r.manifest().model;
             if existing.contains(&id) {
@@ -523,7 +529,7 @@ pub fn build_executor(machine: &Machine, reserve: Reserve, store: &catalog::Serv
         let largest = gpus.iter().map(|&(_, total)| total.saturating_sub(reserved)).max();
         exec.register(trainjob::resident(trainjob::TrainConfig { models_dir: store.models_dir().map(std::path::Path::to_path_buf), store: train.artifact_store, work_root: trainjob::job::default_work_root(), largest_card_bytes: largest, devices: gpus.len().max(1), quotas: train.quotas, free_space: std::sync::Arc::new(trainjob::DiskFree) }));
     }
-    Serving { executor: exec, qwen, qwen35: qwen35_discovered, ricursive: ricursive_discovered }
+    Serving { executor: exec, qwen, qwen_scanned, qwen35: qwen35_discovered, ricursive: ricursive_discovered }
 }
 
 /// Whether any of `models` is a Wan resident, under whatever id it registered:

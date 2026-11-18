@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::adapter_directory::BankDirectory;
+use crate::adapter_directory::{BankDirectory, BankHost};
 use llmserve::adapter_registry::{AdapterHost, LiveAdapters};
 use llmserve::adapter_release::{load_adapter, verify_adapter, LoadedAdapter, ManifestFollower, ManifestPoll};
 use catalog::resident_llm::QwenResident;
@@ -117,11 +117,7 @@ pub fn start_adapter_mode<R: AdapterHost>(mode: AdapterMode, resident: Option<&A
         AdapterMode::Latest(dir) => Ok((Some(Follow::latest(dir.to_path_buf())), None)),
         AdapterMode::Directory(dir) => {
             let resident = required("--serve-adapters")?;
-            let mut bank = BankDirectory::new(dir, resident.served_base());
-            // What the directory holds now is offered before any surface binds, so the first request after
-            // readiness finds its adapter; the watcher follows the changes from here.
-            bank.poll(&LiveAdapters::new(resident.clone(), executor.clone()));
-            Ok((Some(Follow { source: FollowSource::Directory(bank), served: None }), None))
+            Ok((Some(start_adapter_directory(dir, vec![BankHost::new(resident.clone(), executor.clone())])?), None))
         }
         AdapterMode::Pinned(path) => {
             let resident = required("--adapter")?;
@@ -148,6 +144,44 @@ pub fn start_adapter_mode<R: AdapterHost>(mode: AdapterMode, resident: Option<&A
             };
             Ok((Some(Follow { source: FollowSource::Manifest(follower), served }), line))
         }
+    }
+}
+
+/// `--serve-adapters DIR` over `hosts`, every base the server serves that adapters can ride on: each adapter in the
+/// directory is bound to the base its card names, so adapters of several bases are served at once, and one whose
+/// base is not served is refused naming that base. What the directory holds now is offered before any surface
+/// binds, so the first request after readiness finds its adapter; the watcher follows the changes from here.
+pub fn start_adapter_directory(dir: PathBuf, hosts: Vec<BankHost>) -> Result<Follow, String> {
+    if hosts.is_empty() {
+        return Err("--serve-adapters needs a served Qwen3, Qwen3.8 or Ripple to put the adapters on; serve their bases from the model directory, or name one with --checkpoint <dir-or-file>".to_string());
+    }
+    let mut bank = BankDirectory::new(dir, hosts);
+    bank.poll();
+    Ok(Follow { source: FollowSource::Directory(bank), served: None })
+}
+
+/// Every base this server serves that adapters can ride on, of each kind: what `--serve-adapters` binds the
+/// adapters of its directory to, each to its own base.
+pub struct ServedBases {
+    pub qwen: Vec<Arc<QwenResident>>,
+    pub qwen35: Vec<Arc<Qwen35GgufServed>>,
+    pub ricursive: Vec<Arc<RicursiveResident>>,
+}
+
+impl ServedBases {
+    /// The bases as directory hosts on `executor`, the one each is registered with. A resident listed twice (the
+    /// flag-selected Qwen3 is also the scan's) is one host.
+    pub fn bank_hosts(&self, executor: &Executor) -> Vec<BankHost> {
+        let mut qwen: Vec<&Arc<QwenResident>> = Vec::new();
+        for q in &self.qwen {
+            if !qwen.iter().any(|seen| Arc::ptr_eq(seen, q)) {
+                qwen.push(q);
+            }
+        }
+        let mut hosts: Vec<BankHost> = qwen.into_iter().map(|q| BankHost::new(q.clone(), executor.clone())).collect();
+        hosts.extend(self.qwen35.iter().map(|g| BankHost::new(g.clone(), executor.clone())));
+        hosts.extend(self.ricursive.iter().map(|r| BankHost::new(r.clone(), executor.clone())));
+        hosts
     }
 }
 
@@ -178,6 +212,15 @@ impl Host {
             ([one], []) => Host::Qwen35(one.clone()),
             ([], [one]) => Host::Ripple(one.clone()),
             _ => Host::Ambiguous(ids),
+        }
+    }
+
+    /// [`start_adapter_mode`] on this host, except that `--serve-adapters` binds the adapters of its directory to
+    /// every base in `bases`, each to the one its card names ([`start_adapter_directory`]).
+    pub fn start_with(&self, mode: AdapterMode, bases: &ServedBases, executor: &Executor) -> Result<(Option<Follow>, Option<String>), String> {
+        match mode {
+            AdapterMode::Directory(dir) => Ok((Some(start_adapter_directory(dir, bases.bank_hosts(executor))?), None)),
+            mode => self.start(mode, executor),
         }
     }
 
@@ -289,17 +332,20 @@ pub fn spawn_adapter_watcher<R: AdapterHost>(follow: Option<Follow>, resident: O
     // observable difference is that promoted adapters never take effect. A
     // caller measuring before/after therefore sees two identical arms and
     // concludes that training achieved nothing -- the process reports success
-    // the whole way through.
-    let Some(resident) = resident else {
-        if let Some(warning) = ignored_watch_warning(Some(&follow.describe()), false) {
-            eprintln!("{warning}");
+    // the whole way through. A bank directory carries its own hosts.
+    let live = match (&follow.source, resident) {
+        (FollowSource::Directory(_), _) => None,
+        (_, Some(resident)) => Some(LiveAdapters::new(resident, executor.clone())),
+        (_, None) => {
+            if let Some(warning) = ignored_watch_warning(Some(&follow.describe()), false) {
+                eprintln!("{warning}");
+            }
+            return None;
         }
-        return None;
     };
     let stop = Arc::new(AtomicBool::new(false));
     let swaps = Arc::new(AtomicU64::new(0));
     let rejections = Arc::new(AtomicU64::new(0));
-    let live = LiveAdapters::new(resident, executor.clone());
     let counters = WatchCounters { stop: stop.clone(), swaps: swaps.clone(), rejections: rejections.clone() };
     match &follow.source {
         FollowSource::Latest(dir) => eprintln!("brain serve: watching {} for promoted LoRA adapters", dir.display()),
@@ -308,7 +354,7 @@ pub fn spawn_adapter_watcher<R: AdapterHost>(follow: Option<Follow>, resident: O
     }
     let join = std::thread::Builder::new()
         .name("brain-adapter-watch".to_string())
-        .spawn(move || watch_loop(&mut follow, &live, &counters))
+        .spawn(move || watch_loop(&mut follow, live.as_ref(), &counters))
         .ok()?;
     Some(AdapterWatcher { stop, swaps, rejections, join: Some(join) })
 }
@@ -394,17 +440,19 @@ fn next_adapter(source: &mut FollowSource, memory: &mut DirMemory, rejections: &
 /// The watcher's body: offer each new adapter `follow` names, then withdraw
 /// the one it replaces. In that order, so a client that selects the new id
 /// never finds neither.
-fn watch_loop(follow: &mut Follow, live: &LiveAdapters, counters: &WatchCounters) {
+/// `live` is the one resident's adapters every source but a bank directory offers on (a directory carries its own).
+fn watch_loop(follow: &mut Follow, live: Option<&LiveAdapters>, counters: &WatchCounters) {
     let WatchCounters { stop, swaps, rejections } = counters;
     let mut memory = DirMemory::default();
     while !stop.load(Ordering::SeqCst) {
         if let FollowSource::Directory(bank) = &mut follow.source {
-            let pass = bank.poll(live);
+            let pass = bank.poll();
             swaps.fetch_add(pass.offered as u64, Ordering::SeqCst);
             rejections.fetch_add(pass.refused as u64, Ordering::SeqCst);
             std::thread::sleep(POLL);
             continue;
         }
+        let Some(live) = live else { return };
         if let Some(loaded) = next_adapter(&mut follow.source, &mut memory, rejections) {
             let release = loaded.release.clone();
             match live.serve(loaded) {

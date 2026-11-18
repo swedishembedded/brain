@@ -286,9 +286,14 @@ per layer) are part of the model's footprint, so placement budgets them.
   the same id, and a file that disappears withdraws its adapter once the
   requests already accepted for it are done. Nothing restarts and no other
   adapter or the base is disturbed; the adapters run in the same batches. Every
-  file is verified against the served base as `--adapter` does; one that
-  fails is refused (said once) and the release it would have replaced keeps
-  serving, and a card id already served from another file is refused. Symbolic
+  file is bound to the served base its card names (the base id, else the base
+  digest it records) and verified against that base as `--adapter` does, so a
+  server serving several bases (a Qwen3 and a Qwen3.8 from the model directory,
+  say) serves the adapters of each at once on its own base. A file whose base
+  is not served is refused with `adapter <file> rides on base "<id>", which this
+  server does not serve (it serves: ...)`; one that fails verification is
+  refused (said once) and the release it would have replaced keeps serving,
+  and a card id already served from another file is refused. Symbolic
   links, hidden files and files not named `*.safetensors` are ignored, the
   search goes at most four directories down and holds at most 1024 files, and
   a file larger than any adapter is refused. Publish a release by writing it

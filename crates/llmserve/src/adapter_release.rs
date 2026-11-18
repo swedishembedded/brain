@@ -242,20 +242,27 @@ fn read_once(path: &Path, expect: Option<&ServedFamily>) -> Result<(LoadedAdapte
         std::io::ErrorKind::InvalidData if e.to_string().contains("has no ModelCard") => format!("adapter {shown}: no model card, so nothing says which base it belongs to"),
         _ => e.to_string(),
     })?;
-    let descriptor = card.adapter.as_ref().ok_or_else(|| format!("adapter {shown}: its card ({}) describes a model, not an adapter", card.id))?;
-    // The engines' banks implement this kind, and a base takes its own
-    // family; anything else would only fail later, at the first request. An
-    // unbound read leaves the family to the registry it is offered to, which
-    // refuses another family's adapter by name.
-    match expect {
-        Some(family) if card.family != family.tag || descriptor.kind != "lora" => {
-            return Err(format!("adapter {shown}: a {} {:?} adapter; the served base is a {} that takes LoRA adapters of family {}", card.family, descriptor.kind, family.name, family.tag));
-        }
-        None if descriptor.kind != "lora" => return Err(format!("adapter {shown}: a {} {:?} adapter; a served base takes LoRA adapters", card.family, descriptor.kind)),
-        _ => {}
+    if card.adapter.is_none() {
+        return Err(format!("adapter {shown}: its card ({}) describes a model, not an adapter", card.id));
     }
+    check_family(path, &card, expect)?;
     let release = AdapterRelease { id: card.id.clone(), path: path.to_path_buf(), digest };
     Ok((LoadedAdapter { family: card.family.clone(), release, adapter, version: 0 }, card))
+}
+
+/// Refuse an adapter the engines' banks cannot hold: not a LoRA, or (when `expect` is given) of another family than
+/// the base's. Anything else would only fail later, at the first request. An unbound read leaves the family to the
+/// registry it is offered to, which refuses another family's adapter by name.
+fn check_family(path: &Path, card: &ModelCard, expect: Option<&ServedFamily>) -> Result<(), String> {
+    let shown = path.display();
+    let kind = card.adapter.as_ref().map_or("", |d| d.kind.as_str());
+    match expect {
+        Some(family) if card.family != family.tag || kind != "lora" => {
+            Err(format!("adapter {shown}: a {} {kind:?} adapter; the served base is a {} that takes LoRA adapters of family {}", card.family, family.name, family.tag))
+        }
+        None if kind != "lora" => Err(format!("adapter {shown}: a {} {kind:?} adapter; a served base takes LoRA adapters", card.family)),
+        _ => Ok(()),
+    }
 }
 
 /// Read the adapter at `path` as a release, WITHOUT binding it to a base:
@@ -271,8 +278,83 @@ pub fn load_adapter(path: &Path) -> Result<LoadedAdapter, String> {
 /// Every refusal names the file and what was wrong with it; a base mismatch
 /// names both digests.
 pub fn verify_adapter(path: &Path, base: &ServedBase) -> Result<LoadedAdapter, String> {
-    let shown = path.display();
     let (loaded, card) = read_once(path, Some(&base.family))?;
+    bind(path, loaded, &card, base)
+}
+
+/// Why an adapter could not be bound to any base a server serves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BindError {
+    /// The base the adapter's card names (by id, else by the digest it was trained against) is not among the served
+    /// ones: the operator serves that base, or the adapter is not offered.
+    BaseNotServed {
+        /// The adapter file, for the operator's log.
+        adapter: PathBuf,
+        /// The base the card names: its id, else its digest.
+        base: String,
+        /// The ids of the bases that are served.
+        served: Vec<String>,
+    },
+    /// The file is not an adapter, names no base, or does not verify against the base it names.
+    Refused(String),
+}
+
+impl std::fmt::Display for BindError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BindError::BaseNotServed { adapter, base, served } => {
+                let served = if served.is_empty() { "none".to_string() } else { served.join(", ") };
+                write!(f, "adapter {} rides on base {base}, which this server does not serve (it serves: {served}); serve that base to offer it", adapter.display())
+            }
+            BindError::Refused(why) => f.write_str(why),
+        }
+    }
+}
+
+/// Read `path` once and bind it to the base among `bases` its card names: the base served under the id the card
+/// gives (or quantising it), else the one whose digest is the digest the card records it was trained against. The
+/// binding is then verified exactly as [`verify_adapter`] verifies it (the recorded digest must be the base's), so a
+/// server that serves several bases offers each adapter on its own base and never on another. Returns the index of
+/// the base in `bases`.
+pub fn verify_adapter_among(path: &Path, bases: &[ServedBase]) -> Result<(usize, LoadedAdapter), BindError> {
+    let shown = path.display();
+    let (loaded, card) = read_once(path, None).map_err(BindError::Refused)?;
+    let descriptor = card.adapter.as_ref().expect("read_once refused a card without an adapter descriptor");
+    let trained_on = card.training.as_ref().and_then(|t| t.base_digest.as_deref());
+    let named = descriptor.base.as_deref();
+    let by_id: Vec<usize> = named.map_or_else(Vec::new, |id| (0..bases.len()).filter(|&i| bases[i].id.as_deref() == Some(id) || bases[i].quantizes(id)).collect());
+    let chosen = match (by_id.as_slice(), trained_on) {
+        ([one], _) => Some(*one),
+        // Several served quantisations of the named source: the recorded digest, or the family, decides.
+        ([_, _, ..], _) => {
+            let of_family: Vec<usize> = by_id.iter().copied().filter(|&i| bases[i].family.tag == card.family).collect();
+            match of_family.as_slice() {
+                [one] => Some(*one),
+                _ => return Err(BindError::Refused(format!("adapter {shown}: its base {:?} is served several times ({}); its card must name the one it rides on", named.unwrap_or_default(), by_id.iter().filter_map(|&i| bases[i].id.clone()).collect::<Vec<_>>().join(", ")))),
+            }
+        }
+        ([], Some(digest)) => (0..bases.len()).find(|&i| bases[i].family.tag == card.family && bases[i].digest().is_ok_and(|d| d == digest)),
+        ([], None) => None,
+    };
+    let Some(index) = chosen else {
+        let base = match (named, trained_on) {
+            (Some(id), _) => format!("{id:?}"),
+            (None, Some(digest)) => digest.to_string(),
+            (None, None) => return Err(BindError::Refused(format!("adapter {shown}: its card names no base (neither a base digest nor a base id)"))),
+        };
+        let served = bases.iter().map(|b| b.id.clone().unwrap_or_else(|| b.path.display().to_string())).collect();
+        return Err(BindError::BaseNotServed { adapter: path.to_path_buf(), base, served });
+    };
+    let base = &bases[index];
+    check_family(path, &card, Some(&base.family)).map_err(BindError::Refused)?;
+    bind(path, loaded, &card, base).map(|loaded| (index, loaded)).map_err(BindError::Refused)
+}
+
+/// Bind `loaded`, read from `path` with `card`, to `base`: the digest the card records it was trained against must be
+/// the base's (a quantisation is bound by the id of the source it quantises), else the base id it names must be the
+/// base's.
+fn bind(path: &Path, loaded: LoadedAdapter, card: &ModelCard, base: &ServedBase) -> Result<LoadedAdapter, String> {
+    let shown = path.display();
     let adapter = card.adapter.as_ref().expect("read_once refused a card without an adapter descriptor");
     let recorded_base_digest = card.training.as_ref().and_then(|t| t.base_digest.as_deref());
     match (recorded_base_digest, adapter.base.as_deref()) {

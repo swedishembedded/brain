@@ -265,9 +265,13 @@ SERVING OPTIONS
                          no restart: a file that appears is offered, a file
                          renamed over (new bytes) replaces its adapter under
                          the same id with the next policy version, a file that
-                         disappears withdraws its adapter. Every adapter
-                         must verify against the served base like --adapter;
-                         one that does not is refused and the release it
+                         disappears withdraws its adapter. Each adapter is
+                         bound to the served base its card names (its base
+                         id, else the base digest it records) and verified
+                         against it like --adapter, so adapters of several
+                         served bases are served at once; one whose base is
+                         not served is refused naming that base, and one that
+                         does not verify is refused while the release it
                          would replace keeps serving. Symlinks and hidden
                          files are ignored; publish by writing aside and
                          renaming into place. OFF unless given. GET /v1/models
@@ -1590,7 +1594,7 @@ fn run_apis(a: RunApis) {
             reserve.activation_fallback >> 30
         );
     }
-    let serving::Serving { executor, qwen, qwen35, ricursive } = build_serving_executor(reserve, &store, a.scheduler, a.knobs);
+    let serving::Serving { executor, qwen, qwen_scanned, qwen35, ricursive } = build_serving_executor(reserve, &store, a.scheduler, a.knobs);
     refuse_unread_pins(&store);
     let manifests = executor.manifests();
     let served: Vec<&str> = manifests.iter().map(|m| m.model.as_str()).collect();
@@ -1627,8 +1631,9 @@ fn run_apis(a: RunApis) {
     // watcher cannot outlive the surfaces it was swapping models under. `qwen`
     // is the CONCRETE resident handle -- `adapter_view` is inherent, so the
     // erased one the executor holds could not do this.
+    let bases = crate::continuous_train::ServedBases { qwen: qwen.iter().cloned().chain(qwen_scanned).collect(), qwen35: qwen35.clone(), ricursive: ricursive.clone() };
     let host = crate::continuous_train::Host::pick(qwen, &qwen35, &ricursive);
-    let follow = match host.start(a.adapter_mode, &executor) {
+    let follow = match host.start_with(a.adapter_mode, &bases, &executor) {
         Ok((follow, serving_line)) => {
             if let Some(line) = serving_line {
                 eprintln!("{line}");
