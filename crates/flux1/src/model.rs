@@ -10,11 +10,12 @@
 //! Shared verbatim (no second copy): `dit::rope` (the multi-axis interleaved
 //! RoPE table build — 3 axes at theta 10000 here instead of 4 at 2000),
 //! `model::block::flash_bidir_step` (joint bidirectional attention),
-//! `model::int8` (group-wise symmetric weight packing + DP4A GEMM),
+//! `model::int8` (group-wise symmetric weight packing), `model::ops::Ops`
+//! (the int8 products, whose kernel the selector picks per device),
 //! `model::hostmath` (the conditioning mat-vecs), and the kernels
 //! `layernorm(_rows)`, `film_row`, `gate_row`, `bias_add`, `gelu`,
 //! `rmsnorm_rows`, `rope_interleave_table`, `pack_qkv`, `matmul_reg3`,
-//! `matmul_gemv`, `matmul_i8_dyn`, `matmul_i8_gemv`. **No kernel is added.**
+//! `matmul_gemv`. **No kernel is added.**
 //!
 //! Different, and why the code cannot simply be flux2's:
 //!
@@ -64,7 +65,9 @@ use gpu_core::{DeviceBuffer, Gpu, Step};
 use crate::config::Flux1Config;
 use crate::import::Tensors;
 
-pub const KERNELS: &[(&str, &str)] = &[
+/// The kernels this crate dispatches by index (the `K_*` constants name their positions). [`KERNELS`] is this table
+/// followed by the shared façade's set.
+const INDEXED_KERNELS: &[(&str, &str)] = &[
     ("layernorm", kernels::LAYERNORM),
     ("layernorm_rows", kernels::LAYERNORM_ROWS),
     ("matmul", kernels::MATMUL),
@@ -83,14 +86,20 @@ pub const KERNELS: &[(&str, &str)] = &[
     ("film_row", kernels::FILM_ROW),
     ("gate_row", kernels::GATE_ROW),
     ("bias_add", kernels::BIAS_ADD),
-    // int8 DP4A path (GPU only): group-wise activation quant + DP4A GEMM.
-    ("max_abs_row", kernels::MAX_ABS_ROW),
-    ("quant_pack", kernels::QUANT_PACK),
-    ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
-    ("matmul_i8_gemv", kernels::MATMUL_I8_GEMV),
     ("flash_attn_bidir_reg", kernels::FLASH_ATTN_BIDIR_REG),
     ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2),
 ];
+
+/// Every kernel a `Gpu` running this model registers: [`INDEXED_KERNELS`], then what [`model::ops::Ops`] resolves
+/// by name. The int8 tier's linears run through it, so the selector, not this crate, decides which packed-int8
+/// kernel (or the float-read tile decode of a device without the packed dot) serves each product. Each name once,
+/// [`INDEXED_KERNELS`]' spelling first.
+pub static KERNELS: std::sync::LazyLock<Vec<(&'static str, &'static str)>> = std::sync::LazyLock::new(|| {
+    let mut list = INDEXED_KERNELS.to_vec();
+    model::ops::extend_kernel_list(&mut list, model::ops::kernel_list());
+    model::ops::extend_kernel_list(&mut list, model::ops::frozen_base_kernels());
+    list
+});
 const K_LN: usize = 0;
 const K_LN_ROWS: usize = 1;
 const K_MATMUL: usize = 2;
@@ -109,15 +118,11 @@ const K_GELU: usize = 14;
 const K_FILM: usize = 15;
 const K_GATE: usize = 16;
 const K_BIAS: usize = 17;
-const K_MAXABS: usize = 18;
-const K_QUANT: usize = 19;
-const K_MATMUL_I8: usize = 20;
-const K_MATMUL_I8_GEMV: usize = 21;
 /// The register-tiled flash-attention pair, appended so every index above is
 /// unchanged. `model::block::flash_bidir_variant` picks between all four from
 /// the device's queried caps.
-const K_FLASH_REG: usize = 22;
-const K_FLASH_REG2: usize = 23;
+const K_FLASH_REG: usize = 18;
+const K_FLASH_REG2: usize = 19;
 
 fn f(x: f32) -> u32 {
     x.to_bits()
@@ -223,9 +228,7 @@ struct Scratch {
     ln_beta: DeviceBuffer,
 }
 
-// Int8 activation scratch — `model::dispatch::I8Scratch`, keyed by the two
-// in-block contraction widths (hidden, mlp), shared with flux2.
-use model::dispatch::I8Scratch;
+use model::ops::{Act, Ops, Weight};
 
 /// A per-stage tap of the residual slab, for the parity ladder.
 pub struct Trace {
@@ -243,7 +246,9 @@ pub struct Flux1Model {
     n_max: u32,
     fast: bool,
     precision: Precision,
-    i8scr: Option<I8Scratch>,
+    /// The shared façade the int8 linears run through, on this model's device; `None` at fp32. Its per-width
+    /// activation scratch is reused by every block.
+    ops: Option<Ops>,
     dbl: Vec<DoubleW>,
     sgl: Vec<SingleW>,
     img_in: Lin,
@@ -317,13 +322,6 @@ impl Flux1Model {
         let hd = cfg.head_dim();
         let nh = cfg.n_heads as u32;
         let fast = gpu.caps().workgroup_reductions;
-        if precision == Precision::Int8 {
-            assert!(
-                fast,
-                "flux1 int8 needs a GPU backend (DP4A + workgroup barriers); use fp32 on the {} backend",
-                gpu.kind()
-            );
-        }
         // Every sliced storage binding must respect the 256-byte
         // min_storage_buffer_offset_alignment = 64 floats. Every offset this
         // model takes is a multiple of one of these widths.
@@ -503,7 +501,7 @@ impl Flux1Model {
             ln_gamma: upv(&vec![1.0f32; d]),
             ln_beta: upv(&vec![0.0f32; d]),
         };
-        let i8scr = (precision == Precision::Int8).then(|| I8Scratch::new(&gpu, n.max(64), n, &[cfg.hidden as u32, cfg.mlp_hidden() as u32]));
+        let ops = (precision == Precision::Int8).then(|| Ops::new(gpu.share()).unwrap_or_else(|e| panic!("flux1: the int8 model's Gpu lacks the shared kernel set: {e}")));
 
         let host = |name: &str| -> (Vec<f32>, Vec<f32>) {
             (get(&format!("{name}.weight")).1.clone(), get(&format!("{name}.bias")).1.clone())
@@ -513,7 +511,7 @@ impl Flux1Model {
             n_max,
             fast,
             precision,
-            i8scr,
+            ops,
             dbl,
             sgl,
             img_in: lin("img_in", d, cfg.in_channels),
@@ -600,48 +598,40 @@ impl Flux1Model {
         model::dispatch::mm_rows_off(&self.gpu, self.gemm_tier(), x, w, o, xr0, ooff, m, k, n)
     }
 
-    /// Int8 only (a no-op under fp32): quantize rows `r0..r1` of `x` `[.., k]`
-    /// into the K-matched packed scratch with fresh group scales. ONE quant
-    /// feeds every linear reading that activation.
-    fn quant_rows(&self, s: &mut Vec<Step>, x: &DeviceBuffer, r0: u32, r1: u32, k: u32) {
-        let Some(i8s) = self.i8scr.as_ref() else { return };
-        i8s.quant_rows(&self.gpu, [K_MAXABS, K_QUANT], s, x, r0, r1, k);
+    /// Int8 only (`None` under fp32): rows `r0..r1` of `x` `[.., k]` quantized once into the façade's per-width
+    /// scratch. ONE quantization feeds every int8 linear reading those rows.
+    fn quant_rows(&self, s: &mut Vec<Step>, x: &DeviceBuffer, r0: u32, r1: u32, k: u32) -> Option<Act> {
+        self.ops.as_ref().map(|ops| ops.act_shared_scratch(s, x, r0, r1 - r0, k))
     }
 
-    /// Int8 DP4A matmul over pre-quantized rows (tiled, or the GEMV at `m ≤ 32`)
-    /// — the shared `model::dispatch::mm8_rows_off`. Same selection rule as the
-    /// fp32 tier: the DP4A family has identical dispatch geometry and is
-    /// GPU-only, hence always the `Fast` arm.
+    /// One linear over rows `r0..r1` at the model's tier, bias included. `act` is [`Self::quant_rows`]' quantization
+    /// of exactly those rows of `x`, which an int8 linear reads.
     #[allow(clippy::too_many_arguments)]
-    fn mm8(&self, wq: &DeviceBuffer, sw: &DeviceBuffer, o: &DeviceBuffer, xr0: u32, ooff: u64, m: u32, k: u32, n: u32) -> Step {
-        let i8s = self.i8scr.as_ref().expect("int8 scratch");
-        let tier = model::block::GemmVariants::Fast { gemv: Some(K_MATMUL_I8_GEMV), tiled: K_MATMUL_I8 };
-        model::dispatch::mm8_rows_off(&self.gpu, tier, i8s, wq, sw, o, xr0, ooff, m, k, n)
-    }
-
-    /// One linear over rows `r0..r1` at the model's tier, bias included.
-    #[allow(clippy::too_many_arguments)]
-    fn lin_rows(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: &Lin, o: &DeviceBuffer, r0: u32, r1: u32, k: u32, n: u32) {
-        self.lin_rows_at(s, x, w, o, r0, r0 as u64 * n as u64, r1 - r0, k, n);
+    fn lin_rows(&self, s: &mut Vec<Step>, x: &DeviceBuffer, act: Option<&Act>, w: &Lin, o: &DeviceBuffer, r0: u32, r1: u32, k: u32, n: u32) {
+        self.lin_rows_at(s, x, act, w, o, r0, r0 as u64 * n as u64, r1 - r0, k, n);
     }
 
     /// [`Self::lin_rows`] with an independent input row base and an explicit
     /// FLOAT output offset — the modulation sites are addressed by offset, not
     /// by row, because their widths (6D / 3D / 2D) differ per site.
     #[allow(clippy::too_many_arguments)]
-    fn lin_rows_at(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: &Lin, o: &DeviceBuffer, xr0: u32, ooff: u64, m: u32, k: u32, n: u32) {
-        self.matw_rows_at(s, x, &w.w, o, xr0, ooff, m, k, n);
+    fn lin_rows_at(&self, s: &mut Vec<Step>, x: &DeviceBuffer, act: Option<&Act>, w: &Lin, o: &DeviceBuffer, xr0: u32, ooff: u64, m: u32, k: u32, n: u32) {
+        self.matw_rows_at(s, x, act, &w.w, o, xr0, ooff, m, k, n);
         self.bias_rows(s, o, &w.b, ooff, m, n);
     }
 
     /// The matmul half of a linear (no bias) — the single block's `wo_b`, whose
-    /// bias is added once on the `wo_a` half.
+    /// bias is added once on the `wo_a` half. An int8 weight is the product the
+    /// shared façade selects for the device ([`Ops::matmul`]), over `act`.
     #[allow(clippy::too_many_arguments)]
-    fn matw_rows_at(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: &LinW, o: &DeviceBuffer, xr0: u32, ooff: u64, m: u32, k: u32, n: u32) {
-        s.push(match w {
-            LinW::F32(wb) => self.mm_rows_at(x, wb, o, xr0, ooff, m, k, n),
-            LinW::I8(wq, sw) => self.mm8(wq, sw, o, xr0, ooff, m, k, n),
-        });
+    fn matw_rows_at(&self, s: &mut Vec<Step>, x: &DeviceBuffer, act: Option<&Act>, w: &LinW, o: &DeviceBuffer, xr0: u32, ooff: u64, m: u32, k: u32, n: u32) {
+        match w {
+            LinW::F32(wb) => s.push(self.mm_rows_at(x, wb, o, xr0, ooff, m, k, n)),
+            LinW::I8(wq, sw) => {
+                let (ops, act) = (self.ops.as_ref().expect("flux1: an int8 linear on an fp32 model"), act.expect("flux1: an int8 linear without its quantized activation"));
+                ops.matmul(s, &Weight::from_packed_int8(wq.clone(), sw.clone(), n as usize, k as usize), act, o, ooff);
+            }
+        }
     }
 
     /// `o[ooff .. ooff + m*n] += bias` (the bias buffer is exactly `[n]`).
@@ -867,19 +857,21 @@ impl Flux1Model {
         let mut s: Vec<Step> = Vec::new();
         // Every modulation linear reads the SAME `silu(vec)` row, so one
         // quantization feeds all 77 of them.
-        self.quant_rows(&mut s, &scr.vecb, 0, 1, d);
+        let a = self.quant_rows(&mut s, &scr.vecb, 0, 1, d);
+        let a = a.as_ref();
         for b in &self.dbl {
-            self.lin_rows_at(&mut s, &scr.vecb, &b.mod_img, &scr.modout, 0, b.off_img, 1, d, 6 * d);
-            self.lin_rows_at(&mut s, &scr.vecb, &b.mod_txt, &scr.modout, 0, b.off_txt, 1, d, 6 * d);
+            self.lin_rows_at(&mut s, &scr.vecb, a, &b.mod_img, &scr.modout, 0, b.off_img, 1, d, 6 * d);
+            self.lin_rows_at(&mut s, &scr.vecb, a, &b.mod_txt, &scr.modout, 0, b.off_txt, 1, d, 6 * d);
         }
         for b in &self.sgl {
-            self.lin_rows_at(&mut s, &scr.vecb, &b.modl, &scr.modout, 0, b.off, 1, d, 3 * d);
+            self.lin_rows_at(&mut s, &scr.vecb, a, &b.modl, &scr.modout, 0, b.off, 1, d, 3 * d);
         }
-        self.lin_rows_at(&mut s, &scr.vecb, &self.final_mod, &scr.modout, 0, self.final_off, 1, d, 2 * d);
+        self.lin_rows_at(&mut s, &scr.vecb, a, &self.final_mod, &scr.modout, 0, self.final_off, 1, d, 2 * d);
 
         // ---- embed both streams into the joint slab, text rows first ---------
-        self.lin_rows_at(&mut s, &scr.ctx_in, &self.txt_in, &scr.x0, 0, 0, nt, ctxd, d);
-        self.lin_rows_at(&mut s, &scr.tok_in, &self.img_in, &scr.x0, 0, nt as u64 * d as u64, ni, cin, d);
+        // `txt_in` and `img_in` always stay fp32 (`new_with`'s boundary exemptions): they read no quantized rows.
+        self.lin_rows_at(&mut s, &scr.ctx_in, None, &self.txt_in, &scr.x0, 0, 0, nt, ctxd, d);
+        self.lin_rows_at(&mut s, &scr.tok_in, None, &self.img_in, &scr.x0, 0, nt as u64 * d as u64, ni, cin, d);
 
         let (mut xa, mut xb) = (&scr.x0, &scr.x1);
         let flush = |s: &mut Vec<Step>| {
@@ -894,21 +886,17 @@ impl Flux1Model {
             ] {
                 s.push(self.ln_rows(xa, &scr.n1, r0, r1));
                 s.push(self.film_rows(&scr.n1, moff, &scr.n2, r0, r1));
-                if w.wq.is_i8() {
-                    self.quant_rows(&mut s, &scr.n2, r0, r1, d);
-                }
-                self.lin_rows(&mut s, &scr.n2, &w.wq, &scr.q, r0, r1, d, d);
-                self.lin_rows(&mut s, &scr.n2, &w.wk, &scr.k, r0, r1, d, d);
-                self.lin_rows(&mut s, &scr.n2, &w.wv, &scr.v, r0, r1, d, d);
+                let a = if w.wq.is_i8() { self.quant_rows(&mut s, &scr.n2, r0, r1, d) } else { None };
+                self.lin_rows(&mut s, &scr.n2, a.as_ref(), &w.wq, &scr.q, r0, r1, d, d);
+                self.lin_rows(&mut s, &scr.n2, a.as_ref(), &w.wk, &scr.k, r0, r1, d, d);
+                self.lin_rows(&mut s, &scr.n2, a.as_ref(), &w.wv, &scr.v, r0, r1, d, d);
                 s.push(self.qknorm_rows(&scr.q, &w.nq, &scr.qn, r0, r1));
                 s.push(self.qknorm_rows(&scr.k, &w.nk, &scr.kn, r0, r1));
             }
             self.push_attn_core(&mut s, n);
-            if b.txt.wo.is_i8() || b.img.wo.is_i8() {
-                self.quant_rows(&mut s, &scr.ctx, 0, n, d);
-            }
             for (w, moff, r0, r1) in [(&b.txt, b.off_txt, 0, nt), (&b.img, b.off_img, nt, n)] {
-                self.lin_rows(&mut s, &scr.ctx, &w.wo, &scr.proj, r0, r1, d, d);
+                let a = if w.wo.is_i8() { self.quant_rows(&mut s, &scr.ctx, r0, r1, d) } else { None };
+                self.lin_rows(&mut s, &scr.ctx, a.as_ref(), &w.wo, &scr.proj, r0, r1, d, d);
                 s.push(self.gate_rows(xa, moff + 2 * d as u64, &scr.proj, xb, r0, r1));
             }
             std::mem::swap(&mut xa, &mut xb);
@@ -917,17 +905,13 @@ impl Flux1Model {
                 let m2 = moff + 3 * d as u64;
                 s.push(self.ln_rows(xa, &scr.n1, r0, r1));
                 s.push(self.film_rows(&scr.n1, m2, &scr.n2, r0, r1));
-                if w.w1.is_i8() {
-                    self.quant_rows(&mut s, &scr.n2, r0, r1, d);
-                }
-                self.lin_rows(&mut s, &scr.n2, &w.w1, &scr.h1, r0, r1, d, mlp);
+                let a = if w.w1.is_i8() { self.quant_rows(&mut s, &scr.n2, r0, r1, d) } else { None };
+                self.lin_rows(&mut s, &scr.n2, a.as_ref(), &w.w1, &scr.h1, r0, r1, d, mlp);
             }
             s.push(self.gpu.step(K_GELU, &[&scr.h1, &scr.hs], &[n * mlp], n * mlp));
-            if b.txt.w2.is_i8() || b.img.w2.is_i8() {
-                self.quant_rows(&mut s, &scr.hs, 0, n, mlp);
-            }
             for (w, moff, r0, r1) in [(&b.txt, b.off_txt, 0, nt), (&b.img, b.off_img, nt, n)] {
-                self.lin_rows(&mut s, &scr.hs, &w.w2, &scr.mlpo, r0, r1, mlp, d);
+                let a = if w.w2.is_i8() { self.quant_rows(&mut s, &scr.hs, r0, r1, mlp) } else { None };
+                self.lin_rows(&mut s, &scr.hs, a.as_ref(), &w.w2, &scr.mlpo, r0, r1, mlp, d);
                 s.push(self.gate_rows(xa, moff + 5 * d as u64, &scr.mlpo, xb, r0, r1));
             }
             std::mem::swap(&mut xa, &mut xb);
@@ -945,27 +929,21 @@ impl Flux1Model {
             // stream-agnostic, so the whole slab goes through in one dispatch.
             s.push(self.ln_rows(xa, &scr.n1, 0, n));
             s.push(self.film_rows(&scr.n1, w.off, &scr.n2, 0, n));
-            if w.wq.is_i8() || w.wm.is_i8() {
-                self.quant_rows(&mut s, &scr.n2, 0, n, d);
-            }
-            self.lin_rows(&mut s, &scr.n2, &w.wq, &scr.q, 0, n, d, d);
-            self.lin_rows(&mut s, &scr.n2, &w.wk, &scr.k, 0, n, d, d);
-            self.lin_rows(&mut s, &scr.n2, &w.wv, &scr.v, 0, n, d, d);
-            self.lin_rows(&mut s, &scr.n2, &w.wm, &scr.h1, 0, n, d, mlp);
+            let a = if w.wq.is_i8() || w.wm.is_i8() { self.quant_rows(&mut s, &scr.n2, 0, n, d) } else { None };
+            self.lin_rows(&mut s, &scr.n2, a.as_ref(), &w.wq, &scr.q, 0, n, d, d);
+            self.lin_rows(&mut s, &scr.n2, a.as_ref(), &w.wk, &scr.k, 0, n, d, d);
+            self.lin_rows(&mut s, &scr.n2, a.as_ref(), &w.wv, &scr.v, 0, n, d, d);
+            self.lin_rows(&mut s, &scr.n2, a.as_ref(), &w.wm, &scr.h1, 0, n, d, mlp);
             s.push(self.qknorm_rows(&scr.q, &w.nq, &scr.qn, 0, n));
             s.push(self.qknorm_rows(&scr.k, &w.nk, &scr.kn, 0, n));
             self.push_attn_core(&mut s, n);
             s.push(self.gpu.step(K_GELU, &[&scr.h1, &scr.hs], &[n * mlp], n * mlp));
             // linear2 over cat(attn, gelu(mlp)): two column-split matmuls whose
             // gated adds sum. The [D] bias rides on the attn half only.
-            if w.wo_a.is_i8() {
-                self.quant_rows(&mut s, &scr.ctx, 0, n, d);
-            }
-            self.lin_rows(&mut s, &scr.ctx, &w.wo_a, &scr.proj, 0, n, d, d);
-            if matches!(w.wo_b, LinW::I8(..)) {
-                self.quant_rows(&mut s, &scr.hs, 0, n, mlp);
-            }
-            self.matw_rows_at(&mut s, &scr.hs, &w.wo_b, &scr.mlpo, 0, 0, n, mlp, d);
+            let a = if w.wo_a.is_i8() { self.quant_rows(&mut s, &scr.ctx, 0, n, d) } else { None };
+            self.lin_rows(&mut s, &scr.ctx, a.as_ref(), &w.wo_a, &scr.proj, 0, n, d, d);
+            let a = if w.wo_b.is_i8() { self.quant_rows(&mut s, &scr.hs, 0, n, mlp) } else { None };
+            self.matw_rows_at(&mut s, &scr.hs, a.as_ref(), &w.wo_b, &scr.mlpo, 0, 0, n, mlp, d);
             let g = w.off + 2 * d as u64;
             s.push(self.gate_rows(xa, g, &scr.proj, xb, 0, n));
             std::mem::swap(&mut xa, &mut xb);
@@ -991,10 +969,8 @@ impl Flux1Model {
         let p1 = nt + n_pred as u32;
         s.push(self.ln_rows(xa, &scr.n1, p0, p1));
         s.push(self.film_rows(&scr.n1, self.final_off, &scr.n2, p0, p1));
-        if self.final_w.is_i8() {
-            self.quant_rows(&mut s, &scr.n2, p0, p1, d);
-        }
-        self.lin_rows_at(&mut s, &scr.n2, &self.final_w, &scr.out, p0, 0, n_pred as u32, d, cin);
+        let a = if self.final_w.is_i8() { self.quant_rows(&mut s, &scr.n2, p0, p1, d) } else { None };
+        self.lin_rows_at(&mut s, &scr.n2, a.as_ref(), &self.final_w, &scr.out, p0, 0, n_pred as u32, d, cin);
 
 
         // debug aid: SMOKE_STEPS=k submits only the first k steps

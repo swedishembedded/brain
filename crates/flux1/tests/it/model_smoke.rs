@@ -40,7 +40,7 @@ fn fake_tensors(cfg: &Flux1Config) -> flux1::Tensors {
 }
 
 fn run(cfg: &Flux1Config, precision: Precision) -> Vec<f32> {
-    let gpu = gpu_core::testgpu::dev(flux1::KERNELS);
+    let gpu = gpu_core::testgpu::dev(&flux1::KERNELS);
     let nt = 64usize;
     let n_img = 4 * 4 + 2 * 2; // generated 4x4 + one 2x2 Kontext reference
     let model =
@@ -68,7 +68,7 @@ fn tiny_forward_runs_and_is_finite() {
 #[test]
 fn traced_forward_matches_and_taps_every_block() {
     let cfg = tiny();
-    let gpu = gpu_core::testgpu::dev(flux1::KERNELS);
+    let gpu = gpu_core::testgpu::dev(&flux1::KERNELS);
     let nt = 64usize;
     let n_img = 4 * 4 + 2 * 2;
     let model = Flux1Model::new(&cfg, &fake_tensors(&cfg), gpu, (nt + n_img) as u32);
@@ -86,16 +86,12 @@ fn traced_forward_matches_and_taps_every_block() {
     assert_eq!(max_abs, 0.0, "tracing perturbed the forward");
 }
 
-/// Int8 smoke: every quant + sliced-DP4A-GEMM site runs, including the 77
-/// `m = 1` modulation GEMVs, and the output loosely tracks fp32. GPU only.
+/// Int8 smoke: every quantized row range and int8 product site runs, including
+/// the 77 `m = 1` modulation products, and the output loosely tracks fp32. On
+/// any device: where there is no packed-int8 dot the selector reads the codes
+/// through the float-read tile decode.
 #[test]
 fn tiny_forward_int8_runs_and_tracks_fp32() {
-    let gpu = gpu_core::testgpu::dev(flux1::KERNELS);
-    if !gpu.caps().workgroup_reductions {
-        brain_testutil::skip_unavailable(&format!("int8 needs a GPU backend, current is {}", gpu.kind()));
-        return;
-    }
-    drop(gpu);
     let cfg = tiny();
     let a = run(&cfg, Precision::F32);
     let b = run(&cfg, Precision::Int8);
@@ -109,4 +105,10 @@ fn tiny_forward_int8_runs_and_tracks_fp32() {
     let cos = dot / (na.sqrt() * nb.sqrt());
     eprintln!("int8 vs fp32 toy cosine {cos:.6}");
     assert!(cos > 0.9, "int8 toy forward diverged: cosine {cos:.6}");
+}
+
+/// The int8 tier builds a `model::ops::Ops` on this crate's `Gpu`, which needs the whole façade set.
+#[test]
+fn the_kernel_list_registers_the_whole_ops_facade_set() {
+    model::ops::assert_kernel_list_complete(&flux1::KERNELS);
 }

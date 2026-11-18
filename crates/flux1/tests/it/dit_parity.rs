@@ -172,7 +172,7 @@ fn reduced_depth_fp32_parity() {
     };
     let cfg = Flux1Config::kontext_dev().with_depth(sd, ss);
     let Some(ts) = load(&cfg) else { return };
-    let gpu = gpu_core::testgpu::dev(flux1::KERNELS);
+    let gpu = gpu_core::testgpu::dev(&flux1::KERNELS);
     // t2i: 256 txt + 256 img; edit: 256 txt + 512 img (256 noise + 256 ref)
     let model = Flux1Model::new(&cfg, &ts, gpu, 1024);
     let mut ran = false;
@@ -194,9 +194,9 @@ fn full_depth_int8_parity() {
     }
     let cfg = Flux1Config::kontext_dev();
     let Some(ts) = load(&cfg) else { return };
-    let gpu = gpu_core::testgpu::dev(flux1::KERNELS);
+    let gpu = gpu_core::testgpu::dev(&flux1::KERNELS);
     if !gpu.caps().workgroup_reductions {
-        brain_testutil::skip_unavailable(&format!("int8 needs a GPU backend, current is {}", gpu.kind()));
+        brain_testutil::skip_unavailable(&format!("the full-depth int8 run is sized for a >=16 GiB card, current is {}", gpu.kind()));
         return;
     }
     let model = Flux1Model::new_with(&cfg, &ts, gpu, 1024, Precision::Int8);

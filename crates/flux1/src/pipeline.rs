@@ -419,7 +419,7 @@ impl Flux1 {
             let n_max = Flux1::n_max(h, w)?;
             let homes = plan_flux1(&cfg, precision, n_max as u64, 0)?;
             eprintln!("flux1: placement {}", homes.describe());
-            let gpu = homes.run("dit", || Gpu::new(KERNELS))?;
+            let gpu = homes.run("dit", || Gpu::new(&KERNELS))?;
             Flux1::build(root, variant, h, w, cfg, n_max, gpu, precision, homes)
         })
     }

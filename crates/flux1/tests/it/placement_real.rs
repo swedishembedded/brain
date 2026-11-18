@@ -105,7 +105,7 @@ fn the_int8_dit_estimate_matches_its_measured_peak() {
         raw.extend(checkpoint::safetensors::read(f.to_str().expect("UTF-8 path")).expect("DiT shard"));
     }
     let ts = flux1::import_diffusers(raw, &cfg).expect("DiT import");
-    let gpu = gpu_core::devices::with_gpu(card, || Gpu::new(flux1::KERNELS)).expect("card");
+    let gpu = gpu_core::devices::with_gpu(card, || Gpu::new(&flux1::KERNELS)).expect("card");
     let baseline = free_on(card);
     let mut rng = data::rng::Lcg::new(7);
     let lat = rng.vec(n_gen * cfg.in_channels);
