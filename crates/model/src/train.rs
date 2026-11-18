@@ -356,8 +356,8 @@ pub fn load_dataset_with_images(
     Ok((l.train, l.val, l.batch_cfg, l.vocab, l.itos))
 }
 
-/// [`load_dataset_with_images`] for a trainer that reads the advantages of rollouts ([`data::chat_rollout`]): the
-/// supervised loaders refuse such a dataset, because imitating every record would ignore the advantage.
+/// [`load_dataset_with_images`] for a trainer that reads the rewards of rollouts ([`data::chat_rollout`]): the
+/// supervised loaders refuse such a dataset, because imitating every record would ignore the reward.
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::type_complexity)]
 pub fn load_rollout_dataset(
@@ -368,13 +368,13 @@ pub fn load_rollout_dataset(
     Ok((l.train, l.val, l.batch_cfg, l.vocab, l.itos))
 }
 
-/// Refuse a dataset directory whose records carry rollout advantages: a supervised trainer would imitate them all.
+/// Refuse a dataset directory whose records are rollouts: a supervised trainer would imitate them all.
 #[cfg(not(target_arch = "wasm32"))]
 fn refuse_rollouts(dir: &Path) -> std::io::Result<()> {
-    match ["train", "val"].into_iter().find(|split| dir.join(format!("{split}.adv.bin")).exists()) {
+    match ["train", "val"].into_iter().find(|split| data::chat_rollout::holds_rollouts(dir, split)) {
         Some(split) => Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
-            format!("{}: the {split} split carries rollout advantages, and a supervised trainer would imitate every record; train it with a policy-gradient objective (ChatFineTune::policy_gradient)", dir.display()),
+            format!("{}: the {split} split carries rollouts (rewards), and a supervised trainer would imitate every record; train it with a policy-gradient objective (ChatFineTune::policy_gradient)", dir.display()),
         )),
         None => Ok(()),
     }

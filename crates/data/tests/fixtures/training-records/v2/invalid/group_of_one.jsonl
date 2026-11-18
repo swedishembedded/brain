@@ -1,0 +1,5 @@
+{"reward":1.0,"group":"cab","messages":[{"role":"user","content":"cab","train":false},{"role":"assistant","content":"bad","train":true,"token_ids":[1,0,3,151645],"behavior_logprobs":[-0.2,-0.3,-0.4,-0.5]}]}
+{"reward":1.0,"group":"fed","messages":[{"role":"user","content":"fed","train":false},{"role":"assistant","content":"deaf","train":true,"token_ids":[3,4,0,5,151645],"behavior_logprobs":[-0.2,-0.3,-0.4,-0.5,-0.6]}]}
+{"reward":0.0,"group":"fed","messages":[{"role":"user","content":"fed","train":false},{"role":"assistant","content":"fade","train":true,"token_ids":[5,0,3,4,151645],"behavior_logprobs":[-0.2,-0.3,-0.4,-0.5,-0.6]}]}
+{"reward":0.5,"group":"ace","messages":[{"role":"user","content":"ace","train":false},{"role":"assistant","content":"cab","train":true,"token_ids":[2,0,1,151645],"behavior_logprobs":[-0.2,-0.3,-0.4,-0.5]}]}
+{"reward":0.0,"group":"ace","truncated":true,"messages":[{"role":"user","content":"ace","train":false},{"role":"assistant","content":"bead","train":true,"token_ids":[1,4,0,3,151645],"behavior_logprobs":[-0.2,-0.3,-0.4,-0.5,-0.6]}]}

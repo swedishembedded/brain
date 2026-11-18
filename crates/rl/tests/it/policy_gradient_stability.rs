@@ -188,14 +188,15 @@ fn the_stability_settings_are_validated_by_name() {
 fn a_truncated_rollout_is_never_drawn_and_a_dataset_of_only_those_is_refused() {
     use super::external_policy_gradient::{opts, write_dataset};
     let mut m = lora_model(data::rng::random_seed());
-    let rows = [Row { truncated: true, ..Row::new(&[7, 8, 9, 10, 11, 12], 3, Some(5.0)) }, Row::new(&IDS, 3, Some(1.0)), Row { truncated: true, ..Row::new(&[2, 3, 4, 5, 6, 7], 3, Some(-5.0)) }];
+    // The truncated rollouts are in the finished one's group, and their rewards would move its advantage if they counted.
+    let rows = [Row { truncated: true, ..Row::rewarded(&[7, 8, 9, 10, 11, 12], 3, 5.0, "g") }, Row::rewarded(&IDS, 3, 1.0, "g"), Row::rewarded(&[3, 4, 5, 6, 7, 8], 3, -1.0, "g"), Row { truncated: true, ..Row::rewarded(&[2, 3, 4, 5, 6, 7], 3, -5.0, "g") }];
     let (mut obj, _dir) = started(&rows, no_kl(), &mut m);
-    assert_eq!((obj.stats().sequences_truncated, obj.stats().sequences_with_advantage), (2, 1));
+    assert_eq!((obj.stats().sequences_truncated, obj.stats().sequences_with_advantage), (2, 2));
     for _ in 0..5 {
         one_step(&mut obj, &m);
     }
     let steps = &obj.stats().steps;
-    assert!(steps.iter().all(|s| s.sequences == 1 && (s.mean_advantage - 1.0).abs() < 1e-6), "only the finished rollout is trained: {steps:?}");
+    assert!(steps.iter().all(|s| s.sequences == 1 && (s.mean_advantage.abs() - 1.0).abs() < 1e-6), "only the finished rollouts are trained, with the advantages their two rewards give: {steps:?}");
 
     let dir = tempfile::tempdir().unwrap();
     write_dataset(dir.path(), &[Row { truncated: true, ..Row::new(&IDS, 3, Some(1.0)) }]);

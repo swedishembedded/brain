@@ -182,7 +182,28 @@ pub fn check_dataset(model_dir: impl AsRef<Path>, path: impl AsRef<Path>, check:
     let no_think = if check.thinking { None } else { tmpl.no_think_block() };
     let render = RenderOpts { keep_reasoning: no_think.is_some() };
     let asked = Asked { tok: &tok, tmpl: &tmpl, no_think: no_think.as_deref(), render, pack: check.pack_answers, images: &*images };
-    let file = std::fs::File::open(path).map_err(|e| Error::Backend(format!("{}: {e}", path.display())))?;
+    let open = || std::fs::File::open(path).map_err(|e| Error::Backend(format!("{}: {e}", path.display())));
+    let records_of = |file: std::fs::File| std::io::BufReader::new(file).lines().enumerate().map(move |(index, line)| line.map(|l| (index, l)).map_err(|e| Error::Backend(format!("{}: line {}: {e}", path.display(), index + 1))));
+    // The contract's rules between records (a rollout's records agree, a group holds two rollouts, one tokenizer)
+    // need the whole file: a first pass reads each record's rollout, the second refuses a record that breaks one.
+    let mut between: std::collections::HashMap<usize, RecordError> = std::collections::HashMap::new();
+    if check.kind == DatasetKind::Chat {
+        let mut rollouts = Vec::new();
+        for record in records_of(open()?) {
+            let (_, line) = record?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            if !keep_going() {
+                return Err(Error::Cancelled);
+            }
+            let rollout = ChatSample::from_json_line_with(line.trim(), &*images).ok().and_then(|r| r.rollout);
+            // Only the outcome is read between records; the per-token data is not kept.
+            rollouts.push(rollout.map(|r| data::chat_rollout::Rollout { behavior_logprobs: Vec::new(), token_ids: Vec::new(), teacher: None, ..r }));
+        }
+        let refs: Vec<Option<&data::chat_rollout::Rollout>> = rollouts.iter().map(Option::as_ref).collect();
+        between.extend(data::chat_rollout::check_records(&refs));
+    }
 
     let mut report = DatasetReport {
         records: 0,
@@ -200,8 +221,8 @@ pub fn check_dataset(model_dir: impl AsRef<Path>, path: impl AsRef<Path>, check:
         record_lengths_next: None,
     };
     let (mut lengths, mut supervised) = (Vec::new(), Vec::new());
-    for (index, line) in std::io::BufReader::new(file).lines().enumerate() {
-        let line = line.map_err(|e| Error::Backend(format!("{}: line {}: {e}", path.display(), index + 1)))?;
+    for record in records_of(open()?) {
+        let (index, line) = record?;
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -228,6 +249,9 @@ pub fn check_dataset(model_dir: impl AsRef<Path>, path: impl AsRef<Path>, check:
                 Ok(vec![(chosen.ids.len(), chosen.mask.iter().filter(|m| **m).count(), chosen.ids.len()), (rejected.ids.len(), rejected.mask.iter().filter(|m| **m).count(), rejected.ids.len())])
             }),
         };
+        // A record that breaks a rule of its own is refused for that; one that keeps its own rules may still break one
+        // between records.
+        let examples = examples.and_then(|examples| between.remove(&record_index).map_or(Ok(examples), Err));
         match examples {
             Ok(examples) => {
                 report.valid_records += 1;
@@ -283,7 +307,7 @@ mod tests {
     use super::*;
 
     fn fixtures() -> std::path::PathBuf {
-        std::path::PathBuf::from(brain_testutil::repo_path("crates/data/tests/fixtures/training-records/v1"))
+        std::path::PathBuf::from(brain_testutil::repo_path("crates/data/tests/fixtures/training-records/v2"))
     }
 
     /// What the trainer reads the record on `line` as: its own dataset reader ([`Asked::read`], which
@@ -322,10 +346,11 @@ mod tests {
                 listed += 1;
             }
         }
-        assert_eq!(listed, 7);
+        assert_eq!(listed, 10);
 
+        // Line 1 breaks the count; line 2, its group's other rollout, is valid.
         let report = check_dataset(&model, root.join("invalid/behavior_logprob_count.jsonl"), &check, &mut || true).unwrap();
-        assert!(report.record_lengths.is_empty());
+        assert_eq!(report.record_lengths.iter().map(|r| r.line).collect::<Vec<_>>(), [2]);
         let refused = &report.record_refusals[0];
         assert_eq!((refused.line, refused.rule, refused.field.as_deref()), (1, Some(RecordRule::BehaviorLogprobCount), Some("messages[1].behavior_logprobs")));
     }
@@ -337,7 +362,7 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let mixed = scratch.path().join("mixed.jsonl");
         let valid = std::fs::read_to_string(root.join("chat.jsonl")).unwrap();
-        let refused = std::fs::read_to_string(root.join("invalid/missing_advantage.jsonl")).unwrap();
+        let refused = std::fs::read_to_string(root.join("invalid/missing_reward.jsonl")).unwrap();
         let lines: Vec<&str> = valid.lines().chain(["not json"]).chain(refused.lines()).collect();
         std::fs::write(&mixed, lines.join("\n\n")).unwrap();
         let (mut seen, mut offset) = (Vec::new(), 0);

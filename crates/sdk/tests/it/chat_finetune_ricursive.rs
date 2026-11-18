@@ -253,13 +253,15 @@ fn native_sparse_attention_is_refused_where_it_cannot_run() {
     assert!(err.to_string().contains("native sparse attention"), "{err}");
 }
 
-/// (prompt, answer, advantage): two actions of well-rewarded rollouts and two of badly rewarded ones.
+/// (prompt, answer, reward): two actions of well-rewarded rollouts and two of badly rewarded ones, one group (mean
+/// 0, so the mean-centred advantages are the rewards).
 const ROLLOUTS: [(&str, &str, f64); 4] = [("cab", "bad", 1.0), ("fed", "dad", 1.0), ("ace", "cab", -1.0), ("bag", "egg", -1.0)];
 
-fn chat_record(prompt: &str, answer: &str, advantage: Option<f64>) -> String {
+fn chat_record(prompt: &str, answer: &str, reward: Option<f64>) -> String {
     let mut record = serde_json::json!({"messages": [{"role": "user", "content": prompt, "train": false}, {"role": "assistant", "content": answer, "train": true}], "tools": []});
-    if let Some(a) = advantage {
-        record["advantage"] = serde_json::json!(a);
+    if let Some(r) = reward {
+        record["reward"] = serde_json::json!(r);
+        record["group"] = serde_json::json!("toy");
     }
     record.to_string()
 }
@@ -295,7 +297,7 @@ fn a_ricursive_run_scores_held_out_records_before_and_after() {
     assert!(tuned.loss.unwrap() < base.loss.unwrap(), "{base:?} -> {tuned:?}");
 }
 
-/// Spec: rollouts that carry an advantage train a Ripple adapter that makes the actions of well-rewarded rollouts
+/// Spec: rollouts that carry a reward train a Ripple adapter that makes the actions of well-rewarded rollouts
 /// likelier and those of badly rewarded ones less likely, measured on held-out copies of both sets; the run reports
 /// the objective's statistics and records its regime on the adapter's card.
 #[test]

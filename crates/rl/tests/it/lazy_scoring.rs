@@ -42,8 +42,10 @@ fn write_dataset(dir: &Path, examples: usize, teacher: bool) {
             let mask = (0..with.len()).map(|i| i >= lead).collect::<Vec<bool>>();
             (with, mask)
         });
-        let advantage = if e % 2 == 0 { 1.0 } else { -1.0 };
-        split.push_rollout(&EncodedSample { ids, mask, behavior: vec![f32::NAN; STUDENT_LEN], teacher, ..Default::default() }, &[], Some(advantage));
+        // Pairs of rollouts, rewards 1 and -1: advantages +1 and -1 (an odd last example joins the pair before it).
+        let pair = (e / 2).min((examples / 2).max(1) - 1);
+        let outcome = data::chat_rollout::Outcome { reward: if e % 2 == 0 { 1.0 } else { -1.0 }, group: format!("pair-{pair}"), member: data::chat_rollout::Member::Named(format!("{e}")) };
+        split.push_rollout(&EncodedSample { ids, mask, behavior: vec![f32::NAN; STUDENT_LEN], teacher, ..Default::default() }, &[], Some(Some(outcome)));
     }
     data::chat::write_split(dir, "train", &split).unwrap();
     data::chat::write_split(dir, "val", &split).unwrap();
@@ -233,13 +235,14 @@ fn a_fresh_adapter_is_scored_as_the_base_after_it_moved() {
 #[test]
 fn a_resumed_run_scores_under_the_adapter_it_started_from_not_the_one_it_restored() {
     let mut m = lora_model(data::rng::random_seed(), false);
-    let start = logprobs_now(&m, &student_ids(0), ANSWER_FROM);
+    let start: Vec<Vec<f32>> = (0..2).map(|e| logprobs_now(&m, &student_ids(e), ANSWER_FROM)).collect();
     // `prepare` runs before the weights of the checkpoint are restored; the run resumes at draw 4.
-    let (mut obj, _dir) = started(1, false, config(), &mut m, 4);
+    let (mut obj, _dir) = started(2, false, config(), &mut m, 4);
     move_adapter(&m, 7);
     step(&mut obj, &m);
-    let behavior = obj.scores_of(0).unwrap().behavior.unwrap();
-    assert_eq!(&behavior[ANSWER_FROM - 1..STUDENT_LEN - 1], &start[..]);
+    let [e] = drawn(&obj, 2)[..] else { panic!("one step scores one example") };
+    let behavior = obj.scores_of(e).unwrap().behavior.unwrap();
+    assert_eq!(&behavior[ANSWER_FROM - 1..STUDENT_LEN - 1], &start[e][..]);
 }
 
 #[test]

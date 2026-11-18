@@ -109,7 +109,7 @@ pub struct DpoPair {
 /// incorrect completion) - and returns empty when the group has no
 /// contrast (all-correct or all-incorrect groups carry no preference
 /// signal, the same "a group that teaches nothing costs nothing"
-/// discipline [`crate::objective::grpo::group_advantages`] applies to
+/// discipline [`crate::objective::grpo::group_advantages_with`] applies to
 /// zero-variance groups).
 pub fn pairs_from_group(prompt: &[u32], completions: &[Completion], rewards: &[f32]) -> Vec<DpoPair> {
     assert_eq!(completions.len(), rewards.len(), "pairs_from_group: one reward per completion");

@@ -201,7 +201,8 @@ adapters. A full linear (`g_proj`, the embedding, the head) trains and is saved,
 refused when served, by name; `export_peft` writes the norms as PEFT `modules_to_save` and refuses the bare
 `value_res_lambda`. `--held-out FILE` scores a chat JSONL set on the model in the training process before the first step and after the
 last (the loss is printed). `--policy-gradient` (with `--ratio-clip` and `--kl-beta`) trains the clipped policy gradient on
-rollout records, each carrying the `advantage` of its rollout, instead of the supervised loss: the actions of
+rollout records, each carrying the `reward` of its rollout and its `group` (`--advantage-norm` chooses how a group's
+rewards become advantages), instead of the supervised loss: the actions of
 well-rewarded rollouts become likelier and those of badly rewarded ones less likely. The log-probabilities the
 objective reads are the serving engine's for the same tokens, so a policy trained on the trainer's forward is the one
 the engine samples from.

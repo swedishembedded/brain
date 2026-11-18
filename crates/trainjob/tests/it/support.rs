@@ -14,7 +14,8 @@ use trainjob::{ArtifactStore, Digest, TrainConfig};
 
 use crate::fixture::{qwen35_model_dir, qwen3_model_dir_of, TempDir};
 
-/// (prompt, answer, advantage): two actions of well-rewarded rollouts and two of badly rewarded ones.
+/// (prompt, answer, reward): two actions of well-rewarded rollouts and two of badly rewarded ones, one group (mean
+/// 0, so the mean-centred advantages are the rewards).
 const ROLLOUTS: [(&str, &str, f64); 4] = [("cab", "bad", 1.0), ("fed", "dad", 1.0), ("ace", "cab", -1.0), ("bag", "egg", -1.0)];
 
 pub const BASE: &str = "local/toy";
@@ -85,15 +86,16 @@ fn rig_budgeted(tag: &str, budgets: Budgets, store: bool, card: Option<u64>, ext
     Rig { dir, store: store_handle, exec, work_root }
 }
 
-pub fn record(prompt: &str, answer: &str, advantage: Option<f64>) -> String {
+pub fn record(prompt: &str, answer: &str, reward: Option<f64>) -> String {
     let mut record = json!({"messages": [{"role": "user", "content": prompt, "train": false}, {"role": "assistant", "content": answer, "train": true}], "tools": []});
-    if let Some(a) = advantage {
-        record["advantage"] = json!(a);
+    if let Some(r) = reward {
+        record["reward"] = json!(r);
+        record["group"] = json!("toy");
     }
     record.to_string()
 }
 
-/// The rollout records of the toy task (each carrying an advantage), as a JSONL file's bytes.
+/// The rollout records of the toy task (each carrying its reward and group), as a JSONL file's bytes.
 pub fn rollouts() -> Vec<u8> {
     ROLLOUTS.iter().map(|(p, a, adv)| record(p, a, Some(*adv))).collect::<Vec<_>>().join("\n").into_bytes()
 }

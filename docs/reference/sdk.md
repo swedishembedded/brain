@@ -507,20 +507,33 @@ copy is held while training, and the first step's margin is exactly zero
 `ChatFineTune::policy_gradient(config)` (the `study` feature; every architecture whose trainer declares `ChatTrainer::POLICY_GRADIENT`: `qwen3`, `qwen35`, `ricursive`) trains the LoRA adapter with the clipped
 policy-gradient objective of GRPO/PPO on rollouts an orchestrator collected outside brain, instead of imitating every
 record. Each model call of an agent is one chat record whose trained assistant turn is the action; the orchestrator
-scores the rollout with an independent verifier, computes the group-relative advantage and writes it on every record of
-that rollout. A record with a negative advantage lowers the probability of its action, one with a positive advantage
-raises it.
+scores the rollout with an independent verifier and writes its reward, and the group of rollouts it is compared with,
+on every record of that rollout (training-record contract version 2). The run turns each group's rewards into the
+advantages of its rollouts (`PolicyGradientConfig::advantage_norm`). A record whose rollout's advantage is negative
+lowers the probability of its action, a positive one raises it.
 
 ```json
-{"advantage": -0.83, "messages": [
+{"reward": 0.0, "group": "task-17/v3", "rollout": "attempt-2", "messages": [
   {"role": "system", "content": "...", "train": false},
   {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}, {"type": "text", "text": "Which part is this?"}], "train": false},
   {"role": "assistant", "content": "A 40 mm dowel pin.", "train": true, "behavior_logprobs": [-0.11, -0.52, -1.9, -0.03, -0.4, -0.07, -0.01]}]}
 ```
 
-- `"advantage"` (record, optional): a finite number, the weight of every supervised token of the record. A record
-  without one is an imitation example (plain cross-entropy), so rollouts and supervised records mix.
-- `"behavior_logprobs"` (supervised assistant message, optional, needs an `"advantage"`): the log-probability the sampler
+- `"reward"` and `"group"` (record, optional, together): a finite number, the verifier's reward for the rollout the
+  record is one call of, and a key (1 to 512 bytes, no control characters) naming the rollouts it is compared with
+  (the attempts at one prompt by one policy). A record without them is an imitation example (plain cross-entropy), so
+  rollouts and supervised records mix. When the run opens, the rewards of each group become its rollouts' advantages
+  by `advantage_norm`: `MeanCentered` (the default, `r - mean`), `ZScore` (`(r - mean) / (std + 1e-4)`, population
+  standard deviation) or `LeaveOneOut` (`r_i - (sum_{j != i} r_j) / (G - 1)`, RLOO; at a fixed group size `G / (G - 1)`
+  times the centred value). A group whose rewards are all equal teaches nothing (every advantage 0). The advantage is
+  the weight of every supervised token of the record.
+- `"rollout"` (record, optional, with `"group"`): which rollout of its group the record is one call of. The records of
+  one rollout carry the same reward and `truncated`, and the rollout counts once in its group however many calls it
+  made; without it the record is a rollout of its own. A group needs at least two rollouts that were not truncated.
+- `"tokenizer_digest"` (record, optional): `sha256:<hex>`, the tokenizer the sampler encoded the rollout with, as a
+  `policy_trace` names it; the records of one run that name one name the same.
+- Version 1's precomputed `"advantage"` is refused, naming the field and its replacement (`reward` and `group`).
+- `"behavior_logprobs"` (supervised assistant message, optional, needs a `"reward"`): the log-probability the sampler
   gave each token of the answer, one per token of the answer as the chat template renders it after its prompt: the
   answer's text and the end-of-turn marker that closes it (the generation prompt is context, not sampled, and so is the
   whitespace the template writes after the marker, such as the newline after Qwen's `<|im_end|>`: a policy-gradient
@@ -543,17 +556,17 @@ raises it.
   the privileged messages of on-policy self-distillation (see below). `at` is the index of the record's message they are
   inserted before, at or before the first supervised message. Unknown fields, a missing `at`, no messages, an empty
   text, an `assistant`/`tool` role, an `at` past the first answer and a record that holds images are refused naming
-  the field. A record may carry a teacher context instead of an advantage (the scalar part is then 0) or with one.
-- `"truncated"` (record, optional, needs an `"advantage"` or a `"teacher_context"`): `true` when the rollout did not
-  reach an outcome (the token budget cut it, a step timed out), so its advantage says nothing about its actions. A policy
-  gradient never draws, scores or trains on such a record (`stats.sequences_truncated` counts them); a dataset of nothing
-  else is refused. Tokens of an observation (a tool's output, a user turn) are never supervised: only a message with
+  the field. A record may carry a teacher context instead of a reward (the scalar part is then 0) or with one.
+- `"truncated"` (record, optional, needs a `"reward"` or a `"teacher_context"`): `true` when the rollout did not
+  reach an outcome (the token budget cut it, a step timed out), so its reward says nothing about its actions. A policy
+  gradient never draws, scores or trains on such a record (`stats.sequences_truncated` counts them) and its reward takes
+  no part in its group's advantages; a dataset of nothing else is refused. Tokens of an observation (a tool's output, a user turn) are never supervised: only a message with
   `"train": true` is action.
 - Images and tool turns: records carry them exactly as in supervised fine-tuning (an image in a context turn, never in
   a supervised one); they train through the same vision path.
 
 ```rust
-use brain::{BehaviourSource, ChatFineTune, ImportanceCorrection, LossAgg, PolicyGradientConfig, ReferencePolicy};
+use brain::{AdvantageNorm, BehaviourSource, ChatFineTune, ImportanceCorrection, LossAgg, PolicyGradientConfig, ReferencePolicy};
 
 let outcome = ChatFineTune::from_pretrained("Qwen/Qwen3.8-27B-FP8")
     .arch("qwen35")
@@ -578,6 +591,7 @@ let outcome = ChatFineTune::from_pretrained("Qwen/Qwen3.8-27B-FP8")
         teacher: ReferencePolicy::Base,        // self-distillation: Base, or StartOfRun, scores the privileged view
         advantage_bound: Some(5.0),            // clip each token's teacher advantage to [-5, 5]; None for none
         sequence_advantage_cap: Some(50.0),    // cap a sequence's summed |A_t| by scaling it down; None for none
+        advantage_norm: AdvantageNorm::MeanCentered, // or ZScore, LeaveOneOut: how a group's rewards become advantages
     })
     .run()?;
 for step in &outcome.policy_gradient.unwrap().stats.steps {
@@ -607,7 +621,7 @@ brain-sampled GRPO run and an external-rollout run cannot drift apart.
   clipped fraction of the token advantages next to the KL and ratio. This is the sampled-token estimator (one teacher
   log-probability per sampled token), not the full-distribution reverse KL.
 - **Behaviour policy** (`PolicyGradientConfig::behaviour`). `BehaviourSource::Recorded` (the default, the exact mode): the
-  recorded `behavior_logprobs`, required on every supervised token of every record with an advantage; a dataset missing
+  recorded `behavior_logprobs`, required on every supervised token of every record with a reward; a dataset missing
   any is refused before the run, naming how many tokens lack one. `BehaviourSource::StartOfRunProxy`, asked for by name:
   where none was recorded the importance ratio is taken against the adapter the run **started from** (a fresh adapter:
   the base), measured by one forward pass over each record the first time a step draws it, under a frozen copy of the
@@ -616,7 +630,7 @@ brain-sampled GRPO run and an external-rollout run cannot drift apart.
   steps and epochs move a token from where the run began. It is a proxy for the true behaviour policy and exact only when
   the rollouts were sampled from the adapter being continued. The mode used is part of the run's identity and is
   reported (`behaviour`, `tokens_recorded_behavior`, `tokens_start_of_run_behavior`) in the outcome, the training
-  record and the adapter card. A dataset with no advantage sidecar, or sidecars without it, is refused rather than
+  record and the adapter card. A dataset with no rollout sidecar, or sidecars without it, is refused rather than
   trained as imitation.
 - **Stability** (`clip_eps_high`, `importance`, `max_step_kl`, `max_step_grad_norm`; CLI `--ratio-clip-high`,
   `--importance`, `--max-step-kl`, `--max-step-grad-norm`). *Clip-higher*: the ratio band is `[1 - clip_eps, 1 +
@@ -659,11 +673,13 @@ brain-sampled GRPO run and an external-rollout run cannot drift apart.
   the clip fraction, the mean KL to the reference, the ratio mean / min / max, the mean advantage, the imitation
   tokens and the seconds spent scoring the records the step drew for the first time; `training.json` has the same, and the adapter card's provenance (`regime: "policy_gradient_lora"`) the
   settings and the means.
-- **Refused before a device is claimed.** Records with an advantage without `.policy_gradient(..)` (supervised
-  training would silently ignore it); `.policy_gradient(..)` without any record carrying one; an invalid setting; an
+- **Refused before a device is claimed.** Records with a reward without `.policy_gradient(..)` (supervised
+  training would silently ignore it); `.policy_gradient(..)` without any record carrying one; records that break a rule
+  of the contract between records, over the dataset and its replay sets together (`group_of_one`, `rollout_mismatch`,
+  `mixed_tokenizer_digest`, named with the example and set); an invalid setting; an
   architecture whose trainer does not declare the policy gradient; `eval_every`, `patience`, `keep_best`, `held_out` and `held_out_text` (a run has no
   monitoring loss to select on: score the exported adapter with `score_tokens_qwen35`); a held-out or monitoring set
-  that carries advantages; `SeqMean` with more than one sequence per batch row.
+  that carries rewards; `SeqMean` with more than one sequence per batch row.
 - `.continue_from`, `.grad_accum`, `.strict_updates`, `.steps`, `.lr`, `.rank`, `.base_format`, `.activations`, `.checkpoint_every` and
   `run_with(&cancel, ..)` behave as on supervised `ChatFineTune`; an interrupted run resumes from its state (a state
   from other policy-gradient settings is refused like any other different run).

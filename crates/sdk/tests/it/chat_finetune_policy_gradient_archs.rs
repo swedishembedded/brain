@@ -19,17 +19,19 @@ use brain::{BehaviourSource, ChatFineTune, FineTuneStatus, PolicyGradientConfig}
 
 use crate::chat_fixture::{chat_model_dir, cpu, qwen35_model_dir, TempDir};
 
-/// (prompt, answer, advantage): two actions of well-rewarded rollouts and two of badly rewarded ones.
+/// (prompt, answer, reward): two actions of well-rewarded rollouts and two of badly rewarded ones, one group (mean
+/// 0, so the mean-centred advantages are the rewards).
 const ROLLOUTS: [(&str, &str, f64); 4] = [("cab", "bad", 1.0), ("fed", "dad", 1.0), ("ace", "cab", -1.0), ("bag", "egg", -1.0)];
 
-fn record(prompt: &str, answer: &str, reasoning: Option<&str>, advantage: Option<f64>) -> String {
+fn record(prompt: &str, answer: &str, reasoning: Option<&str>, reward: Option<f64>) -> String {
     let mut assistant = serde_json::json!({"role": "assistant", "content": answer, "train": true});
     if let Some(r) = reasoning {
         assistant["reasoning_content"] = serde_json::json!(r);
     }
     let mut record = serde_json::json!({"messages": [{"role": "user", "content": prompt, "train": false}, assistant], "tools": []});
-    if let Some(a) = advantage {
-        record["advantage"] = serde_json::json!(a);
+    if let Some(r) = reward {
+        record["reward"] = serde_json::json!(r);
+        record["group"] = serde_json::json!("toy");
     }
     record.to_string()
 }
@@ -69,10 +71,10 @@ fn policy_gradient(arch: &str, model: &Path, dataset: &Path, out: &Path) -> Chat
         .policy_gradient(PolicyGradientConfig { behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() })
 }
 
-/// The mean log-probability of the actions of `ROLLOUTS` under `adapter` (per answer token for qwen3, summed for
-/// qwen35: the direction is what is compared).
-fn action_logprob(arch: &str, model: &Path, adapter: Option<&Path>) -> f32 {
-    let plain = write_lines(&model.join("plain.jsonl"), &ROLLOUTS.iter().map(|(p, a, _)| record(p, a, None, None)).collect::<Vec<_>>());
+/// The mean log-probability of the actions of `ROLLOUTS` whose reward has the sign of `sign` under `adapter` (per
+/// answer token for qwen3, summed for qwen35: the direction is what is compared).
+fn action_logprob(arch: &str, model: &Path, adapter: Option<&Path>, sign: f64) -> f32 {
+    let plain = write_lines(&model.join("plain.jsonl"), &ROLLOUTS.iter().filter(|(_, _, r)| r * sign > 0.0).map(|(p, a, _)| record(p, a, None, None)).collect::<Vec<_>>());
     match arch {
         "qwen3" => -brain::score_chat(&base(model), adapter, &plain).expect("scoring").loss.expect("a loss"),
         _ => brain::score_tokens_qwen35(&base(model), adapter, &plain, Default::default(), &cpu()).expect("scoring").records.iter().flat_map(|r| r.positions.iter().map(|p| p.logprob)).sum::<f32>(),
@@ -80,30 +82,34 @@ fn action_logprob(arch: &str, model: &Path, adapter: Option<&Path>) -> f32 {
 }
 
 /// A positive advantage raises the log-probability of the trained action and a negative one lowers it, on every
-/// architecture: the same actions, rewarded in one run and penalised in the other.
+/// architecture: in one group, the actions of the rewarded rollouts and of the penalised ones.
 #[test]
 fn a_positive_advantage_raises_and_a_negative_one_lowers_the_trained_action_on_every_architecture() {
     for arch in ARCHS {
         let model = tiny_model(arch, "pg-direction");
-        let before = action_logprob(arch, &model, None);
-        for advantage in [1.0f64, -1.0] {
-            let dataset = write_lines(&model.join("rollouts.jsonl"), &ROLLOUTS.iter().map(|(p, a, _)| record(p, a, None, Some(advantage))).collect::<Vec<_>>());
-            let out = model.join(format!("run{advantage}"));
-            let outcome = policy_gradient(arch, &model, &dataset, &out).run().unwrap_or_else(|e| panic!("{arch}: the policy-gradient run: {e}"));
-            assert_eq!(outcome.status, FineTuneStatus::Completed, "{arch}");
-            let adapter = outcome.adapter.clone().expect("an adapter");
-            let after = action_logprob(arch, &model, Some(&adapter));
-            println!("{arch}: advantage {advantage}: action log-probability {before:.4} -> {after:.4}");
-            assert!(advantage * f64::from(after - before) > 1e-3, "{arch}: advantage {advantage}: {before} -> {after}");
-
-            let pg = outcome.policy_gradient.as_ref().expect("a policy-gradient run reports its statistics");
-            assert_eq!((pg.stats.steps.len(), pg.stats.sequences_with_advantage, pg.stats.sequences_imitation), (10, 4, 0), "{arch}");
-            assert_eq!((pg.stats.tokens_recorded_behavior, pg.stats.tokens_start_of_run_behavior), (0, 16), "{arch}: the behaviour policy is the start of the run, scored lazily");
-            assert!((pg.stats.steps[0].ratio_mean - 1.0).abs() < 1e-4, "{arch}: the first step is on-policy: {:?}", pg.stats.steps[0]);
-            assert!(pg.stats.steps.iter().all(|s| s.loss.is_finite() && s.clip_fraction.is_finite() && s.kl.is_some()), "{arch}");
-            let card = checkpoint::st::read_card(adapter.to_str().unwrap()).unwrap().expect("a card");
-            assert_eq!(card.training.expect("the card records its training").regime, "policy_gradient_lora", "{arch}");
+        let before = [1.0f64, -1.0].map(|sign| action_logprob(arch, &model, None, sign));
+        let dataset = write_lines(&model.join("rollouts.jsonl"), &ROLLOUTS.iter().map(|(p, a, r)| record(p, a, None, Some(*r))).collect::<Vec<_>>());
+        let out = model.join("run");
+        let outcome = policy_gradient(arch, &model, &dataset, &out).run().unwrap_or_else(|e| panic!("{arch}: the policy-gradient run: {e}"));
+        assert_eq!(outcome.status, FineTuneStatus::Completed, "{arch}");
+        let adapter = outcome.adapter.clone().expect("an adapter");
+        // Each set moves the way its advantage says, and the two move apart by more than rounding: the pushes share
+        // most of their features in a tiny model, so each alone moves less than when a run trained one sign only.
+        let moved = [1.0f64, -1.0].map(|sign| action_logprob(arch, &model, Some(&adapter), sign));
+        for ((sign, before), after) in [1.0f64, -1.0].into_iter().zip(before).zip(moved) {
+            println!("{arch}: advantage {sign}: action log-probability {before:.4} -> {after:.4}");
+            assert!(sign * f64::from(after - before) > 0.0, "{arch}: advantage {sign}: {before} -> {after}");
         }
+        let apart = f64::from((moved[0] - before[0]) - (moved[1] - before[1]));
+        assert!(apart > 1e-3, "{arch}: the rewarded and the penalised actions moved apart by {apart}");
+
+        let pg = outcome.policy_gradient.as_ref().expect("a policy-gradient run reports its statistics");
+        assert_eq!((pg.stats.steps.len(), pg.stats.sequences_with_advantage, pg.stats.sequences_imitation), (10, 4, 0), "{arch}");
+        assert_eq!((pg.stats.tokens_recorded_behavior, pg.stats.tokens_start_of_run_behavior), (0, 16), "{arch}: the behaviour policy is the start of the run, scored lazily");
+        assert!((pg.stats.steps[0].ratio_mean - 1.0).abs() < 1e-4, "{arch}: the first step is on-policy: {:?}", pg.stats.steps[0]);
+        assert!(pg.stats.steps.iter().all(|s| s.loss.is_finite() && s.clip_fraction.is_finite() && s.kl.is_some()), "{arch}");
+        let card = checkpoint::st::read_card(adapter.to_str().unwrap()).unwrap().expect("a card");
+        assert_eq!(card.training.expect("the card records its training").regime, "policy_gradient_lora", "{arch}");
     }
 }
 

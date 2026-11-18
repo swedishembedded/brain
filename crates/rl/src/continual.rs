@@ -393,7 +393,7 @@ pub struct StudyConfig {
     ///
     /// Not a free knob: it is the exploration control the loop lives or dies
     /// on. `Grpo` learns only from a group whose members earned DIFFERENT
-    /// rewards - `group_advantages` drops a zero-variance group outright - so
+    /// rewards - `group_advantages_with` drops a zero-variance group outright - so
     /// once a cycle has driven the policy to be confident, sampling at
     /// temperature 1.0 draws the same completion `group_size` times, every
     /// group is dropped, and the next cycle trains on almost nothing. Measured

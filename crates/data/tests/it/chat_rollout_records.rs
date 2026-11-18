@@ -5,10 +5,10 @@
 // clients. If your team needs expertise in reinforcement learning from externally collected agent trajectories then you
 // can procure our services by sending an email to info@swedishembedded.com.
 
-//! A chat record may carry the outcome of the rollout it came from: `"advantage"` on the record, and
-//! `"behavior_logprobs"` on an assistant message (the log-probabilities the collector sampled that answer's tokens
-//! with). A prepared dataset keeps them as sidecars aligned with its token stream, and a record without them is
-//! prepared exactly as before.
+//! A chat record may carry the outcome of the rollout it came from (training-record contract v2): `"reward"` and
+//! `"group"` on the record, optionally `"rollout"`, and `"behavior_logprobs"` on an assistant message (the
+//! log-probabilities the collector sampled that answer's tokens with). A prepared dataset keeps them as sidecars
+//! aligned with its token stream, and a record without them is prepared exactly as before.
 
 use data::binio;
 use data::chat::{prepare_chat_samples, ChatSample, RenderOpts};
@@ -37,8 +37,9 @@ fn write_records(dir: &std::path::Path, lines: &[String]) -> std::path::PathBuf 
     path
 }
 
-fn record(advantage: Option<&str>, behavior: Option<Vec<f32>>) -> String {
-    let adv = advantage.map(|a| format!(r#""advantage": {a},"#)).unwrap_or_default();
+/// A one-answer record; `reward` is the JSON of the reward, written with group `g`.
+fn record(reward: Option<&str>, behavior: Option<Vec<f32>>) -> String {
+    let adv = reward.map(|r| format!(r#""reward": {r}, "group": "g","#)).unwrap_or_default();
     let blp = behavior.map(|b| format!(r#", "behavior_logprobs": {}"#, serde_json::to_string(&b).unwrap())).unwrap_or_default();
     format!(
         r#"{{{adv} "messages": [{{"role":"user","content":"q","train":false}},{{"role":"assistant","content":"a","train":true{blp}}}]}}"#
@@ -60,7 +61,7 @@ fn prepare(samples: &[ChatSample], dir: &std::path::Path) -> Result<(), String> 
 }
 
 #[test]
-fn a_prepared_dataset_keeps_the_advantage_of_each_example_and_the_behaviour_log_probs_of_each_supervised_token() {
+fn a_prepared_dataset_keeps_the_outcome_of_each_example_and_the_behaviour_log_probs_of_each_supervised_token() {
     let tmp = tempfile::tempdir().unwrap();
     let lps: Vec<f32> = (0..ANSWER_TOKENS).map(|i| -0.1 * (i + 1) as f32).collect();
     let path = write_records(tmp.path(), &[record(Some("-1.5"), Some(lps.clone())), record(None, None), record(Some("0.5"), None)]);
@@ -72,10 +73,9 @@ fn a_prepared_dataset_keeps_the_advantage_of_each_example_and_the_behaviour_log_
     let ids = binio::read_u32_bin(&out.join("train.u32.bin")).unwrap();
     let mask = binio::read_mask_bin(&out.join("train.mask.bin")).unwrap();
     let rollout = chat_rollout::read(&out, "train", starts.len(), ids.len()).unwrap().expect("sidecars");
-    assert_eq!(rollout.advantage.len(), 3);
-    assert_eq!(rollout.advantage[0], -1.5);
-    assert!(rollout.advantage[1].is_nan(), "a record without an advantage is an imitation example");
-    assert_eq!(rollout.advantage[2], 0.5);
+    let graded = |member, reward| Some(chat_rollout::ExampleRollout { graded: Some(chat_rollout::Graded { group: 0, member, reward }) });
+    assert_eq!(rollout.groups, ["g"]);
+    assert_eq!(rollout.examples, [graded(0, -1.5), None, graded(1, 0.5)], "a record without a reward is an imitation example; each record is a rollout of its own");
 
     assert_eq!(rollout.behavior.len(), ids.len());
     let first_end = starts[1] as usize;
@@ -94,10 +94,10 @@ fn records_without_rollout_data_prepare_with_no_sidecar_and_a_stale_one_is_remov
     let path = write_records(tmp.path(), &[record(None, None)]);
     let out = tmp.path().join("prepared");
     std::fs::create_dir_all(&out).unwrap();
-    std::fs::write(out.join("train.adv.bin"), [0u8; 4]).unwrap();
+    std::fs::write(out.join("train.rollouts.json"), "{}").unwrap();
     prepare(&examples(&path).unwrap(), &out).unwrap();
     assert!(chat_rollout::read(&out, "train", 1, 1).unwrap().is_none());
-    assert!(!out.join("train.adv.bin").exists() && !out.join("train.blp.bin").exists());
+    assert!(!out.join("train.rollouts.json").exists() && !out.join("train.blp.bin").exists());
 }
 
 #[test]
@@ -108,16 +108,16 @@ fn a_record_that_misstates_its_rollout_data_is_refused_naming_the_field() {
         examples(&path).expect_err("refused")
     };
     let why = refused(record(Some("\"high\""), None));
-    assert!(why.contains(":2:") && why.contains("advantage"), "{why}");
+    assert!(why.contains(":2:") && why.contains("reward"), "{why}");
 
     let positive = vec![0.1; ANSWER_TOKENS];
     let why = refused(record(Some("1.0"), Some(positive)));
     assert!(why.contains(":2:") && why.contains("messages[1]") && why.contains("behavior_logprobs"), "{why}");
 
     let why = refused(record(None, Some(vec![-0.1; ANSWER_TOKENS])));
-    assert!(why.contains(":2:") && why.contains("behavior_logprobs") && why.contains("advantage"), "log-probs without an advantage: {why}");
+    assert!(why.contains(":2:") && why.contains("behavior_logprobs") && why.contains("reward"), "log-probs without a reward: {why}");
 
-    let on_context = r#"{"advantage": 1.0, "messages": [{"role":"user","content":"q","train":false,"behavior_logprobs":[-1.0]},{"role":"assistant","content":"a","train":true}]}"#.to_string();
+    let on_context = r#"{"reward": 1.0, "group": "g", "messages": [{"role":"user","content":"q","train":false,"behavior_logprobs":[-1.0]},{"role":"assistant","content":"a","train":true}]}"#.to_string();
     let why = refused(on_context);
     assert!(why.contains("messages[0]") && why.contains("behavior_logprobs"), "{why}");
 
@@ -150,7 +150,7 @@ fn a_packed_record_places_each_answers_log_probs_on_that_answers_tokens() {
     let tmp = tempfile::tempdir().unwrap();
     let (first, second): (Vec<f32>, Vec<f32>) = (vec![-0.2; ANSWER_TOKENS], vec![-0.7; ANSWER_TOKENS]);
     let line = format!(
-        r#"{{"advantage": 2.0, "messages": [{{"role":"user","content":"q","train":false}},{{"role":"assistant","content":"a","train":true,"behavior_logprobs":{}}},{{"role":"user","content":"r","train":false}},{{"role":"assistant","content":"b","train":true,"behavior_logprobs":{}}}]}}"#,
+        r#"{{"reward": 2.0, "group": "g", "messages": [{{"role":"user","content":"q","train":false}},{{"role":"assistant","content":"a","train":true,"behavior_logprobs":{}}},{{"role":"user","content":"r","train":false}},{{"role":"assistant","content":"b","train":true,"behavior_logprobs":{}}}]}}"#,
         serde_json::to_string(&first).unwrap(),
         serde_json::to_string(&second).unwrap()
     );
@@ -166,7 +166,7 @@ fn a_packed_record_places_each_answers_log_probs_on_that_answers_tokens() {
 }
 
 /// A record marked `"truncated": true` (the rollout never reached an outcome) is kept as such in a sidecar beside its
-/// advantage, and a record that is not marked costs no sidecar at all.
+/// outcome, and a record that is not marked costs no sidecar at all.
 #[test]
 fn a_truncated_rollout_is_flagged_in_its_own_sidecar() {
     let tmp = tempfile::tempdir().unwrap();
@@ -189,7 +189,7 @@ fn truncated_belongs_to_a_rollout() {
     let tmp = tempfile::tempdir().unwrap();
     let path = write_records(tmp.path(), &[record(None, None).replacen("{", "{\"truncated\": true,", 1)]);
     let why = examples(&path).expect_err("refused");
-    assert!(why.contains("truncated") && why.contains("advantage"), "{why}");
+    assert!(why.contains("truncated") && why.contains("reward"), "{why}");
 }
 
 /// Observation tokens (a tool's output, the user's turn) are context, not action: only the assistant answer marked
@@ -197,7 +197,7 @@ fn truncated_belongs_to_a_rollout() {
 #[test]
 fn the_tokens_of_an_observation_are_never_supervised() {
     let tmp = tempfile::tempdir().unwrap();
-    let line = r#"{"advantage": 1.0, "messages": [{"role":"user","content":"q","train":false},{"role":"assistant","content":"x","train":false,"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]},{"role":"tool","tool_call_id":"c1","content":"a long observation the environment wrote","train":false},{"role":"assistant","content":"y","train":true}]}"#;
+    let line = r#"{"reward": 1.0, "group": "g", "messages": [{"role":"user","content":"q","train":false},{"role":"assistant","content":"x","train":false,"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]},{"role":"tool","tool_call_id":"c1","content":"a long observation the environment wrote","train":false},{"role":"assistant","content":"y","train":true}]}"#;
     let path = write_records(tmp.path(), &[line.to_string()]);
     let samples = examples(&path).unwrap();
     let out = tmp.path().join("prepared");
@@ -217,7 +217,7 @@ fn recorded_token_ids_must_be_the_tokens_the_template_renders_for_the_text() {
     let rendered: Vec<u32> = tokenizer().encode("a<|im_end|>");
     let line = |ids: &[u32], lps: usize| {
         format!(
-            r#"{{"advantage": 1.0, "messages": [{{"role":"user","content":"q","train":false}},{{"role":"assistant","content":"a","train":true,"behavior_logprobs":{},"token_ids":{}}}]}}"#,
+            r#"{{"reward": 1.0, "group": "g", "messages": [{{"role":"user","content":"q","train":false}},{{"role":"assistant","content":"a","train":true,"behavior_logprobs":{},"token_ids":{}}}]}}"#,
             serde_json::to_string(&vec![-0.5f32; lps]).unwrap(),
             serde_json::to_string(ids).unwrap()
         )
@@ -245,9 +245,62 @@ fn token_ids_belong_to_a_supervised_answer_of_a_rollout() {
         examples(&path).expect_err("refused")
     };
     let why = refused(r#"{"messages": [{"role":"user","content":"q","train":false},{"role":"assistant","content":"a","train":true,"token_ids":[1]}]}"#);
-    assert!(why.contains("token_ids") && why.contains("advantage"), "{why}");
-    let why = refused(r#"{"advantage": 1.0, "messages": [{"role":"user","content":"q","train":false,"token_ids":[1]},{"role":"assistant","content":"a","train":true}]}"#);
+    assert!(why.contains("token_ids") && why.contains("reward"), "{why}");
+    let why = refused(r#"{"reward": 1.0, "group": "g", "messages": [{"role":"user","content":"q","train":false,"token_ids":[1]},{"role":"assistant","content":"a","train":true}]}"#);
     assert!(why.contains("messages[0]") && why.contains("token_ids"), "{why}");
-    let why = refused(r#"{"advantage": 1.0, "messages": [{"role":"user","content":"q","train":false},{"role":"assistant","content":"a","train":true,"token_ids":[]}]}"#);
+    let why = refused(r#"{"reward": 1.0, "group": "g", "messages": [{"role":"user","content":"q","train":false},{"role":"assistant","content":"a","train":true,"token_ids":[]}]}"#);
     assert!(why.contains("messages[1]") && why.contains("empty"), "{why}");
+}
+
+/// Contract v2 refuses version 1's precomputed advantage by name, and a reward or a group without the other.
+#[test]
+fn a_v1_advantage_and_a_half_outcome_are_refused_by_rule_and_field() {
+    let refusal = |line: &str| {
+        let error = ChatSample::from_json_line_with(line, &data::chat::TextOnly::TRAINER).expect_err("refused");
+        let fault = error.fault().cloned().expect("a contract rule");
+        (fault.rule, fault.field, error.to_string())
+    };
+    let answer = r#""messages": [{"role":"user","content":"q","train":false},{"role":"assistant","content":"a","train":true}]"#;
+    let (rule, field, why) = refusal(&format!(r#"{{"advantage": 1.0, {answer}}}"#));
+    assert_eq!((rule, field.as_str()), (chat_rollout::RecordRule::AdvantageRemoved, "advantage"));
+    assert!(why.contains("reward") && why.contains("group") && why.contains("v2"), "the refusal names the replacement: {why}");
+    assert_eq!(refusal(&format!(r#"{{"reward": 1.0, {answer}}}"#)).0, chat_rollout::RecordRule::MissingGroup);
+    assert_eq!(refusal(&format!(r#"{{"group": "g", {answer}}}"#)).0, chat_rollout::RecordRule::MissingReward);
+    assert_eq!(refusal(&format!(r#"{{"rollout": "r", {answer}}}"#)).0, chat_rollout::RecordRule::MissingGroup);
+    let why = ChatSample::from_json_line_with(&format!(r#"{{"reward": 1.0, "group": "", {answer}}}"#), &data::chat::TextOnly::TRAINER).expect_err("refused").to_string();
+    assert!(why.contains("group") && why.contains("empty"), "{why}");
+    let why = ChatSample::from_json_line_with(&format!(r#"{{"reward": 1.0, "group": "g", "tokenizer_digest": "md5:x", {answer}}}"#), &data::chat::TextOnly::TRAINER).expect_err("refused").to_string();
+    assert!(why.contains("tokenizer_digest"), "{why}");
+}
+
+/// The rules between records: the records of one rollout agree, a group holds two rollouts that reached an outcome
+/// (a truncated one does not count), and one tokenizer. Each refusal is on the record that breaks it.
+#[test]
+fn the_rules_between_records_refuse_the_record_that_breaks_them() {
+    let digest = |d: char| format!("sha256:{}", d.to_string().repeat(64));
+    let line = |extra: &str| format!(r#"{{{extra}"messages": [{{"role":"user","content":"q","train":false}},{{"role":"assistant","content":"a","train":true}}]}}"#);
+    let lines = [
+        line(r#""reward": 1, "group": "a", "rollout": "r0", "#),
+        line(r#""reward": 1, "group": "a", "rollout": "r0", "#),
+        line(r#""reward": 0, "group": "a", "rollout": "r0", "#),
+        line(r#""reward": 0, "group": "a", "rollout": "r1", "#),
+        line(r#""reward": 1, "group": "b", "#),
+        line(r#""reward": 0, "group": "c", "#),
+        line(r#""reward": 1, "group": "c", "truncated": true, "#),
+        line(&format!(r#""reward": 1, "group": "d", "tokenizer_digest": "{}", "#, digest('a'))),
+        line(&format!(r#""reward": 0, "group": "d", "tokenizer_digest": "{}", "#, digest('b'))),
+        line(""),
+    ];
+    let records: Vec<ChatSample> = lines.iter().map(|l| ChatSample::from_json_line_with(l, &data::chat::TextOnly::TRAINER).unwrap()).collect();
+    let rollouts: Vec<Option<&chat_rollout::Rollout>> = records.iter().map(|r| r.rollout.as_ref()).collect();
+    let refused: Vec<(usize, chat_rollout::RecordRule, String)> = chat_rollout::check_records(&rollouts).into_iter().map(|(at, e)| {
+        let f = e.fault().cloned().unwrap();
+        (at, f.rule, f.field)
+    }).collect();
+    use chat_rollout::RecordRule::*;
+    assert_eq!(
+        refused,
+        [(2, RolloutMismatch, "reward".to_string()), (4, GroupOfOne, "group".to_string()), (5, GroupOfOne, "group".to_string()), (8, MixedTokenizerDigest, "tokenizer_digest".to_string())],
+        "a repeated record of a rollout is the same outcome; c's truncated rollout does not count"
+    );
 }

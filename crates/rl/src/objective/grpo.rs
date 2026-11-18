@@ -45,7 +45,7 @@ use model::rollout::{Completion, ModelRollout, Rollout, RolloutParams, StopReaso
 use model::training::{self, Unsupported};
 use model::{Batch, Model, ModelConfig, Objective, StepVerdict, IGNORE};
 
-pub use super::advantage::{group_advantages, group_advantages_with, AdvantageNorm};
+pub use super::advantage::{group_advantages_with, AdvantageNorm};
 pub use super::grpo_stats::{BehaviourRefusal, CycleLog, GrpoStats, NonFiniteSteps, RowRefusal, MAX_CONSECUTIVE_NONFINITE};
 pub use super::grpo_term::{k3_kl, near_clip_boundary, token_term, token_term_banded, ClipBand, TokenTerm, MAX_LOG_RATIO};
 use super::pg_batch::{backward_weighted, with_adapters_disabled, PgBatch, PgSpec};
@@ -474,7 +474,8 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
             }
             advs
         } else {
-            group_advantages_with(self.cfg.options.advantage, &rewards)
+            let rewards: Vec<f64> = rewards.iter().map(|&r| f64::from(r)).collect();
+            group_advantages_with(self.cfg.options.advantage, &rewards).into_iter().map(|a| a as f32).collect()
         };
         let zero_variance = advs.iter().all(|&a| a == 0.0);
 

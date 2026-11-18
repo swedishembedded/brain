@@ -8,10 +8,12 @@
 //! Policy-gradient training on rollouts collected outside brain.
 //!
 //! An orchestrator runs an agent, turns every model call into a chat record (the assistant turn of the call is the
-//! action), scores each rollout with an independent verifier and writes the group-relative advantage on each of the
-//! rollout's records ([`data::chat_rollout`]). [`ExternalPolicyGradient`] trains a LoRA adapter on such a prepared
-//! dataset with the clipped policy-gradient objective of GRPO/PPO on the supervised (action) tokens: records with a
-//! negative advantage push their actions' probability down, those with a positive one pull it up. The per-token term
+//! action), scores each rollout with an independent verifier and writes the rollout's reward and its group (the
+//! rollouts it is compared with) on each of the rollout's records ([`data::chat_rollout`]). [`ExternalPolicyGradient`]
+//! turns the rewards of each group into the rollouts' advantages ([`PolicyGradientConfig::advantage_norm`],
+//! [`super::advantage::group_advantages_with`]) and trains a LoRA adapter on the prepared dataset with the clipped
+//! policy-gradient objective of GRPO/PPO on the supervised (action) tokens: records with a negative advantage push
+//! their actions' probability down, those with a positive one pull it up. The per-token term
 //! and the k3 KL are the functions [`super::grpo::Grpo`] trains through ([`super::pg_batch`]); only the source of the
 //! rows differs.
 //!
@@ -36,7 +38,10 @@
 //! * **Normalisation** ([`LossAgg`]): `SeqMean` divides each sequence's token terms by its own supervised-token
 //!   count (GRPO as published: needs a batch of one sequence); `TokenSum` divides every token of an optimiser step by
 //!   the step's mean count per micro-step, so all tokens weigh the same.
-//! * **Records without an advantage** are imitation examples: plain cross-entropy (weight 1, no KL), so a dataset may
+//! * **Advantages** are computed when the run opens, per group, from the rewards of the group's rollouts that reached
+//!   an outcome, each rollout counted once however many records (calls) it made. A group of one has nothing to compare
+//!   with and is refused; a truncated rollout takes no part.
+//! * **Records without a reward** are imitation examples: plain cross-entropy (weight 1, no KL), so a dataset may
 //!   mix rollouts with supervised records.
 //!
 //! ## Self-distillation with privileged information
@@ -66,6 +71,7 @@ use data::rng::Rng;
 use model::training::{self, Capability, Unsupported};
 use model::{Batch, FitOpts, Model, ModelConfig, Objective, Split, StepVerdict, IGNORE};
 
+use super::advantage::{group_advantages_with, AdvantageNorm};
 use super::grpo::LossAgg;
 use super::grpo_stats::{NonFiniteSteps, MAX_CONSECUTIVE_NONFINITE};
 use super::grpo_term::ClipBand;
@@ -228,6 +234,40 @@ impl std::str::FromStr for BehaviourSource {
     }
 }
 
+/// The scalar advantage of every example of a split, by `norm` over the rewards of its group: NaN for an imitation
+/// example, 0 for a rollout without a reward of its own (a teacher context alone). Each rollout of a group counts
+/// once (an example is one call, or one answer, of its rollout); a truncated rollout takes no part and trains on
+/// nothing. A group that holds one rollout that reached an outcome is refused, by the contract's rule
+/// (`group_of_one`), as are two examples of one rollout that disagree (`rollout_mismatch`).
+fn advantages(split: &data::chat_rollout::SplitRollouts, norm: AdvantageNorm) -> Result<Vec<f32>, String> {
+    use data::chat_rollout::{group_members, GroupEntry, GroupFault, RecordRule};
+    let graded: Vec<(usize, data::chat_rollout::Graded)> = split.examples.iter().enumerate().filter_map(|(e, r)| r.and_then(|r| r.graded).map(|g| (e, g))).collect();
+    let entries: Vec<GroupEntry<u32, u32>> = graded.iter().map(|&(e, g)| GroupEntry { group: g.group, member: g.member, reward: g.reward, truncated: split.truncated[e] }).collect();
+    let (groups, faults) = group_members(&entries);
+    if let Some(fault) = faults.first() {
+        return Err(match fault {
+            GroupFault::Mismatch { entry, field } => format!("{} (field {field}): example {} differs from an earlier example of its rollout", RecordRule::RolloutMismatch.name(), graded[*entry].0),
+            GroupFault::OfOne { group } => format!("{} (field group): group {:?} holds one rollout that reached an outcome; a group-relative advantage needs at least two", RecordRule::GroupOfOne.name(), split.groups[*group as usize]),
+        });
+    }
+    let mut by_member: HashMap<u32, f64> = HashMap::new();
+    for members in groups.values() {
+        let rewards: Vec<f64> = members.iter().map(|&(_, r)| r).collect();
+        by_member.extend(members.iter().map(|&(m, _)| m).zip(group_advantages_with(norm, &rewards)));
+    }
+    if let Some(a) = by_member.values().find(|a| !(**a as f32).is_finite()) {
+        return Err(format!("a group's rewards give the advantage {a}, which is not a finite f32; rescale the rewards"));
+    }
+    Ok(split
+        .examples
+        .iter()
+        .map(|r| match r {
+            None => f32::NAN,
+            Some(r) => r.graded.and_then(|g| by_member.get(&g.member)).map_or(0.0, |&a| a as f32),
+        })
+        .collect())
+}
+
 /// What a run would leave unread: a step draws `grad_accum` batches of `batch_size` records, so a run of `steps`
 /// steps reads `steps * grad_accum * batch_size` records however many the dataset holds. A shorter run trains on a
 /// subset, which is easy to mistake for training on the whole dataset; `None` when every record is drawn at least once.
@@ -289,11 +329,13 @@ pub struct PolicyGradientConfig {
     /// Cap the sum of `|A_t|` over a sequence's tokens (after clipping) by scaling the sequence's advantages down;
     /// `None` leaves it uncapped.
     pub sequence_advantage_cap: Option<f32>,
+    /// How each group's rewards become the advantages of its rollouts.
+    pub advantage_norm: AdvantageNorm,
 }
 
 impl Default for PolicyGradientConfig {
     fn default() -> PolicyGradientConfig {
-        PolicyGradientConfig { clip_eps: 0.2, clip_eps_high: None, importance: ImportanceCorrection::None, max_step_kl: None, max_step_grad_norm: None, numerics: None, kv_roundtrip: None, kl_beta: 0.02, reference: ReferencePolicy::Base, behaviour: BehaviourSource::Recorded, loss_agg: LossAgg::SeqMean, temperature: 1.0, log_kl: true, teacher: ReferencePolicy::Base, advantage_bound: None, sequence_advantage_cap: None }
+        PolicyGradientConfig { clip_eps: 0.2, clip_eps_high: None, importance: ImportanceCorrection::None, max_step_kl: None, max_step_grad_norm: None, numerics: None, kv_roundtrip: None, kl_beta: 0.02, reference: ReferencePolicy::Base, behaviour: BehaviourSource::Recorded, loss_agg: LossAgg::SeqMean, temperature: 1.0, log_kl: true, teacher: ReferencePolicy::Base, advantage_bound: None, sequence_advantage_cap: None, advantage_norm: AdvantageNorm::MeanCentered }
     }
 }
 
@@ -632,21 +674,18 @@ impl ExternalPolicyGradient {
         }
         let ends: Vec<usize> = (0..starts.len()).map(|i| starts.get(i + 1).copied().unwrap_or(tokens.len())).collect();
         let mask = binio::read_mask_bin(&dir.join("train.mask.bin"))?;
-        // The sidecars are the dataset's declaration that it holds rollouts. Without the advantages every record would
-        // be trained as an imitation example, which is a different objective than the one asked for.
+        // The sidecars are the dataset's declaration that it holds rollouts. Without them every record would be
+        // trained as an imitation example, which is a different objective than the one asked for.
         let Some(recorded) = data::chat_rollout::read(dir, "train", starts.len(), tokens.len())? else {
             let stray = ["train.blp.bin", "train.tch.u32.bin", "train.tch.mask.bin", "train.tch.ex.bin"].into_iter().find(|name| dir.join(name).exists());
             return Err(invalid(match stray {
-                Some(name) => format!("{}: {name} is there but train.adv.bin is not; a rollout dataset missing its advantage sidecar would train every record as imitation. Prepare the dataset again from its records", dir.display()),
-                None => format!("{}: the training split carries no rollout advantages, so a policy gradient would train every record as imitation; use the supervised objective, or prepare the dataset from records with an \"advantage\"", dir.display()),
+                Some(name) => format!("{}: {name} is there but train.rollouts.json is not; a rollout dataset missing its rollout sidecar would train every record as imitation. Prepare the dataset again from its records", dir.display()),
+                None => format!("{}: the training split carries no rollouts, so a policy gradient would train every record as imitation; use the supervised objective, or prepare the dataset from records with a \"reward\" and \"group\"", dir.display()),
             }));
         };
-        let (advantage, behavior, truncated) = (recorded.advantage, recorded.behavior, recorded.truncated);
+        let advantage = advantages(&recorded, cfg.advantage_norm).map_err(|why| invalid(format!("{}: {why}", dir.display())))?;
+        let (behavior, truncated) = (recorded.behavior, recorded.truncated);
         let eligible: Vec<usize> = (0..starts.len()).filter(|&e| !truncated[e]).collect();
-        // NaN marks an imitation record; anything else must be a number a loss can be built from.
-        if let Some(e) = advantage.iter().position(|a| a.is_infinite()) {
-            return Err(invalid(format!("{}: example {e} has an infinite advantage", dir.display())));
-        }
         if let Some(t) = behavior.iter().position(|b| b.is_infinite() || *b > 1e-3) {
             return Err(invalid(format!("{}: token {t} has behaviour log-probability {}, which is not a log-probability", dir.display(), behavior[t])));
         }
@@ -679,7 +718,7 @@ impl ExternalPolicyGradient {
             return Err(invalid(format!("{}: all {} records are truncated rollouts, which a policy gradient never trains on", dir.display(), starts.len())));
         }
         if stats.sequences_with_advantage == 0 {
-            return Err(invalid(format!("{}: no training record carries an advantage, so a policy gradient would train every record as imitation; use the supervised objective", dir.display())));
+            return Err(invalid(format!("{}: no training record carries a reward or a teacher context, so a policy gradient would train every record as imitation; use the supervised objective", dir.display())));
         }
         if cfg.behaviour == BehaviourSource::Recorded && stats.tokens_start_of_run_behavior > 0 {
             return Err(invalid(format!(
@@ -698,6 +737,13 @@ impl ExternalPolicyGradient {
         let cache = ScoreCache::create(dir, rows.starts.len())?;
         let max_token = tokens.iter().copied().chain(rows.teacher.iter().flat_map(|t| (0..rows.starts.len()).filter_map(|e| t.example(e)).flat_map(|(ids, _)| ids.iter().copied()))).max().unwrap_or(0);
         Ok(ExternalPolicyGradient { cfg, train, batch_cfg, rows, mask, tag_examples, order: None, cache, max_token, anchors: None, weights_moved: false, scoring_seconds: 0.0, accumulating: StepAccumulator::default(), stats, consecutive_nonfinite: 0, consecutive_guard: 0, gate: NumericsAccumulator::default(), verdict: None })
+    }
+
+    /// The scalar advantage example `example` of the training split trains with: its rollout's, computed from the
+    /// rewards of its group when the run opened (0 for a rollout that trains on a teacher context alone); `None` for
+    /// an imitation example or one past the split.
+    pub fn advantage(&self, example: usize) -> Option<f32> {
+        self.rows.advantage.get(example).copied().filter(|a| !a.is_nan())
     }
 
     /// What the run has measured so far.

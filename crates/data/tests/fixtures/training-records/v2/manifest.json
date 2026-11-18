@@ -1,0 +1,136 @@
+{
+ "contract": "training-records-v2",
+ "tokenizer": "model",
+ "files": [
+  {
+   "path": "chat.jsonl",
+   "kind": "chat",
+   "records": 3,
+   "valid_records": 3,
+   "refusals": []
+  },
+  {
+   "path": "chat_rollout.jsonl",
+   "kind": "chat",
+   "records": 7,
+   "valid_records": 7,
+   "refusals": []
+  },
+  {
+   "path": "preference.jsonl",
+   "kind": "preference",
+   "records": 2,
+   "valid_records": 2,
+   "refusals": []
+  },
+  {
+   "path": "invalid/behavior_logprob_count.jsonl",
+   "kind": "chat",
+   "records": 2,
+   "valid_records": 1,
+   "refusals": [
+    {
+     "line": 1,
+     "rule": "behavior_logprob_count",
+     "field": "messages[1].behavior_logprobs"
+    }
+   ]
+  },
+  {
+   "path": "invalid/token_ids_mismatch.jsonl",
+   "kind": "chat",
+   "records": 2,
+   "valid_records": 1,
+   "refusals": [
+    {
+     "line": 1,
+     "rule": "token_ids_mismatch",
+     "field": "messages[1].token_ids"
+    }
+   ]
+  },
+  {
+   "path": "invalid/missing_reward.jsonl",
+   "kind": "chat",
+   "records": 1,
+   "valid_records": 0,
+   "refusals": [
+    {
+     "line": 1,
+     "rule": "missing_reward",
+     "field": "messages[1].behavior_logprobs"
+    }
+   ]
+  },
+  {
+   "path": "invalid/missing_group.jsonl",
+   "kind": "chat",
+   "records": 1,
+   "valid_records": 0,
+   "refusals": [
+    {
+     "line": 1,
+     "rule": "missing_group",
+     "field": "group"
+    }
+   ]
+  },
+  {
+   "path": "invalid/advantage_removed.jsonl",
+   "kind": "chat",
+   "records": 1,
+   "valid_records": 0,
+   "refusals": [
+    {
+     "line": 1,
+     "rule": "advantage_removed",
+     "field": "advantage"
+    }
+   ]
+  },
+  {
+   "path": "invalid/rollout_mismatch.jsonl",
+   "kind": "chat",
+   "records": 3,
+   "valid_records": 2,
+   "refusals": [
+    {
+     "line": 2,
+     "rule": "rollout_mismatch",
+     "field": "reward"
+    }
+   ]
+  },
+  {
+   "path": "invalid/group_of_one.jsonl",
+   "kind": "chat",
+   "records": 5,
+   "valid_records": 3,
+   "refusals": [
+    {
+     "line": 1,
+     "rule": "group_of_one",
+     "field": "group"
+    },
+    {
+     "line": 4,
+     "rule": "group_of_one",
+     "field": "group"
+    }
+   ]
+  },
+  {
+   "path": "invalid/mixed_tokenizer_digest.jsonl",
+   "kind": "chat",
+   "records": 2,
+   "valid_records": 1,
+   "refusals": [
+    {
+     "line": 2,
+     "rule": "mixed_tokenizer_digest",
+     "field": "tokenizer_digest"
+    }
+   ]
+  }
+ ]
+}

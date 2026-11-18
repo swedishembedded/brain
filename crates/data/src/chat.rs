@@ -681,9 +681,21 @@ struct WireRecord {
     #[allow(dead_code)]
     #[serde(default)]
     metadata: serde_json::Value,
-    /// The group-relative advantage of the rollout this record is one call of ([`crate::chat_rollout`]).
+    /// Version 1's precomputed advantage, read only to refuse it by name ([`crate::chat_rollout`]).
     #[serde(default)]
     advantage: Option<serde_json::Value>,
+    /// The verifier's reward for the rollout this record is one call of ([`crate::chat_rollout`]).
+    #[serde(default)]
+    reward: Option<serde_json::Value>,
+    /// The group of rollouts the reward is compared within ([`crate::chat_rollout`]).
+    #[serde(default)]
+    group: Option<String>,
+    /// Which rollout of the group the record is one call of ([`crate::chat_rollout`]).
+    #[serde(default)]
+    rollout: Option<String>,
+    /// The tokenizer the sampler encoded the rollout with ([`crate::chat_rollout`]).
+    #[serde(default)]
+    tokenizer_digest: Option<String>,
     /// The rollout did not reach an outcome ([`crate::chat_rollout`]).
     #[serde(default)]
     truncated: bool,
@@ -788,19 +800,46 @@ fn sample_from_wire(record: WireRecord, reader: &dyn ImageReader) -> Result<Chat
     let (messages, media, behavior_logprobs, token_ids) = messages_from_wire_with(record.messages, reader)?;
     reader.check_record(&media)?;
     let teacher = record.teacher_context.map(|context| teacher_view(&messages, &record.tools, &media, context)).transpose()?;
-    let advantage = record.advantage.as_ref().map(chat_rollout::check_advantage).transpose()?;
+    if record.advantage.is_some() {
+        return Err(RecordError::of(
+            RecordFault::new(RecordRule::AdvantageRemoved, "advantage"),
+            "advantage: training-record contract v2 removed the precomputed \"advantage\"; give the rollout's \"reward\" and its \"group\" (the rollouts it is compared with) and the trainer computes the advantage of each rollout in its group, by the run's advantage normalisation".to_string(),
+        ));
+    }
+    let outcome = match (&record.reward, record.group) {
+        (Some(reward), Some(group)) => {
+            let reward = chat_rollout::check_reward(reward)?;
+            chat_rollout::check_key("group", &group)?;
+            let member = match record.rollout {
+                Some(key) => {
+                    chat_rollout::check_key("rollout", &key)?;
+                    chat_rollout::Member::Named(key)
+                }
+                None => chat_rollout::Member::of_record(),
+            };
+            Some(chat_rollout::Outcome { reward, group, member })
+        }
+        (Some(_), None) => return Err(RecordError::of(RecordFault::new(RecordRule::MissingGroup, "group"), "group: the record has a \"reward\" and no \"group\"; a reward is compared with the other rollouts of its group".to_string())),
+        (None, Some(_)) => return Err(RecordError::of(RecordFault::new(RecordRule::MissingReward, "reward"), "reward: the record has a \"group\" and no \"reward\"".to_string())),
+        (None, None) if record.rollout.is_some() => return Err(RecordError::of(RecordFault::new(RecordRule::MissingGroup, "group"), "group: \"rollout\" names a rollout of a group, and the record has no \"group\"".to_string())),
+        (None, None) => None,
+    };
+    if let Some(digest) = &record.tokenizer_digest {
+        chat_rollout::check_tokenizer_digest(digest)?;
+    }
     let truncated = record.truncated;
     // A rollout field on a record with no outcome: the record cannot say what its tokens earned.
-    let without_outcome = |field: String, what: &str| Err(RecordError::of(RecordFault::new(RecordRule::MissingAdvantage, &field), format!("{field}: {what} to a rollout, and the record has no \"advantage\" or \"teacher_context\"")));
-    let rollout = match (advantage, teacher) {
+    let without_outcome = |field: String, what: &str| Err(RecordError::of(RecordFault::new(RecordRule::MissingReward, &field), format!("{field}: {what} to a rollout, and the record has no \"reward\" and \"group\" or \"teacher_context\"")));
+    let rollout = match (outcome, teacher) {
         (None, None) if truncated => return without_outcome("truncated".to_string(), "\"truncated\" belongs"),
+        (None, None) if record.tokenizer_digest.is_some() => return without_outcome("tokenizer_digest".to_string(), "\"tokenizer_digest\" belongs"),
         (None, None) => match (token_ids.iter().position(Option::is_some), behavior_logprobs.iter().position(Option::is_some)) {
             (Some(at), _) => return without_outcome(format!("messages[{at}].token_ids"), "\"token_ids\" belong"),
             (None, Some(at)) => return without_outcome(format!("messages[{at}].behavior_logprobs"), "\"behavior_logprobs\" belong"),
             (None, None) => None,
         },
         // A teacher context alone trains on its per-token advantage: the scalar part is 0.
-        (advantage, teacher) => Some(Rollout { advantage: advantage.unwrap_or(0.0), truncated, behavior_logprobs, token_ids, teacher }),
+        (outcome, teacher) => Some(Rollout { outcome, truncated, behavior_logprobs, token_ids, teacher, tokenizer_digest: record.tokenizer_digest }),
     };
     Ok(ChatSample { messages, tools: record.tools, rendered: None, media, rollout })
 }
@@ -1132,9 +1171,9 @@ pub struct EncodedSplit {
     pub starts: Vec<usize>,
     /// The images of each example, aligned with `starts` ([`crate::chat_media`]).
     pub media: Vec<Vec<ImageBytes>>,
-    /// The advantage of each example's rollout, aligned with `starts`; NaN for an imitation example
-    /// ([`crate::chat_rollout`]).
-    pub advantage: Vec<f32>,
+    /// The rollout of each example, aligned with `starts` ([`crate::chat_rollout`]): `None` for an imitation example,
+    /// `Some(None)` for a rollout without a reward of its own (a teacher context alone).
+    pub rollouts: Vec<Option<Option<chat_rollout::Outcome>>>,
     /// The behaviour log-probability of each token, aligned with `ids`; NaN where none was recorded.
     pub behavior: Vec<f32>,
     /// The teacher's rendering of each example, aligned with `starts`; `None` for an example without a teacher context.
@@ -1155,9 +1194,9 @@ impl EncodedSplit {
         self.push_rollout(&EncodedSample { ids: ids.to_vec(), mask: mask.to_vec(), behavior, ..Default::default() }, media, None);
     }
 
-    /// [`Self::push_with_media`] for an example of a rollout: its `advantage` and the behaviour log-probabilities
-    /// `encoded` carries.
-    pub fn push_rollout(&mut self, encoded: &EncodedSample, media: &[ImageBytes], advantage: Option<f32>) {
+    /// [`Self::push_with_media`] for an example of a rollout: its `rollout` (`None` for an imitation example,
+    /// `Some(None)` for one without a reward of its own) and the behaviour log-probabilities `encoded` carries.
+    pub fn push_rollout(&mut self, encoded: &EncodedSample, media: &[ImageBytes], rollout: Option<Option<chat_rollout::Outcome>>) {
         let EncodedSample { ids, mask, behavior, teacher, truncated } = encoded;
         assert_eq!(ids.len(), mask.len(), "EncodedSplit::push: ids and mask differ in length");
         assert_eq!(ids.len(), behavior.len(), "EncodedSplit::push: ids and behaviour log-probabilities differ in length");
@@ -1165,7 +1204,7 @@ impl EncodedSplit {
             return;
         }
         self.media.push(media.to_vec());
-        self.advantage.push(advantage.unwrap_or(f32::NAN));
+        self.rollouts.push(rollout);
         self.teacher.push(teacher.clone());
         self.truncated.push(*truncated);
         self.starts.push(self.ids.len());
@@ -1190,7 +1229,7 @@ pub fn encode_sample_split_while(samples: &[ChatSample], tok: &dyn Tokenizer, tm
             return Ok(None);
         }
         let encoded = s.encode_rollout(tok, tmpl, opts)?;
-        out.push_rollout(&encoded, &s.media, s.rollout.as_ref().map(|r| r.advantage));
+        out.push_rollout(&encoded, &s.media, s.rollout.as_ref().map(|r| r.outcome.clone()));
     }
     Ok(Some(out))
 }
@@ -1203,7 +1242,7 @@ pub fn write_split(dir: &Path, split: &str, data: &EncodedSplit) -> io::Result<(
     binio::write_mask_bin(&dir.join(format!("{split}.mask.bin")), &data.mask)?;
     let starts: Vec<u64> = data.starts.iter().map(|&s| s as u64).collect();
     binio::write_u64_bin(&dir.join(format!("{split}.ex.bin")), &starts)?;
-    chat_rollout::write(dir, split, &data.advantage, &data.behavior, &data.truncated)?;
+    chat_rollout::write(dir, split, &data.rollouts, &data.behavior, &data.truncated)?;
     chat_rollout::write_teacher(dir, split, &data.teacher)?;
     crate::chat_media::write(dir, split, &data.media)
 }

@@ -66,8 +66,8 @@ fn a_prepared_dataset_keeps_the_teachers_rendering_whose_supervised_tokens_are_t
     let ids = binio::read_u32_bin(&out.join("train.u32.bin")).unwrap();
     let mask = binio::read_mask_bin(&out.join("train.mask.bin")).unwrap();
     let rollout = chat_rollout::read(&out, "train", starts.len(), ids.len()).unwrap().expect("sidecars");
-    assert_eq!(rollout.advantage[0], 0.0, "a teacher-only record trains on its per-token advantage alone");
-    assert!(rollout.advantage[1].is_nan(), "a record without rollout data stays an imitation example");
+    assert_eq!(rollout.examples[0], Some(chat_rollout::ExampleRollout { graded: None }), "a teacher-only record is a rollout without a reward of its own");
+    assert!(rollout.examples[1].is_none(), "a record without rollout data stays an imitation example");
 
     let teacher = chat_rollout::read_teacher(&out, "train", starts.len()).unwrap().expect("teacher sidecar");
     assert_eq!(teacher.starts.len(), 2);
@@ -80,17 +80,18 @@ fn a_prepared_dataset_keeps_the_teachers_rendering_whose_supervised_tokens_are_t
 }
 
 #[test]
-fn a_teacher_context_may_come_with_a_scalar_advantage_and_behaviour_log_probs() {
+fn a_teacher_context_may_come_with_a_reward_and_behaviour_log_probs() {
     let tmp = tempfile::tempdir().unwrap();
     let line = format!(
-        r#"{{"advantage": 0.75, "teacher_context": {HINT}, "messages": [{{"role":"user","content":"q","train":false}},{{"role":"assistant","content":"a","train":true,"behavior_logprobs":{}}}]}}"#,
+        r#"{{"reward": 0.75, "group": "g", "teacher_context": {HINT}, "messages": [{{"role":"user","content":"q","train":false}},{{"role":"assistant","content":"a","train":true,"behavior_logprobs":{}}}]}}"#,
         serde_json::to_string(&vec![-0.5f32; 1 + "<|im_end|>".len()]).unwrap()
     );
     let out = tmp.path().join("prepared");
     prepare(&read(&line).unwrap(), TEMPLATE, &out).unwrap();
     let ids = binio::read_u32_bin(&out.join("train.u32.bin")).unwrap();
     let rollout = chat_rollout::read(&out, "train", 1, ids.len()).unwrap().unwrap();
-    assert_eq!(rollout.advantage, [0.75]);
+    assert_eq!(rollout.groups, ["g"]);
+    assert_eq!(rollout.examples, [Some(chat_rollout::ExampleRollout { graded: Some(chat_rollout::Graded { group: 0, member: 0, reward: 0.75 }) })]);
     assert_eq!(rollout.behavior.iter().filter(|b| !b.is_nan()).count(), 1 + "<|im_end|>".len());
 }
 

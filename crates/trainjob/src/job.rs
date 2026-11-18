@@ -283,6 +283,9 @@ pub(crate) fn policy_gradient_config(params: &crate::request::Params) -> Result<
     }
     config.advantage_bound = params.advantage_bound.or(config.advantage_bound);
     config.sequence_advantage_cap = params.sequence_advantage_cap.or(config.sequence_advantage_cap);
+    if let Some(v) = &params.advantage_norm {
+        config.advantage_norm = brain::AdvantageNorm::parse(v).map_err(|e| format!("train: {e}"))?;
+    }
     Ok(config)
 }
 

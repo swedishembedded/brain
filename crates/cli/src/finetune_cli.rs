@@ -48,8 +48,11 @@ brain finetune BASE --dataset FILE --out DIR [options]
                      norms, gates); a served adapter's rows read them per row.
   --held-out FILE    chat JSONL scored on the model in the training process before the first step and after the last
                      (the loss is printed); for architectures whose trainer scores it (Ripple, qwen35).
-  --policy-gradient  train the clipped policy gradient on rollout records (`advantage` on each record) instead of the
-                     supervised loss, for an adapter; --ratio-clip X and --kl-beta X set its clip band and KL weight.
+  --policy-gradient  train the clipped policy gradient on rollout records (`reward` and `group` on each record,
+                     training-record contract v2) instead of the supervised loss, for an adapter; --ratio-clip X and
+                     --kl-beta X set its clip band and KL weight.
+  --advantage-norm N with --policy-gradient: how each group's rewards become advantages: mean-centred (default),
+                     z-score or leave-one-out.
   --ratio-clip-high X
                      with --policy-gradient: widen the clip band's upper edge to 1+X (clip-higher; at least --ratio-clip).
   --importance C     with --policy-gradient: correct for the sampling engine's gap to the trainer: none (default),
@@ -119,6 +122,7 @@ struct Args {
     clip_eps: Option<f32>,
     kl_beta: Option<f32>,
     behaviour: Option<brain::BehaviourSource>,
+    advantage_norm: Option<brain::AdvantageNorm>,
     clip_eps_high: Option<f32>,
     importance: Option<brain::ImportanceCorrection>,
     max_step_kl: Option<f32>,
@@ -180,6 +184,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--ratio-clip" => a.clip_eps = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--kl-beta" => a.kl_beta = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--behaviour" => a.behaviour = Some(need(&mut i, &flag)?.parse().map_err(|e| format!("brain finetune: {flag}: {e}"))?),
+            "--advantage-norm" => a.advantage_norm = Some(brain::AdvantageNorm::parse(&need(&mut i, &flag)?).map_err(|e| format!("brain finetune: {flag}: {e}"))?),
             "--ratio-clip-high" => a.clip_eps_high = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--importance" => a.importance = Some(need(&mut i, &flag)?.parse().map_err(|e| format!("brain finetune: {flag}: {e}"))?),
             "--max-step-kl" => a.max_step_kl = Some(number(&need(&mut i, &flag)?, &flag)?),
@@ -210,7 +215,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
         }
     }
     if !a.policy_gradient {
-        for (flag, given) in [("--ratio-clip", a.clip_eps.is_some()), ("--kl-beta", a.kl_beta.is_some()), ("--behaviour", a.behaviour.is_some()), ("--ratio-clip-high", a.clip_eps_high.is_some()), ("--importance", a.importance.is_some()), ("--max-step-kl", a.max_step_kl.is_some()), ("--max-step-grad-norm", a.max_step_grad_norm.is_some()), ("--kv-roundtrip", a.kv_roundtrip.is_some())] {
+        for (flag, given) in [("--ratio-clip", a.clip_eps.is_some()), ("--kl-beta", a.kl_beta.is_some()), ("--behaviour", a.behaviour.is_some()), ("--advantage-norm", a.advantage_norm.is_some()), ("--ratio-clip-high", a.clip_eps_high.is_some()), ("--importance", a.importance.is_some()), ("--max-step-kl", a.max_step_kl.is_some()), ("--max-step-grad-norm", a.max_step_grad_norm.is_some()), ("--kv-roundtrip", a.kv_roundtrip.is_some())] {
             if given {
                 return Err(format!("brain finetune: {flag} shapes the policy gradient; give --policy-gradient"));
             }
@@ -304,7 +309,7 @@ fn lora(a: &Args, rank: u32) -> brain::ChatFineTune {
     }
     if a.policy_gradient {
         let d = brain::PolicyGradientConfig::default();
-        t = t.policy_gradient(brain::PolicyGradientConfig { clip_eps: a.clip_eps.unwrap_or(d.clip_eps), kl_beta: a.kl_beta.unwrap_or(d.kl_beta), behaviour: a.behaviour.unwrap_or(d.behaviour), numerics: a.numerics_gate.then_some(a.gate), kv_roundtrip: a.kv_roundtrip, clip_eps_high: a.clip_eps_high, importance: a.importance.unwrap_or(d.importance), max_step_kl: a.max_step_kl, max_step_grad_norm: a.max_step_grad_norm, ..d });
+        t = t.policy_gradient(brain::PolicyGradientConfig { clip_eps: a.clip_eps.unwrap_or(d.clip_eps), kl_beta: a.kl_beta.unwrap_or(d.kl_beta), behaviour: a.behaviour.unwrap_or(d.behaviour), numerics: a.numerics_gate.then_some(a.gate), kv_roundtrip: a.kv_roundtrip, clip_eps_high: a.clip_eps_high, importance: a.importance.unwrap_or(d.importance), max_step_kl: a.max_step_kl, max_step_grad_norm: a.max_step_grad_norm, advantage_norm: a.advantage_norm.unwrap_or(d.advantage_norm), ..d });
     }
     t
 }
@@ -488,7 +493,10 @@ mod tests {
     fn the_stability_settings_need_the_policy_gradient_and_parse_by_name() {
         let err = parse(&argv("base --lora 4 --max-step-kl 0.1")).unwrap_err();
         assert!(err.contains("--max-step-kl") && err.contains("--policy-gradient"), "{err}");
-        let a = parse(&argv("base --lora 4 --policy-gradient --ratio-clip-high 0.28 --importance truncate:2 --max-step-kl 0.1 --max-step-grad-norm 5")).unwrap();
+        let a = parse(&argv("base --lora 4 --policy-gradient --ratio-clip-high 0.28 --importance truncate:2 --max-step-kl 0.1 --max-step-grad-norm 5 --advantage-norm leave-one-out")).unwrap();
+        assert_eq!(a.advantage_norm, Some(brain::AdvantageNorm::LeaveOneOut));
+        assert!(parse(&argv("base --lora 4 --advantage-norm z-score")).unwrap_err().contains("--policy-gradient"));
+        assert!(parse(&argv("base --lora 4 --policy-gradient --advantage-norm standardised")).unwrap_err().contains("leave-one-out"));
         assert_eq!((a.clip_eps_high, a.max_step_kl, a.max_step_grad_norm), (Some(0.28), Some(0.1), Some(5.0)));
         assert_eq!(a.importance, Some(brain::ImportanceCorrection::Truncate { cap: 2.0 }));
         let err = parse(&argv("base --lora 4 --policy-gradient --importance sometimes")).unwrap_err();

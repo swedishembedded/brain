@@ -8,7 +8,7 @@
 #![cfg(feature = "study")]
 
 //! `brain::ChatFineTune::policy_gradient` on a `qwen35` base (the 27B's architecture at toy width, CPU backend):
-//! records of rollouts, each carrying the advantage of its rollout, train a LoRA that makes the actions of
+//! records of rollouts, each carrying the reward of its rollout and its group, train a LoRA that makes the actions of
 //! well-rewarded rollouts likelier and those of badly rewarded ones less likely; a run can continue an adapter and
 //! name its reference; records and settings that cannot be honoured are refused before a device is claimed.
 
@@ -18,17 +18,19 @@ use brain::{BehaviourSource, ChatFineTune, FineTuneStatus, PolicyGradientConfig,
 
 use crate::chat_fixture::common::{cpu, qwen35_model_dir};
 
-/// (prompt, answer, advantage): two actions of well-rewarded rollouts and two of badly rewarded ones.
+/// (prompt, answer, reward): two actions of well-rewarded rollouts and two of badly rewarded ones, one group (mean
+/// 0, so the mean-centred advantages are the rewards).
 const ROLLOUTS: [(&str, &str, f64); 4] = [("cab", "bad", 1.0), ("fed", "dad", 1.0), ("ace", "cab", -1.0), ("bag", "egg", -1.0)];
 
-fn record(prompt: &str, answer: &str, advantage: Option<f64>, behavior: Option<Vec<f64>>) -> String {
+fn record(prompt: &str, answer: &str, reward: Option<f64>, behavior: Option<Vec<f64>>) -> String {
     let mut assistant = serde_json::json!({"role": "assistant", "content": answer, "train": true});
     if let Some(b) = behavior {
         assistant["behavior_logprobs"] = serde_json::json!(b);
     }
     let mut record = serde_json::json!({"messages": [{"role": "user", "content": prompt, "train": false}, assistant], "tools": []});
-    if let Some(a) = advantage {
-        record["advantage"] = serde_json::json!(a);
+    if let Some(r) = reward {
+        record["reward"] = serde_json::json!(r);
+        record["group"] = serde_json::json!("toy");
     }
     record.to_string()
 }
@@ -139,15 +141,15 @@ fn records_and_settings_a_policy_gradient_run_cannot_honour_are_refused_before_t
     let out = model.join("run");
     let refused = |run: ChatFineTune| run.run().expect_err("refused").to_string();
 
-    // An advantage is never silently ignored by supervised training.
+    // A reward is never silently ignored by supervised training.
     let sft = ChatFineTune::from_pretrained(base(&model)).arch("qwen35").dataset(&dataset).out_dir(&out).steps(2).device(cpu());
     let why = refused(sft);
-    assert!(why.contains("advantage") && why.contains("policy_gradient"), "{why}");
+    assert!(why.contains("reward") && why.contains("policy_gradient"), "{why}");
 
     // And the objective that reads one needs some.
     let plain = plain(&model);
     let why = refused(policy_gradient(&model, &plain, &out, Default::default()));
-    assert!(why.contains("no record") && why.contains("advantage"), "{why}");
+    assert!(why.contains("no record") && why.contains("reward"), "{why}");
 
     let why = refused(policy_gradient(&model, &dataset, &out, PolicyGradientConfig { clip_eps: 1.5, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }));
     assert!(why.contains("clip_eps"), "{why}");
@@ -160,10 +162,23 @@ fn records_and_settings_a_policy_gradient_run_cannot_honour_are_refused_before_t
     let bad = write_lines(&model.join("bad.jsonl"), &[record("cab", "bad", Some(1.0), None), record("fed", "dad", Some(-1.0), Some(vec![-1.0; 3]))]);
     let why = refused(policy_gradient(&model, &bad, &out, Default::default()));
     assert!(why.contains("bad.jsonl") && why.contains("record 2") && why.contains("behavior_logprobs") && why.contains('3') && why.contains('4'), "{why}");
+
+    // The contract's rules between records hold over the run's records: a group of one, two tokenizers.
+    let lonely = write_lines(&model.join("lonely.jsonl"), &[record("cab", "bad", Some(1.0), None)]);
+    let why = refused(policy_gradient(&model, &lonely, &out, Default::default()));
+    assert!(why.contains("group_of_one") && why.contains("\"toy\""), "{why}");
+    let digest = |line: String, d: char| {
+        let mut v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        v["tokenizer_digest"] = serde_json::json!(format!("sha256:{}", d.to_string().repeat(64)));
+        v.to_string()
+    };
+    let mixed = write_lines(&model.join("mixed.jsonl"), &[digest(record("cab", "bad", Some(1.0), None), 'a'), digest(record("fed", "dad", Some(-1.0), None), 'b')]);
+    let why = refused(policy_gradient(&model, &mixed, &out, Default::default()));
+    assert!(why.contains("mixed_tokenizer_digest") && why.contains("example 2 of the dataset"), "{why}");
     assert!(!out.join("adapter.safetensors").exists(), "nothing was trained");
 }
 
-/// Self-distillation: records with a privileged teacher context and no advantage train through the same run; the
+/// Self-distillation: records with a privileged teacher context and no reward train through the same run; the
 /// teacher's per-token advantages are on the outcome, and the run reports its guards.
 #[test]
 fn records_with_a_teacher_context_train_on_the_teachers_per_token_advantage() {

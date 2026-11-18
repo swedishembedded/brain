@@ -64,6 +64,7 @@ pub fn implied_defaults() -> Map<String, Value> {
         ("teacher", Some(json!(pg.teacher.name()))),
         ("advantage_bound", pg.advantage_bound.map(float)),
         ("sequence_advantage_cap", pg.sequence_advantage_cap.map(float)),
+        ("advantage_norm", Some(json!(pg.advantage_norm.name()))),
         ("beta", Some(float(brain::DEFAULT_DPO_BETA))),
         ("nll_weight", Some(float(brain::DEFAULT_DPO_NLL_WEIGHT))),
         ("keep_reasoning", Some(json!(brain::DEFAULT_DPO_KEEP_REASONING))),
@@ -92,7 +93,7 @@ fn spec_without_defaults() -> ActionSpec {
         .cancellable()
         .param(ParamSpec::new("base", ParamType::Str, "the base model, `<vendor>/<repo>` in the server's model store").required())
         .param(ParamSpec::new("data", ParamType::Str, "JSON document naming the datasets: {\"train\": SRC, \"held_out\"?, \"held_out_text\"?, \"monitor\"?, \"start_adapter\"?, \"replay\"?: [SRC], \"weighted_replay\"?: [{SRC fields, \"share\"}]} where SRC is {\"digest\": \"<blake3 hex>\"} (an artifact of the server's store) or {\"blob\": \"<input name>\"} (an input blob of this call)").required())
-        .param(ParamSpec::new("objective", ParamType::Enum(vec!["sft".into(), "policy_gradient".into(), "dpo".into()]), "supervised imitation; the clipped policy gradient on rollout records that carry an advantage or a teacher context; or direct preference optimization on `generic-preference-v1` pairs (`dataset` and `held_out` hold pairs)").default(json!("sft")))
+        .param(ParamSpec::new("objective", ParamType::Enum(vec!["sft".into(), "policy_gradient".into(), "dpo".into()]), "supervised imitation; the clipped policy gradient on rollout records that carry a reward and group (training-record contract v2) or a teacher context; or direct preference optimization on `generic-preference-v1` pairs (`dataset` and `held_out` hold pairs)").default(json!("sft")))
         .param(ParamSpec::new("steps", ParamType::Int, "optimiser steps").default(json!(100)).min(1.0).max(1_000_000.0).step(1.0))
         .param(ParamSpec::new("rank", ParamType::Int, "LoRA rank of a fresh adapter; a continued adapter keeps its own (default 8)").min(1.0).max(256.0).step(1.0))
         .param(optional_f("alpha", "LoRA alpha (default 2 x rank)", 0.0, 1024.0))
@@ -125,6 +126,7 @@ fn spec_without_defaults() -> ActionSpec {
         .param(ParamSpec::new("teacher", ParamType::Enum(vec!["base".into(), "start".into()]), "policy gradient with teacher contexts: the frozen policy that scores the student's tokens in the privileged context"))
         .param(optional_f("advantage_bound", "policy gradient with teacher contexts: each token's advantage is clipped to [-bound, bound]", 0.0, 1e6))
         .param(optional_f("sequence_advantage_cap", "policy gradient with teacher contexts: the most the magnitudes of a sequence's token advantages may sum to", 0.0, 1e9))
+        .param(ParamSpec::new("advantage_norm", ParamType::Enum(brain::AdvantageNorm::ALL.iter().map(|n| n.name().to_string()).collect()), "policy gradient: how each group's rewards become the advantages of its rollouts: `mean-centred` (r - mean), `z-score` ((r - mean) / (std + 1e-4)) or `leave-one-out` (r_i - the mean of the others)"))
         .param(optional_f("beta", "dpo: the temperature of the preference loss (default 0.1)", 0.0, 100.0))
         .param(optional_f("nll_weight", "dpo: the weight of the supervised likelihood of the chosen answer added to the loss (default 0)", 0.0, 1000.0))
         .param(ParamSpec::new("keep_reasoning", ParamType::Bool, "dpo: train on the reasoning of each candidate (the template drops a closed think block from an assistant turn otherwise)"))
@@ -339,6 +341,7 @@ pub struct Params {
     pub teacher: Option<String>,
     pub advantage_bound: Option<f32>,
     pub sequence_advantage_cap: Option<f32>,
+    pub advantage_norm: Option<String>,
     pub beta: Option<f32>,
     pub nll_weight: Option<f32>,
     pub keep_reasoning: Option<bool>,
@@ -376,6 +379,7 @@ impl Request {
             (params.teacher.is_some(), "teacher"),
             (params.advantage_bound.is_some(), "advantage_bound"),
             (params.sequence_advantage_cap.is_some(), "sequence_advantage_cap"),
+            (params.advantage_norm.is_some(), "advantage_norm"),
         ]
         .into_iter()
         .filter_map(|(named, name)| named.then_some(name))
@@ -602,6 +606,20 @@ mod tests {
         assert!(e.contains("max_step_kl") && e.contains("sft"), "the step guard belongs to the policy gradient: {e}");
         let stable = json!({"base": "a/b", "data": data, "objective": "policy_gradient", "clip_eps_high": 0.28, "importance": "truncate:2", "max_step_kl": 0.1, "max_step_grad_norm": 5.0});
         assert!(request(stable, &[]).is_ok());
+    }
+
+    /// `advantage_norm` names one of the three normalisations, is the trainer's when named, and belongs to the policy
+    /// gradient.
+    #[test]
+    fn the_advantage_normalisation_is_named_on_the_wire() {
+        let data = json!({"train": {"digest": digest(1)}}).to_string();
+        for norm in brain::AdvantageNorm::ALL {
+            let named = request(json!({"base": "a/b", "data": data, "objective": "policy_gradient", "advantage_norm": norm.name()}), &[]).unwrap();
+            assert_eq!(crate::job::policy_gradient_config(&named.params).unwrap().advantage_norm, norm);
+        }
+        assert!(request(json!({"base": "a/b", "data": data, "objective": "policy_gradient", "advantage_norm": "standardised"}), &[]).is_err(), "an unknown normalisation is refused by the spec");
+        let e = request(json!({"base": "a/b", "data": data, "advantage_norm": "z-score"}), &[]).unwrap_err();
+        assert!(e.contains("advantage_norm") && e.contains("sft"), "{e}");
     }
 
     #[test]

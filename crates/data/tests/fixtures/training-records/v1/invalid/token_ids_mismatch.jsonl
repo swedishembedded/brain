@@ -1,1 +1,0 @@
-{"advantage":1.0,"messages":[{"role":"user","content":"cab","train":false},{"role":"assistant","content":"bad","train":true,"token_ids":[1,0,4,151645],"behavior_logprobs":[-0.2,-0.3,-0.4,-0.5]}]}

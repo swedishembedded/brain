@@ -778,16 +778,20 @@ impl ChatFineTune {
     /// of imitating every record (reinforcement learning from external rollouts).
     ///
     /// Each record is one model call of an agent (its trained assistant turn is the action) and carries the
-    /// `"advantage"` of the rollout it belongs to, optionally with `"behavior_logprobs"` on the action
-    /// ([`data::chat_rollout`]). A record with a negative advantage lowers the probability of its action, one with
-    /// a positive advantage raises it; a record without an advantage is imitated. `config` sets the clip half-width,
+    /// `"reward"` of the rollout it belongs to and the `"group"` of rollouts it is compared with, optionally with
+    /// `"behavior_logprobs"` on the action ([`data::chat_rollout`], training-record contract v2). The run turns each
+    /// group's rewards into the advantages of its rollouts by [`PolicyGradientConfig::advantage_norm`]. A record whose
+    /// rollout's advantage is negative lowers the probability of its action, a positive one raises it; a record
+    /// without a reward is imitated. The records the run trains on (the dataset and its replay sets together) are
+    /// held to the contract's rules between records: a group holds at least two rollouts that reached an outcome, the
+    /// records of one rollout agree on it, and the records that name a tokenizer name one. `config` sets the clip half-width,
     /// the KL coefficient and its reference policy (the base, or the adapter [`ChatFineTune::continue_from`] starts
     /// from), the loss normalisation and the sampling temperature; see
     /// [`rl::objective::external`] for what each means and exactly which policy the importance ratio is taken
     /// against when no behaviour log-probabilities were recorded.
     ///
-    /// Records with an advantage are refused without this call (supervised training would silently ignore the
-    /// advantage). Needs a `qwen35` base; incompatible with the held-out sets, [`ChatFineTune::eval_every`] and
+    /// Records with a reward are refused without this call (supervised training would silently ignore the
+    /// reward). Needs a `qwen35` base; incompatible with the held-out sets, [`ChatFineTune::eval_every`] and
     /// selection on a monitoring loss. The run's statistics are on the outcome
     /// ([`ChatFineTuneOutcome::policy_gradient`]) and its settings on the adapter's card.
     pub fn policy_gradient(mut self, config: PolicyGradientConfig) -> Self {
@@ -1048,23 +1052,23 @@ impl ChatFineTune {
         Ok(())
     }
 
-    /// Records that carry an advantage need the objective that reads it, and that objective needs some; neither a
-    /// held-out set nor a monitoring set has any (they are scored without it). `sets` is `(name, carries an advantage)`.
+    /// Records that carry a reward need the objective that reads it, and that objective needs some; neither a
+    /// held-out set nor a monitoring set has any (they are scored without it). `sets` is `(name, carries a rollout)`.
     fn check_rollout_records(&self, sets: &[(&str, bool)]) -> Result<()> {
         let carrying = |name: &str| sets.iter().any(|(n, carries)| *n == name && *carries);
         match &self.policy_gradient {
             None => match sets.iter().find(|(_, carries)| *carries) {
                 Some((name, _)) => Err(Error::Backend(format!(
-                    "ChatFineTune: the {name} records carry an \"advantage\" or a \"teacher_context\", which supervised training would ignore; call .policy_gradient(..) to train on the rollouts, or remove the field"
+                    "ChatFineTune: the {name} records carry a \"reward\" or a \"teacher_context\", which supervised training would ignore; call .policy_gradient(..) to train on the rollouts, or remove the field"
                 ))),
                 None => Ok(()),
             },
             Some(_) => {
                 if let Some(name) = ["held-out", "held-out text", "monitoring"].into_iter().find(|n| carrying(n)) {
-                    return Err(Error::Backend(format!("ChatFineTune: policy_gradient: the {name} records carry an \"advantage\"; that set is scored without one")));
+                    return Err(Error::Backend(format!("ChatFineTune: policy_gradient: the {name} records carry a \"reward\"; that set is scored without one")));
                 }
                 if !carrying("dataset") && !carrying("replay") {
-                    return Err(Error::Backend("ChatFineTune: policy_gradient: no record of the dataset carries an \"advantage\" or a \"teacher_context\"; this would be supervised training (drop .policy_gradient(..))".to_string()));
+                    return Err(Error::Backend("ChatFineTune: policy_gradient: no record of the dataset carries a \"reward\" or a \"teacher_context\"; this would be supervised training (drop .policy_gradient(..))".to_string()));
                 }
                 Ok(())
             }
@@ -1142,6 +1146,9 @@ impl ChatFineTune {
             ("held-out text", carries(held_out_text.as_deref())),
             ("monitoring", carries(monitor.as_deref())),
         ])?;
+        if self.policy_gradient.is_some() {
+            check_rollouts_together(&train_samples, &replay_samples, &weighted_samples)?;
+        }
         if self.eval_every == 0 && self.evaluations_dir.is_some() {
             return Err(Error::Backend("ChatFineTune: keeping the evaluations needs eval_every > 0".to_string()));
         }
@@ -1268,6 +1275,7 @@ impl ChatFineTune {
                 "teacher": c.teacher.name(),
                 "advantage_bound_bits": c.advantage_bound.map(f32::to_bits),
                 "sequence_advantage_cap_bits": c.sequence_advantage_cap.map(f32::to_bits),
+                "advantage_norm": c.advantage_norm.name(),
             })),
         });
         let mut step_work: Vec<model::StepWork> = Vec::new();
@@ -1564,6 +1572,7 @@ impl PolicyGradientOutcome {
             "teacher": c.teacher.name(),
             "advantage_bound": c.advantage_bound,
             "sequence_advantage_cap": c.sequence_advantage_cap,
+            "advantage_norm": c.advantage_norm.name(),
             "sequences_with_teacher": s.sequences_with_teacher,
             "sequences_capped": s.sequences_capped,
             "sequences_with_advantage": s.sequences_with_advantage,
@@ -2451,6 +2460,22 @@ pub(crate) fn digest(path: &Path) -> Result<String> {
 
 pub(crate) fn utf8(path: &Path) -> Result<&str> {
     path.to_str().ok_or_else(|| Error::Backend(format!("{}: not a UTF-8 path", path.display())))
+}
+
+/// The rules of the training-record contract that hold between records, over every record a policy-gradient run
+/// trains on (the dataset and its replay sets, read together): the first refusal, naming its rule and field.
+fn check_rollouts_together(dataset: &[ChatSample], replay: &[ChatSample], weighted: &[(Vec<ChatSample>, f32)]) -> Result<()> {
+    let sets = std::iter::once(("dataset", dataset)).chain(std::iter::once(("replay", replay))).chain(weighted.iter().map(|(records, _)| ("weighted replay", &records[..])));
+    let records: Vec<(&str, usize, Option<&data::chat_rollout::Rollout>)> = sets.flat_map(|(name, records)| records.iter().enumerate().map(move |(at, r)| (name, at, r.rollout.as_ref()))).collect();
+    let rollouts: Vec<Option<&data::chat_rollout::Rollout>> = records.iter().map(|(_, _, r)| *r).collect();
+    match data::chat_rollout::check_records(&rollouts).into_iter().next() {
+        None => Ok(()),
+        Some((at, refusal)) => {
+            let (name, index, _) = records[at];
+            let rule = refusal.fault().map_or("", |f| f.rule.name());
+            Err(Error::Backend(format!("ChatFineTune: policy_gradient: example {} of the {name} breaks the training-record rule {rule}: {refusal}", index + 1)))
+        }
+    }
 }
 
 #[cfg(test)]

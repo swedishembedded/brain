@@ -268,7 +268,7 @@ pub fn target_of(task: &Task) -> Vec<u32> {
 ///
 /// Dense partial credit is what gives a cold-start GRPO group reward
 /// VARIANCE to learn from: an exact-match reward makes every early group
-/// all-wrong, and [`crate::objective::grpo::group_advantages`] drops a
+/// all-wrong, and [`crate::objective::grpo::group_advantages_with`] drops a
 /// zero-variance group entirely, so an exact-match reward would train on
 /// nothing at all until the policy stumbled onto a fully correct completion
 /// by chance (probability `1/32^3`).

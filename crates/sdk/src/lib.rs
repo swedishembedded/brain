@@ -201,6 +201,9 @@ pub use model::kv_tier::{KvElement, KvTier};
 pub use rl::objective::numerics::{NumericsBounds, NumericsReport};
 #[cfg(feature = "study")]
 pub use rl::objective::grpo::LossAgg;
+/// How a policy-gradient run turns each group's rewards into advantages ([`PolicyGradientConfig::advantage_norm`]).
+#[cfg(feature = "study")]
+pub use rl::objective::advantage::AdvantageNorm;
 #[cfg(feature = "study")]
 pub use finetune::{DEFAULT_LORA_LR, DEFAULT_LORA_RANK, LORA_WEIGHT_DECAY, emit_held_out_records, score_chat, score_tokens, score_tokens_qwen35, HeldOutRecords, ChatFineTune, ChatFineTuneOutcome, FineTuneProgress, TrainFootprint, FineTuneStatus, HeldOutScore, MonitorPoint, PolicyGradientOutcome, RecordReadout, Selection, TokenReadout, TokenScore};
 #[cfg(feature = "study")]

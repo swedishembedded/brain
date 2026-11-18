@@ -29,7 +29,12 @@ pub(crate) const T: usize = 8;
 pub(crate) struct Row {
     pub(crate) ids: Vec<u32>,
     pub(crate) answer_from: usize,
+    /// The advantage the row trains with (`None`: an imitation row). Without [`Self::group`] the row is a rollout in a
+    /// group of its own with one partner rollout ([`write_dataset`]), so the advantage is exactly this; with it, this is
+    /// the row's reward and the advantage is computed from its group.
     pub(crate) advantage: Option<f32>,
+    /// The group the row's reward is compared within, when the test names one.
+    pub(crate) group: Option<&'static str>,
     /// One value per supervised token.
     pub(crate) behavior: Option<Vec<f32>>,
     /// The rollout did not reach an outcome: the record is masked.
@@ -38,20 +43,62 @@ pub(crate) struct Row {
 
 impl Row {
     pub(crate) fn new(ids: &[u32], answer_from: usize, advantage: Option<f32>) -> Row {
-        Row { ids: ids.to_vec(), answer_from, advantage, behavior: None, truncated: false }
+        Row { ids: ids.to_vec(), answer_from, advantage, group: None, behavior: None, truncated: false }
+    }
+
+    /// A row whose `reward` is compared within `group` (the rows of the dataset that name it).
+    pub(crate) fn rewarded(ids: &[u32], answer_from: usize, reward: f32, group: &'static str) -> Row {
+        Row { group: Some(group), ..Row::new(ids, answer_from, Some(reward)) }
     }
 }
 
+/// The seed every test positions the draw order with (`Objective::begin`).
+pub(crate) const DRAW_SEED: u64 = 17;
+
+fn encoded(row: &Row) -> data::chat::EncodedSample {
+    let mask: Vec<bool> = (0..row.ids.len()).map(|i| i >= row.answer_from).collect();
+    let mut behavior = vec![f32::NAN; row.ids.len()];
+    if let Some(b) = &row.behavior {
+        assert_eq!(b.len(), row.ids.len() - row.answer_from);
+        behavior[row.answer_from..].copy_from_slice(b);
+    }
+    data::chat::EncodedSample { ids: row.ids.clone(), mask, behavior, teacher: None, truncated: row.truncated }
+}
+
+/// The dataset of `rows` as the record contract lays it out. A row with an advantage and no group of its own is a
+/// rollout of reward `a` in a group with one partner rollout of reward `-a` (the same tokens): under the default
+/// mean-centred normalisation the row trains with exactly `a` (and the partner with `-a`). The examples are laid out so
+/// that the order a run positioned with [`DRAW_SEED`] draws first holds the given rows, in their order, and the
+/// partners after them: a test that draws no more than the rows it gave sees only those.
 pub(crate) fn write_dataset(dir: &Path, rows: &[Row]) {
+    type Rollout = Option<Option<data::chat_rollout::Outcome>>;
+    let graded = |reward: f32, group: String, member: &str| -> Rollout { Some(Some(data::chat_rollout::Outcome { reward: f64::from(reward), group, member: data::chat_rollout::Member::Named(member.to_string()) })) };
+    let mut given: Vec<(data::chat::EncodedSample, Rollout)> = Vec::new();
+    let mut partners = Vec::new();
+    for (at, row) in rows.iter().enumerate() {
+        let rollout = match (row.advantage, row.group) {
+            (None, _) => None,
+            (Some(reward), Some(group)) => graded(reward, group.to_string(), &format!("row-{at}")),
+            (Some(a), None) => {
+                if !row.truncated {
+                    partners.push((encoded(row), graded(-a, format!("row-{at}"), "partner")));
+                }
+                graded(a, format!("row-{at}"), "row")
+            }
+        };
+        given.push((encoded(row), rollout));
+    }
+    // The run draws `epoch_order(seed, eligible, 0)[k]`-th eligible example k-th: put the given rows in those slots.
+    let (finished, truncated): (Vec<_>, Vec<_>) = given.into_iter().partition(|(e, _)| !e.truncated);
+    let slots = finished.len() + partners.len();
+    let mut laid: Vec<Option<(data::chat::EncodedSample, Rollout)>> = vec![None; slots];
+    let order = if slots > 0 { model::train::epoch_order(DRAW_SEED, slots, 0) } else { Vec::new() };
+    for (k, example) in finished.into_iter().chain(partners).enumerate() {
+        laid[order[k]] = Some(example);
+    }
     let mut split = EncodedSplit::default();
-    for row in rows {
-        let mask: Vec<bool> = (0..row.ids.len()).map(|i| i >= row.answer_from).collect();
-        let mut behavior = vec![f32::NAN; row.ids.len()];
-        if let Some(b) = &row.behavior {
-            assert_eq!(b.len(), row.ids.len() - row.answer_from);
-            behavior[row.answer_from..].copy_from_slice(b);
-        }
-        split.push_rollout(&data::chat::EncodedSample { ids: row.ids.clone(), mask, behavior, teacher: None, truncated: row.truncated }, &[], row.advantage);
+    for (sample, rollout) in laid.into_iter().flatten().chain(truncated) {
+        split.push_rollout(&sample, &[], rollout);
     }
     data::chat::write_split(dir, "train", &split).unwrap();
     data::chat::write_split(dir, "val", &split).unwrap();
@@ -98,7 +145,7 @@ pub(crate) fn started(rows: &[Row], cfg: PolicyGradientConfig, m: &mut Qwen35) -
     write_dataset(dir.path(), rows);
     let mut obj = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), cfg).unwrap();
     Objective::<Qwen35>::prepare(&mut obj, m).unwrap();
-    Objective::<Qwen35>::begin(&mut obj, 17, 0);
+    Objective::<Qwen35>::begin(&mut obj, DRAW_SEED, 0);
     (obj, dir)
 }
 
@@ -124,7 +171,8 @@ fn a_positive_advantage_raises_and_a_negative_one_lowers_the_probability_of_the_
     training::require_token_objectives(&mut m).unwrap().enable_weighted_loss();
 
     let dir = tempfile::tempdir().unwrap();
-    write_dataset(dir.path(), &[Row { ..Row::new(&good.ids, 3, Some(1.0)) }, Row::new(&bad.ids, 3, Some(-1.0))]);
+    // One group: rewards 1 and -1, so the mean-centred advantages are +1 and -1.
+    write_dataset(dir.path(), &[Row::rewarded(&good.ids, 3, 1.0, "g"), Row::rewarded(&bad.ids, 3, -1.0, "g")]);
     let run = opts(6, 2, 2e-2);
     let mut obj = ExternalPolicyGradient::open(dir.path(), &run, PolicyGradientConfig { behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }).unwrap();
     let (report, m) = fit_controlled(m, &mut obj, &run, None, FitControl::default()).unwrap();
@@ -208,7 +256,8 @@ fn without_recorded_behaviour_the_first_step_is_the_on_policy_estimator() {
     let mut m = lora_model(data::rng::random_seed());
     let row = Row::new(&[1, 2, 3, 4, 5, 6], 3, Some(2.0));
     let (mut obj, _dir) = started(std::slice::from_ref(&row), no_kl(), &mut m);
-    assert_eq!(obj.stats().tokens_start_of_run_behavior, 3);
+    // The row's three answer tokens and its partner's (the rollout it is compared with).
+    assert_eq!(obj.stats().tokens_start_of_run_behavior, 6);
     assert_eq!(obj.stats().tokens_recorded_behavior, 0);
     let loss = one_step(&mut obj, &m);
     let step = &obj.stats().steps[0];
@@ -265,7 +314,8 @@ fn a_record_without_an_advantage_trains_as_the_supervised_fine_tune_does() {
     let mut obj = ExternalPolicyGradient::open(dir.path(), &opts(1, 2, 1e-2), no_kl()).unwrap();
     Objective::<Qwen35>::prepare(&mut obj, &mut m).unwrap();
     Objective::<Qwen35>::begin(&mut obj, 17, 0);
-    assert_eq!((obj.stats().sequences_imitation, obj.stats().sequences_with_advantage), (1, 1));
+    // The zero-advantage row and its partner (a flat group).
+    assert_eq!((obj.stats().sequences_imitation, obj.stats().sequences_with_advantage), (1, 2));
     m.zero_grads();
     let loss = Objective::<Qwen35>::micro_steps(&mut obj, &m, &mut Rng::new(1), 2);
     m.poll_wait();
@@ -294,11 +344,11 @@ fn a_mistaken_configuration_is_refused_before_anything_trains() {
 }
 
 #[test]
-fn a_supervised_trainer_refuses_a_dataset_that_carries_advantages() {
+fn a_supervised_trainer_refuses_a_dataset_of_rollouts() {
     let dir = tempfile::tempdir().unwrap();
     write_dataset(dir.path(), &[Row::new(&[1, 2, 3, 4], 2, Some(1.0))]);
     let err = model::load_dataset_with_images(dir.path(), &opts(1, 1, 1e-2)).err().expect("refused");
-    assert!(err.to_string().contains("advantages") && err.to_string().contains("policy_gradient"), "{err}");
+    assert!(err.to_string().contains("rollouts") && err.to_string().contains("policy_gradient"), "{err}");
     assert!(model::load_rollout_dataset(dir.path(), &opts(1, 1, 1e-2)).is_ok());
 }
 
@@ -307,7 +357,7 @@ fn a_supervised_trainer_refuses_a_dataset_that_carries_advantages() {
 #[test]
 fn every_step_reports_finite_statistics_and_the_step_log_line_carries_them() {
     let mut m = lora_model(data::rng::random_seed());
-    let rows = [Row::new(&[1, 2, 3, 4, 5, 6], 3, Some(1.0)), Row::new(&[2, 3, 4, 5, 6, 7], 3, Some(-1.0))];
+    let rows = [Row::rewarded(&[1, 2, 3, 4, 5, 6], 3, 1.0, "g"), Row::rewarded(&[2, 3, 4, 5, 6, 7], 3, -1.0, "g")];
     let cfg = PolicyGradientConfig { reference: ReferencePolicy::StartOfRun, loss_agg: LossAgg::TokenSum, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() };
     let (mut obj, _dir) = started(&rows, cfg, &mut m);
     assert_eq!(Objective::<Qwen35>::step_log(&obj), None, "nothing to say before the first step");
@@ -325,15 +375,16 @@ fn every_step_reports_finite_statistics_and_the_step_log_line_carries_them() {
     assert!(obj.stats().steps[0].kl.unwrap().abs() < 1e-6, "the first step sits on its own reference");
 }
 
-pub(crate) fn recorded(ids: &[u32], answer_from: usize, advantage: f32) -> Row {
-    Row { behavior: Some(vec![-1.0; ids.len() - answer_from]), ..Row::new(ids, answer_from, Some(advantage)) }
+/// A row of group `g` with `reward`, its behaviour log-probabilities recorded.
+pub(crate) fn recorded(ids: &[u32], answer_from: usize, reward: f32) -> Row {
+    Row { behavior: Some(vec![-1.0; ids.len() - answer_from]), ..Row::rewarded(ids, answer_from, reward, "g") }
 }
 
 /// T016: the ratio is taken against the sampler's recorded log-probabilities, or - only when asked for - against the
 /// start of the run, and the result says which.
 #[test]
 fn the_behaviour_policy_is_the_recorded_one_unless_the_start_of_run_proxy_is_asked_for() {
-    let unrecorded = [Row::new(&[1, 2, 3, 4, 5, 6], 3, Some(1.0)), Row::new(&[2, 3, 4, 5, 6, 7], 3, Some(-1.0))];
+    let unrecorded = [Row::rewarded(&[1, 2, 3, 4, 5, 6], 3, 1.0, "g"), Row::rewarded(&[2, 3, 4, 5, 6, 7], 3, -1.0, "g")];
     let dir = tempfile::tempdir().unwrap();
     write_dataset(dir.path(), &unrecorded);
     let err = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), PolicyGradientConfig::default()).err().expect("no recorded behaviour, no explicit proxy");
@@ -348,35 +399,35 @@ fn the_behaviour_policy_is_the_recorded_one_unless_the_start_of_run_proxy_is_ask
     assert_eq!((obj.stats().behaviour, obj.stats().tokens_recorded_behavior, obj.stats().tokens_start_of_run_behavior), (BehaviourSource::Recorded, 6, 0));
 
     // One record short of exact is not exact: the proxy has to be asked for by name.
-    write_dataset(dir.path(), &[recorded(&[1, 2, 3, 4, 5, 6], 3, 1.0), Row::new(&[2, 3, 4, 5, 6, 7], 3, Some(-1.0))]);
+    write_dataset(dir.path(), &[recorded(&[1, 2, 3, 4, 5, 6], 3, 1.0), Row::rewarded(&[2, 3, 4, 5, 6, 7], 3, -1.0, "g")]);
     let err = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), PolicyGradientConfig::default()).err().expect("a partly recorded dataset");
     assert!(err.to_string().contains("3 of the 6"), "{err}");
 }
 
-/// T017: a rollout dataset that lost its advantage sidecar is refused, not trained as imitation.
+/// T017: a rollout dataset that lost its rollout sidecar is refused, not trained as imitation.
 #[test]
 fn a_rollout_dataset_missing_its_sidecars_is_refused_not_trained_as_imitation() {
     let dir = tempfile::tempdir().unwrap();
-    write_dataset(dir.path(), &[recorded(&[1, 2, 3, 4, 5, 6], 3, 1.0)]);
-    std::fs::remove_file(dir.path().join("train.adv.bin")).unwrap();
-    let err = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), PolicyGradientConfig::default()).err().expect("behaviour log-probabilities without advantages");
+    write_dataset(dir.path(), &[recorded(&[1, 2, 3, 4, 5, 6], 3, 1.0), recorded(&[2, 3, 4, 5, 6, 7], 3, 0.0)]);
+    std::fs::remove_file(dir.path().join("train.rollouts.json")).unwrap();
+    let err = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), PolicyGradientConfig::default()).err().expect("behaviour log-probabilities without rewards");
     assert!(err.to_string().contains("train.blp.bin") && err.to_string().contains("imitation"), "{err}");
 
     write_dataset(dir.path(), &[Row::new(&[1, 2, 3, 4, 5, 6], 3, Some(1.0))]);
-    std::fs::remove_file(dir.path().join("train.adv.bin")).unwrap();
+    std::fs::remove_file(dir.path().join("train.rollouts.json")).unwrap();
     let err = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), PolicyGradientConfig { behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }).err().expect("no sidecar at all");
     assert!(err.to_string().contains("imitation") && err.to_string().contains("supervised objective"), "{err}");
 
-    // Every record without an advantage is the same case, however the files came to be.
+    // Every record without a reward is the same case, however the files came to be.
     write_dataset(dir.path(), &[Row::new(&[1, 2, 3, 4, 5, 6], 3, None)]);
     let err = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), PolicyGradientConfig::default()).err().expect("an all-imitation dataset");
     assert!(err.to_string().contains("imitation"), "{err}");
 }
 
-/// T019: a dataset holding a token id past the model's vocabulary is refused before any step, and an infinite
-/// advantage when the dataset is opened.
+/// T019: a dataset holding a token id past the model's vocabulary is refused before any step (a reward that is not
+/// finite never gets as far: the record reader, the sidecar writer and its reader refuse it).
 #[test]
-fn a_token_id_past_the_vocabulary_or_an_infinite_advantage_is_refused() {
+fn a_token_id_past_the_vocabulary_is_refused() {
     let mut m = lora_model(data::rng::random_seed());
     let vocab = Model::config(&m).vocab as u32;
     let config = no_kl();
@@ -387,9 +438,6 @@ fn a_token_id_past_the_vocabulary_or_an_infinite_advantage_is_refused() {
     let err = Objective::<Qwen35>::check_data(&mut obj, &m).unwrap_err();
     assert!(err.to_string().contains("vocabulary"), "{err}");
 
-    write_dataset(dir.path(), &[Row::new(&[1, 2, 3, 4, 5, 6], 3, Some(f32::INFINITY))]);
-    let err = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), config).err().expect("an infinite advantage");
-    assert!(err.to_string().contains("infinite advantage"), "{err}");
 }
 
 /// Recorded behaviour log-probabilities in the record contract's convention (natural log, one per supervised token,
@@ -424,4 +472,81 @@ fn recorded_log_probs_in_the_contracts_convention_give_a_first_step_ratio_of_one
         println!("seed {seed}: {what}: ratio {:.4}..{:.4}", step.ratio_min, step.ratio_max);
         assert!((step.ratio_min - 1.0).abs() > 1e-3 || (step.ratio_max - 1.0).abs() > 1e-3, "{what}: {step:?}");
     }
+}
+
+/// L1: the advantages a run trains with are computed when it opens, per group, from the rewards of the group's
+/// rollouts: each normalisation equals its fp64 definition, a rollout of several calls counts once, a truncated one
+/// takes no part, and leave-one-out is mean-centring scaled by `G / (G - 1)`, a factor that differs between groups of
+/// different sizes.
+#[test]
+fn the_advantages_are_each_groups_rewards_under_the_runs_normalisation() {
+    use data::chat_rollout::{Member, Outcome};
+    use rl::objective::advantage::AdvantageNorm;
+    // (group, rollout, reward, truncated): group a holds two rollouts, one of them two calls; group b holds four
+    // finished rollouts and a truncated one.
+    let examples: [(&str, &str, f64, bool); 8] = [("a", "a0", 1.0, false), ("a", "a1", 0.25, false), ("a", "a0", 1.0, false), ("b", "b0", 0.9, false), ("b", "b1", 0.1, false), ("b", "b2", 0.4, false), ("b", "b3", 0.0, false), ("b", "b4", 7.0, true)];
+    let dir = tempfile::tempdir().unwrap();
+    let mut split = EncodedSplit::default();
+    for (k, &(group, rollout, reward, truncated)) in examples.iter().enumerate() {
+        let ids: Vec<u32> = (0..6).map(|i| 1 + ((k + i) % 20) as u32).collect();
+        let mask = (0..6).map(|i| i >= 3).collect();
+        let outcome = Outcome { reward, group: group.to_string(), member: Member::Named(rollout.to_string()) };
+        split.push_rollout(&data::chat::EncodedSample { ids, mask, behavior: vec![f32::NAN; 6], teacher: None, truncated }, &[], Some(Some(outcome)));
+    }
+    data::chat::write_split(dir.path(), "train", &split).unwrap();
+    data::chat::write_split(dir.path(), "val", &split).unwrap();
+    std::fs::write(dir.path().join("meta.json"), data::binio::Meta::vocab_only(29)).unwrap();
+
+    // The fp64 definitions, written out per member.
+    let oracle = |norm: AdvantageNorm, rewards: &[f64]| -> Vec<f64> {
+        let g = rewards.len() as f64;
+        let mean = rewards.iter().sum::<f64>() / g;
+        let std = (rewards.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / g).sqrt();
+        rewards
+            .iter()
+            .enumerate()
+            .map(|(i, r)| match norm {
+                AdvantageNorm::MeanCentered => r - mean,
+                AdvantageNorm::ZScore => (r - mean) / (std + 1e-4),
+                AdvantageNorm::LeaveOneOut => r - rewards.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, x)| x).sum::<f64>() / (g - 1.0),
+            })
+            .collect()
+    };
+    let (a, b) = ([1.0, 0.25], [0.9, 0.1, 0.4, 0.0]);
+    let mut by_norm = Vec::new();
+    for norm in AdvantageNorm::ALL {
+        let cfg = PolicyGradientConfig { advantage_norm: norm, ..no_kl() };
+        let obj = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), cfg).unwrap();
+        let (want_a, want_b) = (oracle(norm, &a), oracle(norm, &b));
+        let want = [want_a[0], want_a[1], want_a[0], want_b[0], want_b[1], want_b[2], want_b[3]];
+        for (e, w) in want.iter().enumerate() {
+            let got = f64::from(obj.advantage(e).unwrap());
+            assert!((got - w).abs() <= 1e-6 * w.abs().max(1.0), "{norm:?} example {e}: {got} against {w}");
+        }
+        assert_eq!(obj.stats().sequences_truncated, 1);
+        by_norm.push((0..7).map(|e| f64::from(obj.advantage(e).unwrap())).collect::<Vec<_>>());
+    }
+    let (centred, loo) = (&by_norm[0], &by_norm[2]);
+    let (factor_a, factor_b) = (loo[0] / centred[0], loo[3] / centred[3]);
+    assert!((factor_a - 2.0).abs() < 1e-5 && (factor_b - 4.0 / 3.0).abs() < 1e-5, "G/(G-1) per group: {factor_a}, {factor_b}");
+}
+
+/// A group with one rollout that reached an outcome, and two calls of one rollout that disagree, are refused when the
+/// run opens, by the contract's rule.
+#[test]
+fn a_group_of_one_and_a_rollout_that_disagrees_with_itself_are_refused_by_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    write_dataset(dir.path(), &[Row::rewarded(&[1, 2, 3, 4, 5, 6], 3, 1.0, "lonely"), Row::rewarded(&[2, 3, 4, 5, 6, 7], 3, 1.0, "g"), Row::rewarded(&[3, 4, 5, 6, 7, 8], 3, 0.0, "g")]);
+    let err = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), no_kl()).err().expect("a group of one");
+    assert!(err.to_string().contains("group_of_one") && err.to_string().contains("\"lonely\""), "{err}");
+
+    let mut split = EncodedSplit::default();
+    for (k, reward) in [1.0, 0.0, 0.5].into_iter().enumerate() {
+        let member = data::chat_rollout::Member::Named(if k < 2 { "same".into() } else { "other".into() });
+        let outcome = data::chat_rollout::Outcome { reward, group: "g".into(), member };
+        split.push_rollout(&encoded(&Row::new(&[1, 2, 3, 4, 5, 6], 3, None)), &[], Some(Some(outcome)));
+    }
+    data::chat::write_split(dir.path(), "train", &split).unwrap();
+    let err = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), no_kl()).err().expect("a rollout with two rewards");
+    assert!(err.to_string().contains("rollout_mismatch"), "{err}");
 }

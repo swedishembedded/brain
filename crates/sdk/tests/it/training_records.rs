@@ -7,7 +7,7 @@
 
 #![cfg(feature = "study")]
 
-//! The training-record contract, version 1, held to its fixtures (`crates/data/tests/fixtures/training-records/v1`):
+//! The training-record contract, version 2, held to its fixtures (`crates/data/tests/fixtures/training-records/v2`):
 //! `brain::dataset_report::check_dataset`, against the fixtures' own tokenizer and chat template, accepts every record
 //! of the valid files and refuses each invalid one with the rule and the field its `manifest.json` names. A producer
 //! copies the same files as its own test, so a change to what brain accepts is a change to these files and to the
@@ -18,17 +18,17 @@ use std::path::PathBuf;
 use brain::dataset_report::{check_dataset, DatasetCheck, DatasetKind};
 
 fn fixtures() -> PathBuf {
-    PathBuf::from(brain_testutil::repo_path("crates/data/tests/fixtures/training-records/v1"))
+    PathBuf::from(brain_testutil::repo_path("crates/data/tests/fixtures/training-records/v2"))
 }
 
 #[test]
 fn every_fixture_is_accepted_or_refused_by_the_rule_and_field_its_manifest_names() {
     let root = fixtures();
     let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("manifest.json")).unwrap()).unwrap();
-    assert_eq!(manifest["contract"], "training-records-v1");
+    assert_eq!(manifest["contract"], "training-records-v2");
     let model = root.join(manifest["tokenizer"].as_str().unwrap());
     let files = manifest["files"].as_array().unwrap();
-    assert!(files.len() >= 6, "{manifest}");
+    assert!(files.len() >= 11, "{manifest}");
     for file in files {
         let path = file["path"].as_str().unwrap();
         let kind = match file["kind"].as_str().unwrap() {
@@ -55,8 +55,8 @@ fn the_rollout_fixture_supervises_the_tokens_its_records_carry() {
     let root = fixtures();
     let check = DatasetCheck { kind: DatasetKind::Chat, thinking: true, pack_answers: false, max_block: 512, list_records: None };
     let report = check_dataset(root.join("model"), root.join("chat_rollout.jsonl"), &check, &mut || true).unwrap();
-    // Four records; the one with two answers is two examples.
-    assert_eq!((report.valid_records, report.examples), (4, 5));
+    // Seven records; the ones with two and three answers are two and three examples.
+    assert_eq!((report.valid_records, report.examples), (7, 10));
     let text = std::fs::read_to_string(root.join("chat_rollout.jsonl")).unwrap();
     for line in text.lines() {
         let record: serde_json::Value = serde_json::from_str(line).unwrap();

@@ -52,7 +52,7 @@ fn gpu_disabled() -> bool {
 }
 
 /// GRPO (`group_size = 2`): real sampling variance across the group is what
-/// exercises `group_advantages`'s non-degenerate z-score path, not just its
+/// exercises `group_advantages_with`'s non-degenerate z-score path, not just its
 /// zero-variance drop.
 #[test]
 fn grpo_group_size_two_runs_end_to_end_through_fit_with() {
