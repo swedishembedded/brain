@@ -58,14 +58,14 @@ pub(crate) fn build(rest: &str, max_batch: Option<u32>) -> Result<Box<dyn PerfTa
     if devices.is_empty() {
         return Err(format!("qwen35 target: {path} does not fit the schedulable GPUs: {}", served.unavailable_reason(&key).unwrap_or_default()));
     }
-    let (mut sched, _tokenizer, _stop) = served.activate_scheduler(&devices)?;
+    let (mut sched, _tokenizer, _stop) = served.with_first(|r| r.activate_scheduler(&devices))?;
     let vocab = model::serve::PagedDecoder::vocab(sched.decoder_mut()) as u32;
     let mut info = TargetInfo::new("qwen35", "token")
         .with("weights", path.into())
         .with("max_batch", served.max_batch().into())
         .with("ctx", served.cap().into())
-        .with("kv_dtype", served.kv_tier().as_str().into())
-        .with("prefix_slots", served.prefix_slots().into())
+        .with("kv_dtype", served.with_first(|r| r.kv_tier()).as_str().into())
+        .with("prefix_slots", served.with_first(|r| r.prefix_slots()).into())
         .with("devices", devices.iter().map(|d| format!("{d:?}")).collect::<Vec<_>>().into());
     for (i, line) in served.chosen_defaults().iter().enumerate() {
         info = info.with(&format!("default_{i}"), line.as_str().into());

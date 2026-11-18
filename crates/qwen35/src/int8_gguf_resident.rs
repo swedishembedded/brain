@@ -4270,6 +4270,11 @@ impl Qwen35GgufResident {
         unipool::sequence_blocks(&unipool::StateGeometry::of(cfg, self.gdn_state.is_bf16(), self.max_batch), kv_planes).saturating_mul(block_rows)
     }
 
+    /// Rows of the shared KV pool this resident is planned with (0 before one is sized).
+    pub fn kv_pool_rows(&self) -> u32 {
+        self.kv_pool_rows
+    }
+
     /// See [`Self::with_prefix_slots`].
     pub fn prefix_slots(&self) -> u32 {
         self.prefix_slots

@@ -236,6 +236,17 @@ classed error rather than taking the lane down. `brain serve`
 logs each choice and why (`brain: <id>: default ...`). Adding a default is
 adding a rule or a candidate where its throughput ranks it.
 
+These defaults are sized to the cards' free memory when the server scans its
+models. When a request later finds the cards giving less than that plan needs
+(another process took memory on them after the scan), the context, the batch,
+the prompt cache and the KV pool the operator did not name are sized again to
+what the cards give now, the weight, KV and recurrent-state tiers chosen at the
+scan are kept, the change is logged as a warning naming each value before and
+after, and the model is listed with its new context (`max_context_tokens` in
+`/v1/models` and the D-Bus manifests). A setting the operator named is never
+changed; when no plan fits even at the leanest settings the request is refused
+as before and retried when memory returns.
+
 What it does differently:
 
 - **Speculative decoding** (`--speculative`, `model::serve::speculate`). The

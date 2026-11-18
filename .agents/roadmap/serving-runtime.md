@@ -787,14 +787,24 @@ int8 C = 16 arm measured 536 tok/s (0.59): the second pass over the weights. Ope
       (`Footprint::per_stage`). `--reserve-gb` no longer grows with `--max-batch`: the measured rule is charged per model only to
       a model that declares no estimate, and an explicit `--reserve-gb` is the whole headroom. Tests: `crates/residency/tests/it/activation.rs`,
       `model::memplan` (the calibration point), `catalog` `estimate_counts_the_kv_pool_and_shrinks_under_int8`, `cli` `card_reserve`.
-- [ ] A defaulted plan is sized once, to the card's free bytes at the model scan, and never again (2026-11-18,
+- [x] A defaulted plan is re-planned when a co-tenant shrank the card after the scan (2026-11-18, decision: re-plan, not
+      an operator-named share): `residency::ResidentModel::replan`, called by the manager when a claim would be starved,
+      with each card's bytes usable now; the Qwen3.8 GGUF/FP8 resident (`Qwen35GgufServed`) sizes again the context,
+      batch, prompt cache and KV pool the operator did not name (the weight, KV and state tiers stay as chosen), the
+      manager logs the change as a warning and the executor lists the new manifests (`max_context_tokens`). Tests
+      `residency` `a_defaulted_plan_is_resized_to_a_card_a_co_tenant_shrank_and_a_named_one_is_not`,
+      `a_re_planned_model_runs_and_is_listed_with_its_new_context`, `catalog`
+      `a_defaulted_plan_is_sized_again_to_a_card_a_co_tenant_shrank_and_a_named_context_is_kept` (synthetic GGUF, modelled
+      card). Open: the Qwen3 resident (`QwenResident`, single-device) keeps its plan fixed for its lifetime (its plan is
+      also a worker's host spec); a re-plan is only asked for when a claim is starved, so a plan sized to a smaller card
+      does not grow back when memory returns, and a re-plan that leaves fewer replicas than the executor routed to
+      maps the extra replica keys onto the last replica; not run on a card.
+      The report (2026-11-18,
       Qwen3.8-27B-FP8, one GH200, 97,871 MiB). On a free card the default is max-batch 64 and ctx 886,784, and it serves. With a
       30 GiB co-tenant already present at the scan it is max-batch 64 and ctx 186,368, and it serves. With an 8 GiB
       co-tenant arriving after the scan, the 94,904 MiB plan meets 86,385 MiB usable and the model is `Starved` on every
       request until a restart. This is the reported "did not fit gpu0's budget" on a card another lane was using.
-      `--max-batch 16` fitted only because the restart re-planned. Needed: a defaulted context and KV pool re-planned to
-      the usable bytes when the instance is built (the advertised context then follows), or sized with a share of the card
-      named by the operator. Which of the two is a contract decision.
+      `--max-batch 16` fitted only because the restart re-planned.
 - [ ] The launch workspace is calibrated on one model and one card; a second measurement (Qwen3 at 64 rows on a 24 GB card)
       would tell whether depth times width is the right scale.
 - [ ] `policy_trace` over D-Bus is the `generate` action's `policy_trace` param, the same spec as HTTP (no separate gap); the

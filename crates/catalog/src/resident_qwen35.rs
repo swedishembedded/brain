@@ -603,6 +603,17 @@ pub fn gguf_resident(gguf_path: &str, id: &str, gpus: &[(u32, u64)], reserved: u
 /// (its device bytes are part of the placement), so adapters can be offered
 /// on it ([`AdapterHost`]).
 pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], reserved: u64, cfg: &Qwen35GgufServeConfig, bank: Option<AdapterBankSettings>) -> Result<Qwen35GgufServed, String> {
+    let offered: Vec<(Device, u64)> = gpus.iter().map(|&(i, total)| (Device::Gpu(i), total.saturating_sub(reserved))).collect();
+    let (plan, pinned) = plan_served(gguf_path, id, &offered, cfg, bank.as_ref())?;
+    let replanner = Replanner { gguf_path: gguf_path.to_string(), id: id.to_string(), cfg: pinned, bank: bank.clone(), cards: gpus.iter().map(|&(i, _)| Device::Gpu(i)).collect() };
+    Ok(Qwen35GgufServed::new(plan, bank, gguf_path, id, replanner))
+}
+
+/// The replicas [`gguf_resident_banked`] serves on `offered` (each card and the bytes it can give), with every
+/// serving default the operator left unset chosen for those bytes, and `cfg` with the choices a re-plan keeps pinned:
+/// the weight tiers, the KV tier and the recurrent-state precision. The context, the batch, the prompt cache and the KV
+/// pool stay as the operator gave them, so a re-plan ([`Qwen35GgufServed`]'s `replan`) chooses them again.
+fn plan_served(gguf_path: &str, id: &str, offered: &[(Device, u64)], cfg: &Qwen35GgufServeConfig, bank: Option<&AdapterBankSettings>) -> Result<(ServedPlan, Qwen35GgufServeConfig), String> {
     use qwen35::int8_gguf_resident::{Qwen35GgufResident, SpecServing, SpeculativeMode};
     use qwen35::resident_checkpoint::ResidentCheckpoint;
     if let Some(why) = &cfg.refused {
@@ -638,7 +649,6 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
             held
         }
     };
-    let offered: Vec<(Device, u64)> = gpus.iter().map(|&(i, total)| (Device::Gpu(i), total.saturating_sub(reserved))).collect();
     if offered.is_empty() {
         return Err("no GPU is budgeted for it (its weights are device buffers; there is no CPU path)".to_string());
     }
@@ -675,7 +685,7 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
     // the whole box, and a model that fits one card would span all of them as a single instance (one set of decode slots,
     // a cross-card hop per token) with no card left for another replica.
     let leanest_batch = cfg.max_batch.unwrap_or(1).max(1);
-    let group = card_group(&offered, |cards| fits(build_on(cards, cfg.kv.unwrap_or(model::kv_tier::KvTier::INT8), SpeculativeMode::Off, leanest_batch, 0, probe_cap)).is_ok());
+    let group = card_group(offered, |cards| fits(build_on(cards, cfg.kv.unwrap_or(model::kv_tier::KvTier::INT8), SpeculativeMode::Off, leanest_batch, 0, probe_cap)).is_ok());
     let devices = offered[..group].to_vec();
     let build = |kv, mode, max_batch, prefix_slots, cap| build_on(&devices, kv, mode, max_batch, prefix_slots, cap);
     // Chosen in the order they matter to throughput, each with the ones not yet
@@ -744,7 +754,8 @@ pub fn gguf_resident_banked(gguf_path: &str, id: &str, gpus: &[(u32, u64)], rese
         let cards: Vec<String> = replicas.iter().map(|r| r.placement().iter().map(|(d, ..)| format!("{d:?}")).collect::<Vec<_>>().join("+")).collect();
         chosen.push(format!("{} replicas ({}): one per group of cards that holds the model, each with its own KV pool and prefix cache, the next built when the running ones are full", replicas.len(), cards.join(", ")));
     }
-    Ok(Qwen35GgufServed::new(replicas, bank, gguf_path, id, chosen))
+    let pinned = Qwen35GgufServeConfig { tier: Some(tier.clone()), kv: Some(kv), gdn_state: Some(gdn_state), ..cfg.clone() };
+    Ok((ServedPlan { replicas, chosen }, pinned))
 }
 
 /// How many leading cards of `offered` one replica spans: the fewest on which `holds` the model (all of them when no
@@ -755,34 +766,88 @@ fn card_group<T>(offered: &[T], mut holds: impl FnMut(&[T]) -> bool) -> usize {
 
 /// A released Qwen3.8 GGUF resident with the adapters offered beside it.
 ///
-/// Everything about the model is [`Qwen35GgufResident`]'s (it derefs to it:
-/// placement, activation, the engine); this adds the registry of adapters the
+/// Everything about the model is its replicas' [`Qwen35GgufResident`]s'
+/// (placement, activation, the engine); this adds the registry of adapters the
 /// operator wants served and the instance that applies them. Each served
 /// adapter is a model of its own ([`llmserve::adapter_registry::AdapterView`])
 /// registered with the executor beside this one, sharing its instance, so a
 /// batch mixes base and adapter requests in one batched decode step.
+///
+/// The plan is the one thing that changes: what was sized to the cards' free bytes when the server scanned its
+/// models (the context, the batch, the prompt cache and the KV pool the operator did not name) is sized again when a
+/// request finds the cards smaller than that plan ([`ResidentModel::replan`]), so a co-tenant that arrived after the
+/// scan shrinks the plan instead of starving the model until a restart.
 pub struct Qwen35GgufServed {
+    plan: std::sync::RwLock<Arc<ServedPlan>>,
+    adapters: Arc<AdapterRegistry>,
+    replanner: Replanner,
+}
+
+/// One plan of a [`Qwen35GgufServed`].
+struct ServedPlan {
     /// One resident per replica, each placed on its own cards (replica 0 first); all share one configuration, so the
     /// manifest, the slots and the context are the first one's.
     replicas: Vec<qwen35::int8_gguf_resident::Qwen35GgufResident>,
-    adapters: Arc<AdapterRegistry>,
     /// Each serving default taken from the hardware, with why.
     chosen: Vec<String>,
 }
 
+impl ServedPlan {
+    /// The resident the replica `key` names.
+    fn replica(&self, key: &InstanceKey) -> &qwen35::int8_gguf_resident::Qwen35GgufResident {
+        &self.replicas[key.replica_index().min(self.replicas.len() - 1)]
+    }
+
+    /// What a re-plan reports as changed: context, batch, prompt cache, KV pool and replicas.
+    fn shape(&self) -> [(&'static str, u64); 5] {
+        let first = &self.replicas[0];
+        [("--ctx", first.cap().into()), ("--max-batch", first.max_batch().into()), ("prefix slots", first.prefix_slots().into()), ("KV pool tokens", first.kv_pool_rows().into()), ("replicas", self.replicas.len() as u64)]
+    }
+}
+
+/// What a [`Qwen35GgufServed`] is planned again from: the checkpoint, the configuration with the choices a re-plan
+/// keeps pinned ([`plan_served`]), the bank, and the cards the scan offered it.
+struct Replanner {
+    gguf_path: String,
+    id: String,
+    cfg: Qwen35GgufServeConfig,
+    bank: Option<AdapterBankSettings>,
+    cards: Vec<Device>,
+}
+
 impl Qwen35GgufServed {
-    fn new(replicas: Vec<qwen35::int8_gguf_resident::Qwen35GgufResident>, bank: Option<AdapterBankSettings>, gguf_path: &str, id: &str, chosen: Vec<String>) -> Qwen35GgufServed {
+    fn new(plan: ServedPlan, bank: Option<AdapterBankSettings>, gguf_path: &str, id: &str, replanner: Replanner) -> Qwen35GgufServed {
         // An adapter trains on the full-precision release and serves on its
         // quantisation: the card names the release, not this file.
         let base = ServedBase::of_family(family(), gguf_path, Some(id.to_string())).quantizing(&QWEN35_SOURCES);
-        Qwen35GgufServed { replicas, adapters: AdapterRegistry::new(bank, base), chosen }
+        Qwen35GgufServed { plan: std::sync::RwLock::new(Arc::new(plan)), adapters: AdapterRegistry::new(bank, base), replanner }
+    }
+
+    fn plan(&self) -> Arc<ServedPlan> {
+        self.plan.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Each setting the operator left unset, as `knob value: why` - what the
     /// hardware's rules chose ([`KV_DEFAULTS`], [`SPECULATION_DEFAULTS`],
     /// [`PREFIX_SLOT_DEFAULTS`]) and the context the cards hold.
-    pub fn chosen_defaults(&self) -> &[String] {
-        &self.chosen
+    pub fn chosen_defaults(&self) -> Vec<String> {
+        self.plan().chosen.clone()
+    }
+
+    /// `f` of the first replica's resident as planned now: what the serving settings and the placement report speak
+    /// of.
+    pub fn with_first<R>(&self, f: impl FnOnce(&qwen35::int8_gguf_resident::Qwen35GgufResident) -> R) -> R {
+        f(&self.plan().replicas[0])
+    }
+
+    /// The longest context one request may have, as planned now.
+    pub fn cap(&self) -> u32 {
+        self.plan().replicas[0].cap()
+    }
+
+    /// The decode slots of one replica, as planned now.
+    pub fn max_batch(&self) -> u32 {
+        self.plan().replicas[0].max_batch()
     }
 }
 
@@ -796,23 +861,10 @@ pub fn family() -> ServedFamily {
 
 const QWEN35_SOURCES: [&str; 4] = ["Qwen/Qwen3.8-27B-FP8", "Qwen/Qwen3.8-27B", "Qwen3.8-27B-FP8", "Qwen3.8-27B"];
 
-impl std::ops::Deref for Qwen35GgufServed {
-    type Target = qwen35::int8_gguf_resident::Qwen35GgufResident;
-    /// The first replica: what the serving settings, the manifest and the placement report speak of.
-    fn deref(&self) -> &Self::Target {
-        &self.replicas[0]
-    }
-}
-
 impl Qwen35GgufServed {
-    /// The resident the replica `key` names.
-    fn replica(&self, key: &InstanceKey) -> &qwen35::int8_gguf_resident::Qwen35GgufResident {
-        &self.replicas[key.replica_index().min(self.replicas.len() - 1)]
-    }
-
     /// Every replica's placement, as `(replica, device, layers start, layers end, bytes)`.
     pub fn replica_placements(&self) -> Vec<(usize, Device, usize, usize, u64)> {
-        self.replicas.iter().enumerate().flat_map(|(i, r)| r.placement().into_iter().map(move |(d, start, end, bytes)| (i, d, start, end, bytes))).collect()
+        self.plan().replicas.iter().enumerate().flat_map(|(i, r)| r.placement().into_iter().map(move |(d, start, end, bytes)| (i, d, start, end, bytes))).collect()
     }
 }
 
@@ -832,24 +884,25 @@ impl ResidentModel for Qwen35GgufServed {
     /// wrapper: the adapter views served over this resident restate its
     /// manifest, so they declare it too.
     fn manifest(&self) -> Manifest {
-        self.replicas[0].manifest().with_architecture(qwen35::spec::CARD_FAMILY)
+        self.plan().replicas[0].manifest().with_architecture(qwen35::spec::CARD_FAMILY)
     }
     fn instance_key(&self, action: &str, inv: &Invocation) -> InstanceKey {
-        self.replicas[0].instance_key(action, inv)
+        self.plan().replicas[0].instance_key(action, inv)
     }
     fn estimate(&self, key: &InstanceKey) -> MemCost {
-        self.replica(key).estimate(key)
+        self.plan().replica(key).estimate(key)
     }
     fn batch_limit(&self) -> Option<usize> {
-        self.replicas[0].batch_limit()
+        self.plan().replicas[0].batch_limit()
     }
     fn replicas(&self) -> usize {
-        self.replicas.len()
+        self.plan().replicas.len()
     }
     /// Requests fill a replica's decode slots before the next replica is built, and follow the prompts each replica's
     /// prefix cache keeps.
     fn replica_routing(&self) -> Option<residency::affinity::ReplicaRouting> {
-        let first = &self.replicas[0];
+        let plan = self.plan();
+        let first = &plan.replicas[0];
         Some(residency::affinity::ReplicaRouting { slots: first.max_batch() as usize, cached_prompts: first.prefix_slots() as usize })
     }
     /// The request's prompt keyed for the prefix caches, in the namespace of the adapter it names: a prefix cached under
@@ -858,16 +911,38 @@ impl ResidentModel for Qwen35GgufServed {
         llmserve::request_prefix_chain(inv, &inv.get_str(llmserve::adapter_registry::ADAPTER_PARAM).unwrap_or_default())
     }
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        self.replica(key).activate(key, device)
+        self.plan().replica(key).activate(key, device)
+    }
+    /// The context, batch, prompt cache and KV pool the operator did not name, sized again to the bytes the cards
+    /// give now (the weight, KV and recurrent-state tiers stay as chosen). `None` when the plan that fits is the one
+    /// in place, or when nothing fits even at the leanest settings (the claim stays starved).
+    fn replan(&self, _key: &InstanceKey, usable: &[(Device, u64)]) -> Option<String> {
+        let r = &self.replanner;
+        let offered: Vec<(Device, u64)> = r.cards.iter().filter_map(|card| usable.iter().find(|(d, _)| d == card).copied()).collect();
+        let (fresh, _) = match plan_served(&r.gguf_path, &r.id, &offered, &r.cfg, r.bank.as_ref()) {
+            Ok(planned) => planned,
+            Err(why) => {
+                residency::log::debug(&format!("{MODEL}: no plan fits the cards as they are now: {why}"));
+                return None;
+            }
+        };
+        let old = self.plan();
+        let changed: Vec<String> = old.shape().iter().zip(fresh.shape()).filter(|((_, before), (_, after))| before != after).map(|((name, before), (_, after))| format!("{name} {before} -> {after}")).collect();
+        if changed.is_empty() {
+            return None;
+        }
+        let cards: Vec<String> = offered.iter().map(|(d, bytes)| format!("{d:?} {} MiB", bytes >> 20)).collect();
+        *self.plan.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(fresh);
+        Some(format!("{} (usable now: {})", changed.join(", "), cards.join(", ")))
     }
 }
 
 impl MultiDeviceResidentModel for Qwen35GgufServed {
     fn unavailable_reason(&self, key: &InstanceKey) -> Option<String> {
-        self.replica(key).unavailable_reason(key)
+        self.plan().replica(key).unavailable_reason(key)
     }
     fn estimate_multi(&self, key: &InstanceKey) -> MultiDeviceCost {
-        self.replica(key).estimate_multi(key)
+        self.plan().replica(key).estimate_multi(key)
     }
 
     /// The served instance of one replica: the checkpoint as a `Qwen35GgufEngine` (with its adapter bank, when one was
@@ -875,7 +950,8 @@ impl MultiDeviceResidentModel for Qwen35GgufServed {
     /// adapters decode in ONE batched step per iteration. Every replica builds its own bank and syncs it from the one
     /// registry, so an adapter is served identically by all of them.
     fn activate_multi(&self, key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
-        let replica = self.replica(key);
+        let plan = self.plan();
+        let replica = plan.replica(key);
         let (mut sched, tok, stop) = replica.activate_scheduler(devices)?;
         let capacity = replica.max_batch() as usize;
         let text = llmserve::TextFrontend::new(tok, stop, "qwen35", std::sync::Arc::new(qwen35::int8_gguf_resident::parse_request));
@@ -986,7 +1062,8 @@ mod tests {
             .iter()
             .map(|&card| Qwen35GgufResident::new("never-opened.gguf".to_string(), vec![(Device::Gpu(card), 80 << 30)], 4096, model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8)).with_max_batch(6).with_prefix_slots(9).with_model_id("t/x"))
             .collect();
-        Qwen35GgufServed::new(replicas, bank, "never-opened.gguf", "t/x", Vec::new())
+        let replanner = Replanner { gguf_path: "never-opened.gguf".to_string(), id: "t/x".to_string(), cfg: Qwen35GgufServeConfig::default(), bank: bank.clone(), cards: cards.iter().map(|&c| Device::Gpu(c)).collect() };
+        Qwen35GgufServed::new(ServedPlan { replicas, chosen: Vec::new() }, bank, "never-opened.gguf", "t/x", replanner)
     }
 
     /// **One instance per card.** The resident declares a replica per group of cards that holds the model, each estimated and
@@ -1001,7 +1078,7 @@ mod tests {
         assert_eq!((routing.slots, routing.cached_prompts), (6, 9), "its decode slots and the prompts its prefix cache keeps");
         let key = served.instance_key("generate", &Invocation::new());
         for card in 0..4u32 {
-            let planned: Vec<Device> = served.replica(&key.replica(card as usize)).placement().iter().map(|(d, ..)| *d).collect();
+            let planned: Vec<Device> = served.plan().replica(&key.replica(card as usize)).placement().iter().map(|(d, ..)| *d).collect();
             assert!(planned.is_empty() || planned == [Device::Gpu(card)], "replica {card} is on its own card, never another's: {planned:?}");
         }
 
@@ -1187,9 +1264,9 @@ mod tests {
     fn the_resident_is_served_under_the_id_it_is_given() {
         let path = write_servable_gguf("id");
         let r = gguf_resident(path.as_str(), "unsloth/Qwen3.8-27B-GGUF", &gpu_budget(), RESERVED, &Qwen35GgufServeConfig::default()).expect("a complete GGUF must build");
-        assert_eq!(r.model_id(), "unsloth/Qwen3.8-27B-GGUF");
+        assert_eq!(r.with_first(|q| q.model_id().to_string()), "unsloth/Qwen3.8-27B-GGUF");
         assert_eq!(r.manifest().model, "unsloth/Qwen3.8-27B-GGUF");
-        assert_eq!(r.gguf_path(), path.as_str());
+        assert_eq!(r.with_first(|q| q.gguf_path().to_string()), path.as_str());
     }
 
     /// Without a fixed context the cards decide: far more than any development
@@ -1203,8 +1280,36 @@ mod tests {
         let cfg = Qwen35GgufServeConfig { speculative: Some(qwen35::int8_gguf_resident::SpeculativeMode::Off), max_batch: Some(8), ..Qwen35GgufServeConfig::default() };
         let r = gguf_resident(path.as_str(), "t/auto", &gpus, RESERVED, &cfg).expect("builds");
         assert!(r.cap() > 1_000_000, "a tiny model on a 2 GiB budget leaves room for a huge context: {}", r.cap());
-        let placed: u64 = r.placement().iter().map(|p| p.3).sum();
+        let placed: u64 = r.with_first(|q| q.placement()).iter().map(|p| p.3).sum();
         assert!(placed <= 2 * GIB, "the context must be charged into a placement that fits the usable bytes: {placed}");
+    }
+
+    /// **A co-tenant arrives after the scan.** The defaulted context, batch and KV pool were sized to the free card;
+    /// re-planned to the bytes the card gives now they fit them and the estimate follows, while the tiers chosen at
+    /// the scan stay. A context the operator named is kept, and only the pool around it is sized again.
+    #[test]
+    fn a_defaulted_plan_is_sized_again_to_a_card_a_co_tenant_shrank_and_a_named_context_is_kept() {
+        let path = write_servable_gguf("replan");
+        let gpus = vec![(0, 6 * GIB)];
+        let key = |r: &Qwen35GgufServed| r.instance_key("generate", &Invocation::new());
+        let on_card = |r: &Qwen35GgufServed| r.estimate_multi(&key(r)).on(Device::Gpu(0));
+        let served = gguf_resident(path.as_str(), "t/replan", &gpus, RESERVED, &Qwen35GgufServeConfig::default()).expect("builds");
+        let (ctx, kv) = (served.cap(), served.with_first(|q| q.kv_tier()));
+        assert!(on_card(&served) <= 4 * GIB, "sized to the free card's 4 GiB");
+        // A co-tenant takes 2 GiB of the 4 this server could use.
+        let usable = [(Device::Gpu(0), 2 * GIB)];
+        let change = served.replan(&key(&served), &usable).expect("a defaulted plan that no longer fits is sized again");
+        assert!(change.contains("--ctx") && change.contains("Gpu(0) 2048 MiB"), "the change names what moved and the bytes it was sized to: {change}");
+        assert!(served.cap() < ctx, "a shorter context: {} after {ctx}", served.cap());
+        assert!(on_card(&served) <= 2 * GIB, "the estimate fits what the card gives now: {}", on_card(&served));
+        assert_eq!(served.with_first(|q| q.kv_tier()), kv, "the KV tier chosen at the scan stays");
+        assert_eq!(served.manifest().max_context_tokens, Some(u64::from(served.cap())), "the manifest advertises the new context");
+        assert!(served.replan(&key(&served), &usable).is_none(), "nothing changes when the plan already fits");
+
+        let named = Qwen35GgufServeConfig { ctx: Some(4096), ..Qwen35GgufServeConfig::default() };
+        let served = gguf_resident(path.as_str(), "t/named", &gpus, RESERVED, &named).expect("builds");
+        let _ = served.replan(&key(&served), &usable);
+        assert_eq!(served.cap(), 4096, "an operator's context is never changed");
     }
 
     /// A replica spans the fewest cards that hold the model, however much more the whole box could hold.
@@ -1252,10 +1357,10 @@ mod tests {
         };
         let r = gguf_resident(path.as_str(), "t/knobs", &gpu_budget(), RESERVED, &cfg).expect("builds");
         assert_eq!(r.cap(), 8192);
-        assert_eq!(r.kv_tier(), model::kv_tier::KvTier::INT8);
+        assert_eq!(r.with_first(|q| q.kv_tier()), model::kv_tier::KvTier::INT8);
         assert_eq!(r.max_batch(), 4);
-        assert_eq!(r.prefix_slots(), 2);
-        assert_eq!(r.speculation().mode, qwen35::int8_gguf_resident::SpeculativeMode::Off);
+        assert_eq!(r.with_first(|q| q.prefix_slots()), 2);
+        assert_eq!(r.with_first(|q| q.speculation()).mode, qwen35::int8_gguf_resident::SpeculativeMode::Off);
         // What `/v1/models` reports is the context the resident was built with.
         assert_eq!(r.manifest().max_context_tokens, Some(8192));
     }
@@ -1269,14 +1374,14 @@ mod tests {
         let path = write_servable_gguf("defaults");
         let r = gguf_resident(path.as_str(), "t/defaults", &gpu_budget(), RESERVED, &Qwen35GgufServeConfig::default()).expect("builds");
         assert!(r.cap() > 2048, "sized by memory, not a fixed default: {}", r.cap());
-        assert_eq!(r.kv_tier(), model::kv_tier::KvTier::INT8, "the most compact, fastest tier fits");
+        assert_eq!(r.with_first(|q| q.kv_tier()), model::kv_tier::KvTier::INT8, "the most compact, fastest tier fits");
         let (batches, _) = gpu_core::defaults::candidates(MAX_BATCH_DEFAULTS, gpu_core::defaults::Hardware::detected());
         assert_eq!(r.max_batch(), batches[0], "two roomy cards take the widest batch");
-        assert_eq!(r.prefix_slots(), 4 * r.max_batch(), "four warm prompts per concurrent sequence fit");
+        assert_eq!(r.with_first(|q| q.prefix_slots()), 4 * r.max_batch(), "four warm prompts per concurrent sequence fit");
         let (modes, _) = gpu_core::defaults::candidates(SPECULATION_DEFAULTS, gpu_core::defaults::Hardware::detected());
-        assert_eq!(r.speculation().mode, modes[0], "the hardware's best-ranked speculation");
+        assert_eq!(r.with_first(|q| q.speculation()).mode, modes[0], "the hardware's best-ranked speculation");
         let (states, _) = gpu_core::defaults::candidates(GDN_STATE_DEFAULTS, gpu_core::defaults::Hardware::detected());
-        assert_eq!(r.gdn_state(), states[0], "the hardware's best-ranked recurrent-state precision");
+        assert_eq!(r.with_first(|q| q.gdn_state()), states[0], "the hardware's best-ranked recurrent-state precision");
         let said = r.chosen_defaults().join("\n");
         for knob in ["--weight-format i8", "--kv-cache int8", "--max-batch", "--gdn-state", "--speculative", "prefix slots", "--ctx"] {
             assert!(said.contains(knob), "every default is reported with its reason; missing {knob}:\n{said}");
@@ -1291,9 +1396,9 @@ mod tests {
         let path = write_servable_gguf("gdn-state-regimes");
         let build = |cfg: Qwen35GgufServeConfig| gguf_resident(path.as_str(), "t/gdn", &gpu_budget(), RESERVED, &cfg).expect("builds");
         let exact = build(Qwen35GgufServeConfig { exact_decode: true, ..Default::default() });
-        assert_eq!(exact.gdn_state(), GdnState::F32);
+        assert_eq!(exact.with_first(|q| q.gdn_state()), GdnState::F32);
         assert!(exact.chosen_defaults().join("\n").contains("--gdn-state f32"));
-        assert_eq!(build(Qwen35GgufServeConfig { gdn_state: Some(GdnState::F32), ..Default::default() }).gdn_state(), GdnState::F32);
+        assert_eq!(build(Qwen35GgufServeConfig { gdn_state: Some(GdnState::F32), ..Default::default() }).with_first(|q| q.gdn_state()), GdnState::F32);
     }
 
     /// A default that does not fit falls back to the next-ranked one that
@@ -1314,20 +1419,20 @@ mod tests {
         }
         let r = gguf_resident(path.as_str(), "t/x", &gpus, RESERVED, &Qwen35GgufServeConfig { ctx: Some(longest), max_batch: batch, ..Default::default() }).expect("the leaner default fits");
         assert_eq!(r.cap(), longest);
-        assert_eq!(r.kv_tier(), model::kv_tier::KvTier::INT8);
+        assert_eq!(r.with_first(|q| q.kv_tier()), model::kv_tier::KvTier::INT8);
         let said = r.chosen_defaults().join("\n");
         if gpu_core::defaults::Hardware::detected().host_memory_on(&[0]) {
             // A card that reads host memory directly (a Grace-Hopper card on CUDA) keeps the prompt-cache snapshots
             // there, charged to no card: the full default costs the longest context nothing and stays.
-            assert_eq!(r.prefix_slots(), 4 * r.max_batch(), "snapshots in host memory leave the full prompt cache beside {longest}-token sequences\n{said}");
+            assert_eq!(r.with_first(|q| q.prefix_slots()), 4 * r.max_batch(), "snapshots in host memory leave the full prompt cache beside {longest}-token sequences\n{said}");
         } else {
             // Cached prompts live in the shared KV pool and cost only their recurrent-state snapshots, so a few can
             // still fit beside the longest context; the full default cannot.
-            assert!(r.prefix_slots() < 4 * r.max_batch(), "the full prompt cache does not fit beside {longest}-token sequences: {}", r.prefix_slots());
+            assert!(r.with_first(|q| q.prefix_slots()) < 4 * r.max_batch(), "the full prompt cache does not fit beside {longest}-token sequences: {}", r.with_first(|q| q.prefix_slots()));
             assert!(said.contains("passed over"), "{said}");
         }
         let wide = gguf_resident(path.as_str(), "t/x", &gpus, RESERVED, &Qwen35GgufServeConfig { max_batch: Some(16), ..Default::default() }).expect("builds");
-        assert_eq!(wide.prefix_slots(), 4 * 16, "the prompt cache follows the concurrency where it fits");
+        assert_eq!(wide.with_first(|q| q.prefix_slots()), 4 * 16, "the prompt cache follows the concurrency where it fits");
     }
 
     /// The default batch is the widest that still leaves one sequence the context floor: on a card where the widest

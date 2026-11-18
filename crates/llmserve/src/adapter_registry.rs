@@ -530,6 +530,10 @@ impl<R: AdapterHost> ResidentModel for AdapterView<R> {
     fn adapter_identity(&self) -> Option<AdapterIdentity> {
         self.base.adapters().identity(&self.id)
     }
+    /// The base's plan, which the view shares.
+    fn replan(&self, key: &InstanceKey, usable: &[(Device, u64)]) -> Option<String> {
+        self.base.replan(key, usable)
+    }
 }
 
 impl<R: AdapterHost + MultiDeviceResidentModel> MultiDeviceResidentModel for AdapterView<R> {

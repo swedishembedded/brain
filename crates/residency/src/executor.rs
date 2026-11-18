@@ -459,7 +459,8 @@ impl Executor {
             lanes.insert(d, ltx);
         }
 
-        let dispatcher = Dispatcher::new(mgr, policy, lanes, tx.clone(), stats.clone(), supervision.map(|s| s.health));
+        let manifests = Arc::new(RwLock::new(Arc::new(manifests)));
+        let dispatcher = Dispatcher::new(mgr, policy, lanes, tx.clone(), stats.clone(), supervision.map(|s| s.health), manifests.clone());
         let h = std::thread::Builder::new()
             .name("brain-dispatcher".into())
             .spawn(move || dispatch_loop(rx, dispatcher, capacity))
@@ -468,7 +469,7 @@ impl Executor {
 
         Executor {
             tx,
-            manifests: Arc::new(RwLock::new(Arc::new(manifests))),
+            manifests,
             adapters,
             models: Arc::new(RwLock::new(known)),
             stats,
@@ -821,11 +822,15 @@ struct Dispatcher {
     holds: Holds,
     /// Monotonic job-id source; each submitted job gets the next value.
     next_id: u64,
+    /// The executor's manifest list, refreshed when a model re-sizes its defaulted plan
+    /// ([`ResidencyManager::take_replanned`]): the context it advertises changes with it.
+    manifests: Arc<RwLock<Arc<Vec<Manifest>>>>,
 }
 
 impl Dispatcher {
-    fn new(mgr: ResidencyManager, policy: Policy, lanes: HashMap<Device, Sender<LaneMsg>>, done: Sender<Msg>, stats: Arc<Mutex<Stats>>, health: Option<Arc<Health<Device>>>) -> Dispatcher {
+    fn new(mgr: ResidencyManager, policy: Policy, lanes: HashMap<Device, Sender<LaneMsg>>, done: Sender<Msg>, stats: Arc<Mutex<Stats>>, health: Option<Arc<Health<Device>>>, manifests: Arc<RwLock<Arc<Vec<Manifest>>>>) -> Dispatcher {
         Dispatcher {
+            manifests,
             mgr,
             policy,
             lanes,
@@ -1332,7 +1337,7 @@ fn note_unservable(stats: &Arc<Mutex<Stats>>, key: &InstanceKey, reason: Option<
 impl Dispatcher {
     /// Assign as many runnable groups as there are free device lanes.
     fn assign(&mut self) {
-        let Dispatcher { queue, mgr, policy, lanes, done, running, busy, stats, running_jobs, open_groups, health: supervised, holds, .. } = self;
+        let Dispatcher { queue, mgr, policy, lanes, done, running, busy, stats, running_jobs, open_groups, health: supervised, holds, manifests, .. } = self;
         let health = supervised.as_deref();
         let contract = policy.admission;
         // Quarantined devices are excluded exactly like busy ones, so a group is
@@ -1420,6 +1425,13 @@ impl Dispatcher {
             } else {
                 mgr.claim(&model, &action, &inv, key.replica_index(), &exclude).map(|(w, d, k)| (ClaimOutcome::Single(w, d), k))
             };
+            if !mgr.take_replanned().is_empty() {
+                // A re-sized plan changes what the model advertises (its context): every listing is answered anew,
+                // the adapters that restate the model's manifest included.
+                let mut listed = manifests.write().unwrap_or_else(|e| e.into_inner());
+                let fresh: Vec<Manifest> = listed.iter().map(|m| mgr.manifest_of(&m.model).unwrap_or_else(|| m.clone())).collect();
+                *listed = Arc::new(fresh);
+            }
             let (outcome, ckey) = match claim_result {
                 Ok(x) => {
                     note_unservable(stats, &key, None);
@@ -3964,6 +3976,55 @@ mod tests {
         let gpu1 = report.budgets.iter().find(|b| b.device == Device::Gpu(1)).expect("gpu1 budget");
         assert!(gpu0.used >= 15 * GB, "gpu0.used={}", gpu0.used);
         assert!(gpu1.used >= 15 * GB, "gpu1.used={}", gpu1.used);
+    }
+
+    /// A model whose defaulted context was sized to a free card, served after a co-tenant took 8 GB of it: the first
+    /// request re-plans it to the card as it is, runs, and the executor's listing advertises the new context.
+    #[test]
+    fn a_re_planned_model_runs_and_is_listed_with_its_new_context() {
+        struct Defaulted(std::sync::atomic::AtomicU64);
+        impl ResidentModel for Defaulted {
+            fn manifest(&self) -> Manifest {
+                Manifest::new("defaulted", "a defaulted plan", vec![ActionSpec::new("run", "run")]).with_max_context_tokens(self.0.load(Ordering::SeqCst))
+            }
+            fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+                InstanceKey::new("defaulted", "default")
+            }
+            fn estimate(&self, _k: &InstanceKey) -> MemCost {
+                MemCost::new(0, 0)
+            }
+            fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+                Err("multi-device only".to_string())
+            }
+            fn replan(&self, _k: &InstanceKey, usable: &[(Device, u64)]) -> Option<String> {
+                let room = usable.iter().find(|(d, _)| *d == Device::Gpu(0))?.1;
+                let tokens = room.checked_sub(10 * GB)? >> 20;
+                (tokens < self.0.load(Ordering::SeqCst)).then(|| format!("--ctx {} -> {tokens}", self.0.swap(tokens, Ordering::SeqCst)))
+            }
+        }
+        impl MultiDeviceResidentModel for Defaulted {
+            fn estimate_multi(&self, _k: &InstanceKey) -> MultiDeviceCost {
+                MultiDeviceCost::new(vec![(Device::Gpu(0), 10 * GB + (self.0.load(Ordering::SeqCst) << 20))], 0)
+            }
+            fn activate_multi(&self, _k: &InstanceKey, _devices: &[Device]) -> Result<Box<dyn Instance>, String> {
+                Ok(Box::new(MultiFakeInst { live: Arc::new(AtomicU32::new(0)) }))
+            }
+        }
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0);
+        let probe: CapacityProbe = Arc::new(|| vec![(Device::Gpu(0), 16 * GB)]);
+        let exec = Executor::start_with_probe(vec![], budgets, Policy::default(), Some(probe));
+        exec.register_multi(Arc::new(Defaulted((14 * 1024).into())));
+        assert_eq!(exec.manifests()[0].max_context_tokens, Some(14 * 1024), "sized at the scan to the free card");
+        // The co-tenant is seen once the dispatcher has measured the card.
+        let deadline = Instant::now() + std::time::Duration::from_secs(20);
+        while exec.residency().budgets.iter().find(|b| b.device == Device::Gpu(0)).is_none_or(|b| b.total > 16 * GB) {
+            assert!(Instant::now() < deadline, "the capacity probe never applied");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let r = exec.run_blocking("defaulted", "run", Invocation::new(), |_| {});
+        assert!(r.is_ok(), "re-planned to the card as it is now, it runs: {r:?}");
+        assert_eq!(exec.manifests()[0].max_context_tokens, Some(6 * 1024), "the listing advertises the new context");
     }
 
     /// A multi-only model (zero-cost `estimate`, hard-erroring `activate`) must

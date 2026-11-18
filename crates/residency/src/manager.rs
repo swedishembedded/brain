@@ -251,6 +251,9 @@ pub struct ResidencyManager {
     /// rate under a shifting Zipf load. See `place.rs`'s
     /// module doc for the measurement this generalizes from.
     eviction: Box<dyn EvictionPolicy>,
+    /// Models that re-sized their defaulted plan since [`Self::take_replanned`] last asked
+    /// ([`ResidentModel::replan`]): their manifests (the context they advertise) have changed.
+    replanned: Vec<String>,
 }
 
 /// One multi-device resident instance's bookkeeping - parallel to
@@ -281,6 +284,35 @@ impl ResidencyManager {
             builds: 0,
             evictions: 0,
             eviction: Box::new(CostAware),
+            replanned: Vec::new(),
+        }
+    }
+
+    /// The models whose plan was re-sized since the last call ([`ResidentModel::replan`]), so the caller reads their
+    /// manifests again; empty almost always.
+    pub fn take_replanned(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.replanned)
+    }
+
+    /// `model`'s manifest as it answers now (single- or multi-device), for a caller refreshing what it lists after
+    /// a re-plan.
+    pub fn manifest_of(&self, model: &str) -> Option<capability::Manifest> {
+        self.models.get(model).map(|m| m.manifest()).or_else(|| self.multi_models.get(model).map(|m| m.manifest()))
+    }
+
+    /// A starved claim's second chance: offer `m` the bytes each device can give this server right now
+    /// ([`ResidentModel::replan`]). `true` when the model re-sized its defaulted plan, which is logged as a warning
+    /// naming every value that changed, and the claim is worth trying once more.
+    fn replan_starved(&mut self, model: &str, m: &dyn ResidentModel, key: &InstanceKey) -> bool {
+        let usable: Vec<(Device, u64)> = self.budgets.devices().filter(|d| *d != Device::Cpu).map(|d| (d, self.budgets.usable_on(d))).collect();
+        match m.replan(key, &usable) {
+            Some(change) => {
+                crate::log::warn(&format!("{key}: its defaulted plan no longer fit the memory this server can use now, so it was re-planned: {change}"));
+                self.event(format!("replan {key}: {change}"));
+                self.replanned.push(model.to_string());
+                true
+            }
+            None => false,
         }
     }
 
@@ -960,6 +992,29 @@ impl ResidencyManager {
         replica: usize,
         exclude: &HashSet<Device>,
     ) -> Result<(Claimed, Device, InstanceKey), ClaimError> {
+        match self.claim_once(model, action, inv, replica, exclude) {
+            Err(ClaimError::Starved(why)) => {
+                let Some(m) = self.models.get(model).cloned() else { return Err(ClaimError::Starved(why)) };
+                let key = m.instance_key(action, inv).replica(replica);
+                if self.replan_starved(model, &*m, &key) {
+                    self.claim_once(model, action, inv, replica, exclude)
+                } else {
+                    Err(ClaimError::Starved(why))
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// [`Self::claim`] without the re-plan of a starved model.
+    fn claim_once(
+        &mut self,
+        model: &str,
+        action: &str,
+        inv: &Invocation,
+        replica: usize,
+        exclude: &HashSet<Device>,
+    ) -> Result<(Claimed, Device, InstanceKey), ClaimError> {
         let m = self
             .models
             .get(model)
@@ -1170,6 +1225,29 @@ impl ResidencyManager {
     /// [`Self::register_multi`]. See this file's own module doc for what the
     /// eviction fallback here does and does not cover.
     pub fn claim_multi(
+        &mut self,
+        model: &str,
+        action: &str,
+        inv: &Invocation,
+        replica: usize,
+        exclude: &HashSet<Device>,
+    ) -> Result<(ClaimedMulti, Vec<Device>, InstanceKey), ClaimError> {
+        match self.claim_multi_once(model, action, inv, replica, exclude) {
+            Err(ClaimError::Starved(why)) => {
+                let Some(m) = self.multi_models.get(model).cloned() else { return Err(ClaimError::Starved(why)) };
+                let key = m.instance_key(action, inv).replica(replica);
+                if self.replan_starved(model, &*m, &key) {
+                    self.claim_multi_once(model, action, inv, replica, exclude)
+                } else {
+                    Err(ClaimError::Starved(why))
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// [`Self::claim_multi`] without the re-plan of a starved model.
+    fn claim_multi_once(
         &mut self,
         model: &str,
         action: &str,
@@ -2915,6 +2993,78 @@ mod tests {
         assert!(matches!(err, ClaimError::Starved(_)), "expected Starved, got {err:?}");
         mgr.refresh_accelerator_capacity(&[(Device::Gpu(0), 24 * GB)]);
         claim_multi_built(&mut mgr, "pair").expect("recovered");
+    }
+
+    /// A model with a defaulted context: `bytes = fixed + ctx * per_token` on gpu0, re-planned to the longest context
+    /// the bytes it is offered hold; with `named` the operator fixed the context and it is never re-planned.
+    struct Defaulted {
+        ctx: std::sync::atomic::AtomicU64,
+        named: bool,
+        live: Arc<AtomicU32>,
+    }
+    const DEFAULTED_FIXED: u64 = 10 * GB;
+    const DEFAULTED_PER_TOKEN: u64 = 1 << 20;
+    impl ResidentModel for Defaulted {
+        fn manifest(&self) -> Manifest {
+            Manifest::new("defaulted", "a defaulted plan", vec![ActionSpec::new("run", "run")]).with_max_context_tokens(self.ctx.load(Ordering::SeqCst))
+        }
+        fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+            InstanceKey::new("defaulted", "default")
+        }
+        fn estimate(&self, _k: &InstanceKey) -> MemCost {
+            MemCost::new(0, 0)
+        }
+        fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn crate::Instance>, String> {
+            Err("multi-device only".to_string())
+        }
+        fn replan(&self, _k: &InstanceKey, usable: &[(Device, u64)]) -> Option<String> {
+            let room = usable.iter().find(|(d, _)| *d == Device::Gpu(0))?.1;
+            let fits = room.checked_sub(DEFAULTED_FIXED)? / DEFAULTED_PER_TOKEN;
+            let before = self.ctx.load(Ordering::SeqCst);
+            if self.named || fits == 0 || fits >= before {
+                return None;
+            }
+            self.ctx.store(fits, Ordering::SeqCst);
+            Some(format!("--ctx {before} -> {fits}"))
+        }
+    }
+    impl crate::multi::MultiDeviceResidentModel for Defaulted {
+        fn estimate_multi(&self, _k: &InstanceKey) -> crate::multi::MultiDeviceCost {
+            crate::multi::MultiDeviceCost::new(vec![(Device::Gpu(0), DEFAULTED_FIXED + self.ctx.load(Ordering::SeqCst) * DEFAULTED_PER_TOKEN)], 0)
+        }
+        fn activate_multi(&self, _k: &InstanceKey, _devices: &[Device]) -> Result<Box<dyn crate::Instance>, String> {
+            self.live.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(FakeInst { live: self.live.clone() }))
+        }
+    }
+
+    /// A co-tenant takes memory after the server sized a model's defaulted plan: the claim that would be starved
+    /// re-plans the defaulted context to what the card holds now, is placed, and the model's manifest advertises the
+    /// new context; a context the operator named is never changed, and stays starved.
+    #[test]
+    fn a_defaulted_plan_is_resized_to_a_card_a_co_tenant_shrank_and_a_named_one_is_not() {
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0);
+        let mut mgr = ResidencyManager::new(budgets);
+        // Sized at the scan to the free card: 14 GB of context.
+        mgr.register_multi(Arc::new(Defaulted { ctx: (14 * 1024).into(), named: false, live: live.clone() }));
+        // A co-tenant arrives with 8 GB.
+        mgr.refresh_accelerator_capacity(&[(Device::Gpu(0), 16 * GB)]);
+        claim_multi_built(&mut mgr, "defaulted").expect("re-planned to what the card holds now");
+        assert_eq!(mgr.take_replanned(), vec!["defaulted".to_string()]);
+        assert_eq!(mgr.manifest_of("defaulted").and_then(|m| m.max_context_tokens), Some(6 * 1024), "the new context is advertised");
+        assert!(mgr.take_replanned().is_empty(), "reported once");
+
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0);
+        let mut mgr = ResidencyManager::new(budgets);
+        mgr.register_multi(Arc::new(Defaulted { ctx: (14 * 1024).into(), named: true, live }));
+        mgr.refresh_accelerator_capacity(&[(Device::Gpu(0), 16 * GB)]);
+        let err = mgr.claim_multi("defaulted", "run", &Invocation::new(), 0, &HashSet::new()).err().expect("an operator's context is the operator's");
+        assert!(matches!(err, ClaimError::Starved(_)), "{err:?}");
+        assert!(mgr.take_replanned().is_empty());
+        assert_eq!(mgr.manifest_of("defaulted").and_then(|m| m.max_context_tokens), Some(14 * 1024));
     }
 
     /// **The daemon adapts to VRAM it does not own.** Budgets used to be frozen

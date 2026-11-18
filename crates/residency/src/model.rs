@@ -127,6 +127,21 @@ pub trait ResidentModel: Send + Sync {
     fn adapter_identity(&self) -> Option<AdapterIdentity> {
         None
     }
+
+    /// Size again, to `usable` (each device this model may use and the bytes this server can use on it right now),
+    /// whatever this model chose for itself when it was built because the operator named nothing: its context, its
+    /// KV pool, its batch. Called when [`Self::estimate`] (or a multi-device model's `estimate_multi`) no longer fits
+    /// those bytes even with nothing else resident, before the request is refused as starved: a card another
+    /// process took memory on after the server sized its models. A setting the operator named is never changed.
+    /// Returns what changed, which the manager logs and after which it reads the estimate and the manifest again
+    /// (a new context is advertised); `None` when nothing was re-chosen (nothing was defaulted, or no smaller plan
+    /// fits), and the claim is refused as before.
+    ///
+    /// Runs on the dispatcher thread, rarely (only when a claim is starved); it may read the checkpoint's
+    /// headers but must not touch a device. Defaulted to `None`: a plan fixed at construction.
+    fn replan(&self, _key: &InstanceKey, _usable: &[(Device, u64)]) -> Option<String> {
+        None
+    }
 }
 
 /// The [`ResidentModel`] methods of a wrapper that restates only its inner
@@ -171,6 +186,9 @@ macro_rules! forward_resident_model {
         }
         fn adapter_identity(&self) -> Option<AdapterIdentity> {
             self.inner.adapter_identity()
+        }
+        fn replan(&self, key: &InstanceKey, usable: &[(Device, u64)]) -> Option<String> {
+            self.inner.replan(key, usable)
         }
     };
 }
