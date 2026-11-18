@@ -391,6 +391,9 @@ impl ModelOptimizer {
             Some(LatencySpec::Seconds(s)) => return Err(Error::Backend(format!("ModelOptimizer: a latency limit must be finite and positive, got {s}"))),
             Some(LatencySpec::Like(name)) => {
                 let tier = model::policy::parse_weight_format(name).ok().and_then(|p| p.uniform_dtype()).ok_or_else(|| Error::Backend(format!("ModelOptimizer: latency tier {name:?} is not a weight format")))?;
+                if let Some(widened) = excluded_tiers.iter().find(|e| e.tier == tier.name()) {
+                    return Err(Error::Backend(format!("ModelOptimizer: latency tier {}: this device holds it as {}, so it is not a candidate to time", widened.tier, widened.held_as)));
+                }
                 Some(modelopt::LatencyLimit::Uniform(tier))
             }
         };

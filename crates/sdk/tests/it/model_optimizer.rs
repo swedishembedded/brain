@@ -106,6 +106,8 @@ fn a_candidate_that_cannot_be_measured_is_refused_before_anything_loads() {
 
     let err = ModelOptimizer::from_pretrained(base.to_str().unwrap()).dataset(&dataset).out_dir(model.join("run")).tiers("int8").device(cpu()).run().expect_err("the CPU backend holds int8 as f32");
     assert!(err.to_string().contains("i8") && err.to_string().contains("f32"), "{err}");
+    let err = ModelOptimizer::from_pretrained(base.to_str().unwrap()).dataset(&dataset).out_dir(model.join("run")).max_latency_like("int8").device(cpu()).run().expect_err("the CPU backend times no int8 product");
+    assert!(err.to_string().contains("latency tier i8") && err.to_string().contains("holds it as f32"), "{err}");
 
     let plain = chat_model_dir("optimize-args");
     let base = plain.join("model.safetensors");
@@ -172,6 +174,10 @@ fn a_latency_limit_holds_the_plan_to_a_uniform_format_s_speed() {
 #[test]
 #[ignore = "runs alone in a child process of its parent test"]
 fn a_latency_limit_holds_the_plan_to_a_uniform_format_s_speed_alone() {
+    if !gpu_core::Gpu::new(&[]).caps().numeric.int8_dot {
+        brain_testutil::skip_unavailable("a latency limit like int8 needs int8 held as itself (int8_dot), absent on this device");
+        return;
+    }
     let model = chat_model_dir_of("optimize-latency", qwen3::QwenConfig::tiny_i8());
     let dataset = write_dataset(&model, 8);
     let outcome = ModelOptimizer::from_pretrained(model.join("model.safetensors").to_str().unwrap())
