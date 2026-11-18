@@ -8,6 +8,10 @@
 //! memory it actually has, for its clients. If your team needs expertise in fine-tuning large language models of
 //! any architecture then you can procure our services by sending an email to info@swedishembedded.com.
 
+mod objectives;
+
+use objectives::Objective;
+
 const USAGE: &str = "\
 brain finetune BASE --dataset FILE --out DIR [options]
 
@@ -48,6 +52,19 @@ brain finetune BASE --dataset FILE --out DIR [options]
                      norms, gates); a served adapter's rows read them per row.
   --held-out FILE    chat JSONL scored on the model in the training process before the first step and after the last
                      (the loss is printed); for architectures whose trainer scores it (Ripple, qwen35).
+  --objective O      what the adapter is trained toward: sft (default), policy-gradient, preference, feedback or distill
+                     (the last three train an adapter, so they need --lora RANK).
+  --loss L --gamma X --beta X --nll-weight X
+                     with --objective preference: the pair loss dpo (default), ipo, simpo or orpo over `chosen`/`rejected`
+                     pairs (--dataset and --held-out hold pairs); --gamma is simpo's target margin, --beta the loss's
+                     temperature (simpo's beta, orpo's lambda; also KTO's), --nll-weight the anchor on the chosen answer.
+  --desirable-weight X --undesirable-weight X
+                     with --objective feedback: KTO's weights of a desirable and an undesirable completion's term (default 1
+                     each); --beta is its temperature.
+  --teacher T --top-k N
+                     with --objective distill: the policy of the same base that teaches, base (default), start (the adapter of
+                     --continue) or adapter:FILE, and how many of its most likely tokens per position are kept (default 16).
+  --keep-reasoning   with --objective preference or feedback: train on each candidate's reasoning block (default: dropped).
   --policy-gradient  train the clipped policy gradient on rollout records (`reward` and `group` on each record,
                      training-record contract v2) instead of the supervised loss, for an adapter; --ratio-clip X and
                      --kl-beta X set its clip band and KL weight.
@@ -133,6 +150,18 @@ struct Args {
     held_out: Option<String>,
     modules_to_save: Vec<String>,
     policy_gradient: bool,
+    /// `--objective`, as given; [`Args::objective`] is the one the run trains.
+    objective_flag: Option<Objective>,
+    objective: Objective,
+    loss: Option<String>,
+    gamma: Option<f32>,
+    beta: Option<f32>,
+    nll_weight: Option<f32>,
+    keep_reasoning: bool,
+    desirable_weight: Option<f32>,
+    undesirable_weight: Option<f32>,
+    teacher: Option<objectives::Teacher>,
+    top_k: Option<usize>,
     clip_eps: Option<f32>,
     kl_beta: Option<f32>,
     behaviour: Option<brain::BehaviourSource>,
@@ -200,6 +229,16 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--held-out" => a.held_out = Some(need(&mut i, &flag)?),
             "--modules-to-save" => a.modules_to_save = need(&mut i, &flag)?.split(',').map(str::trim).filter(|p| !p.is_empty()).map(String::from).collect(),
             "--policy-gradient" => a.policy_gradient = true,
+            "--objective" => a.objective_flag = Some(Objective::parse(&need(&mut i, &flag)?)?),
+            "--loss" => a.loss = Some(need(&mut i, &flag)?),
+            "--gamma" => a.gamma = Some(number(&need(&mut i, &flag)?, &flag)?),
+            "--beta" => a.beta = Some(number(&need(&mut i, &flag)?, &flag)?),
+            "--nll-weight" => a.nll_weight = Some(number(&need(&mut i, &flag)?, &flag)?),
+            "--keep-reasoning" => a.keep_reasoning = true,
+            "--desirable-weight" => a.desirable_weight = Some(number(&need(&mut i, &flag)?, &flag)?),
+            "--undesirable-weight" => a.undesirable_weight = Some(number(&need(&mut i, &flag)?, &flag)?),
+            "--teacher" => a.teacher = Some(objectives::Teacher::parse(&need(&mut i, &flag)?)?),
+            "--top-k" => a.top_k = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--ratio-clip" => a.clip_eps = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--kl-beta" => a.kl_beta = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--behaviour" => a.behaviour = Some(need(&mut i, &flag)?.parse().map_err(|e| format!("brain finetune: {flag}: {e}"))?),
@@ -230,6 +269,15 @@ fn parse(argv: &[String]) -> Result<Args, String> {
     if a.base.is_empty() {
         return Err("brain finetune: no base given".to_string());
     }
+    a.objective = match (a.objective_flag, a.policy_gradient) {
+        (None, false) => Objective::Sft,
+        (None, true) | (Some(Objective::PolicyGradient), _) => Objective::PolicyGradient,
+        (Some(Objective::Sft), true) => return Err("brain finetune: --policy-gradient trains the policy-gradient objective; --objective sft contradicts it".to_string()),
+        (Some(o), true) => return Err(format!("brain finetune: --policy-gradient trains the policy-gradient objective; --objective {} contradicts it", o.name())),
+        (Some(o), false) => o,
+    };
+    a.policy_gradient = a.objective == Objective::PolicyGradient;
+    objectives::validate(&a)?;
     // The budget flags shape the selection; without --native-sparse they would be ignored.
     if !a.native_sparse {
         for (flag, given) in [("--lsa-window", a.lsa_window.is_some()), ("--lsa-sink", a.lsa_sink.is_some()), ("--lsa-top-k", a.lsa_top_k.is_some()), ("--lsa-top-p", a.lsa_top_p.is_some()), ("--lsa-cluster-block", a.lsa_cluster_block.is_some()), ("--lsa-window-only", a.lsa_window_only)] {
@@ -452,6 +500,7 @@ pub fn run_finetune(argv: &[String]) -> ! {
         }
     };
     let code = match args.lora {
+        Some(_) if args.objective.is_paired() => objectives::run(&args),
         Some(rank) => match lora(&args, rank).run_with(&brain::CancelToken::default(), |p| eprintln!("step {}: loss {:.4}", p.step, p.loss)) {
             Ok(o) => {
                 println!("status: {:?}, {} steps, {}", o.status, o.steps_completed, losses(o.initial_loss, o.final_loss));
@@ -599,6 +648,56 @@ mod tests {
     }
 
     #[test]
+    fn each_paired_objective_trains_an_adapter_and_takes_only_its_own_settings() {
+        let err = |s: &str| parse(&argv(s)).unwrap_err();
+        for objective in ["preference", "feedback", "distill"] {
+            assert!(err(&format!("base --objective {objective}")).contains("--lora"), "{objective}");
+        }
+        assert!(err("base --objective pairwise").contains("preference"));
+        assert!(err("base --lora 4 --policy-gradient --objective preference").contains("contradicts"));
+        assert_eq!(parse(&argv("base --lora 4 --objective policy-gradient")).unwrap().objective, Objective::PolicyGradient);
+        assert_eq!(parse(&argv("base --lora 4 --policy-gradient")).unwrap().objective, Objective::PolicyGradient);
+        assert_eq!(parse(&argv("base --lora 4")).unwrap().objective, Objective::Sft);
+        // a setting of one objective is refused beside another, by name
+        assert!(err("base --lora 4 --loss ipo").contains("--objective preference"));
+        assert!(err("base --lora 4 --objective feedback --loss ipo").contains("--objective preference"));
+        assert!(err("base --lora 4 --objective preference --desirable-weight 2").contains("--objective feedback"));
+        assert!(err("base --lora 4 --objective preference --top-k 4").contains("--objective distill"));
+        assert!(err("base --lora 4 --objective distill --beta 0.2").contains("preference or feedback"));
+        assert!(err("base --lora 4 --keep-reasoning").contains("preference or feedback"));
+        // and so is a setting the objective's trainer does not read
+        assert!(err("base --lora 4 --objective feedback --weight-decay 0.1").contains("--weight-decay"));
+        assert!(err("base --lora 4 --objective distill --held-out h.jsonl").contains("--held-out"));
+        assert!(err("base --lora 4 --objective preference --no-thinking").contains("--no-thinking"));
+        assert!(parse(&argv("base --lora 4 --objective preference --held-out h.jsonl --stages 2 --activations recompute")).is_ok());
+    }
+
+    #[test]
+    fn a_preference_loss_is_named_and_simpo_alone_takes_a_margin() {
+        let loss = |s: &str| parse(&argv(&format!("base --lora 4 --objective preference {s}"))).and_then(|a| objectives::pair_loss(&a));
+        assert_eq!(loss(""), Ok(brain::PairLoss::Dpo));
+        assert_eq!(loss("--loss ipo"), Ok(brain::PairLoss::Ipo));
+        assert_eq!(loss("--loss orpo --beta 0.2"), Ok(brain::PairLoss::Orpo));
+        assert_eq!(loss("--loss simpo"), Ok(brain::PairLoss::SimPo { gamma: brain::DEFAULT_SIMPO_GAMMA }));
+        assert_eq!(loss("--loss simpo --gamma 1.2"), Ok(brain::PairLoss::SimPo { gamma: 1.2 }));
+        assert!(loss("--loss dpo --gamma 1").unwrap_err().contains("simpo"));
+        let err = loss("--loss kto").unwrap_err();
+        assert!(err.contains("--loss") && err.contains("simpo"), "{err}");
+    }
+
+    #[test]
+    fn a_distillation_teacher_is_the_base_the_start_adapter_or_an_adapter_file() {
+        let teacher = |s: &str| parse(&argv(&format!("base --lora 4 --objective distill {s}"))).map(|a| a.teacher);
+        assert_eq!(teacher(""), Ok(None));
+        assert_eq!(teacher("--teacher base"), Ok(Some(objectives::Teacher::Base)));
+        assert_eq!(teacher("--teacher start --continue a.safetensors"), Ok(Some(objectives::Teacher::Start)));
+        assert_eq!(teacher("--teacher adapter:t.safetensors --top-k 4"), Ok(Some(objectives::Teacher::Adapter("t.safetensors".into()))));
+        assert!(teacher("--teacher start").unwrap_err().contains("--continue"));
+        assert!(teacher("--teacher adapter:").unwrap_err().contains("adapter:FILE"));
+        assert!(teacher("--teacher tutor").unwrap_err().contains("base, start"));
+    }
+
+    #[test]
     fn strict_updates_is_a_flag_and_off_by_default() {
         assert!(!parse(&argv("base --steps 3")).unwrap().strict_updates);
         assert!(parse(&argv("base --strict-updates")).unwrap().strict_updates);
@@ -612,7 +711,7 @@ mod tests {
 
     #[test]
     fn the_usage_names_every_flag_the_parser_takes() {
-        for flag in ["--dataset", "--out", "--lora", "--alpha", "--continue", "--adapter-id", "--arch", "--models-dir", "--steps", "--lr", "--weight-decay", "--grad-accum", "--strict-updates", "--stages", "--native-sparse", "--lsa-window", "--lsa-sink", "--lsa-top-k", "--lsa-top-p", "--lsa-cluster-block", "--lsa-window-only", "--seed", "--max-block", "--base-format", "--activations", "--no-thinking", "--train-precision", "--held-out", "--modules-to-save", "--policy-gradient", "--algorithm", "--loss-agg", "--loss-agg-length", "--truncated", "--advantage-floor", "--ratio-clip", "--kl-beta", "--behaviour", "--ratio-clip-high", "--importance", "--max-step-kl", "--max-step-grad-norm", "--numerics-gate", "--gate-max-mean-gap", "--gate-max-gap", "--gate-max-mismatch-kl", "--gate-min-sequence-ess", "--gate-max-grad-norm", "--kv-roundtrip"] {
+        for flag in ["--dataset", "--out", "--lora", "--alpha", "--continue", "--adapter-id", "--arch", "--models-dir", "--steps", "--lr", "--weight-decay", "--grad-accum", "--strict-updates", "--stages", "--native-sparse", "--lsa-window", "--lsa-sink", "--lsa-top-k", "--lsa-top-p", "--lsa-cluster-block", "--lsa-window-only", "--seed", "--max-block", "--base-format", "--activations", "--no-thinking", "--train-precision", "--held-out", "--modules-to-save", "--policy-gradient", "--algorithm", "--loss-agg", "--loss-agg-length", "--truncated", "--advantage-floor", "--ratio-clip", "--kl-beta", "--behaviour", "--ratio-clip-high", "--importance", "--max-step-kl", "--max-step-grad-norm", "--numerics-gate", "--gate-max-mean-gap", "--gate-max-gap", "--gate-max-mismatch-kl", "--gate-min-sequence-ess", "--gate-max-grad-norm", "--kv-roundtrip", "--objective", "--loss", "--gamma", "--beta", "--nll-weight", "--keep-reasoning", "--desirable-weight", "--undesirable-weight", "--teacher", "--top-k"] {
             assert!(USAGE.contains(flag), "{flag} is parsed but absent from the usage");
         }
     }

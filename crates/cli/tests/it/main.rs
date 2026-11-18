@@ -11,6 +11,7 @@ mod autofetch_flag;
 mod caps_color;
 mod device_routing;
 mod doctor_cli;
+mod finetune_objectives;
 mod flops_coverage;
 mod flops_diffusion_cli;
 mod flops_help;

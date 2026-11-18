@@ -151,6 +151,34 @@ applications built on one model became its Rust sample under
   flag (`--ctx`, `--max-batch`, `--sched-*`). A config file that still sets one
   is refused with its replacement.
 
+## Fine-tuning
+
+`brain finetune BASE --dataset FILE --out DIR [options]` fine-tunes a chat model of any architecture it has a
+trainer for; `brain finetune --help` lists every option. Without `--lora RANK` it trains every weight; with it, a
+LoRA adapter over the frozen base (`DIR/adapter.safetensors` and its training record `DIR/training.json`). The
+objective the adapter is trained toward is `--objective`; each runs the same SDK pipeline as the training job of the
+HTTP API (`brain::ChatFineTune`, `PreferenceFineTune`, `FeedbackFineTune`, `DistillFineTune`):
+
+| `--objective` | Dataset | Options |
+|---|---|---|
+| `sft` (default) | `generic-messages-v2` chat JSONL | |
+| `policy-gradient` (or `--policy-gradient`) | rollout records with `reward` and `group` | `--algorithm`, `--ratio-clip`, `--kl-beta`, ... |
+| `preference` | `generic-preference-v1` pairs (`--held-out` too) | `--loss dpo\|ipo\|simpo\|orpo`, `--gamma X` (SimPO's target margin), `--beta X`, `--nll-weight X`, `--keep-reasoning` |
+| `feedback` (KTO) | `generic-feedback-v1` desirable and undesirable completions | `--desirable-weight X`, `--undesirable-weight X`, `--beta X`, `--keep-reasoning` |
+| `distill` | chat records; the teacher scores their supervised turns | `--teacher base\|start\|adapter:FILE`, `--top-k N` |
+
+`preference`, `feedback` and `distill` train an adapter, so they need `--lora RANK`. `--teacher start` is the adapter
+of `--continue FILE`; `adapter:FILE` is another adapter on the same base. A setting that an objective does not read
+(`--loss` beside `feedback`, `--weight-decay` beside `distill`) is a usage error that names it, never ignored.
+
+```bash
+brain finetune Qwen/Qwen3-4B --lora 16 --objective preference --loss simpo --gamma 0.5 \
+    --dataset pairs.jsonl --held-out held_out_pairs.jsonl --out runs/prefs
+brain finetune Qwen/Qwen3-4B --lora 16 --objective feedback --dataset judged.jsonl --out runs/kto
+brain finetune Qwen/Qwen3-4B --lora 16 --objective distill --teacher adapter:specialist.safetensors \
+    --top-k 16 --dataset prompts.jsonl --out runs/distill
+```
+
 ## Pulling weights
 
 `brain pull <model>` fetches a model's official weights into the model store
