@@ -27,7 +27,7 @@ use data::preference::EncodedTurn;
 use data::qwen_tokenizer::QwenBpe;
 
 use crate::config::QwenConfig;
-use crate::model::Qwen;
+use crate::model::{Qwen, IGNORE};
 use gpu_core::select::Dtype;
 
 /// Aggregate score over a held-out set: `loss` is mean per-token
@@ -144,7 +144,6 @@ fn load_reporting_tier(weights: &str, adapter: Option<&str>, block: u32, dt: Dty
 
 /// [`score_chat_rendered`]'s loop over an already built `model`, asking `keep_going` before each sample.
 fn score_loaded(model: &Qwen, tok: &QwenBpe, tmpl: &ChatTemplate, samples: &[ChatSample], render: RenderOpts, keep_going: &mut dyn FnMut() -> bool) -> Option<ChatScore> {
-    let vocab = model.cfg.vocab as usize;
     let cap = model.ctx_len();
 
     let mut total_nll = 0.0f64;
@@ -171,17 +170,17 @@ fn score_loaded(model: &Qwen, tok: &QwenBpe, tmpl: &ChatTemplate, samples: &[Cha
             skipped += 1;
             continue;
         }
-        let logits = model.logits_all(&ids);
-        for i in 0..ids.len() - 1 {
-            if !mask[i + 1] {
+        // Position `i` predicts `ids[i + 1]`, scored where training supervises it; the loss and the model's own
+        // pick are reduced on the device, so a long record costs two numbers a position on the host, not its logits.
+        let targets: Vec<u32> = (0..ids.len()).map(|i| if i + 1 < ids.len() && mask[i + 1] { ids[i + 1] } else { IGNORE }).collect();
+        let (nll, picked) = model.score_positions(&ids, &targets);
+        for ((&target, &loss), &pick) in targets.iter().zip(&nll).zip(&picked) {
+            if target == IGNORE {
                 continue;
             }
-            let target = ids[i + 1] as usize;
-            let row = &logits[i * vocab..(i + 1) * vocab];
-            let log_prob = model::logprobs::row_logprob(row, target);
-            total_nll -= log_prob as f64;
+            total_nll += loss as f64;
             positions += 1;
-            if argmax(row) as usize == target {
+            if pick == target {
                 correct += 1;
             }
         }
@@ -223,12 +222,9 @@ pub fn preference_margins(weights: &str, reference_adapter: Option<&str>, policy
 /// sequence, teacher-forced: position `i` predicts `ids[i + 1]`, counted
 /// where `mask[i + 1]`.
 fn supervised_logprob(model: &Qwen, turn: &EncodedTurn) -> f64 {
-    let vocab = model.cfg.vocab as usize;
-    let logits = model.logits_all(&turn.ids);
-    (0..turn.ids.len() - 1)
-        .filter(|&i| turn.mask[i + 1])
-        .map(|i| model::logprobs::row_logprob(&logits[i * vocab..(i + 1) * vocab], turn.ids[i + 1] as usize) as f64)
-        .sum()
+    let targets: Vec<u32> = (0..turn.ids.len()).map(|i| if i + 1 < turn.ids.len() && turn.mask[i + 1] { turn.ids[i + 1] } else { IGNORE }).collect();
+    let (nll, _) = model.score_positions(&turn.ids, &targets);
+    -nll.iter().map(|&l| l as f64).sum::<f64>()
 }
 
 /// Which KV representation [`score_chat_paged`] scores through.

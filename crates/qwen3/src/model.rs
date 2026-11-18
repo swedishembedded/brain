@@ -180,6 +180,16 @@ const KV_ROUNDTRIP_FP8: usize = 69;
 /// the GEMMs and the fused attention's 64-row query tiles.
 const DECODE_PREFILL_ROWS: u32 = 256;
 
+/// The finest granularity a trimmed training batch's run length is rounded up to ([`Qwen::needed_len`]); longer runs
+/// round to an eighth of their power of two, so a dataset meets few distinct lengths and each is recorded once.
+pub const TRIM_QUANTUM: u32 = 64;
+
+/// The recorded forward and backward of one trimmed run length ([`Qwen::run_tape`]).
+type RunTapes = std::sync::Arc<(Tape, Tape)>;
+
+/// The recorded passes of trimmed run lengths a build keeps at once ([`Qwen::run_tape`]): two octaves of lengths.
+const RUN_TAPES: usize = 16;
+
 /// Rows every activation buffer of a [`Qwen::new_impl`] build holds: `b·t`
 /// for a batched forward, one prefill chunk for a decode-only build (whose
 /// single-token decode uses row 0).
@@ -306,6 +316,9 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
     LIST.get_or_init(|| {
         let mut v = STATIC_PIPELINES.to_vec();
         v.push(("matmul_gemv", kernels::MATMUL_GEMV));
+        // The per-row argmax a teacher-forced score reads beside the loss (`Qwen::score_positions`).
+        v.push(("argmax_part", kernels::ARGMAX_PART));
+        v.push(("argmax_final", kernels::ARGMAX_FINAL));
         // Device AdamW over bf16 or blockwise-int8 moments (`optim::Optim` resolves them by name).
         v.extend(optim::MOMENT_KERNELS);
         // `Ops::bind` resolves its `(RegisterTiled, F32)` kernel by the NAME
@@ -734,6 +747,15 @@ pub struct Qwen {
 
     fwd_steps: Tape,
     bwd_steps: Tape,
+    /// The per-row argmax ids and their reduction scratch [`Self::score_positions`] reads, allocated on first use.
+    argmax_out: std::sync::OnceLock<(DeviceBuffer, DeviceBuffer)>,
+    /// Tokens per row the current batch computes: `t`, or, for a training batch whose supervised positions end
+    /// early, just past them ([`Self::needed_len`]). The buffers keep their `b * t` capacity; a trimmed batch is
+    /// laid out at its run length, row after row.
+    t_run: Cell<u32>,
+    /// The forward and backward recorded for each trimmed run length met lately, newest last (at most
+    /// [`RUN_TAPES`]); cleared whenever the full-length tapes are rebuilt.
+    run_tapes: std::cell::RefCell<Vec<(u32, RunTapes)>>,
     /// `[1]`: `1/count` for the current batch, the CE gradient's scale.
     inv_count: DeviceBuffer,
     /// Rows of logits the head holds at once (`model::head_ce::rows_for_budget`).
@@ -1665,6 +1687,9 @@ impl Qwen {
             res_saved,
             fwd_steps: Tape::default(),
             bwd_steps: Tape::default(),
+            argmax_out: std::sync::OnceLock::new(),
+            t_run: Cell::new(t),
+            run_tapes: Default::default(),
             inv_count: bwd(1),
             head_rows: head_rows as u32,
             flash,
@@ -1708,13 +1733,76 @@ impl Qwen {
         if let Some(&bad) = x.iter().find(|&&t| t as usize >= self.cfg.vocab as usize) {
             panic!("batched-forward token id {bad} exceeds vocab {} (checkpoint/tokenizer mismatch?)", self.cfg.vocab);
         }
-        self.gpu.write(&self.tokens, x);
+        let run = self.needed_len(y);
+        self.t_run.set(run);
+        let (tokens, targets): (std::borrow::Cow<[u32]>, std::borrow::Cow<[u32]>) = if run == self.t {
+            (x.into(), y.into())
+        } else {
+            // Each row's first `run` tokens, row after row: what the trimmed forward and backward read.
+            let (t, run) = (self.t as usize, run as usize);
+            let rows = |v: &[u32]| v.chunks(t).flat_map(|row| row[..run].iter().copied()).collect::<Vec<u32>>();
+            (rows(x).into(), rows(y).into())
+        };
+        self.gpu.write(&self.tokens, &tokens);
         if let Some(uniq) = &self.tok_uniq {
-            self.gpu.write(uniq, &model::ops::uniq_padded(x, (self.b * self.t) as usize));
+            self.gpu.write(uniq, &model::ops::uniq_padded(&tokens, (self.b * self.t) as usize));
         }
-        self.gpu.write(&self.targets, y);
+        self.gpu.write(&self.targets, &targets);
         let c = y.iter().filter(|&&v| v != IGNORE).count();
         self.count.set(c.max(1) as f32);
+    }
+
+    /// The tokens per row worth computing for `targets` (`b` rows of `t`): a training batch needs nothing past the
+    /// last supervised position of its longest row. The model is causal and each row attends only to itself, so a
+    /// row's tail past its last supervised position changes no earlier activation and adds no loss and no gradient;
+    /// skipping it makes a record padded to the block cost its own length (rounded up by at most an eighth, at least
+    /// to whole [`TRIM_QUANTUM`]s, so a run of records needs few recorded passes). The full row is kept by a build that is not training, and by
+    /// every build whose passes read the whole row: quantized boundaries (sized for it), a pipeline stage (its
+    /// neighbours run the whole row), an external head, an image splice, DeepStack, M-RoPE, native sparse
+    /// attention, a weighted or scaled loss, the padded-key mask and a resident full fine-tune.
+    fn needed_len(&self, targets: &[u32]) -> u32 {
+        let trimmable = !self.bwd_steps.steps.is_empty()
+            && self.res_saved.is_none()
+            && self.shard.embed
+            && self.shard.head
+            && !self.external_head.get()
+            && self.splice.is_empty()
+            && self.deepstack.get().is_none()
+            && !self.mrope.get()
+            && self.nlsa.is_none()
+            && self.weighted_ce.is_none()
+            && self.logit_scale.is_none()
+            && !self.kmask_on.get()
+            && self.resident.is_none()
+            && targets.len() == (self.b * self.t) as usize;
+        if !trimmable {
+            return self.t;
+        }
+        let last = targets.chunks(self.t as usize).map(|row| row.iter().rposition(|&v| v != IGNORE).map_or(0, |i| i + 1)).max().unwrap_or(0) as u32;
+        // An eighth of the length's power of two, at least TRIM_QUANTUM: at most 12.5 % past the record, eight
+        // lengths an octave.
+        let quantum = ((last.max(1).next_power_of_two()) / 8).max(TRIM_QUANTUM);
+        last.max(1).next_multiple_of(quantum).min(self.t)
+    }
+
+    /// Tokens per row the current batch computes ([`Self::needed_len`]).
+    pub fn run_len(&self) -> u32 {
+        self.t_run.get()
+    }
+
+    /// The recorded forward and backward of a batch trimmed to `run` tokens a row, recorded on first use.
+    fn run_tape(&self, run: u32) -> RunTapes {
+        let mut tapes = self.run_tapes.borrow_mut();
+        if let Some(i) = tapes.iter().position(|(len, _)| *len == run) {
+            let hit = tapes.remove(i);
+            tapes.push(hit);
+        } else {
+            if tapes.len() == RUN_TAPES {
+                tapes.remove(0);
+            }
+            tapes.push((run, std::sync::Arc::new((self.forward_steps(self.b, run), self.build_backward_steps_at(self.b, run)))));
+        }
+        tapes.last().expect("just pushed").1.clone()
     }
 
     /// Divides the current batch's loss and gradient by `tokens` rather than
@@ -1914,6 +2002,7 @@ impl Qwen {
         if self.kv_roundtrip.replace(element) != element && !self.decode_only {
             // The batched forward and the backward's recompute are recorded graphs: they are built again with the round trip in.
             self.fwd_steps = self.forward_steps(self.b, self.t);
+            self.run_tapes.get_mut().clear();
             if !self.bwd_steps.steps.is_empty() {
                 self.bwd_steps = self.build_backward_steps();
             }
@@ -2512,8 +2601,12 @@ impl Qwen {
 
     pub fn forward(&self) -> f32 {
         assert!(!self.decode_only, "Qwen::forward: batched forward called on a decode-only-built model; use step/prefill/step_embed instead");
-        self.submit_forward();
-        let n = (self.b * self.t) as usize;
+        if self.run_len() == self.t {
+            self.submit_forward();
+        } else {
+            self.run_tape(self.run_len()).0.submit(&self.gpu);
+        }
+        let n = (self.b * self.run_len()) as usize;
         let losses = self.gpu.read(&self.ce_buf, n);
         match &self.weighted_ce {
             // Must return the SAME scalar `backward`'s (weighted) `d_logits`
@@ -2533,8 +2626,10 @@ impl Qwen {
     /// `set_batch`/`forward`).
     pub fn batch_token_logprobs(&self) -> Vec<f32> {
         assert!(!self.decode_only, "Qwen::batch_token_logprobs: batched forward called on a decode-only-built model");
-        let n = (self.b * self.t) as usize;
-        self.gpu.read(&self.ce_buf, n).iter().map(|&nll| -nll).collect()
+        let (t, run) = (self.t as usize, self.run_len() as usize);
+        let computed = self.gpu.read(&self.ce_buf, self.b as usize * run);
+        // A trimmed row's positions past its run length were not computed: they are unsupervised, `0.0` as IGNORE is.
+        computed.chunks(run).flat_map(|row| row.iter().map(|&nll| -nll).chain(std::iter::repeat_n(0.0, t - run))).collect()
     }
 
     pub fn backward(&self) {
@@ -2548,7 +2643,11 @@ impl Qwen {
             assert!(!self.backward_pending.replace(true), "qwen3 layer-streamed full fine-tune: a second backward before the update (gradient accumulation) is not supported; every micro-batch is its own step");
             return;
         }
-        self.bwd_steps.submit(&self.gpu);
+        if self.run_len() == self.t {
+            self.bwd_steps.submit(&self.gpu);
+        } else {
+            self.run_tape(self.run_len()).1.submit(&self.gpu);
+        }
     }
 
     fn layer_streamed(&self) -> bool {
@@ -2590,9 +2689,15 @@ impl Qwen {
     }
 
     fn build_backward_steps(&self) -> Tape {
+        self.build_backward_steps_at(self.b, self.t)
+    }
+
+    /// The backward of a batch of `b` rows of `t` tokens laid out row after row (the build's own `b * t`, or a
+    /// trimmed run length, [`Self::needed_len`]).
+    fn build_backward_steps_at(&self, b: u32, t: u32) -> Tape {
         assert!(!self.decode_only, "build_backward_steps: no backward buffers on a decode-only-built Qwen");
         let c = &self.cfg;
-        let n = self.b * self.t;
+        let n = b * t;
         let d = c.d_model;
         let ff = c.d_ff;
         let hd = c.head_dim;
@@ -2601,8 +2706,6 @@ impl Qwen {
         let nh = c.n_heads;
         let nkv = c.n_kv_heads;
         let theta = c.rope_theta;
-        let b = self.b;
-        let t = self.t;
         let ids = Self::ids();
         let ga = self.gqa(b, t);
         let mut s: Vec<Step> = Vec::new();
@@ -2906,6 +3009,7 @@ impl Qwen {
         // best, an oversized/undersized-buffer bind-group mismatch at worst.
         if !self.decode_only {
             self.fwd_steps = self.forward_steps(self.b, self.t);
+            self.run_tapes.get_mut().clear();
             if !self.bwd_steps.steps.is_empty() {
                 self.bwd_steps = self.build_backward_steps();
             }
@@ -2923,6 +3027,7 @@ impl Qwen {
         self.external_head.set(true);
         if !self.decode_only {
             self.fwd_steps = self.forward_steps(self.b, self.t);
+            self.run_tapes.get_mut().clear();
             if !self.bwd_steps.steps.is_empty() {
                 self.bwd_steps = self.build_backward_steps();
             }
@@ -3016,6 +3121,7 @@ impl Qwen {
         };
         self.nlsa = Some(NativeLsa { cfg, kernels, selector, index, stats });
         self.fwd_steps = self.forward_steps(self.b, self.t);
+            self.run_tapes.get_mut().clear();
         if !self.bwd_steps.steps.is_empty() {
             self.bwd_steps = self.build_backward_steps();
         }
@@ -3044,6 +3150,7 @@ impl Qwen {
         // directly), so rebuilding the batched graph here is skipped for it.
         if !self.decode_only {
             self.fwd_steps = self.forward_steps(self.b, self.t);
+            self.run_tapes.get_mut().clear();
             if !self.bwd_steps.steps.is_empty() {
                 self.bwd_steps = self.build_backward_steps();
             }
@@ -3088,6 +3195,7 @@ impl Qwen {
             }
             if !self.decode_only {
                 self.fwd_steps = self.forward_steps(self.b, self.t);
+            self.run_tapes.get_mut().clear();
                 if !self.bwd_steps.steps.is_empty() {
                     self.bwd_steps = self.build_backward_steps();
                 }
@@ -3138,6 +3246,7 @@ impl Qwen {
         // a decode-only build - `decode_steps` reads `self.deepstack` directly.
         if !self.decode_only {
             self.fwd_steps = self.forward_steps(self.b, self.t);
+            self.run_tapes.get_mut().clear();
         }
     }
 
@@ -3195,6 +3304,24 @@ impl Qwen {
     }
 
     /// Logits for every position of a single sequence (B must be 1, t>=len).
+    /// Teacher-forced scores of one sequence, reduced on the device: for each position `i`, the negative
+    /// log-probability of `targets[i]` (`0.0` where it is `IGNORE`) and the token the model would pick there itself.
+    /// Two numbers a position reach the host, never the `[len, vocab]` logits [`Self::logits_all`] reads back (10 GB
+    /// for a 16K-token row of a 152K vocabulary). B must be 1 and `tokens.len() <= t`.
+    pub fn score_positions(&self, tokens: &[u32], targets: &[u32]) -> (Vec<f32>, Vec<u32>) {
+        let t_use = tokens.len() as u32;
+        assert!(t_use <= self.t && self.b == 1 && targets.len() == tokens.len(), "qwen: score_positions takes one sequence of at most {} tokens with a target per token", self.t);
+        let head = self.head_ce();
+        let (ids, scratch) = self.argmax_out.get_or_init(|| (self.gpu.storage(u64::from(self.b * self.t)), head.argmax_scratch(&self.gpu)));
+        self.set_batch(tokens, targets);
+        let mut tape = self.body_tape(1, t_use);
+        head.forward_steps_with(&self.ops, &mut tape.steps, &self.xn_final, t_use, &self.targets, &self.ce_buf, Some(model::head_ce::ArgmaxOut { ids, scratch }), 1.0);
+        tape.submit(&self.gpu);
+        let nll = self.gpu.read(&self.ce_buf, t_use as usize);
+        let picked = self.gpu.read(ids, t_use as usize).into_iter().map(|id| id as u32).collect();
+        (nll, picked)
+    }
+
     pub fn logits_all(&self, tokens: &[u32]) -> Vec<f32> {
         let t_use = tokens.len() as u32;
         assert!(t_use <= self.t && self.b == 1, "qwen decoder sized too small");
@@ -4063,6 +4190,7 @@ impl Qwen {
         self.reset_cache();
         if !self.decode_only {
             self.fwd_steps = self.forward_steps(self.b, self.t);
+            self.run_tapes.get_mut().clear();
         }
     }
 
@@ -4418,6 +4546,9 @@ impl model::Model for Qwen {
     }
     fn forward(&self) -> f32 {
         Qwen::forward(self)
+    }
+    fn computed_tokens(&self) -> Option<u64> {
+        Some(u64::from(self.b) * u64::from(self.run_len()))
     }
     fn backward(&self) {
         Qwen::backward(self)
