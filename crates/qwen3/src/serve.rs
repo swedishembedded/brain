@@ -874,7 +874,7 @@ pub fn prefill_round_rows(fused: FusedAttention, tensor_cores: bool) -> u32 {
 /// chosen ([`fused_attention_on_gpu`]; tensor cores when every selected card offers them).
 pub fn prefill_round_rows_on_gpu(cfg: &QwenConfig, kv_int8: bool) -> u32 {
     let hw = gpu_core::defaults::Hardware::detected();
-    let cards: Vec<u32> = hw.cards.iter().map(|c| c.index).collect();
+    let cards: Vec<u32> = hw.own_cards().map(|c| c.index).collect();
     prefill_round_rows(fused_attention_on_gpu(cfg, kv_int8), gpu_core::provider::cuda::tensor_core_kernels_offered(hw, &cards))
 }
 

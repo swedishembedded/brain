@@ -105,9 +105,33 @@ impl Hardware {
         ))
     }
 
-    /// Every card is NVIDIA's and the CUDA backend can run on each.
+    /// The canonical cards the CUDA backend drives, bit `i` for `gpu<i>`: those the CUDA driver lists; none where it
+    /// cannot run.
+    pub fn cuda_cards(&self) -> u64 {
+        self.mask(|c| self.cuda_unusable.is_none() && c.compute_capability.is_some())
+    }
+
+    /// NVIDIA cards a working CUDA driver does not list, bit `i` for `gpu<i>`: hidden from this process (by
+    /// `CUDA_VISIBLE_DEVICES`, which the driver reads, or a container's device list) while Vulkan still enumerates
+    /// them. The operator's statement of which cards are not this process's, not a card CUDA cannot run.
+    pub fn hidden_from_cuda(&self) -> u64 {
+        self.mask(|c| self.cuda_unusable.is_none() && c.vendor_id == NVIDIA && c.compute_capability.is_none())
+    }
+
+    fn mask(&self, keep: impl Fn(&Card) -> bool) -> u64 {
+        self.cards.iter().filter(|c| c.index < 64 && keep(c)).fold(0, |m, c| m | 1 << c.index)
+    }
+
+    /// The cards that are this process's: every card, except the NVIDIA cards hidden from a CUDA driver that drives
+    /// others ([`Self::hidden_from_cuda`]), which "every card" never names ([`crate::devices::DeviceSpec::resolve`]).
+    pub fn own_cards(&self) -> impl Iterator<Item = &Card> {
+        let hidden = if self.cuda_cards() != 0 { self.hidden_from_cuda() } else { 0 };
+        self.cards.iter().filter(move |c| c.index >= 64 || hidden & 1 << c.index == 0)
+    }
+
+    /// Every card of this process ([`Self::own_cards`]) is NVIDIA's and the CUDA backend can run on each.
     pub fn cuda_everywhere(&self) -> bool {
-        self.cuda_unusable.is_none() && !self.cards.is_empty() && self.cards.iter().all(|c| c.vendor_id == NVIDIA && c.compute_capability.is_some())
+        self.cuda_unusable.is_none() && self.own_cards().next().is_some() && self.own_cards().all(|c| c.vendor_id == NVIDIA && c.compute_capability.is_some())
     }
 
     /// Whether the native fused kernel `which` will run on every one of the
@@ -138,7 +162,7 @@ impl Hardware {
 
     /// The lowest compute capability among the cards, when every card has one.
     pub fn min_compute_capability(&self) -> Option<(u32, u32)> {
-        self.cards.iter().map(|c| c.compute_capability).collect::<Option<Vec<_>>>()?.into_iter().min()
+        self.own_cards().map(|c| c.compute_capability).collect::<Option<Vec<_>>>()?.into_iter().min()
     }
 }
 
@@ -235,6 +259,25 @@ mod tests {
         assert_eq!(amd.cuda_fallback_notice(Backend::Wgpu), None);
         let healthy = Hardware { cards: nvidia, cuda_unusable: None };
         assert_eq!(healthy.cuda_fallback_notice(Backend::Wgpu), None);
+    }
+
+    /// `CUDA_VISIBLE_DEVICES=0` on a four-card NVIDIA node: Vulkan lists every card, CUDA only the one it was given.
+    /// The three it does not list are hidden from this process, not cards CUDA cannot run, so the cards CUDA drives
+    /// stay on CUDA; only a driver that does not load at all makes no card CUDA's.
+    #[test]
+    fn a_card_hidden_from_cuda_is_told_apart_from_one_cuda_cannot_drive() {
+        let node = Hardware { cards: vec![card(0, NVIDIA, 96, Some((9, 0))), card(1, NVIDIA, 96, None), card(2, NVIDIA, 96, None), card(3, NVIDIA, 96, None)], cuda_unusable: None };
+        assert_eq!((node.cuda_cards(), node.hidden_from_cuda()), (0b0001, 0b1110));
+        // The hidden cards are not this process's: every default ruled on the cards (the backend, the CUDA-only
+        // kernels a plan counts on) is the one card's, CUDA's.
+        assert_eq!(node.own_cards().map(|c| c.index).collect::<Vec<_>>(), [0]);
+        assert!(node.cuda_everywhere() && node.min_compute_capability() == Some((9, 0)));
+        assert_eq!(choose(BACKEND, &node, |_| Ok(())).unwrap().value, Backend::Cuda);
+        let broken = Hardware { cuda_unusable: Some("libcuda.so.1 not found".into()), ..node.clone() };
+        assert_eq!((broken.cuda_cards(), broken.hidden_from_cuda()), (0, 0), "nothing is hidden from a driver that does not load");
+        assert!(!broken.cuda_everywhere() && broken.own_cards().count() == 4);
+        let mixed = Hardware { cards: vec![card(0, NVIDIA, 24, Some((8, 9))), card(1, 0x1002, 16, None)], cuda_unusable: None };
+        assert_eq!((mixed.cuda_cards(), mixed.hidden_from_cuda()), (0b01, 0), "an AMD card is not hidden from CUDA");
     }
 
     #[test]

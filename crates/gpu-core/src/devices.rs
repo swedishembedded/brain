@@ -842,10 +842,10 @@ impl DeviceSpec {
         if self.is_all() {
             // Everything present. GPUs first (the scheduler prefers them), CPU
             // always usable, NPU when one exists.
-            set.gpus = (0..probe.gpus).collect();
+            set.gpus = probe.every_gpu();
             set.cpu_cores = (0..probe.cpu_cores).collect();
             set.npus = (0..probe.npus).collect();
-            set.backend = if probe.gpus > 0 { probe.gpu_backend } else { Backend::Cpu };
+            set.backend = if set.gpus.is_empty() { Backend::Cpu } else { probe.default_backend_for(&set.gpus)? };
             return Ok(set);
         }
 
@@ -861,7 +861,7 @@ impl DeviceSpec {
                 Request::AllGpus => {
                     any_gpu_request = true;
                     named_card = true;
-                    set.gpus.extend(0..probe.gpus);
+                    set.gpus.extend(probe.every_gpu());
                 }
                 Request::Gpu(i) => {
                     any_gpu_request = true;
@@ -962,7 +962,7 @@ impl DeviceSpec {
             } else if want_wgpu {
                 Backend::Wgpu
             } else {
-                probe.gpu_backend
+                probe.default_backend_for(&set.gpus)?
             }
         } else {
             Backend::Cpu
@@ -1036,14 +1036,53 @@ pub struct Inventory {
     /// of [`crate::defaults::BACKEND`] that holds on this machine (CUDA where
     /// every card can run it, the portable backend otherwise).
     pub gpu_backend: Backend,
+    /// The cards the CUDA backend drives, bit `i` for `gpu<i>` ([`crate::defaults::Hardware::cuda_cards`]).
+    pub cuda_cards: u64,
+    /// NVIDIA cards hidden from CUDA in this process while it drives others
+    /// ([`crate::defaults::Hardware::hidden_from_cuda`]): left out of "every card", refused by name.
+    pub cuda_hidden: u64,
 }
 
 impl Inventory {
+    /// Whether CUDA drives some cards here and the rest are NVIDIA cards hidden from it: then "every card" means the
+    /// cards CUDA drives, on CUDA, and the hidden ones are not this process's.
+    fn cuda_narrowed(&self) -> bool {
+        let all = if self.gpus >= 64 { u64::MAX } else { (1u64 << self.gpus) - 1 };
+        self.cuda_hidden != 0 && self.cuda_cards != 0 && (self.cuda_cards | self.cuda_hidden) & all == all
+    }
+
+    /// The cards "every card" names: all of them, or the ones CUDA drives where the others are hidden from it.
+    fn every_gpu(&self) -> Vec<u32> {
+        (0..self.gpus).filter(|&i| !self.cuda_narrowed() || i >= 64 || self.cuda_cards & 1 << i != 0).collect()
+    }
+
+    /// The backend for `gpus` when no backend token was given: CUDA when it drives every one of them, else the
+    /// machine's default. `Err` names a card hidden from CUDA while CUDA drives others, rather than driving it (and
+    /// the rest) through the portable backend behind the operator's back.
+    fn default_backend_for(&self, gpus: &[u32]) -> Result<Backend, String> {
+        let bit = |i: u32| i < 64 && self.cuda_cards & 1 << i != 0;
+        if !gpus.is_empty() && gpus.iter().all(|&i| bit(i)) {
+            return Ok(Backend::Cuda);
+        }
+        let hidden: Vec<String> = gpus.iter().filter(|&&i| i < 64 && self.cuda_hidden & 1 << i != 0).map(|i| format!("gpu{i}")).collect();
+        if !hidden.is_empty() && self.cuda_cards != 0 {
+            let sees: Vec<String> = (0..self.gpus.min(64)).filter(|&i| bit(i)).map(|i| format!("gpu{i}")).collect();
+            return Err(format!(
+                "{} hidden from CUDA in this process (CUDA_VISIBLE_DEVICES or the container's device list), which drives {}: \
+                 name a card CUDA sees, make the card visible to CUDA, or pass --backend wgpu or --backend vulkan to drive it \
+                 through the portable backend",
+                if hidden.len() == 1 { format!("{} is", hidden[0]) } else { format!("{} are", hidden.join(", ")) },
+                sees.join(", ")
+            ));
+        }
+        Ok(self.gpu_backend)
+    }
+
     /// The machine's cores and NPUs, with no GPU enumerated: what a [`DeviceSpec`] that does not
     /// [`DeviceSpec::reads_gpus`] resolves against.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn probe_host() -> Inventory {
-        Inventory { gpus: 0, cpu_cores: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1), npus: npu_count(), gpu_backend: Backend::Cpu }
+        Inventory { gpus: 0, cpu_cores: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1), npus: npu_count(), gpu_backend: Backend::Cpu, cuda_cards: 0, cuda_hidden: 0 }
     }
 
     /// Probe the current machine.
@@ -1057,6 +1096,8 @@ impl Inventory {
             cpu_cores: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1),
             npus: npu_count(),
             gpu_backend: crate::defaults::candidates(crate::defaults::BACKEND, crate::defaults::Hardware::detected()).0[0],
+            cuda_cards: crate::defaults::Hardware::detected().cuda_cards(),
+            cuda_hidden: crate::defaults::Hardware::detected().hidden_from_cuda(),
         }
     }
 }
@@ -1707,7 +1748,7 @@ mod tests {
     use super::*;
 
     fn inv(gpus: u32, cores: usize, npus: u32) -> Inventory {
-        Inventory { gpus, cpu_cores: cores, npus, gpu_backend: Backend::Wgpu }
+        Inventory { gpus, cpu_cores: cores, npus, gpu_backend: Backend::Wgpu, cuda_cards: 0, cuda_hidden: 0 }
     }
 
     fn resolve(s: &str, i: Inventory) -> Result<ComputeSet, String> {
@@ -1742,6 +1783,29 @@ mod tests {
         assert_eq!(resolve("cpu", cuda_only).unwrap().backend, Backend::Cpu);
         assert_eq!(resolve("vulkan", cuda_only).unwrap().backend, Backend::Vulkan, "an explicit token wins");
         assert_eq!(resolve("wgpu", cuda_only).unwrap().backend, Backend::Wgpu, "an explicit token wins");
+    }
+
+    /// `CUDA_VISIBLE_DEVICES=0` on a four-GH200 node (Vulkan lists all four, CUDA one): a run that names no backend
+    /// is CUDA's on the card CUDA sees, never the portable backend over cards the operator hid from CUDA; a card named
+    /// that CUDA cannot see is refused naming it, and an explicit portable backend still drives what it names.
+    #[test]
+    fn a_card_hidden_from_cuda_never_turns_the_run_portable() {
+        let node = Inventory { cuda_cards: 0b0001, cuda_hidden: 0b1110, ..inv(4, 72, 0) };
+        for spec in ["", "gpu", "gpu0", "gpu0,cpu"] {
+            let set = resolve(spec, node).unwrap();
+            assert_eq!((set.backend, set.gpus.clone()), (Backend::Cuda, vec![0]), "{spec:?}");
+        }
+        for spec in ["gpu1", "gpu0,gpu2"] {
+            let err = resolve(spec, node).unwrap_err();
+            assert!(err.contains("hidden from CUDA") && err.contains("CUDA_VISIBLE_DEVICES") && err.contains("--backend"), "{spec}: {err}");
+        }
+        assert_eq!(resolve("gpu1,vulkan", node).unwrap().backend, Backend::Vulkan, "an explicit token wins");
+        assert_eq!(resolve("wgpu", node).unwrap().gpus, vec![0, 1, 2, 3], "an explicit portable backend drives every card");
+        assert_eq!(resolve("cpu", node).unwrap().backend, Backend::Cpu);
+        // Every card CUDA's: nothing changes; no card CUDA's (the driver does not load): the portable default.
+        let all = Inventory { gpu_backend: Backend::Cuda, cuda_cards: 0b1111, ..inv(4, 72, 0) };
+        assert_eq!((resolve("", all).unwrap().backend, resolve("", all).unwrap().gpus.len()), (Backend::Cuda, 4));
+        assert_eq!(resolve("gpu1", inv(4, 72, 0)).unwrap().backend, Backend::Wgpu);
     }
 
     #[test]

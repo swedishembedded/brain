@@ -1806,7 +1806,7 @@ mod tests {
     /// selection, so a GPU-less runner (or one with its cards hidden) checks them as well as a two-card box.
     fn two_card_selection(token: &str) -> gpu_core::devices::ComputeSet {
         use gpu_core::devices::{Backend, DeviceSpec, Inventory};
-        let machine = Inventory { gpus: 2, cpu_cores: 4, npus: 0, gpu_backend: Backend::Wgpu };
+        let machine = Inventory { gpus: 2, cpu_cores: 4, npus: 0, gpu_backend: Backend::Wgpu, cuda_cards: 0, cuda_hidden: 0 };
         DeviceSpec::parse(token).and_then(|s| s.resolve(&machine)).unwrap_or_else(|e| panic!("{token}: {e}"))
     }
 
