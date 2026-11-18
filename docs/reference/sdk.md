@@ -602,6 +602,12 @@ for step in &outcome.policy_gradient.unwrap().stats.steps {
 }
 ```
 
+A named algorithm is a configuration to start from: `PolicyGradientAlgorithm::{Grpo, DrGrpo, Dapo, Rloo}.config(max_block)`
+returns `PolicyGradientConfig::default()` with what defines the algorithm set (GRPO: `ZScore`, `SeqMean`, a symmetric
+band; Dr. GRPO: `MeanCentered`, `ConstantLength(max_block)`, `kl_beta` 0; DAPO: `ZScore`, `clip_eps_high: Some(0.28)`,
+`TokenSum`, `TruncatedRollouts::Mask`, `kl_beta` 0; RLOO: `LeaveOneOut`, `TokenSum`); change any field of it before
+passing it to `policy_gradient`. `PolicyGradientOutcome::settings_json` is every setting a run trained with, in wire form.
+
 The loss of a supervised token with advantage `A`, behaviour log-probability `old`, current log-probability `new` and
 reference `ref` is `-min(r A, clip(r, 1 - eps, 1 + eps) A) + beta * (e^u - u - 1)` with `r = exp(new - old)` and
 `u = ref - new`; a token clipped on the side its advantage pushes toward has no gradient. The objective, the per-token

@@ -51,6 +51,10 @@ brain finetune BASE --dataset FILE --out DIR [options]
   --policy-gradient  train the clipped policy gradient on rollout records (`reward` and `group` on each record,
                      training-record contract v2) instead of the supervised loss, for an adapter; --ratio-clip X and
                      --kl-beta X set its clip band and KL weight.
+  --algorithm A      with --policy-gradient: a named algorithm whose settings are this run's defaults (any flag below
+                     overrides it): grpo (z-score, seq-mean, symmetric clip, the KL term), dr-grpo (mean-centred,
+                     constant-length over --loss-agg-length or --max-block, no KL), dapo (z-score, clip-higher 0.28,
+                     token-sum, truncated masked, no KL) or rloo (leave-one-out, token-sum).
   --advantage-norm N with --policy-gradient: how each group's rewards become advantages: mean-centred (default),
                      z-score or leave-one-out.
   --loss-agg A       with --policy-gradient: how the token terms are normalised: seq-mean (default; each sequence by its own
@@ -131,6 +135,7 @@ struct Args {
     behaviour: Option<brain::BehaviourSource>,
     advantage_norm: Option<brain::AdvantageNorm>,
     loss_agg: Option<String>,
+    algorithm: Option<brain::PolicyGradientAlgorithm>,
     truncated: Option<brain::TruncatedRollouts>,
     loss_agg_length: Option<u32>,
     clip_eps_high: Option<f32>,
@@ -196,6 +201,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--behaviour" => a.behaviour = Some(need(&mut i, &flag)?.parse().map_err(|e| format!("brain finetune: {flag}: {e}"))?),
             "--advantage-norm" => a.advantage_norm = Some(brain::AdvantageNorm::parse(&need(&mut i, &flag)?).map_err(|e| format!("brain finetune: {flag}: {e}"))?),
             "--loss-agg" => a.loss_agg = Some(need(&mut i, &flag)?),
+            "--algorithm" => a.algorithm = Some(brain::PolicyGradientAlgorithm::parse(&need(&mut i, &flag)?).map_err(|e| format!("brain finetune: {flag}: {e}"))?),
             "--truncated" => a.truncated = Some(brain::TruncatedRollouts::parse(&need(&mut i, &flag)?).map_err(|e| format!("brain finetune: {flag}: {e}"))?),
             "--loss-agg-length" => a.loss_agg_length = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--ratio-clip-high" => a.clip_eps_high = Some(number(&need(&mut i, &flag)?, &flag)?),
@@ -228,13 +234,14 @@ fn parse(argv: &[String]) -> Result<Args, String> {
         }
     }
     if !a.policy_gradient {
-        for (flag, given) in [("--ratio-clip", a.clip_eps.is_some()), ("--kl-beta", a.kl_beta.is_some()), ("--behaviour", a.behaviour.is_some()), ("--advantage-norm", a.advantage_norm.is_some()), ("--loss-agg", a.loss_agg.is_some()), ("--loss-agg-length", a.loss_agg_length.is_some()), ("--truncated", a.truncated.is_some()), ("--ratio-clip-high", a.clip_eps_high.is_some()), ("--importance", a.importance.is_some()), ("--max-step-kl", a.max_step_kl.is_some()), ("--max-step-grad-norm", a.max_step_grad_norm.is_some()), ("--kv-roundtrip", a.kv_roundtrip.is_some())] {
+        for (flag, given) in [("--ratio-clip", a.clip_eps.is_some()), ("--kl-beta", a.kl_beta.is_some()), ("--behaviour", a.behaviour.is_some()), ("--advantage-norm", a.advantage_norm.is_some()), ("--algorithm", a.algorithm.is_some()), ("--loss-agg", a.loss_agg.is_some()), ("--loss-agg-length", a.loss_agg_length.is_some()), ("--truncated", a.truncated.is_some()), ("--ratio-clip-high", a.clip_eps_high.is_some()), ("--importance", a.importance.is_some()), ("--max-step-kl", a.max_step_kl.is_some()), ("--max-step-grad-norm", a.max_step_grad_norm.is_some()), ("--kv-roundtrip", a.kv_roundtrip.is_some())] {
             if given {
                 return Err(format!("brain finetune: {flag} shapes the policy gradient; give --policy-gradient"));
             }
         }
     }
     if a.policy_gradient {
+        algorithm_config(&a)?;
         loss_agg(&a)?;
     }
     if !a.numerics_gate && a.gate != brain::NumericsBounds::default() {
@@ -271,9 +278,23 @@ fn loss_agg(a: &Args) -> Result<Option<brain::LossAgg>, String> {
             Some(n) => Ok(Some(brain::LossAgg::ConstantLength(n))),
             None => Err("brain finetune: --loss-agg constant-length divides by a constant; give --loss-agg-length N or --max-block N".to_string()),
         },
+        // Dr. GRPO's own aggregation is a constant length: its constant alone is enough.
+        (None, Some(_)) if a.algorithm == Some(brain::PolicyGradientAlgorithm::DrGrpo) => Ok(None),
         (_, Some(_)) => Err("brain finetune: --loss-agg-length is the constant of --loss-agg constant-length".to_string()),
         (Some(v), None) => v.parse().map(Some).map_err(|e| format!("brain finetune: --loss-agg: {e}")),
         (None, None) => Ok(None),
+    }
+}
+
+/// The configuration `--algorithm` names (the default without one), before the flags are laid over it.
+fn algorithm_config(a: &Args) -> Result<brain::PolicyGradientConfig, String> {
+    let length = a.loss_agg_length.or(a.max_block);
+    match (a.algorithm, length) {
+        (None, _) => Ok(brain::PolicyGradientConfig::default()),
+        (Some(brain::PolicyGradientAlgorithm::DrGrpo), None) => Err("brain finetune: --algorithm dr-grpo divides each sequence by a constant length; give --loss-agg-length N or --max-block N".to_string()),
+        (Some(algorithm), Some(n)) => Ok(algorithm.config(n)),
+        // Only Dr. GRPO reads the constant.
+        (Some(algorithm), None) => Ok(algorithm.config(0)),
     }
 }
 
@@ -338,8 +359,8 @@ fn lora(a: &Args, rank: u32) -> brain::ChatFineTune {
         t = t.modules_to_save(a.modules_to_save.clone());
     }
     if a.policy_gradient {
-        let d = brain::PolicyGradientConfig::default();
-        t = t.policy_gradient(brain::PolicyGradientConfig { clip_eps: a.clip_eps.unwrap_or(d.clip_eps), kl_beta: a.kl_beta.unwrap_or(d.kl_beta), behaviour: a.behaviour.unwrap_or(d.behaviour), numerics: a.numerics_gate.then_some(a.gate), kv_roundtrip: a.kv_roundtrip, clip_eps_high: a.clip_eps_high, importance: a.importance.unwrap_or(d.importance), max_step_kl: a.max_step_kl, max_step_grad_norm: a.max_step_grad_norm, advantage_norm: a.advantage_norm.unwrap_or(d.advantage_norm), loss_agg: loss_agg(a).expect("parse checked --loss-agg").unwrap_or(d.loss_agg), truncated: a.truncated.unwrap_or(d.truncated), ..d });
+        let d = algorithm_config(a).expect("parse checked --algorithm");
+        t = t.policy_gradient(brain::PolicyGradientConfig { clip_eps: a.clip_eps.unwrap_or(d.clip_eps), kl_beta: a.kl_beta.unwrap_or(d.kl_beta), behaviour: a.behaviour.unwrap_or(d.behaviour), numerics: a.numerics_gate.then_some(a.gate), kv_roundtrip: a.kv_roundtrip.or(d.kv_roundtrip), clip_eps_high: a.clip_eps_high.or(d.clip_eps_high), importance: a.importance.unwrap_or(d.importance), max_step_kl: a.max_step_kl.or(d.max_step_kl), max_step_grad_norm: a.max_step_grad_norm.or(d.max_step_grad_norm), advantage_norm: a.advantage_norm.unwrap_or(d.advantage_norm), loss_agg: loss_agg(a).expect("parse checked --loss-agg").unwrap_or(d.loss_agg), truncated: a.truncated.unwrap_or(d.truncated), ..d });
     }
     t
 }
@@ -548,6 +569,19 @@ mod tests {
     }
 
     #[test]
+    fn a_named_algorithm_is_the_base_the_flags_override() {
+        let config = |s: &str| parse(&argv(s)).and_then(|a| algorithm_config(&a));
+        assert_eq!(config("base --lora 4 --policy-gradient --algorithm dapo"), Ok(brain::PolicyGradientAlgorithm::Dapo.config(0)));
+        assert_eq!(config("base --lora 4 --policy-gradient --algorithm dr-grpo --max-block 256").map(|c| c.loss_agg), Ok(brain::LossAgg::ConstantLength(256)));
+        assert_eq!(config("base --lora 4 --policy-gradient --algorithm dr-grpo --loss-agg-length 64").map(|c| c.loss_agg), Ok(brain::LossAgg::ConstantLength(64)));
+        assert!(config("base --lora 4 --policy-gradient --algorithm dr-grpo").unwrap_err().contains("--loss-agg-length"));
+        assert!(parse(&argv("base --lora 4 --algorithm rloo")).unwrap_err().contains("--policy-gradient"));
+        assert!(parse(&argv("base --lora 4 --policy-gradient --algorithm ppo")).unwrap_err().contains("dr-grpo"));
+        let a = parse(&argv("base --lora 4 --policy-gradient --algorithm dapo --ratio-clip-high 0.4 --kl-beta 0.01")).unwrap();
+        assert_eq!((a.clip_eps_high, a.kl_beta), (Some(0.4), Some(0.01)));
+    }
+
+    #[test]
     fn the_numerics_gate_needs_the_policy_gradient_and_takes_its_bounds_by_name() {
         assert!(parse(&argv("base --lora 4 --numerics-gate")).unwrap_err().contains("--policy-gradient"));
         assert!(parse(&argv("base --lora 4 --policy-gradient --gate-max-gap 0.5")).unwrap_err().contains("--numerics-gate"));
@@ -571,7 +605,7 @@ mod tests {
 
     #[test]
     fn the_usage_names_every_flag_the_parser_takes() {
-        for flag in ["--dataset", "--out", "--lora", "--alpha", "--continue", "--adapter-id", "--arch", "--models-dir", "--steps", "--lr", "--weight-decay", "--grad-accum", "--strict-updates", "--stages", "--native-sparse", "--lsa-window", "--lsa-sink", "--lsa-top-k", "--lsa-top-p", "--lsa-cluster-block", "--lsa-window-only", "--seed", "--max-block", "--base-format", "--activations", "--no-thinking", "--train-precision", "--held-out", "--modules-to-save", "--policy-gradient", "--loss-agg", "--loss-agg-length", "--truncated", "--ratio-clip", "--kl-beta", "--behaviour", "--ratio-clip-high", "--importance", "--max-step-kl", "--max-step-grad-norm", "--numerics-gate", "--gate-max-mean-gap", "--gate-max-gap", "--gate-max-mismatch-kl", "--gate-min-sequence-ess", "--gate-max-grad-norm", "--kv-roundtrip"] {
+        for flag in ["--dataset", "--out", "--lora", "--alpha", "--continue", "--adapter-id", "--arch", "--models-dir", "--steps", "--lr", "--weight-decay", "--grad-accum", "--strict-updates", "--stages", "--native-sparse", "--lsa-window", "--lsa-sink", "--lsa-top-k", "--lsa-top-p", "--lsa-cluster-block", "--lsa-window-only", "--seed", "--max-block", "--base-format", "--activations", "--no-thinking", "--train-precision", "--held-out", "--modules-to-save", "--policy-gradient", "--algorithm", "--loss-agg", "--loss-agg-length", "--truncated", "--ratio-clip", "--kl-beta", "--behaviour", "--ratio-clip-high", "--importance", "--max-step-kl", "--max-step-grad-norm", "--numerics-gate", "--gate-max-mean-gap", "--gate-max-gap", "--gate-max-mismatch-kl", "--gate-min-sequence-ess", "--gate-max-grad-norm", "--kv-roundtrip"] {
             assert!(USAGE.contains(flag), "{flag} is parsed but absent from the usage");
         }
     }

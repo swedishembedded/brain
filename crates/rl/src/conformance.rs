@@ -27,9 +27,9 @@ use model::{Adam, Batch, Model, ModelConfig, Objective, IGNORE};
 use crate::env::{Environment, Reward, Step, Task, Verifier};
 use crate::objective::distill::{DistillConfig, DistillExample, DistillTopK, TopK};
 use crate::objective::dpo::{weigh_pair, PackedPair};
-use crate::objective::advantage::{group_advantages_with, AdvantageNorm};
-use crate::objective::external::{PolicyGradientConfig, TruncatedRollouts};
-use crate::objective::grpo::{token_term, Grpo, GrpoConfig, LossAgg};
+use crate::objective::advantage::group_advantages_with;
+use crate::objective::external::{PolicyGradientAlgorithm, PolicyGradientConfig};
+use crate::objective::grpo::{token_term, Grpo, GrpoConfig};
 use crate::objective::grpo_term::ClipBand;
 use crate::objective::pg_batch::{backward_weighted, PgBatch, PgSpec};
 
@@ -125,14 +125,10 @@ pub fn run_objectives<M: Model>(subject: &Subject<M>, seed: u64) -> Result<(), S
     lowers(subject.name, "distill", &m, &mut || distill.micro_steps(&m, &mut rng, 2))
 }
 
-/// The policy-gradient regimes the suite holds every model to, by name, as the configuration a run takes.
+/// The policy-gradient regimes the suite holds every model to: every named algorithm, by name, as the configuration a
+/// run that names it takes.
 pub fn policy_gradient_regimes() -> Vec<(&'static str, PolicyGradientConfig)> {
-    let d = PolicyGradientConfig::default();
-    vec![
-        ("dr-grpo", PolicyGradientConfig { advantage_norm: AdvantageNorm::MeanCentered, loss_agg: LossAgg::ConstantLength(SEQ), kl_beta: 0.0, ..d }),
-        ("rloo", PolicyGradientConfig { advantage_norm: AdvantageNorm::LeaveOneOut, loss_agg: LossAgg::TokenSum, ..d }),
-        ("dapo", PolicyGradientConfig { advantage_norm: AdvantageNorm::ZScore, clip_eps: 0.2, clip_eps_high: Some(0.28), loss_agg: LossAgg::TokenSum, truncated: TruncatedRollouts::Mask, kl_beta: 0.0, ..d }),
-    ]
+    PolicyGradientAlgorithm::ALL.into_iter().map(|a| (a.name(), a.config(SEQ))).collect()
 }
 
 /// One step of a policy-gradient regime on the conformance batch: its rows are one group whose rewards are 1 and 0,

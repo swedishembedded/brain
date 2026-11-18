@@ -252,8 +252,15 @@ fn fine_tune_for_footprint(base_dir: &Path, request: &Request) -> Result<brain::
     Ok(ft)
 }
 
+/// The algorithm a request names, if any.
+pub(crate) fn algorithm(params: &crate::request::Params) -> Result<Option<brain::PolicyGradientAlgorithm>, String> {
+    params.algorithm.as_deref().map(brain::PolicyGradientAlgorithm::parse).transpose().map_err(|e| format!("train: {e}"))
+}
+
+/// The configuration a policy-gradient request trains with: its algorithm's (the trainer's default without one), with
+/// every setting the request names over it.
 pub(crate) fn policy_gradient_config(params: &crate::request::Params) -> Result<brain::PolicyGradientConfig, String> {
-    let mut config = brain::PolicyGradientConfig::default();
+    let mut config = algorithm(params)?.map_or_else(brain::PolicyGradientConfig::default, |a| a.config(params.max_block));
     if let Some(v) = params.clip_eps {
         config.clip_eps = v;
     }
@@ -275,6 +282,8 @@ pub(crate) fn policy_gradient_config(params: &crate::request::Params) -> Result<
     config.loss_agg = match (params.loss_agg.as_deref(), params.loss_agg_length) {
         // The constant is its own setting on the wire; omitted, it is the longest row the run trains.
         (Some("constant-length"), length) => brain::LossAgg::ConstantLength(length.unwrap_or(params.max_block)),
+        // An algorithm whose aggregation is a constant length (dr-grpo) takes the constant alone.
+        (None, Some(n)) if matches!(config.loss_agg, brain::LossAgg::ConstantLength(_)) => brain::LossAgg::ConstantLength(n),
         (_, Some(_)) => return Err("train: loss_agg_length is the constant of loss_agg constant-length; name that aggregation".to_string()),
         (Some(v), None) => v.parse().map_err(|e| format!("train: loss_agg: {e}"))?,
         (None, None) => config.loss_agg,
@@ -503,6 +512,8 @@ fn chat_summary(outcome: &brain::ChatFineTuneOutcome) -> Value {
         if let Some(fields) = stats.as_object_mut() {
             fields.remove("steps");
             fields.insert("steps_taken".into(), json!(pg.stats.steps.len()));
+            // Every setting the run trained with, a named algorithm expanded and the request's own settings over it.
+            fields.insert("settings".into(), pg.settings_json());
         }
         stats
     });
@@ -655,6 +666,9 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
     if let Some(fields) = outputs.as_object_mut() {
         fields.insert("status".into(), json!("completed"));
         fields.insert("objective".into(), json!(p.objective.name()));
+        if p.objective == Objective::PolicyGradient {
+            fields.insert("algorithm".into(), json!(p.algorithm));
+        }
         fields.insert("adapter_digest".into(), json!(digest.map(|d| d.hex())));
         fields.insert("record_digest".into(), json!(record_digest.map(|d| d.hex())));
         fields.insert("evaluations".into(), json!(evaluations));

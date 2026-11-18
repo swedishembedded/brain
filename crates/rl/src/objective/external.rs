@@ -346,6 +346,57 @@ impl Default for PolicyGradientConfig {
     }
 }
 
+/// A named policy-gradient algorithm: the settings that define it, laid over [`PolicyGradientConfig::default`]. A run
+/// that names one may still set any other field (or override one of these); what it trained with is the configuration,
+/// which a run records whole.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PolicyGradientAlgorithm {
+    /// GRPO as published: z-scored group advantages, each sequence's token mean, a symmetric clip band, the KL term.
+    Grpo,
+    /// Dr. GRPO: mean-centred advantages (no division by the group's spread), every sequence's sum over one constant
+    /// length (the run's longest row), no KL term.
+    DrGrpo,
+    /// DAPO: z-scored advantages, clip-higher (`[0.8, 1.28]`), every token of a step weighed alike, truncated rollouts
+    /// masked, no KL term.
+    Dapo,
+    /// RLOO: each rollout against the mean of the others of its group, every token of a step weighed alike.
+    Rloo,
+}
+
+impl PolicyGradientAlgorithm {
+    /// Every algorithm, in the order the wire lists them.
+    pub const ALL: [PolicyGradientAlgorithm; 4] = [PolicyGradientAlgorithm::Grpo, PolicyGradientAlgorithm::DrGrpo, PolicyGradientAlgorithm::Dapo, PolicyGradientAlgorithm::Rloo];
+
+    /// The algorithm's name on the wire (`algorithm`).
+    pub fn name(self) -> &'static str {
+        match self {
+            PolicyGradientAlgorithm::Grpo => "grpo",
+            PolicyGradientAlgorithm::DrGrpo => "dr-grpo",
+            PolicyGradientAlgorithm::Dapo => "dapo",
+            PolicyGradientAlgorithm::Rloo => "rloo",
+        }
+    }
+
+    /// The algorithm a wire name names.
+    ///
+    /// # Errors
+    /// The name is none of [`Self::name`]'s; the error lists them.
+    pub fn parse(name: &str) -> Result<PolicyGradientAlgorithm, String> {
+        PolicyGradientAlgorithm::ALL.into_iter().find(|a| a.name() == name).ok_or_else(|| format!("algorithm {name:?} is none of {}", PolicyGradientAlgorithm::ALL.map(PolicyGradientAlgorithm::name).join(", ")))
+    }
+
+    /// The configuration the algorithm names, for a run whose longest row is `max_block` tokens (Dr. GRPO's constant).
+    pub fn config(self, max_block: u32) -> PolicyGradientConfig {
+        let d = PolicyGradientConfig::default();
+        match self {
+            PolicyGradientAlgorithm::Grpo => PolicyGradientConfig { advantage_norm: AdvantageNorm::ZScore, loss_agg: LossAgg::SeqMean, clip_eps: 0.2, clip_eps_high: None, ..d },
+            PolicyGradientAlgorithm::DrGrpo => PolicyGradientConfig { advantage_norm: AdvantageNorm::MeanCentered, loss_agg: LossAgg::ConstantLength(max_block), kl_beta: 0.0, ..d },
+            PolicyGradientAlgorithm::Dapo => PolicyGradientConfig { advantage_norm: AdvantageNorm::ZScore, clip_eps: 0.2, clip_eps_high: Some(0.28), loss_agg: LossAgg::TokenSum, truncated: TruncatedRollouts::Mask, kl_beta: 0.0, ..d },
+            PolicyGradientAlgorithm::Rloo => PolicyGradientConfig { advantage_norm: AdvantageNorm::LeaveOneOut, loss_agg: LossAgg::TokenSum, ..d },
+        }
+    }
+}
+
 impl model::training_plan::PlanCheck for PolicyGradientConfig {
     fn plan_name(&self) -> &'static str {
         "policy gradient"
@@ -1295,6 +1346,28 @@ mod tests {
         for reference in [ReferencePolicy::Base, ReferencePolicy::StartOfRun] {
             assert_eq!(reference.name().parse::<ReferencePolicy>(), Ok(reference));
         }
+    }
+
+    /// Each algorithm sets what defines it and leaves every other setting the default's; its wire name reads back.
+    #[test]
+    fn each_algorithm_expands_to_the_settings_that_define_it() {
+        let d = PolicyGradientConfig::default();
+        for algorithm in PolicyGradientAlgorithm::ALL {
+            assert_eq!(PolicyGradientAlgorithm::parse(algorithm.name()), Ok(algorithm));
+            let c = algorithm.config(1024);
+            assert!(c.validate().is_ok(), "{algorithm:?}");
+            // What no algorithm decides stays the default's.
+            assert_eq!((c.importance, c.reference, c.behaviour, c.temperature, c.teacher, c.max_step_kl), (d.importance, d.reference, d.behaviour, d.temperature, d.teacher, d.max_step_kl), "{algorithm:?}");
+        }
+        let grpo = PolicyGradientAlgorithm::Grpo.config(1024);
+        assert_eq!((grpo.advantage_norm, grpo.loss_agg, grpo.clip_eps, grpo.clip_eps_high, grpo.kl_beta), (AdvantageNorm::ZScore, LossAgg::SeqMean, 0.2, None, d.kl_beta));
+        let dr = PolicyGradientAlgorithm::DrGrpo.config(1024);
+        assert_eq!((dr.advantage_norm, dr.loss_agg, dr.kl_beta), (AdvantageNorm::MeanCentered, LossAgg::ConstantLength(1024), 0.0));
+        let dapo = PolicyGradientAlgorithm::Dapo.config(1024);
+        assert_eq!((dapo.advantage_norm, dapo.clip_eps, dapo.clip_eps_high, dapo.loss_agg, dapo.truncated, dapo.kl_beta), (AdvantageNorm::ZScore, 0.2, Some(0.28), LossAgg::TokenSum, TruncatedRollouts::Mask, 0.0));
+        let rloo = PolicyGradientAlgorithm::Rloo.config(1024);
+        assert_eq!((rloo.advantage_norm, rloo.loss_agg, rloo.kl_beta), (AdvantageNorm::LeaveOneOut, LossAgg::TokenSum, d.kl_beta));
+        assert!(PolicyGradientAlgorithm::parse("ppo").unwrap_err().contains("grpo, dr-grpo, dapo, rloo"));
     }
 
     /// A run that draws fewer records than the dataset holds says how many it leaves unread; one that covers the

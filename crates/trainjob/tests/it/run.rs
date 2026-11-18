@@ -45,6 +45,35 @@ fn a_policy_gradient_job_trains_a_qwen3_base() {
     assert_eq!(outcome.outputs["policy_gradient"]["behaviour"], "start_of_run_proxy", "the proxy was asked for and the result says so");
 }
 
+/// A named algorithm trains, and the result records it and every setting the run trained with: the algorithm's
+/// expansion (Dr. GRPO's constant is the request's `max_block`) with a setting the request names over it.
+#[test]
+fn every_named_algorithm_trains_and_the_result_records_the_settings_it_expanded_to() {
+    let rig = rig_qwen3("run-pg-algorithms", 16 << 30);
+    let train = data_digest(&rig, &rollouts());
+    for algorithm in brain::PolicyGradientAlgorithm::ALL {
+        let params = json!({
+            "base": BASE, "arch": "qwen3", "objective": "policy_gradient", "algorithm": algorithm.name(), "behaviour": "start_of_run_proxy", "temperature": 0.9,
+            "steps": 2, "grad_accum": 2, "rank": 2, "lr": 2e-2, "seed": 7, "max_block": 128, "data": json!({"train": {"digest": train.hex()}}).to_string(),
+        });
+        let outcome = run(&rig, params, &[], &Frames::default()).unwrap_or_else(|e| panic!("{}: {e}", algorithm.name()));
+        assert_eq!((&outcome.outputs["status"], &outcome.outputs["algorithm"]), (&json!("completed"), &json!(algorithm.name())));
+        let settings = &outcome.outputs["policy_gradient"]["settings"];
+        let want = brain::PolicyGradientAlgorithm::config(algorithm, 128);
+        assert_eq!(settings["loss_agg"], json!(want.loss_agg.to_string()), "{}: {settings}", algorithm.name());
+        assert_eq!((settings["advantage_norm"].as_str(), settings["truncated"].as_str()), (Some(want.advantage_norm.name()), Some(want.truncated.name())), "{}", algorithm.name());
+        assert_eq!((settings["kl_beta"].as_f64(), settings["clip_eps_high"].as_f64()), (Some(f64::from(want.kl_beta)), want.clip_eps_high.map(f64::from)), "{}", algorithm.name());
+        assert_eq!((settings["behaviour"].as_str(), settings["temperature"].as_f64().map(|t| (t * 1e6).round() / 1e6)), (Some("start_of_run_proxy"), Some(0.9)), "the request's own settings are laid over the algorithm's");
+        assert_eq!(outcome.outputs["policy_gradient"]["steps_taken"], 2);
+    }
+    let named = json!({
+        "base": BASE, "arch": "qwen3", "objective": "policy_gradient", "algorithm": "dapo", "clip_eps_high": 0.4, "behaviour": "start_of_run_proxy",
+        "steps": 1, "rank": 2, "seed": 7, "max_block": 128, "data": json!({"train": {"digest": train.hex()}}).to_string(),
+    });
+    let outcome = run(&rig, named, &[], &Frames::default()).expect("the run");
+    assert_eq!(outcome.outputs["policy_gradient"]["settings"]["clip_eps_high"].as_f64().map(|v| (v * 1e6).round() / 1e6), Some(0.4), "a named setting overrides the algorithm's");
+}
+
 #[test]
 fn a_policy_gradient_job_streams_each_step_and_hands_back_the_adapter_by_digest_and_by_blob_then_continues_it() {
     let rig = rig("run-pg", 16 << 30, true);

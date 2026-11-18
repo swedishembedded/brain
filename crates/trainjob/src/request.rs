@@ -114,6 +114,7 @@ fn spec_without_defaults() -> ActionSpec {
         .param(ParamSpec::new("adapter_id", ParamType::Str, "the id written on the adapter's card"))
         .param(ParamSpec::new("keep_evaluations", ParamType::Bool, "also publish the adapter of every evaluation (needs eval_every > 0)").default(json!(false)))
         .param(ParamSpec::new("return_adapter", ParamType::Bool, "also return the adapter as an output blob (a file descriptor over D-Bus); over HTTP take it by digest from the artifact store").default(json!(false)))
+        .param(ParamSpec::new("algorithm", ParamType::Enum(brain::PolicyGradientAlgorithm::ALL.iter().map(|a| a.name().to_string()).collect()), "policy gradient: a named algorithm whose settings are the defaults of this run (any setting named beside it overrides it): `grpo` (z-score, seq-mean, symmetric clip, the KL term), `dr-grpo` (mean-centred, constant-length over max_block, no KL), `dapo` (z-score, clip-higher 0.28, token-sum, truncated masked, no KL) or `rloo` (leave-one-out, token-sum); the result records every setting the run trained with"))
         .param(optional_f("clip_eps", "policy gradient: half-width of the clip band of the importance ratio", 0.0, 1.0))
         .param(optional_f("clip_eps_high", "policy gradient: the upper edge of the clip band is 1 + this (clip-higher), at least clip_eps; omitted, the band is symmetric", 0.0, 10.0))
         .param(ParamSpec::new("importance", ParamType::Str, "policy gradient: the correction for the sampling engine's gap to the trainer: `none`, `truncate:CAP` or `mask:CAP`; needs recorded behaviour log-probabilities"))
@@ -331,6 +332,7 @@ pub struct Params {
     pub adapter_id: Option<String>,
     pub keep_evaluations: bool,
     pub return_adapter: bool,
+    pub algorithm: Option<String>,
     pub clip_eps: Option<f32>,
     pub clip_eps_high: Option<f32>,
     pub importance: Option<String>,
@@ -371,6 +373,7 @@ impl Request {
         let data = DataRefs::parse(&params.data)?;
         let refused = |what: &str| Err(format!("train: {what}"));
         let pg_named: Vec<&str> = [
+            (params.algorithm.is_some(), "algorithm"),
             (params.clip_eps.is_some(), "clip_eps"),
             (params.clip_eps_high.is_some(), "clip_eps_high"),
             (params.importance.is_some(), "importance"),
@@ -525,7 +528,7 @@ mod tests {
         assert_eq!(crate::job::policy_gradient_config(&named.params).unwrap(), brain::PolicyGradientConfig::default(), "the declared defaults are the trainer's");
         let pg = brain::PolicyGradientConfig::default();
         assert_eq!((pg.clip_eps_high, pg.max_step_kl, pg.max_step_grad_norm, pg.advantage_bound, pg.sequence_advantage_cap), (None, None, None, None, None));
-        assert_eq!(off, ["clip_eps_high", "max_step_kl", "max_step_grad_norm", "loss_agg_length", "advantage_bound", "sequence_advantage_cap"], "only the settings the trainer leaves off, or that depend on the request (the constant length is max_block's), are undeclared");
+        assert_eq!(off, ["algorithm", "clip_eps_high", "max_step_kl", "max_step_grad_norm", "loss_agg_length", "advantage_bound", "sequence_advantage_cap"], "only the settings the trainer leaves off, or that depend on the request (the constant length is max_block's), are undeclared");
         for p in spec.params.iter().filter(|p| p.help.starts_with("dpo:")) {
             assert!(defaults.contains_key(&p.name), "{}: a preference setting declares its default", p.name);
         }
@@ -664,6 +667,28 @@ mod tests {
         assert!(request(json!({"base": "a/b", "data": data, "objective": "policy_gradient", "truncated": "drop"}), &[]).is_err());
         let e = request(json!({"base": "a/b", "data": data, "truncated": "keep"}), &[]).unwrap_err();
         assert!(e.contains("truncated") && e.contains("sft"), "{e}");
+    }
+
+    /// A named algorithm is the configuration's base: each expands to its own settings, a setting named beside it
+    /// overrides it, an unknown name is refused by the spec, and it belongs to the policy gradient.
+    #[test]
+    fn a_named_algorithm_is_the_base_its_requests_settings_override() {
+        let data = json!({"train": {"digest": digest(1)}}).to_string();
+        let pg = |extra: serde_json::Value| {
+            let mut p = json!({"base": "a/b", "data": data, "objective": "policy_gradient", "max_block": 512});
+            p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            request(p, &[]).map(|r| crate::job::policy_gradient_config(&r.params).unwrap())
+        };
+        for algorithm in brain::PolicyGradientAlgorithm::ALL {
+            assert_eq!(pg(json!({"algorithm": algorithm.name()})).unwrap(), algorithm.config(512), "{}", algorithm.name());
+        }
+        let dapo = pg(json!({"algorithm": "dapo", "clip_eps_high": 0.35, "kl_beta": 0.01, "truncated": "keep"})).unwrap();
+        assert_eq!((dapo.clip_eps_high, dapo.kl_beta, dapo.truncated, dapo.loss_agg), (Some(0.35), 0.01, brain::TruncatedRollouts::Keep, brain::LossAgg::TokenSum));
+        assert_eq!(pg(json!({"algorithm": "dr-grpo", "loss_agg_length": 64})).unwrap().loss_agg, brain::LossAgg::ConstantLength(64), "dr-grpo takes its constant alone");
+        assert!(pg(json!({"algorithm": "dapo", "loss_agg_length": 64})).is_err(), "dapo's aggregation has no constant");
+        assert!(pg(json!({"algorithm": "ppo"})).is_err());
+        let e = request(json!({"base": "a/b", "data": data, "algorithm": "rloo"}), &[]).unwrap_err();
+        assert!(e.contains("algorithm") && e.contains("sft"), "{e}");
     }
 
     /// A policy-gradient setting the trainer would refuse is refused when the job is submitted, naming it.

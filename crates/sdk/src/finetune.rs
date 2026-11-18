@@ -1557,24 +1557,10 @@ impl PolicyGradientOutcome {
     /// The settings, the dataset's make-up and the run's means: what the adapter's card and the training record say
     /// about how it was trained.
     fn summary_json(&self) -> serde_json::Value {
-        let c = &self.config;
         let s = &self.stats;
-        serde_json::json!({
-            "clip_eps": c.clip_eps,
-            "clip_eps_high": c.clip_eps_high,
-            "importance": c.importance,
-            "max_step_kl": c.max_step_kl,
-            "max_step_grad_norm": c.max_step_grad_norm,
-            "kl_beta": c.kl_beta,
-            "reference": c.reference.name(),
+        let mut summary = self.settings_json();
+        let measured = serde_json::json!({
             "behaviour": s.behaviour.name(),
-            "loss_agg": c.loss_agg.to_string(),
-            "temperature": c.temperature,
-            "teacher": c.teacher.name(),
-            "advantage_bound": c.advantage_bound,
-            "sequence_advantage_cap": c.sequence_advantage_cap,
-            "advantage_norm": c.advantage_norm.name(),
-            "truncated": c.truncated.name(),
             "sequences_with_teacher": s.sequences_with_teacher,
             "sequences_capped": s.sequences_capped,
             "sequences_with_advantage": s.sequences_with_advantage,
@@ -1585,7 +1571,6 @@ impl PolicyGradientOutcome {
             "steps_skipped_nonfinite": s.steps_skipped_nonfinite,
             "steps_skipped_guard": s.steps_skipped_guard,
             "numerics": s.numerics,
-            "kv_roundtrip": c.kv_roundtrip.map(|e| format!("{e:?}")),
             "mean_loss": s.mean_loss(),
             "mean_clip_fraction": s.mean_clip_fraction(),
             "mean_kl": s.mean_kl(),
@@ -1599,6 +1584,34 @@ impl PolicyGradientOutcome {
                 }
                 step
             }),
+        });
+        if let (Some(fields), serde_json::Value::Object(more)) = (summary.as_object_mut(), measured) {
+            fields.extend(more);
+        }
+        summary
+    }
+
+    /// Every setting the run trained with, in wire form: what a named algorithm expanded to, with the settings a caller
+    /// named over it.
+    pub fn settings_json(&self) -> serde_json::Value {
+        let c = &self.config;
+        serde_json::json!({
+            "clip_eps": c.clip_eps,
+            "clip_eps_high": c.clip_eps_high,
+            "importance": c.importance.to_string(),
+            "max_step_kl": c.max_step_kl,
+            "max_step_grad_norm": c.max_step_grad_norm,
+            "kl_beta": c.kl_beta,
+            "reference": c.reference.name(),
+            "behaviour": c.behaviour.name(),
+            "loss_agg": c.loss_agg.to_string(),
+            "temperature": c.temperature,
+            "teacher": c.teacher.name(),
+            "advantage_bound": c.advantage_bound,
+            "sequence_advantage_cap": c.sequence_advantage_cap,
+            "advantage_norm": c.advantage_norm.name(),
+            "truncated": c.truncated.name(),
+            "kv_roundtrip": c.kv_roundtrip.map(|e| format!("{e:?}")),
         })
     }
 }

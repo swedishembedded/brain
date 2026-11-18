@@ -33,6 +33,12 @@ L3 one step lowers the regime's own loss on every conformance family (`rl::confo
 typed; L4 the `brain/train` params validated, another objective's refused by name, the dry run. L5-L7 (the caller's
 view, a served toy that learns, real weights) are other lanes' and are not claimed here.
 
+The named algorithms (`rl::objective::external::PolicyGradientAlgorithm`: `grpo`, `dr-grpo`, `dapo`, `rloo`) are the
+configurations the rows below are held to: `policy_gradient_regimes` trains each one's expansion on every family,
+`each_algorithm_expands_to_the_settings_that_define_it` (`rl`), `a_named_algorithm_is_the_base_its_requests_settings_override`
+(`trainjob`) and `every_named_algorithm_trains_and_the_result_records_the_settings_it_expanded_to` (`trainjob/tests/it/run.rs`,
+toy `qwen3`) hold the wire to them.
+
 | Regime | Level | Evidence |
 |---|---|---|
 | RLOO (`AdvantageNorm::LeaveOneOut`, contract v2) | L4 | L1 `rl` `advantage::every_normalisation_matches_its_fp64_oracle`, `a_pair_by_hand`, `leave_one_out_is_scaled_mean_centring_at_a_fixed_size_and_not_across_sizes`, `external_policy_gradient::the_advantages_are_each_groups_rewards_under_the_runs_normalisation`, the token weight as for every regime (`pg_batch`); L2 `rl/tests/rloo_gradcheck.rs`; L3 `rl::conformance::policy_gradient_regimes`; L4 `trainjob` `the_advantage_normalisation_is_named_on_the_wire` |
