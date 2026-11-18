@@ -8,6 +8,7 @@
 //! others run beside it.
 
 mod int8_compute_real;
+mod int8_layer;
 mod parity;
 mod real_weight_parity;
 mod st_source;

@@ -84,7 +84,9 @@
 
 use std::collections::HashMap;
 
+use gpu_core::select::Dtype;
 use gpu_core::{DeviceBuffer, Gpu, Step, Transient};
+use model::ops::{Act, Ops, Weight};
 
 use crate::config::{Gemma4Config, LayerType};
 use crate::rope::{apply_rope_full, DeviceRope};
@@ -101,16 +103,14 @@ const K_ROPE2D: usize = 5;
 const K_GQA_SCORES_WIN: usize = 6;
 const K_ATTN_SOFTMAX: usize = 7;
 const K_GQA_APPLY: usize = 8;
-const K_MAX_ABS_ROW: usize = 9;
-const K_QUANT_PACK: usize = 10;
-const K_MATMUL_I8_DYN: usize = 11;
 
-/// Every kernel this block dispatches - all pre-existing, all at their
+/// The kernels this block dispatches by index - all pre-existing, all at their
 /// documented general contract (see this module's doc for the three kernel-
 /// contract facts found while wiring them up - two needed no new kernel at
 /// all, and the third (`rope2d_partial`) is a REFUTED guess, not something
-/// this crate ships).
-pub const KERNELS: [(&str, &str); 12] = [
+/// this crate ships). [`KERNELS`] is this table followed by the shared
+/// façade's set.
+const INDEXED_KERNELS: [(&str, &str); 9] = [
     ("matmul", kernels::MATMUL),
     ("rmsnorm", kernels::RMSNORM),
     ("gelu", kernels::GELU),
@@ -120,14 +120,19 @@ pub const KERNELS: [(&str, &str); 12] = [
     ("gqa_scores_win", kernels::GQA_SCORES_WIN),
     ("attn_softmax", kernels::ATTN_SOFTMAX),
     ("gqa_apply", kernels::GQA_APPLY),
-    // The int8 tier ([`Precision::Int8`]). Registered unconditionally -
-    // building a pipeline costs a compile at `Gpu::new` and nothing at
-    // dispatch, and a kernel table that changes shape with a runtime flag is
-    // how a model ends up with two incompatible kernel index spaces.
-    ("max_abs_row", kernels::MAX_ABS_ROW),
-    ("quant_pack", kernels::QUANT_PACK),
-    ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
 ];
+
+/// Every kernel a `Gpu` running this crate's layers registers: [`INDEXED_KERNELS`], then what
+/// [`model::ops::Ops`] resolves by name. The int8 tier ([`Precision::Int8`]) runs its projections through it, so the
+/// selector, not this crate, decides which packed-int8 kernel (or the float-read tile decode of a device without the
+/// packed dot) serves each product. Registered unconditionally: a kernel table that changes shape with a runtime flag
+/// is how a model ends up with two incompatible kernel index spaces.
+pub static KERNELS: std::sync::LazyLock<Vec<(&'static str, &'static str)>> = std::sync::LazyLock::new(|| {
+    let mut list = INDEXED_KERNELS.to_vec();
+    model::ops::extend_kernel_list(&mut list, model::ops::kernel_list());
+    model::ops::extend_kernel_list(&mut list, model::ops::frozen_base_kernels());
+    list
+});
 
 /// Which arithmetic the seven per-layer projections run in.
 ///
@@ -140,9 +145,10 @@ pub enum Precision {
     /// Plain `matmul`. Every device supports it; nothing about it is
     /// conditional.
     Fp32,
-    /// Per-output-channel symmetric int8 weights with per-token dynamic
-    /// activation scales, through the packed-dot GEMM. Requires
-    /// `DeviceCaps::numeric.int8_dot`.
+    /// Group-wise symmetric int8 weights with per-group dynamic activation
+    /// scales; each product's kernel is the one `model::ops::Ops::matmul`
+    /// selects for the device. [`Precision::for_device`] honours it where the
+    /// device has the packed-int8 dot.
     Int8,
 }
 
@@ -160,7 +166,9 @@ impl Precision {
     /// path is the fast one would be a pure loss, which is exactly why this
     /// asks the device instead of assuming a tier.
     pub fn for_device(gpu: &Gpu, requested: Precision) -> Precision {
-        if requested == Precision::Int8 && !gpu.caps().numeric.int8_dot {
+        // The engine-wide rule (`DType::promote`), not a copy of it: int8 executes as int8 where the device has
+        // the packed-int8 dot and widens to fp32 elsewhere.
+        if requested == Precision::Int8 && Dtype::I8.promote(&gpu.caps().numeric) != Dtype::I8 {
             eprintln!("gemma4: int8 requested but this device exposes no packed-int8 dot path; running the projections in fp32");
             return Precision::Fp32;
         }
@@ -200,8 +208,8 @@ fn upload(gpu: &Gpu, data: &[f32]) -> DeviceBuffer {
 enum Proj {
     F32(DeviceBuffer),
     /// `model::int8::quantize_weight`'s packed `[n, k/4]` u32 words plus its
-    /// `[n, k/32]` f32 group scale.
-    I8 { w: DeviceBuffer, sw: DeviceBuffer },
+    /// `[n, k/32]` f32 group scale, as the shared façade's weight.
+    I8(Weight),
 }
 
 impl Proj {
@@ -229,7 +237,7 @@ impl Proj {
             Precision::Int8 => {
                 let mut up = paramstore::upload::Uploader::new(gpu);
                 let (packed, sw) = model::int8::upload_quantized(&mut up, source, name, n, k).unwrap_or_else(|e| panic!("gemma4: {e}"));
-                Proj::I8 { w: packed, sw }
+                Proj::I8(Weight::from_packed_int8(packed, sw, n, k))
             }
         }
     }
@@ -306,26 +314,23 @@ impl MlpWeights {
     }
 }
 
-/// `out = x @ Wᵀ`, `x: [m,k]`, `w: [n,k]`, `out: [m,n]` - no bias anywhere in
-/// this crate (`attention_bias=false`, MLP linears are always bias-free per
-/// `Gemma4TextMLP`/`Gemma3MLP`).
+/// `outs[i] = x @ W_iᵀ` for every `(W_i, out_i, n_i)` reading the same `x: [m, k]` - no bias anywhere in this crate
+/// (`attention_bias=false`, MLP linears are always bias-free per `Gemma4TextMLP`/`Gemma3MLP`).
 ///
-/// The int8 arm quantizes the ACTIVATION per 32-element group on the fly
-/// (`max_abs_row` -> `quant_pack`) and lets the packed-dot GEMM dequantize
-/// with `sx*sw` on the way out - the same recipe `ltxv::block`'s own
-/// quantized linears use, at this model's shapes. Every `k` here (hidden
-/// 3840, q_dim 4096, kv_dim 2048/512, intermediate 15360) is a multiple of
-/// 32, the activation scale group the kernels require.
-fn linear(gpu: &Gpu, s: &mut Vec<Step>, x: &DeviceBuffer, w: &Proj, out: &DeviceBuffer, m: u32, k: u32, n: u32) {
-    match w {
-        Proj::F32(wb) => s.push(gpu.step(K_MATMUL, &[x, wb, out], &[m, k, n], m * n)),
-        Proj::I8 { w: wb, sw } => {
-            debug_assert_eq!(k % 32, 0, "int8 activations are scaled per 32 elements");
-            let xq = gpu.storage((m * k / 4) as u64);
-            let sx = gpu.storage(model::int8::act_scale_len(m as usize, k as usize) as u64);
-            s.push(gpu.step(K_MAX_ABS_ROW, &[x, &sx], &[m, k], m));
-            s.push(gpu.step(K_QUANT_PACK, &[x, &sx, &xq], &[m, k], m * k / 4));
-            s.push(gpu.dispatch(K_MATMUL_I8_DYN, &[&xq, wb, &sx, sw, out], &[m, k / 4, n], gpu_core::Dispatch::Workgroups(m.div_ceil(128) * n.div_ceil(128))));
+/// The int8 projections read ONE quantized activation of `x` (made at most once, however many of them read it) and
+/// run the product the shared façade selects for the device ([`Ops::matmul`]): the packed-dot GEMM where the device
+/// has one, the float-read tile decode where it has not. Every `k` here (hidden 3840, q_dim 4096, kv_dim 2048/512,
+/// intermediate 15360) is a multiple of 32, the activation scale group.
+fn linears(gpu: &Gpu, ops: Option<&Ops>, s: &mut Vec<Step>, x: &DeviceBuffer, m: u32, k: u32, outs: &[(&Proj, &DeviceBuffer, u32)]) {
+    let mut act: Option<Act> = None;
+    for &(w, out, n) in outs {
+        match w {
+            Proj::F32(wb) => s.push(gpu.step(K_MATMUL, &[x, wb, out], &[m, k, n], m * n)),
+            Proj::I8(wt) => {
+                let ops = ops.expect("gemma4: an int8 projection without the layer's Ops");
+                let act = act.get_or_insert_with(|| ops.act(s, x, 0, m, k));
+                ops.matmul(s, wt, act, out, 0);
+            }
         }
     }
 }
@@ -350,7 +355,7 @@ fn mul(gpu: &Gpu, s: &mut Vec<Step>, a: &DeviceBuffer, b: &DeviceBuffer, y: &Dev
 /// result (matching `Gemma4TextAttention.forward`'s return value, i.e. the
 /// value fed to `post_attention_layernorm` next).
 #[allow(clippy::too_many_arguments)]
-fn attention(gpu: &Gpu, s: &mut Vec<Step>, cfg: &Gemma4Config, lt: LayerType, w: &AttnWeights, x_in: &DeviceBuffer, hidden: u32, t: u32, rope: &DeviceRope) -> DeviceBuffer {
+fn attention(gpu: &Gpu, ops: Option<&Ops>, s: &mut Vec<Step>, cfg: &Gemma4Config, lt: LayerType, w: &AttnWeights, x_in: &DeviceBuffer, hidden: u32, t: u32, rope: &DeviceRope) -> DeviceBuffer {
     let head_dim = cfg.head_dim_for(lt);
     let heads = cfg.num_attention_heads;
     let kv_heads = cfg.kv_heads_for(lt);
@@ -362,20 +367,21 @@ fn attention(gpu: &Gpu, s: &mut Vec<Step>, cfg: &Gemma4Config, lt: LayerType, w:
 
     let q_pre = gpu.storage((t * q_dim) as u64);
     let k_pre = gpu.storage((t * kv_dim) as u64);
-    linear(gpu, s, x_in, &w.wq, &q_pre, t, hidden, q_dim);
-    linear(gpu, s, x_in, &w.wk, &k_pre, t, hidden, kv_dim);
-
     // Mismatch 2 (this module's doc): v_pre is EITHER a fresh v_proj
     // matmul, OR (k_eq_v) the SAME raw k_pre buffer reused as v_norm's
     // input - never rotated, never k_norm'd, exactly `Gemma4TextAttention.
     // forward`'s `value_states = ... else key_states` (the pre-norm key).
-    let v_pre = if let Some(wv) = &w.wv {
-        let vb = gpu.storage((t * kv_dim) as u64);
-        linear(gpu, s, x_in, wv, &vb, t, hidden, kv_dim);
-        vb
-    } else {
-        assert!(w.k_eq_v);
-        k_pre.clone()
+    let v_pre = match &w.wv {
+        Some(wv) => {
+            let vb = gpu.storage((t * kv_dim) as u64);
+            linears(gpu, ops, s, x_in, t, hidden, &[(&w.wq, &q_pre, q_dim), (&w.wk, &k_pre, kv_dim), (wv, &vb, kv_dim)]);
+            vb
+        }
+        None => {
+            assert!(w.k_eq_v);
+            linears(gpu, ops, s, x_in, t, hidden, &[(&w.wq, &q_pre, q_dim), (&w.wk, &k_pre, kv_dim)]);
+            k_pre.clone()
+        }
     };
 
     let q = gpu.storage((t * q_dim) as u64);
@@ -409,7 +415,7 @@ fn attention(gpu: &Gpu, s: &mut Vec<Step>, cfg: &Gemma4Config, lt: LayerType, w:
     s.push(gpu.step(K_GQA_APPLY, &[&probs, &v, &ctx], &[1, heads, kv_heads, t, head_dim, group], heads * t * head_dim));
 
     let out = gpu.storage((t * hidden) as u64);
-    linear(gpu, s, &ctx, &w.wo, &out, t, q_dim, hidden);
+    linears(gpu, ops, s, &ctx, t, q_dim, &[(&w.wo, &out, hidden)]);
     out
 }
 
@@ -417,6 +423,8 @@ fn attention(gpu: &Gpu, s: &mut Vec<Step>, cfg: &Gemma4Config, lt: LayerType, w:
 /// count.
 pub struct Gemma4Layer {
     gpu: Gpu,
+    /// The shared façade the int8 projections run through, on this layer's device; `None` at fp32.
+    ops: Option<Ops>,
     cfg: Gemma4Config,
     lt: LayerType,
     attn: AttnWeights,
@@ -449,8 +457,10 @@ impl Gemma4Layer {
         let attn = AttnWeights::upload(&g, weights, &format!("{prefix}.self_attn"), head_dim, q_dim, kv_dim, hidden, k_eq_v, precision);
         let mlp = MlpWeights::upload(&g, weights, &format!("{prefix}.mlp"), hidden, cfg.intermediate_size as usize, precision);
         let layer_scalar = tget_owned(weights, &format!("{prefix}.layer_scalar"))[0];
+        let ops = (precision == Precision::Int8).then(|| Ops::new(g.share()).unwrap_or_else(|e| panic!("gemma4: the layer's Gpu lacks the shared kernel set: {e}")));
         Transient::on(gpu, Gemma4Layer {
             gpu: g,
+            ops,
             cfg: *cfg,
             lt,
             attn,
@@ -491,7 +501,7 @@ impl Gemma4Layer {
         let h1 = gpu.storage(td as u64);
         rmsnorm(gpu, &mut s, &x_buf, &input_ln, &h1, hidden, t, eps);
 
-        let attn_out = attention(gpu, &mut s, cfg, self.lt, &self.attn, &h1, hidden, t, rope);
+        let attn_out = attention(gpu, self.ops.as_ref(), &mut s, cfg, self.lt, &self.attn, &h1, hidden, t, rope);
 
         let h2 = gpu.storage(td as u64);
         rmsnorm(gpu, &mut s, &attn_out, &post_attn_ln, &h2, hidden, t, eps);
@@ -503,14 +513,14 @@ impl Gemma4Layer {
         let ff_dim = cfg.intermediate_size;
         let gate_pre = gpu.storage((t * ff_dim) as u64);
         let up = gpu.storage((t * ff_dim) as u64);
-        linear(gpu, &mut s, &h3, &self.mlp.gate, &gate_pre, t, hidden, ff_dim);
-        linear(gpu, &mut s, &h3, &self.mlp.up, &up, t, hidden, ff_dim);
+        let ops = self.ops.as_ref();
+        linears(gpu, ops, &mut s, &h3, t, hidden, &[(&self.mlp.gate, &gate_pre, ff_dim), (&self.mlp.up, &up, ff_dim)]);
         let gate_act = gpu.storage((t * ff_dim) as u64);
         s.push(gpu.step(K_GELU, &[&gate_pre, &gate_act], &[t * ff_dim], t * ff_dim));
         let h_act = gpu.storage((t * ff_dim) as u64);
         mul(gpu, &mut s, &gate_act, &up, &h_act, t * ff_dim);
         let mlp_out = gpu.storage(td as u64);
-        linear(gpu, &mut s, &h_act, &self.mlp.down, &mlp_out, t, ff_dim, hidden);
+        linears(gpu, ops, &mut s, &h_act, t, ff_dim, &[(&self.mlp.down, &mlp_out, hidden)]);
 
         let h4 = gpu.storage(td as u64);
         rmsnorm(gpu, &mut s, &mlp_out, &post_ff_ln, &h4, hidden, t, eps);
