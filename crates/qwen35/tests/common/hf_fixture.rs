@@ -119,7 +119,11 @@ fn write_checkpoint_from(cfg: &Qwen35Config, tag: &str, skip: Option<&str>, dens
 
 #[allow(clippy::too_many_arguments)]
 fn write_release(cfg: &Qwen35Config, tag: &str, skip: Option<&str>, dense: Option<&HashMap<String, Vec<f32>>>, layout: Layout, block: usize, tame: bool, mixed: bool) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("qwen35_fp8_source_{tag}_{}", std::process::id()));
+    // The call's own sequence number keeps two tests of one binary that chose the same tag (`resident_checkpoint`'s
+    // and `mixed_precision`'s "parity") from writing and deleting each other's files while both run.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("qwen35_fp8_source_{tag}_{}_{n}", std::process::id()));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::create_dir_all(&dir).unwrap();
     // seed: any fixed bytes do; equality is against an independent reader of the same files
