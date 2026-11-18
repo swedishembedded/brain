@@ -507,6 +507,17 @@ async fn a_job_can_be_cancelled_and_the_model_sees_it() {
     let rig = rig();
     let (_, created) = call(&rig.app, Method::POST, "/v1/jobs", "alice", Some(run_body("brain-slow", "render", json!({"steps": 500}), json!({})))).await;
     let id = created["id"].as_str().unwrap().to_string();
+    // The model sees a cancellation only once it runs: admission puts the job on a lane, and a job cancelled before
+    // the lane starts it is dropped unrun. Wait for its first step, as a client cancelling a running job would.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (_, status) = call(&rig.app, Method::GET, &format!("/v1/jobs/{id}"), "alice", None).await;
+        if status["progress"]["step"].as_u64().is_some_and(|s| s > 0) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the job never started: {status}");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 
     let (status, _) = call(&rig.app, Method::DELETE, &format!("/v1/jobs/{id}"), "alice", None).await;
     assert_eq!(status, StatusCode::OK);
