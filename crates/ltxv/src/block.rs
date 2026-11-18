@@ -97,7 +97,7 @@ use crate::rope::{apply_rope_step, ltx_rope_tables};
 // streams run the identical sequence, only dims/weights differ).
 // ---------------------------------------------------------------------------
 
-// Kernel-table indices (order matches INDEXED_KERNELS below; slots 11-14, 29 and 30 hold the quantized linears' kernels, which `model::ops::Ops` resolves by name).
+// Kernel-table indices (order matches INDEXED_KERNELS below; the quantized linears' kernels are `model::ops::Ops`'s, resolved by name from the façade sets appended to it).
 const K_MATMUL: usize = 0;
 const K_BIAS_ADD: usize = 1;
 const K_RMSNORM: usize = 2;
@@ -134,11 +134,11 @@ const K_SIGMOID: usize = 10;
 /// identical 10-linear block shape - see that module's `Sel`/`GemmVariants`
 /// precedent, which this mirrors). Only the fp32 reference path
 /// ([`LtxBlock`]/[`LtxAvBlock`], used by `LtxDit::forward`/gradcheck/
-/// `ltxv_bench dit`) needed this - the quantized path ([`LtxBlockQ`]'s
-/// `qgemm`) already dispatches `matmul_i8_dyn`/`matmul_q4_dyn`
-/// unconditionally, which for DP4A has no naive sibling to fall back to.
-const K_MATMUL_REG3: usize = 15;
-const K_MATMUL_GEMV: usize = 16;
+/// `ltxv_bench dit`) needed this - the quantized path ([`LtxBlockQ`]) runs
+/// its products through `model::ops::Ops`, whose selector makes the same
+/// choice for the packed tiers.
+const K_MATMUL_REG3: usize = 11;
+const K_MATMUL_GEMV: usize = 12;
 /// Phase 8 finding #2: `attn_scores_cross` parallelises over the KEY index
 /// and reduces over `head_dim`, so at THIS crate's real width (heads=32,
 /// head_dim=128, 1024-token self-attention) it measured a fraction of one
@@ -152,8 +152,8 @@ const K_MATMUL_GEMV: usize = 16;
 /// with the int8 tier (only the four projections are quantized - see
 /// [`attention_q`]'s doc), this fix reaches the real 22B checkpoint's
 /// generation path too, not just the fp32 bench.
-const K_KV_K_HEADT: usize = 17;
-const K_ATTN_SCORES_CROSS_KT: usize = 18;
+const K_KV_K_HEADT: usize = 13;
+const K_ATTN_SCORES_CROSS_KT: usize = 14;
 /// Phase 8 finding #3: with #2 fixed, `attn_softmax_cross` (one THREAD per
 /// row, 3 serial `t_enc`-wide passes) became the new #2 kernel by share
 /// (about a quarter of a real-width whole pass) at only a couple of percent
@@ -163,7 +163,7 @@ const K_ATTN_SCORES_CROSS_KT: usize = 18;
 /// thread), gated behind `DeviceCaps::workgroup_reductions` the same way
 /// `crates/wan/src/block.rs::Sel.softmax_rows` already gates it - mirrored
 /// here rather than re-derived.
-const K_SOFTMAX_ROWS: usize = 19;
+const K_SOFTMAX_ROWS: usize = 15;
 /// Phase 9 finding: with #2 and #3 fixed, `attn_apply_cross` +
 /// `attn_scores_cross_kt` + `softmax_rows` were **the overwhelming majority
 /// of GPU kernel time** at the real 720p token count (T=3520, heads=32,
@@ -184,11 +184,11 @@ const K_SOFTMAX_ROWS: usize = 19;
 /// model, not a new kernel. `pack_qkv` is likewise the same pre-existing
 /// kernel `crates/flux2/src/model.rs` packs its DiT self-attention operands
 /// with.
-const K_PACK_QKV: usize = 20;
-const K_FLASH: usize = 21;
-const K_FLASH_SPLIT: usize = 22;
-const K_FLASH_REG: usize = 23;
-const K_FLASH_REG2: usize = 24;
+const K_PACK_QKV: usize = 16;
+const K_FLASH: usize = 17;
+const K_FLASH_SPLIT: usize = 18;
+const K_FLASH_REG: usize = 19;
+const K_FLASH_REG2: usize = 20;
 /// The ONE kernel this crate contributes rather than reuses (§F.3: the tree
 /// was grepped first - `bias_add` broadcasts a row but only IN PLACE,
 /// `region_copy` preserves the source layout rather than compacting a strided
@@ -199,7 +199,7 @@ const K_FLASH_REG2: usize = 24;
 /// its wall clock on, plus ~25 GB of PCIe traffic per forward, for a table whose only
 /// per-block input is a 147 KB `scale_shift_table`. Appended, so every index
 /// above is unchanged.
-const K_ADALN_ROW: usize = 25;
+const K_ADALN_ROW: usize = 21;
 
 /// The fused CROSS-attention kernel, `model::block::flash_cross_step`'s only
 /// rung (§F.3: the tree was grepped first and had none - `flash_attn_bidir_*`
@@ -209,7 +209,7 @@ const K_ADALN_ROW: usize = 25;
 /// `attn_apply_cross` trio for text cross-attention, whose real cost is the
 /// `[heads, nq, nk]` score slab written, read, rewritten and read again.
 /// Appended, so every index above is unchanged.
-const K_FLASH_CROSS_REG2: usize = 26;
+const K_FLASH_CROSS_REG2: usize = 22;
 
 /// The coalesced workgroup-per-row RMSNorm - the recurring defect class where
 /// a fast sibling already existed (`crates/wan/src/block.rs` and
@@ -217,20 +217,20 @@ const K_FLASH_CROSS_REG2: usize = 26;
 /// learned about, so every norm in every block ran the one-thread-per-row
 /// reference. Selected by `model::block::rms_variant`, never dispatched
 /// directly - see [`rmsnorm`]. Appended, so every index above is unchanged.
-const K_RMSNORM_ROWS: usize = 27;
+const K_RMSNORM_ROWS: usize = 23;
 /// `lora_delta`: the accumulate half of a runtime LoRA correction
 /// (`model::dispatch::lora_rows_off`), `out += (x·Aᵀ)·Bᵀ`.
-const K_LORA_DELTA: usize = 28;
+const K_LORA_DELTA: usize = 24;
 /// `attn_bias_groups`: an IC-LoRA reference's attention strength on the
 /// materialized scores ([`SelfAttnBias`]).
-const K_ATTN_BIAS_GROUPS: usize = 31;
+const K_ATTN_BIAS_GROUPS: usize = 25;
 /// `flash_attn_bidir_bias`: the fused self-attention under the same bias.
-const K_FLASH_BIDIR_BIAS: usize = 32;
+const K_FLASH_BIDIR_BIAS: usize = 26;
 
 /// The kernels this crate dispatches by index - all pre-existing except
 /// [`K_ADALN_ROW`] and [`K_FLASH_CROSS_REG2`], all at their documented general
 /// contract. [`KERNELS`] is this table followed by the shared façade's set.
-const INDEXED_KERNELS: [(&str, &str); 33] = [
+const INDEXED_KERNELS: [(&str, &str); 27] = [
     ("matmul", kernels::MATMUL),
     ("bias_add", kernels::BIAS_ADD),
     ("rmsnorm", kernels::RMSNORM),
@@ -242,10 +242,6 @@ const INDEXED_KERNELS: [(&str, &str); 33] = [
     ("attn_apply_cross", kernels::ATTN_APPLY_CROSS),
     ("rope2d", kernels::ROPE2D),
     ("sigmoid", kernels::SIGMOID),
-    ("max_abs_row", kernels::MAX_ABS_ROW),
-    ("quant_pack", kernels::QUANT_PACK),
-    ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
-    ("matmul_q4_dyn", kernels::MATMUL_Q4_DYN),
     ("matmul_reg3", kernels::MATMUL_REG3),
     ("matmul_gemv", kernels::MATMUL_GEMV),
     ("kv_k_headt", kernels::KV_K_HEADT),
@@ -263,8 +259,6 @@ const INDEXED_KERNELS: [(&str, &str); 33] = [
     ("flash_attn_cross_reg2", kernels::FLASH_ATTN_CROSS_REG2),
     ("rmsnorm_rows", kernels::RMSNORM_ROWS),
     ("lora_delta", kernels::LORA_DELTA),
-    ("quant_residual_pack", kernels::QUANT_RESIDUAL_PACK),
-    ("add", kernels::ADD),
     ("attn_bias_groups", kernels::ATTN_BIAS_GROUPS),
     ("flash_attn_bidir_bias", kernels::FLASH_ATTN_BIDIR_BIAS),
 ];
