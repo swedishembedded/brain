@@ -445,10 +445,13 @@ pub fn keyed_draws_are_the_rows_draws<D: PagedDecoder>(c: &Conformance<D>) {
     assert_eq!(drawn.len(), draws.len(), "a keyed step answers every row");
     for (i, (d, got)) in draws.iter().zip(&drawn).enumerate() {
         match (d, got) {
-            (Some(d), Drawn::Token(t, lp)) => {
+            (Some(d), Drawn::Token(t, lp, whole)) => {
                 let (want, want_lp) = draw_row(&rows[i], *d);
                 assert_eq!(*t, want, "row {i}: the keyed draw is not the row's draw");
                 assert!((lp - want_lp).abs() <= 1e-3 * want_lp.abs().max(1.0), "row {i}: logprob {lp} against the row's {want_lp}");
+                // The figure a policy trace carries of a draw that cut the row: its token's log-softmax at the temperature.
+                let want_whole = crate::logprobs::row_logprob_at(&rows[i], want as usize, d.temp);
+                assert!((whole - want_whole).abs() <= 1e-3 * want_whole.abs().max(1.0), "row {i}: whole-row logprob {whole} against the row's {want_whole}");
             }
             (None, Drawn::Row(row)) => assert_eq!(row, &rows[i], "row {i}: the row handed back is not the step's row"),
             other => panic!("row {i}: {other:?} for draw {d:?}"),

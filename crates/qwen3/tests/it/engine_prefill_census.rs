@@ -160,7 +160,7 @@ fn a_keyed_window_draws_what_single_keyed_steps_draw() {
         let step: Vec<Option<RowDraw>> = (0..rows).map(|i| Some(draw(i, 10 + s))).collect();
         let drawn = single.forward_batched_drawn(&mut tables.iter_mut().collect::<Vec<_>>(), &cur, &step);
         for (i, d) in drawn.into_iter().enumerate() {
-            let Drawn::Token(t, lp) = d else { panic!("a keyed row is drawn") };
+            let Drawn::Token(t, lp, _) = d else { panic!("a keyed row is drawn") };
             want[i].push((t, lp));
             cur[i] = t;
         }

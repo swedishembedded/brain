@@ -244,8 +244,8 @@ impl PagedDecoder for Echo {
             .map(|(&i, d)| match d {
                 Some(d) => {
                     self.drawn += 1;
-                    let (t, lp) = draw_row(&row_for(i), *d);
-                    Drawn::Token(t, lp)
+                    let (t, lp, whole) = model::serve::draw_row_whole(&row_for(i), *d);
+                    Drawn::Token(t, lp, whole)
                 }
                 None => {
                     self.returned += 1;

@@ -86,7 +86,7 @@ fn run(plans: bool) -> (Trace, usize) {
                 e.forward_batched_drawn(&mut refs, &next, &draws)
                     .into_iter()
                     .map(|d| match d {
-                        Drawn::Token(t, lp) => vec![(t, lp)],
+                        Drawn::Token(t, lp, _) => vec![(t, lp)],
                         Drawn::Row(row) => vec![best_of(&row)],
                     })
                     .collect()

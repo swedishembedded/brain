@@ -410,7 +410,7 @@ impl RowDrawer {
     /// its `top_k` is wider than the candidates), and row `i` of `logits` read back where it is `None`. Only those
     /// rows cross to the host.
     pub fn answer(&self, g: &Gpu, logits: &DeviceBuffer, draws: &[Option<crate::serve::RowDraw>], vocab: u32, shape: DrawShape) -> Vec<crate::serve::Drawn> {
-        use crate::serve::{draw_from_candidates, draw_row, Drawn};
+        use crate::serve::{draw_from_candidates, draw_row_whole, Drawn};
         let rows = draws.len();
         let v = vocab as usize;
         let out = if draws.iter().any(Option::is_some) { g.read(&self.out, rows * 4) } else { Vec::new() };
@@ -431,16 +431,32 @@ impl RowDrawer {
             .enumerate()
             .map(|(i, d)| match d {
                 None => Some(Drawn::Row(read_row(i))),
-                Some(d) if !d.keeps_top_k(v) => Some(Drawn::Token(out[4 * i] as u32, out[4 * i + 1])),
-                Some(d) if n > 0 => draw_from_candidates(&list(i), out[4 * i + 2], out[4 * i + 3], *d, v).map(|(t, lp)| Drawn::Token(t, lp)),
+                Some(d) if !d.keeps_top_k(v) => {
+                    let (token, lp) = (out[4 * i] as u32, out[4 * i + 1]);
+                    // A row drawn over every token has its own figure; a nucleus or min-p floor drew over fewer, and the
+                    // whole row's figure needs the token's logit with the row's best and mass.
+                    let whole = if d.has_nucleus() || d.min_p > 0.0 {
+                        let logit = list(i).iter().find(|&&(t, _)| t == token).map(|&(_, l)| l).unwrap_or_else(|| {
+                            let mut one = [0.0f32];
+                            g.read_into(logits, i as u64 * vocab as u64 + token as u64, &mut one);
+                            one[0]
+                        });
+                        let whole = logit / d.temp.max(1e-6) - out[4 * i + 2] - out[4 * i + 3].ln();
+                        if whole.is_nan() { lp } else { whole }
+                    } else {
+                        lp
+                    };
+                    Some(Drawn::Token(token, lp, whole))
+                }
+                Some(d) if n > 0 => draw_from_candidates(&list(i), out[4 * i + 2], out[4 * i + 3], *d, v).map(|(t, lp, whole)| Drawn::Token(t, lp, whole)),
                 Some(_) => None,
             })
             .collect();
         // The rows their candidates could not answer, drawn whole on the CPU pool.
         let whole: Vec<(usize, Vec<f32>)> = answers.iter().enumerate().filter(|(_, a)| a.is_none()).map(|(i, _)| (i, read_row(i))).collect();
-        let drawn = backend_cpu::par::map(whole.len(), |j| draw_row(&whole[j].1, draws[whole[j].0].expect("a keyed row")));
-        for ((i, _), (t, lp)) in whole.iter().zip(drawn) {
-            answers[*i] = Some(Drawn::Token(t, lp));
+        let drawn = backend_cpu::par::map(whole.len(), |j| draw_row_whole(&whole[j].1, draws[whole[j].0].expect("a keyed row")));
+        for ((i, _), (t, lp, whole)) in whole.iter().zip(drawn) {
+            answers[*i] = Some(Drawn::Token(t, lp, whole));
         }
         answers.into_iter().map(|a| a.expect("every row answered")).collect()
     }

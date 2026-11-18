@@ -148,40 +148,46 @@ fn a_policy_trace_waits_for_a_decoder_that_is_not_ready_to_score() {
     assert!(results[1].clone().expect("served").outputs.get("policy_trace").is_none());
 }
 
-/// SPEC: a policy trace of a reply sampled from the whole distribution (a temperature, no top-k, top-p or min-p) on a
-/// decoder that draws over its whole logits row is the decode steps' own log-probabilities - the behaviour policy
-/// exactly, whatever the batch or the kernels of a scoring pass would compute - with the stop token's; a truncated or
-/// greedy draw reports no whole-distribution figure, so its trace is scored by the decoder.
+/// SPEC: a policy trace of a sampled reply is the decode steps' own log-probabilities under the whole row at the request
+/// temperature, `log_softmax(logits / T)[token]` of the row that drew each token, with the stop token's, whatever cut
+/// (top-k, top-p, min-p) the draw made. No scoring pass runs for it: the trace says it came from the decode, and the
+/// decoder is never asked to score. A cut draw's own figure (what `completion_logprobs` reports) is the token's under
+/// the survivors, which the whole-row figure never exceeds.
 #[test]
-fn a_policy_trace_of_a_whole_distribution_draw_is_the_decode_time_log_probabilities() {
+fn a_policy_trace_of_a_sampled_draw_is_the_whole_row_log_probability_of_the_decode_that_drew_it() {
     let spec = chat_spec();
-    let request = |seed: u64, top_k: i64| {
+    let request = |seed: u64, top_k: i64, top_p: f64, min_p: f64| {
         let inv = Invocation::new().set("prompt", json!("t1t2t3t4")).set("chat", json!(false)).set("max_new", json!(12)).set("logprobs", json!(true)).set("policy_trace", json!(true)).set("seed", json!(seed));
-        spec.validate(inv.set("temp", json!(1.0)).set("top_k", json!(top_k)).set("top_p", json!(1.0)).set("min_p", json!(0.0))).expect("a valid request")
+        spec.validate(inv.set("temp", json!(1.0)).set("top_k", json!(top_k)).set("top_p", json!(top_p)).set("min_p", json!(min_p))).expect("a valid request")
     };
     let front = Parsed { tok: tokenizer() };
+    // The toy's scores are `-token / 100` whatever precedes: a trace that came from a scoring pass would read so.
     let mut sched = Scheduler::new(Toy::new(BlockAllocator::new(128, 8), 0).sampling().scoring(), 4);
-    let results = run_batch_scheduled(&mut sched, &front, &[request(3, 0), request(8, 0), request(5, 5)], &mut |_, _| {});
+    let cuts = [(0, 1.0, 0.0), (0, 1.0, 0.0), (5, 1.0, 0.0), (0, 0.9, 0.0), (0, 1.0, 0.2)];
+    let requests: Vec<_> = cuts.iter().enumerate().map(|(i, &(k, p, m))| request(3 + i as u64, k, p, m)).collect();
+    let results = run_batch_scheduled(&mut sched, &front, &requests, &mut |_, _| {});
+    assert_eq!(sched.decoder_mut().scores_run, 0, "no reply is re-read by a scoring prefill: the decode already reported its figures");
     for (i, result) in results.into_iter().enumerate() {
-        let out = result.expect("served").outputs;
+        let out = result.unwrap_or_else(|e| panic!("request {i} {:?}: {e:?}", cuts[i])).outputs;
         let trace = &out["policy_trace"];
+        assert_eq!(trace["log_prob_source"], json!("decode"), "{:?}: {trace}", cuts[i]);
         let generated: Vec<u32> = serde_json::from_value(trace["generation_token_ids"].clone()).unwrap();
         let traced: Vec<f32> = serde_json::from_value(trace["generation_log_probs"].clone()).unwrap();
         let sampler: Vec<f32> = serde_json::from_value(out["completion_logprobs"].clone()).unwrap();
+        let prompt: Vec<u32> = serde_json::from_value(trace["prompt_token_ids"].clone()).unwrap();
         assert_eq!(traced.len(), generated.len());
-        if i < 2 {
-            assert_eq!(trace["log_prob_source"], json!("decode"), "{trace}");
-            assert_eq!(traced[..sampler.len()], sampler[..], "the decode-time figures, bit for bit");
-            // The stop token's figure is the step's that drew it: the toy's row after the last generated token.
-            if let Some(&stop) = out.get("stop_token").and_then(|t| t.as_u64()).map(|t| t as u32).as_ref() {
-                let prompt: Vec<u32> = serde_json::from_value(trace["prompt_token_ids"].clone()).unwrap();
-                let previous = *generated[..generated.len() - 1].last().or(prompt.last()).expect("a prompt");
-                let whole = SampleParams { temp: 1.0, ..SampleParams::greedy() };
-                assert!((traced[generated.len() - 1] - model::serve::candidate_logprob(&row(previous), whole, stop)).abs() < 1e-5, "{trace}");
+        let whole = SampleParams { temp: 1.0, ..SampleParams::greedy() };
+        let mut previous = *prompt.last().expect("a prompt");
+        for (j, (&token, &lp)) in generated.iter().zip(&traced).enumerate() {
+            let want = model::serve::candidate_logprob(&row(previous), whole, token);
+            assert!((lp - want).abs() < 1e-4, "{:?} token {j}: traced {lp} against the row's {want}", cuts[i]);
+            if let Some(&own) = sampler.get(j) {
+                assert!(lp <= own + 1e-4, "{:?} token {j}: the whole row's figure {lp} exceeds the survivors' {own}", cuts[i]);
             }
-        } else {
-            assert_eq!(trace["log_prob_source"], json!("score"), "a top-k draw is scored: {trace}");
-            assert!(traced.iter().zip(&generated).all(|(lp, &t)| (lp + t as f32 / 100.0).abs() < 1e-6), "the toy's scores: {trace}");
+            previous = token;
+        }
+        if cuts[i].0 == 5 {
+            assert!(traced.iter().zip(&sampler).any(|(w, own)| w + 1e-3 < *own), "a top-k draw's whole-row figures sit below the survivors': {traced:?} against {sampler:?}");
         }
     }
 }

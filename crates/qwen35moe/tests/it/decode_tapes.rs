@@ -269,7 +269,7 @@ fn a_sampled_step_replays_its_recording_and_draws_what_the_built_step_draws() {
         let bits = |d: &[Drawn]| -> Vec<(u32, Vec<u32>)> {
             d.iter()
                 .map(|x| match x {
-                    Drawn::Token(t, lp) => (*t, vec![lp.to_bits()]),
+                    Drawn::Token(t, lp, _) => (*t, vec![lp.to_bits()]),
                     Drawn::Row(row) => (u32::MAX, row.iter().map(|v| v.to_bits()).collect()),
                 })
                 .collect()
@@ -278,7 +278,7 @@ fn a_sampled_step_replays_its_recording_and_draws_what_the_built_step_draws() {
         toks = a
             .iter()
             .map(|x| match x {
-                Drawn::Token(t, _) => *t,
+                Drawn::Token(t, ..) => *t,
                 Drawn::Row(row) => model::hostmath::argmax_row(row),
             })
             .collect();

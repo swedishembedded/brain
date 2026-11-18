@@ -74,8 +74,10 @@ impl RowDraw {
 /// the keyed draw does not cover (a processor, a nucleus, a `top_k` inside the vocabulary).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Drawn {
-    /// The drawn token and its log-probability.
-    Token(u32, f32),
+    /// The drawn token, its log-probability under the distribution it was drawn from (the survivors of the cut), and
+    /// its log-probability under the whole row at the request temperature, `log_softmax(logits / temp)[token]`: the
+    /// behaviour policy's own figure for a draw that is cut (see [`draw_row_whole`]).
+    Token(u32, f32, f32),
     /// The row's whole `[vocab]` logits, for the host sampler.
     Row(Vec<f32>),
 }
@@ -145,6 +147,14 @@ pub fn draw_row(row: &[f32], d: RowDraw) -> (u32, f32) {
     (token, (scaled - best) - (kept as f32).ln())
 }
 
+/// [`draw_row`], and the token's log-probability under the whole row at the draw's temperature: the figure a policy
+/// trace needs of a draw that cut the row, from the same logits the draw read.
+pub fn draw_row_whole(row: &[f32], d: RowDraw) -> (u32, f32, f32) {
+    let (token, lp) = draw_row(row, d);
+    let whole = crate::logprobs::row_logprob_at(row, token as usize, d.temp.max(1e-6));
+    (token, lp, if whole.is_nan() { lp } else { whole })
+}
+
 /// [`draw_row`] for a draw whose survivors are a best-first list: the row's best `top_k`, or the shortest sorted
 /// prefix that holds the nucleus (the row sampler's own prefix search, [`super::fullrow`]).
 fn draw_truncated_row(row: &[f32], d: RowDraw) -> (u32, f32) {
@@ -186,23 +196,28 @@ pub fn draw_list(list: &[(u32, f32)], d: RowDraw, full_mass: Option<f32>) -> (u3
 /// The keyed draw of a row answered from its best-first `list` of candidates and its statistics (`best`, the row's
 /// largest `logit / temp`, and `mass`, the sum of `exp(logit / temp - best)` over the row), when the list holds every
 /// survivor: the `top_k` best are in it, or its mass reaches the nucleus. `None` when it does not, and the row itself
-/// must be drawn ([`draw_row`]). Only for a draw that [`RowDraw::truncates`] a `vocab`-wide row.
-pub fn draw_from_candidates(list: &[(u32, f32)], best: f32, mass: f32, d: RowDraw, vocab: usize) -> Option<(u32, f32)> {
+/// must be drawn ([`draw_row`]). Only for a draw that [`RowDraw::truncates`] a `vocab`-wide row. The third figure is the
+/// token's log-probability under the whole row, `logit / temp - best - ln(mass)`: the drawn token is in the list, and
+/// `best` and `mass` are the row's own, so a cut draw's whole-distribution figure needs nothing more from the device.
+pub fn draw_from_candidates(list: &[(u32, f32)], best: f32, mass: f32, d: RowDraw, vocab: usize) -> Option<(u32, f32, f32)> {
     if list.is_empty() || mass.is_nan() || mass <= 0.0 {
         return None;
     }
-    if d.keeps_top_k(vocab) {
-        return (list.len() >= d.top_k).then(|| draw_list(&list[..d.top_k], d, None));
-    }
     let temp = d.temp.max(1e-6);
-    let held: f64 = list.iter().map(|&(_, l)| if l.is_nan() { 0.0 } else { ((l / temp - best).exp()) as f64 }).sum();
-    (held >= d.top_p as f64 * mass as f64).then(|| draw_list(list, d, Some(mass)))
+    let drawn = if d.keeps_top_k(vocab) {
+        (list.len() >= d.top_k).then(|| draw_list(&list[..d.top_k], d, None))?
+    } else {
+        let held: f64 = list.iter().map(|&(_, l)| if l.is_nan() { 0.0 } else { ((l / temp - best).exp()) as f64 }).sum();
+        (held >= d.top_p as f64 * mass as f64).then(|| draw_list(list, d, Some(mass)))?
+    };
+    let logit = list.iter().find(|&&(t, _)| t == drawn.0).map(|&(_, l)| l)?;
+    Some((drawn.0, drawn.1, logit / temp - best - mass.ln()))
 }
 
 /// Every row's answer to a keyed step whose rows were read back: `draws[i]` drawn from `rows[i]` where it is
 /// `Some`, the row handed back where it is `None`. The rows are drawn in parallel on the CPU pool.
 pub fn draw_rows_host(rows: Vec<Vec<f32>>, draws: &[Option<RowDraw>]) -> Vec<Drawn> {
     assert_eq!(rows.len(), draws.len(), "draw_rows_host: {} rows for {} draws", rows.len(), draws.len());
-    let drawn = backend_cpu::par::map(rows.len(), |i| draws[i].map(|d| draw_row(&rows[i], d)));
-    rows.into_iter().zip(drawn).map(|(row, t)| t.map_or(Drawn::Row(row), |(t, lp)| Drawn::Token(t, lp))).collect()
+    let drawn = backend_cpu::par::map(rows.len(), |i| draws[i].map(|d| draw_row_whole(&rows[i], d)));
+    rows.into_iter().zip(drawn).map(|(row, t)| t.map_or(Drawn::Row(row), |(t, lp, whole)| Drawn::Token(t, lp, whole))).collect()
 }

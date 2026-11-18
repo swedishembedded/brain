@@ -297,16 +297,16 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   The request is refused (400, `invalid-request`) when it sets penalties, DRY,
   no-repeat bans or a thinking budget, which reshape the distribution the tokens
   are drawn from, and fails with `unsupported-capability` on a model that cannot
-  score its own generation. A reply sampled from the whole distribution (a
-  temperature above 0, no top-k, top-p or min-p) on a model that draws over its
-  whole logits row carries the decode steps' own log-probabilities: the exact
-  behaviour policy, at no extra cost (`log_prob_source: "decode"`). Any other
-  reply is scored as above, at the cost of one extra prefill of prompt plus
-  generation on the serving thread (`log_prob_source: "score"`); on a GPU that
-  pass runs other kernels than the decode did and differs from the decode-time
-  distribution by a few thousandths of a nat per token. Train rollouts at
-  temperature 1.0 without top-k or top-p; `logprobs` (above) is the sampler's own,
-  truncated figure and is a different quantity.
+  score its own generation. A reply sampled with a temperature above 0 on a model that
+  draws over its whole logits row, with or without a top-k, top-p or min-p cut, carries the
+  decode steps' own log-probabilities under the whole distribution at the request temperature,
+  `log_softmax(logits / T)[token]` (`log_prob_source: "decode"`): the exact behaviour policy,
+  with no extra prefill. Any other reply (a greedy draw, a speculated step, a token sampled on
+  the host) is scored as above, at the cost of one extra prefill of prompt plus generation on
+  the serving thread (`log_prob_source: "score"`); on a GPU that pass runs other kernels than
+  the decode did and differs from the decode-time distribution by a few thousandths of a nat
+  per token. `logprobs` (above) is the sampler's own, truncated figure and is a different
+  quantity.
 - **Scoring given text (`score`).** A served Qwen3 or Qwen3.8 chat model (the Qwen3.8-27B served from a released FP8
   or GGUF checkpoint included), and each adapter id riding on it, has a
   `score` action, called through `POST /v1/run` with `model` the base or adapter id and `blobs.records` a

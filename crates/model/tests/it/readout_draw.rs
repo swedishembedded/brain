@@ -92,9 +92,14 @@ fn the_device_draw_is_the_host_reference_row_for_row() {
             for (r, (d, got)) in draws.iter().zip(&got).enumerate() {
                 let row = &host[r * vocab..(r + 1) * vocab];
                 match (d, got) {
-                    (Some(d), Drawn::Token(t, lp)) => {
+                    (Some(d), Drawn::Token(t, lp, whole)) => {
                         let (want, want_lp) = draw_row(row, *d);
                         assert_eq!(*t, want, "{rows}x{vocab} round {round} row {r} {d:?}");
+                        // A NaN logit carries no mass (the row fixture plants one), as in the draw's own weights.
+                        let clean: Vec<f32> = row.iter().map(|&l| if l.is_nan() { f32::NEG_INFINITY } else { l }).collect();
+                        let want_whole = model::logprobs::row_logprob_at(&clean, want as usize, d.temp);
+                        // A row of no mass has no distribution to report a figure under (the draw answers 0).
+                        assert!(want_whole.is_nan() || (whole - want_whole).abs() <= 1e-4 * want_whole.abs().max(1.0), "{rows}x{vocab} round {round} row {r} {d:?}: whole-row logprob {whole} vs {want_whole}");
                         assert!((lp - want_lp).abs() <= 1e-4 * want_lp.abs().max(1.0), "{rows}x{vocab} round {round} row {r}: logprob {lp} vs {want_lp}");
                     }
                     (None, Drawn::Row(back)) => assert!(back.iter().zip(row).all(|(a, b)| a.to_bits() == b.to_bits()), "row {r} came back changed"),
@@ -124,7 +129,7 @@ fn the_device_draw_follows_the_exact_distribution() {
             let shape = drawer.shape(&draws, vocab as u32);
             g.submit(&[], &drawer.steps(&g, &logits, &draws, vocab as u32));
             for d in drawer.answer(&g, &logits, &draws, vocab as u32, shape) {
-                let Drawn::Token(t, _) = d else { panic!("every row is drawn") };
+                let Drawn::Token(t, ..) = d else { panic!("every row is drawn") };
                 counts[t as usize] += 1;
             }
         }

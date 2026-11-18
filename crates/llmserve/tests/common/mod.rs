@@ -27,11 +27,13 @@ pub struct Toy {
     busy_polls: std::cell::Cell<u32>,
     /// Offer every token as a candidate ([`Toy::sampling`]); greedy only otherwise.
     sampling: bool,
+    /// Scoring passes run so far ([`PagedDecoder::score_continuation`]): each is a prefill of a whole prompt and reply.
+    pub scores_run: usize,
 }
 
 impl Toy {
     pub fn new(alloc: BlockAllocator, cached: u32) -> Toy {
-        Toy { alloc, cached, scoring: false, busy_polls: std::cell::Cell::new(0), sampling: false }
+        Toy { alloc, cached, scoring: false, busy_polls: std::cell::Cell::new(0), sampling: false, scores_run: 0 }
     }
 
     /// The same decoder, able to sample: after token `p` its row ranks every token, `p + 1` first, then `p + 2`, ...,
@@ -68,6 +70,7 @@ impl PagedDecoder for Toy {
         if !self.scoring {
             return Err("the toy cannot score".to_string());
         }
+        self.scores_run += 1;
         Ok(tokens[from..].iter().map(|&t| -(t as f32) / 100.0).collect())
     }
     fn alloc_mut(&mut self) -> &mut BlockAllocator {
