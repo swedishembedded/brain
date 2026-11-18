@@ -124,12 +124,15 @@ fn attention_is_quadratic_in_tokens_and_the_gemms_are_linear() {
     // The EXPONENT, not the constant. A cost model fitted at one size can get
     // the constant right and the exponent wrong, and it is then only wrong far
     // away from where it was checked - which is the one place a predictor is
-    // for.
-    let exponent = |kind: &str| -> f64 {
-        let a = small.get(kind).unwrap_or_else(|| panic!("{kind} not dispatched at the small size")).flops as f64;
-        let b = big.get(kind).unwrap_or_else(|| panic!("{kind} not dispatched at the big size")).flops as f64;
-        assert!(a > 0.0, "{kind} costs nothing at the small size");
-        println!("{kind:<26} {a:>14} -> {b:>14} flops  ({:.4}x for {r:.4}x tokens)", b / a);
+    // for. Each family is summed over every kernel of it the device selected:
+    // a card with work-group reductions runs one fused flash kernel and the
+    // register-tiled GEMMs, the CPU backend the scores/softmax/apply triad and
+    // the plain GEMM, so the exponent is the family's on any backend.
+    let family = |costs: &BTreeMap<String, Cost>, member: &dyn Fn(&str) -> bool| -> u64 { costs.iter().filter(|(n, _)| member(n)).map(|(_, c)| c.flops).sum() };
+    let exponent = |what: &str, member: &dyn Fn(&str) -> bool| -> f64 {
+        let (a, b) = (family(&small, member) as f64, family(&big, member) as f64);
+        assert!(a > 0.0 && b > 0.0, "no {what} kernel costs anything at both sizes; dispatched: {:?}", small.keys().collect::<Vec<_>>());
+        println!("{what:<26} {a:>14} -> {b:>14} flops  ({:.4}x for {r:.4}x tokens)", b / a);
         (b / a).ln() / r.ln()
     };
 
@@ -137,13 +140,13 @@ fn attention_is_quadratic_in_tokens_and_the_gemms_are_linear() {
     // pair count - and with it the score/apply MACs - grows as n^2. The per-row
     // softmax terms make it very slightly sub-quadratic, which is why the
     // assertion is on the exponent with a band and not on an exact ratio.
-    let attn = exponent("flash_attn_bidir_reg2");
+    let attn = exponent("bidirectional attention", &|n| n.contains("attn") && n.contains("bidir"));
     assert!((attn - 2.0).abs() < 0.05, "bidirectional attention must be ~quadratic in tokens, measured exponent {attn:.4}");
 
     // The projections contract fixed [d, d] / [d, mlp] weights against the
     // rows, so they are degree 1. Not exactly proportional: the text rows are
     // a fixed count, so the total is affine in n, not a multiple of it.
-    let mm = exponent("matmul_reg3");
+    let mm = exponent("projection GEMM", &|n| n.starts_with("matmul"));
     assert!((mm - 1.0).abs() < 0.02, "the projection GEMMs must be ~linear in tokens, measured exponent {mm:.4}");
 
     // And the two must be TOLD APART - a model that got attention's exponent
