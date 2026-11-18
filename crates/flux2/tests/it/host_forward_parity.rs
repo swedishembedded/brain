@@ -66,7 +66,7 @@ fn host_f32_forward_matches_device_forward() {
     let (host, _) = forward(&cfg, &w, &b.inputs(), model::saved::SavedPolicy::Keep).unwrap();
 
     // device path on the same tensors/inputs
-    let gpu = gpu_core::testgpu::dev(flux2::KERNELS);
+    let gpu = gpu_core::testgpu::dev(&flux2::KERNELS);
     let model = flux2::Flux2Model::new(&fc, &ts, gpu, cfg.n() as u32);
     let ids = flux2::position_ids(cfg.txt_len, cfg.lh, cfg.lw, &[]);
     let dev = model.forward(&b.img, &b.ctx, b.t as f32, &ids, cfg.n_img());

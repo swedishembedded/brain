@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Int8 (DP4A) DiT parity vs the fp32 forward AND the diffusers reference,
+//! Int8 DiT parity vs the fp32 forward AND the diffusers reference,
 //! replaying the exact captured transformer inputs (the `dit_parity` fixture,
 //! t2i: 512 txt + 1024 img = 1536 joint tokens).
 //!
@@ -14,7 +14,7 @@
 //! (informational).
 //!
 //! Env: `BRAIN_FLUX2_TRANSFORMER` = the klein-4B diffusers `transformer/` dir.
-//! Skips without weights, fixtures, or a GPU backend (int8 needs DP4A).
+//! Skips without weights, fixtures, or a card (the 4B forward is sized for one).
 
 use flux2::{Flux2Config, Flux2Model, Precision};
 
@@ -103,7 +103,7 @@ fn int8_bisect_keep_f32_families() {
     if !std::path::Path::new(&f_t2i).exists() {
         return;
     }
-    let gpu = gpu_core::testgpu::dev(flux2::KERNELS);
+    let gpu = gpu_core::testgpu::dev(&flux2::KERNELS);
     if !gpu.caps().workgroup_reductions {
         return;
     }
@@ -134,9 +134,9 @@ fn int8_forward_matches_fp32_and_reference() {
         brain_testutil::skip(&format!("fixture {f_t2i} absent"));
         return;
     }
-    let gpu = gpu_core::testgpu::dev(flux2::KERNELS);
+    let gpu = gpu_core::testgpu::dev(&flux2::KERNELS);
     if !gpu.caps().workgroup_reductions {
-        brain_testutil::skip_unavailable(&format!("int8 needs a GPU backend (DP4A), current is {}", gpu.kind()));
+        brain_testutil::skip_unavailable(&format!("the real-weight 4B int8 parity is sized for a card, current is {}", gpu.kind()));
         return;
     }
     let Some(map) = load_weights() else { return };

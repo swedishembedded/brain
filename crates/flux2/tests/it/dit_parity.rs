@@ -89,7 +89,7 @@ fn dit_forward_matches_reference() {
     }
     let Some(map) = load_weights() else { return };
     let cfg = Flux2Config::klein_4b();
-    let gpu = gpu_core::testgpu::dev(flux2::KERNELS);
+    let gpu = gpu_core::testgpu::dev(&flux2::KERNELS);
     // sized for the edit case: 512 txt + 2048 img/ref tokens
     let model = Flux2Model::new(&cfg, &map, gpu, 512 + 2048);
     run_case(&model, &f_t2i);

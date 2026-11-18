@@ -62,7 +62,7 @@ fn euler_loop_and_decode_match_reference() {
         ts.extend(checkpoint::safetensors::read(f.to_str().unwrap()).unwrap());
     }
     let map = flux2::import_diffusers(ts, &cfg).unwrap();
-    let gpu = gpu_core::testgpu::dev(flux2::KERNELS);
+    let gpu = gpu_core::testgpu::dev(&flux2::KERNELS);
     let model = Flux2Model::new(&cfg, &map, gpu, 512 + 1024);
 
     // schedule: 512x512 -> 1024 tokens, 4 steps

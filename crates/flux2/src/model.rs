@@ -43,7 +43,9 @@ use gpu_core::{DeviceBuffer, Gpu, Step};
 use crate::config::Flux2Config;
 use crate::import::Tensors;
 
-pub const KERNELS: &[(&str, &str)] = &[
+/// The kernels this model dispatches by index (the `K_*` constants name their positions). [`KERNELS`] is this table
+/// followed by the shared façade's set.
+const INDEXED_KERNELS: &[(&str, &str)] = &[
     ("layernorm", kernels::LAYERNORM),
     ("matmul", kernels::MATMUL),
     ("matmul_reg3", kernels::MATMUL_REG3),
@@ -58,11 +60,6 @@ pub const KERNELS: &[(&str, &str)] = &[
     ("flash_attn_bidir_split", kernels::FLASH_ATTN_BIDIR_SPLIT),
     ("silu_mul", kernels::SILU_MUL),
     ("gate_row", kernels::GATE_ROW),
-    // int8 DP4A path (GPU only): group-wise activation quant + DP4A GEMM.
-    // Listing them is harmless off-GPU — only dispatched under Precision::Int8.
-    ("max_abs_row", kernels::MAX_ABS_ROW),
-    ("quant_pack", kernels::QUANT_PACK),
-    ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
     ("flash_attn_bidir_reg", kernels::FLASH_ATTN_BIDIR_REG),
     ("flash_attn_bidir_reg2", kernels::FLASH_ATTN_BIDIR_REG2),
     // Runtime LoRA epilogue (`y += B·(A·x)`), dispatched only for a linear an
@@ -72,6 +69,17 @@ pub const KERNELS: &[(&str, &str)] = &[
     // `model::block::ln_variant` where the device runs reductions.
     ("layernorm_rows", kernels::LAYERNORM_ROWS),
 ];
+
+/// Every kernel a `Gpu` running this model registers: [`INDEXED_KERNELS`], then what [`model::ops::Ops`] resolves
+/// by name. The int8 tier's linears run through it, so the selector, not this crate, decides which packed-int8
+/// kernel (or the float-read tile decode of a device without the packed dot) serves each product. Each name once,
+/// [`INDEXED_KERNELS`]' spelling first.
+pub static KERNELS: std::sync::LazyLock<Vec<(&'static str, &'static str)>> = std::sync::LazyLock::new(|| {
+    let mut list = INDEXED_KERNELS.to_vec();
+    model::ops::extend_kernel_list(&mut list, model::ops::kernel_list());
+    model::ops::extend_kernel_list(&mut list, model::ops::frozen_base_kernels());
+    list
+});
 const K_LN: usize = 0;
 const K_MATMUL: usize = 1;
 const K_MATMUL_REG3: usize = 2;
@@ -86,16 +94,13 @@ const K_FLASH: usize = 10;
 const K_FLASH_SPLIT: usize = 11;
 const K_SILU_MUL: usize = 12;
 const K_GATE: usize = 13;
-const K_MAXABS: usize = 14;
-const K_QUANT: usize = 15;
-const K_MATMUL_I8: usize = 16;
 /// The register-tiled flash-attention pair, appended so every index above is
 /// unchanged. `model::block::flash_bidir_variant` picks between all four from
 /// the device's queried caps.
-const K_FLASH_REG: usize = 17;
-const K_FLASH_REG2: usize = 18;
-const K_LORA: usize = 19;
-const K_LN_ROWS: usize = 20;
+const K_FLASH_REG: usize = 14;
+const K_FLASH_REG2: usize = 15;
+const K_LORA: usize = 16;
+const K_LN_ROWS: usize = 17;
 
 const EPS: f32 = 1e-6;
 
@@ -104,9 +109,9 @@ fn f(x: f32) -> u32 {
 }
 
 
-// The numeric-tier machinery (Precision map, packed-int8 resident weight,
-// K-keyed activation scratch, DP4A dispatch) is shared with flux1 via
-// `model::dispatch` — this file keeps only the FLUX.2-specific graph.
+// The numeric-tier machinery (Precision map, packed-int8 resident weight) is
+// shared with flux1 via `model::dispatch`, and the int8 products run through
+// `model::ops::Ops` - this file keeps only the FLUX.2-specific graph.
 pub use model::dispatch::Precision;
 use model::dispatch::{LinW as Lin, LoraW};
 
@@ -210,12 +215,11 @@ struct Scratch {
     ctx_in: DeviceBuffer,
 }
 
-// Int8 activation scratch (allocated only under [`Precision::Int8`]):
-// `model::dispatch::I8Scratch`, keyed by the two in-block contraction widths
-// (hidden, mlp). One quant feeds every linear reading that activation
-// (n1 → q/k/v and w1/w3, ctx → wo, hs → w2/wo_b); the boundary linears
-// (img_in/txt_in/final_layer) stay fp32.
-use model::dispatch::I8Scratch;
+// Int8 activations (made only under [`Precision::Int8`]) are the shared
+// façade's: one quantization of a slab feeds every linear reading it (n1 →
+// q/k/v and w1/w3, ctx → wo, hs → w2/wo_b), each over its own row window
+// (`Ops::act_rows`); the boundary linears (img_in/txt_in/final_layer) stay fp32.
+use model::ops::{Act, Ops, Weight};
 
 pub struct Flux2Model {
     pub cfg: Flux2Config,
@@ -226,7 +230,9 @@ pub struct Flux2Model {
     b_max: u32,
     fast: bool,
     precision: Precision,
-    i8scr: Option<I8Scratch>,
+    /// The shared façade the int8 linears run through, on this model's device; `None` at fp32. Its per-width
+    /// activation scratch is reused by every block and every forward.
+    ops: Option<Ops>,
     dbl: Vec<(StreamW, StreamW)>,
     sgl: Vec<SingleW>,
     img_in: LinA,
@@ -314,11 +320,6 @@ impl Flux2Model {
         let nh = cfg.n_heads as u32;
         let fast = gpu.caps().workgroup_reductions;
         if precision == Precision::Int8 {
-            assert!(
-                fast,
-                "flux2 int8 needs a GPU backend (DP4A + workgroup barriers); use fp32 on the {} backend",
-                gpu.kind()
-            );
             // step_sliced binds sub-ranges at BYTE offset elem*4; storage
             // bindings must be 256-byte aligned. Every sliced row offset here is
             // 0 or txt_len rows, so widths and txt_len must be multiples of 64.
@@ -625,7 +626,7 @@ impl Flux2Model {
             beta: (0..6).map(|_| a(bd)).collect(),
             gate: (0..5).map(|_| a(bd)).collect(),
         };
-        let i8scr = (precision == Precision::Int8).then(|| I8Scratch::new(&gpu, n, n, &[cfg.hidden as u32, cfg.mlp_hidden() as u32]));
+        let ops = (precision == Precision::Int8).then(|| Ops::new(gpu.share()).unwrap_or_else(|e| panic!("flux2: the int8 model's Gpu lacks the shared kernel set: {e}")));
 
         if gpu_core::profile::enabled() {
             let ms = |n: u128| n as f64 / 1e6;
@@ -649,7 +650,7 @@ impl Flux2Model {
             b_max,
             fast,
             precision,
-            i8scr,
+            ops,
             dbl,
             sgl,
             img_in: img_in_w,
@@ -809,24 +810,25 @@ impl Flux2Model {
         model::dispatch::mm_rows_off(&self.gpu, self.gemm_tier(), x, w, o, xr0, or0 as u64 * n as u64, m, k, n)
     }
 
-    /// Int8 only (no-op under fp32): quantize rows `r0..r1` of `x` `[.., k]`
-    /// into the K-matched packed scratch with fresh group scales
-    /// (`max_abs_row` → `quant_pack`). ONE quant feeds every linear reading
-    /// that activation (n1 → q/k/v and w1/w3, ctx → wo, hs → w2).
-    fn quant_rows(&self, s: &mut Vec<Step>, x: &DeviceBuffer, r0: u32, r1: u32, k: u32) {
-        let Some(i8s) = self.i8scr.as_ref() else { return };
-        i8s.quant_rows(&self.gpu, [K_MAXABS, K_QUANT], s, x, r0, r1, k);
+    /// Int8 only (`None` under fp32): rows `r0..r1` of `x` `[.., k]` quantized once into the façade's per-width
+    /// scratch. ONE quantization feeds every int8 linear reading those rows, each over its own window
+    /// ([`Self::rows_of`]).
+    fn quant_rows(&self, s: &mut Vec<Step>, x: &DeviceBuffer, r0: u32, r1: u32, k: u32) -> Option<Act> {
+        self.ops.as_ref().map(|ops| ops.act_shared_scratch(s, x, r0, r1 - r0, k))
     }
 
-    /// Int8 DP4A matmul over pre-quantized rows `xr0..xr0+m` of the K-matched
-    /// packed scratch, writing rows `or0..or0+m` of `o` `[.., n]` — the shared
-    /// `model::dispatch::mm8_rows_off`. Same selection rule and the same
-    /// measured `gemv: None` as the fp32 tier — see `gemm_tier`.
+    /// Rows `r0..r1` (absolute) of `act`, which starts at row 0: the window one stream or one sample reads.
+    fn rows_of(&self, act: Option<&Act>, r0: u32, r1: u32) -> Option<Act> {
+        Some(self.ops.as_ref()?.act_rows(act?, r0, r1 - r0))
+    }
+
+    /// The int8 product the shared façade selects for the device ([`Ops::matmul`]) over `act`, writing rows
+    /// `or0..or0+m` of `o` `[.., n]`.
     #[allow(clippy::too_many_arguments)]
-    fn mm8(&self, wq: &DeviceBuffer, sw: &DeviceBuffer, o: &DeviceBuffer, xr0: u32, or0: u32, m: u32, k: u32, n: u32) -> Step {
-        let i8s = self.i8scr.as_ref().expect("int8 scratch");
-        let tier = model::block::GemmVariants::Fast { gemv: None, tiled: K_MATMUL_I8 };
-        model::dispatch::mm8_rows_off(&self.gpu, tier, i8s, wq, sw, o, xr0, or0 as u64 * n as u64, m, k, n)
+    fn mm8(&self, s: &mut Vec<Step>, act: Option<&Act>, wq: &DeviceBuffer, sw: &DeviceBuffer, o: &DeviceBuffer, or0: u32, k: u32, n: u32) {
+        let ops = self.ops.as_ref().expect("flux2: an int8 linear on an fp32 model");
+        let act = act.expect("flux2: an int8 linear without its quantized activation");
+        ops.matmul(s, &Weight::from_packed_int8(wq.clone(), sw.clone(), n as usize, k as usize), act, o, or0 as u64 * n as u64);
     }
 
     /// The runtime LoRA correction of `w`, if it has one: `o += B·(A·x)` over
@@ -840,31 +842,31 @@ impl Flux2Model {
     }
 
     /// One linear over rows `r0..r1` at the model's tier: fp32 [`Self::mm_rows_at`]
-    /// or the DP4A GEMM over the activation [`Self::quant_rows`] pre-packed,
-    /// then any runtime adapter correction.
+    /// or the int8 product over `act` (exactly those rows, quantized), then any
+    /// runtime adapter correction.
     #[allow(clippy::too_many_arguments)]
-    fn push_lin_rows(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: &LinA, o: &DeviceBuffer, r0: u32, r1: u32, k: u32, n: u32) {
-        self.push_lin_rows_at(s, x, w, o, r0, r0, r1 - r0, k, n);
+    fn push_lin_rows(&self, s: &mut Vec<Step>, x: &DeviceBuffer, act: Option<&Act>, w: &LinA, o: &DeviceBuffer, r0: u32, r1: u32, k: u32, n: u32) {
+        self.push_lin_rows_at(s, x, act, w, o, r0, r0, r1 - r0, k, n);
     }
 
     /// [`Self::push_lin_rows`] with independent input/output row bases
     /// ([`Self::mm_rows_at`]).
     #[allow(clippy::too_many_arguments)]
-    fn push_lin_rows_at(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: &LinA, o: &DeviceBuffer, xr0: u32, or0: u32, m: u32, k: u32, n: u32) {
-        s.push(match &w.w {
-            Lin::F32(wb) => self.mm_rows_at(x, wb, o, xr0, or0, m, k, n),
-            Lin::I8(wq, sw) => self.mm8(wq, sw, o, xr0, or0, m, k, n),
-        });
+    fn push_lin_rows_at(&self, s: &mut Vec<Step>, x: &DeviceBuffer, act: Option<&Act>, w: &LinA, o: &DeviceBuffer, xr0: u32, or0: u32, m: u32, k: u32, n: u32) {
+        match &w.w {
+            Lin::F32(wb) => s.push(self.mm_rows_at(x, wb, o, xr0, or0, m, k, n)),
+            Lin::I8(wq, sw) => self.mm8(s, act, wq, sw, o, or0, k, n),
+        }
         self.push_lora(s, x, w, o, xr0, or0 as u64 * n as u64, m, k, n);
     }
 
     /// Whole-slab linear (`m` rows from row 0) at the model's tier — the fp32
     /// arm is the plain unsliced [`Self::mm`] (byte-identical to before).
-    fn push_lin_full(&self, s: &mut Vec<Step>, x: &DeviceBuffer, w: &LinA, o: &DeviceBuffer, m: u32, k: u32, n: u32) {
-        s.push(match &w.w {
-            Lin::F32(wb) => self.mm(x, wb, o, m, k, n),
-            Lin::I8(wq, sw) => self.mm8(wq, sw, o, 0, 0, m, k, n),
-        });
+    fn push_lin_full(&self, s: &mut Vec<Step>, x: &DeviceBuffer, act: Option<&Act>, w: &LinA, o: &DeviceBuffer, m: u32, k: u32, n: u32) {
+        match &w.w {
+            Lin::F32(wb) => s.push(self.mm(x, wb, o, m, k, n)),
+            Lin::I8(wq, sw) => self.mm8(s, act, wq, sw, o, 0, k, n),
+        }
         self.push_lora(s, x, w, o, 0, 0, m, k, n);
     }
 
@@ -1122,31 +1124,34 @@ impl Flux2Model {
         for b in 0..bsz {
             let base = b * n;
             let ctx_r0 = b * nt; // ctx_in is [B*txt_len, context_in_dim]
-            self.push_lin_rows_at(&mut s, &scr.ctx_in, &self.txt_in, &scr.x0, ctx_r0, base, nt, cfg.context_in_dim as u32, d);
-            self.push_lin_rows_at(&mut s, &scr.tok_in, &self.img_in, &scr.x0, b * ni, base + nt, ni, cin, d);
+            self.push_lin_rows_at(&mut s, &scr.ctx_in, None, &self.txt_in, &scr.x0, ctx_r0, base, nt, cfg.context_in_dim as u32, d);
+            self.push_lin_rows_at(&mut s, &scr.tok_in, None, &self.img_in, &scr.x0, b * ni, base + nt, ni, cin, d);
         }
 
         let (mut xa, mut xb) = (&scr.x0, &scr.x1);
         // sites: 0=img1 1=img2 2=txt1 3=txt2; gates likewise
         for (img_w, txt_w) in &self.dbl {
-            // attention halves of both streams into the joint q/k/v
+            // attention halves of both streams into the joint q/k/v: every
+            // stream's norm lands in its own rows of n1, then ONE quantization
+            // of the slab feeds every stream's q/k/v over its row window.
             for b in 0..bsz {
                 let (t0, t1) = (b * n, b * n + nt);
                 let (i0, i1) = (b * n + nt, (b + 1) * n);
                 s.push(self.ln_rows(xa, 2, &scr.n1, b, t0, t1)); // txt norm1
-                if txt_w.wq.is_i8() {
-                    self.quant_rows(&mut s, &scr.n1, t0, t1, d);
-                }
-                self.push_lin_rows(&mut s, &scr.n1, &txt_w.wq, &scr.q, t0, t1, d, d);
-                self.push_lin_rows(&mut s, &scr.n1, &txt_w.wk, &scr.k, t0, t1, d, d);
-                self.push_lin_rows(&mut s, &scr.n1, &txt_w.wv, &scr.v, t0, t1, d, d);
                 s.push(self.ln_rows(xa, 0, &scr.n1, b, i0, i1)); // img norm1
-                if img_w.wq.is_i8() {
-                    self.quant_rows(&mut s, &scr.n1, i0, i1, d);
-                }
-                self.push_lin_rows(&mut s, &scr.n1, &img_w.wq, &scr.q, i0, i1, d, d);
-                self.push_lin_rows(&mut s, &scr.n1, &img_w.wk, &scr.k, i0, i1, d, d);
-                self.push_lin_rows(&mut s, &scr.n1, &img_w.wv, &scr.v, i0, i1, d, d);
+            }
+            let a = if txt_w.wq.is_i8() || img_w.wq.is_i8() { self.quant_rows(&mut s, &scr.n1, 0, rows, d) } else { None };
+            for b in 0..bsz {
+                let (t0, t1) = (b * n, b * n + nt);
+                let (i0, i1) = (b * n + nt, (b + 1) * n);
+                let at = self.rows_of(a.as_ref(), t0, t1);
+                self.push_lin_rows(&mut s, &scr.n1, at.as_ref(), &txt_w.wq, &scr.q, t0, t1, d, d);
+                self.push_lin_rows(&mut s, &scr.n1, at.as_ref(), &txt_w.wk, &scr.k, t0, t1, d, d);
+                self.push_lin_rows(&mut s, &scr.n1, at.as_ref(), &txt_w.wv, &scr.v, t0, t1, d, d);
+                let ai = self.rows_of(a.as_ref(), i0, i1);
+                self.push_lin_rows(&mut s, &scr.n1, ai.as_ref(), &img_w.wq, &scr.q, i0, i1, d, d);
+                self.push_lin_rows(&mut s, &scr.n1, ai.as_ref(), &img_w.wk, &scr.k, i0, i1, d, d);
+                self.push_lin_rows(&mut s, &scr.n1, ai.as_ref(), &img_w.wv, &scr.v, i0, i1, d, d);
                 s.push(self.qknorm_rows(&scr.q, &txt_w.nq, &scr.qn, t0, t1));
                 s.push(self.qknorm_rows(&scr.k, &txt_w.nk, &scr.kn, t0, t1));
                 s.push(self.qknorm_rows(&scr.q, &img_w.nq, &scr.qn, i0, i1));
@@ -1154,44 +1159,41 @@ impl Flux2Model {
             }
             self.push_attn_core(&mut s, bsz, n);
             // per-stream projection + gated residual (ONE ctx quant, two GEMMs)
-            if txt_w.wo.is_i8() || img_w.wo.is_i8() {
-                self.quant_rows(&mut s, &scr.ctx, 0, rows, d);
-            }
+            let a = if txt_w.wo.is_i8() || img_w.wo.is_i8() { self.quant_rows(&mut s, &scr.ctx, 0, rows, d) } else { None };
             for b in 0..bsz {
                 let (t0, t1) = (b * n, b * n + nt);
                 let (i0, i1) = (b * n + nt, (b + 1) * n);
-                self.push_lin_rows(&mut s, &scr.ctx, &txt_w.wo, &scr.proj, t0, t1, d, d);
-                self.push_lin_rows(&mut s, &scr.ctx, &img_w.wo, &scr.proj, i0, i1, d, d);
+                self.push_lin_rows(&mut s, &scr.ctx, self.rows_of(a.as_ref(), t0, t1).as_ref(), &txt_w.wo, &scr.proj, t0, t1, d, d);
+                self.push_lin_rows(&mut s, &scr.ctx, self.rows_of(a.as_ref(), i0, i1).as_ref(), &img_w.wo, &scr.proj, i0, i1, d, d);
                 s.push(self.gate_rows(xa, 2, &scr.proj, xb, b, t0, t1));
                 s.push(self.gate_rows(xa, 0, &scr.proj, xb, b, i0, i1));
             }
             std::mem::swap(&mut xa, &mut xb);
-            // MLP halves
+            // MLP halves, the norms first and one quantization of the slab as above
             for b in 0..bsz {
                 let (t0, t1) = (b * n, b * n + nt);
                 let (i0, i1) = (b * n + nt, (b + 1) * n);
                 s.push(self.ln_rows(xa, 3, &scr.n1, b, t0, t1)); // txt norm2
-                if txt_w.w1.is_i8() {
-                    self.quant_rows(&mut s, &scr.n1, t0, t1, d);
-                }
-                self.push_lin_rows(&mut s, &scr.n1, &txt_w.w1, &scr.h1, t0, t1, d, mlp);
-                self.push_lin_rows(&mut s, &scr.n1, &txt_w.w3, &scr.h2, t0, t1, d, mlp);
                 s.push(self.ln_rows(xa, 1, &scr.n1, b, i0, i1)); // img norm2
-                if img_w.w1.is_i8() {
-                    self.quant_rows(&mut s, &scr.n1, i0, i1, d);
-                }
-                self.push_lin_rows(&mut s, &scr.n1, &img_w.w1, &scr.h1, i0, i1, d, mlp);
-                self.push_lin_rows(&mut s, &scr.n1, &img_w.w3, &scr.h2, i0, i1, d, mlp);
             }
-            s.push(self.gpu.step(K_SILU_MUL, &[&scr.h1, &scr.h2, &scr.hs], &[rows * mlp], rows * mlp));
-            if txt_w.w2.is_i8() || img_w.w2.is_i8() {
-                self.quant_rows(&mut s, &scr.hs, 0, rows, mlp);
-            }
+            let a = if txt_w.w1.is_i8() || img_w.w1.is_i8() { self.quant_rows(&mut s, &scr.n1, 0, rows, d) } else { None };
             for b in 0..bsz {
                 let (t0, t1) = (b * n, b * n + nt);
                 let (i0, i1) = (b * n + nt, (b + 1) * n);
-                self.push_lin_rows(&mut s, &scr.hs, &txt_w.w2, &scr.mlp, t0, t1, mlp, d);
-                self.push_lin_rows(&mut s, &scr.hs, &img_w.w2, &scr.mlp, i0, i1, mlp, d);
+                let at = self.rows_of(a.as_ref(), t0, t1);
+                self.push_lin_rows(&mut s, &scr.n1, at.as_ref(), &txt_w.w1, &scr.h1, t0, t1, d, mlp);
+                self.push_lin_rows(&mut s, &scr.n1, at.as_ref(), &txt_w.w3, &scr.h2, t0, t1, d, mlp);
+                let ai = self.rows_of(a.as_ref(), i0, i1);
+                self.push_lin_rows(&mut s, &scr.n1, ai.as_ref(), &img_w.w1, &scr.h1, i0, i1, d, mlp);
+                self.push_lin_rows(&mut s, &scr.n1, ai.as_ref(), &img_w.w3, &scr.h2, i0, i1, d, mlp);
+            }
+            s.push(self.gpu.step(K_SILU_MUL, &[&scr.h1, &scr.h2, &scr.hs], &[rows * mlp], rows * mlp));
+            let a = if txt_w.w2.is_i8() || img_w.w2.is_i8() { self.quant_rows(&mut s, &scr.hs, 0, rows, mlp) } else { None };
+            for b in 0..bsz {
+                let (t0, t1) = (b * n, b * n + nt);
+                let (i0, i1) = (b * n + nt, (b + 1) * n);
+                self.push_lin_rows(&mut s, &scr.hs, self.rows_of(a.as_ref(), t0, t1).as_ref(), &txt_w.w2, &scr.mlp, t0, t1, mlp, d);
+                self.push_lin_rows(&mut s, &scr.hs, self.rows_of(a.as_ref(), i0, i1).as_ref(), &img_w.w2, &scr.mlp, i0, i1, mlp, d);
                 s.push(self.gate_rows(xa, 3, &scr.mlp, xb, b, t0, t1));
                 s.push(self.gate_rows(xa, 1, &scr.mlp, xb, b, i0, i1));
             }
@@ -1207,28 +1209,22 @@ impl Flux2Model {
             for b in 0..bsz {
                 s.push(self.ln_rows(xa, 4, &scr.n1, b, b * n, (b + 1) * n));
             }
-            if w.wq.is_i8() || w.w1.is_i8() {
-                self.quant_rows(&mut s, &scr.n1, 0, rows, d);
-            }
-            self.push_lin_full(&mut s, &scr.n1, &w.wq, &scr.q, rows, d, d);
-            self.push_lin_full(&mut s, &scr.n1, &w.wk, &scr.k, rows, d, d);
-            self.push_lin_full(&mut s, &scr.n1, &w.wv, &scr.v, rows, d, d);
+            let a = if w.wq.is_i8() || w.w1.is_i8() { self.quant_rows(&mut s, &scr.n1, 0, rows, d) } else { None };
+            self.push_lin_full(&mut s, &scr.n1, a.as_ref(), &w.wq, &scr.q, rows, d, d);
+            self.push_lin_full(&mut s, &scr.n1, a.as_ref(), &w.wk, &scr.k, rows, d, d);
+            self.push_lin_full(&mut s, &scr.n1, a.as_ref(), &w.wv, &scr.v, rows, d, d);
             s.push(self.qknorm_rows(&scr.q, &w.nq, &scr.qn, 0, rows));
             s.push(self.qknorm_rows(&scr.k, &w.nk, &scr.kn, 0, rows));
             self.push_attn_core(&mut s, bsz, n);
-            self.push_lin_full(&mut s, &scr.n1, &w.w1, &scr.h1, rows, d, mlp);
-            self.push_lin_full(&mut s, &scr.n1, &w.w3, &scr.h2, rows, d, mlp);
+            self.push_lin_full(&mut s, &scr.n1, a.as_ref(), &w.w1, &scr.h1, rows, d, mlp);
+            self.push_lin_full(&mut s, &scr.n1, a.as_ref(), &w.w3, &scr.h2, rows, d, mlp);
             s.push(self.gpu.step(K_SILU_MUL, &[&scr.h1, &scr.h2, &scr.hs], &[rows * mlp], rows * mlp));
             // linear2 over cat(attn, mlp): two column-split matmuls, summed.
             // ctx is quantized only now — after w1/w3 consumed the n1 packing.
-            if w.wo_a.is_i8() {
-                self.quant_rows(&mut s, &scr.ctx, 0, rows, d);
-            }
-            self.push_lin_full(&mut s, &scr.ctx, &w.wo_a, &scr.proj, rows, d, d);
-            if w.wo_b.is_i8() {
-                self.quant_rows(&mut s, &scr.hs, 0, rows, mlp);
-            }
-            self.push_lin_full(&mut s, &scr.hs, &w.wo_b, &scr.mlp, rows, mlp, d);
+            let a = if w.wo_a.is_i8() { self.quant_rows(&mut s, &scr.ctx, 0, rows, d) } else { None };
+            self.push_lin_full(&mut s, &scr.ctx, a.as_ref(), &w.wo_a, &scr.proj, rows, d, d);
+            let a = if w.wo_b.is_i8() { self.quant_rows(&mut s, &scr.hs, 0, rows, mlp) } else { None };
+            self.push_lin_full(&mut s, &scr.hs, a.as_ref(), &w.wo_b, &scr.mlp, rows, mlp, d);
             // y = x + gate ⊙ proj ; then y += gate ⊙ mlp (two gated adds), each
             // one dispatch over the batch via `rows_per_cond = n` groups.
             s.push(self.gate_grouped(xa, 4, &scr.proj, xb, rows, n));
@@ -1242,10 +1238,8 @@ impl Flux2Model {
             let p0 = b * n + nt;
             let p1 = p0 + n_pred as u32;
             s.push(self.ln_rows(xa, 5, &scr.n1, b, p0, p1));
-            if self.final_w.is_i8() {
-                self.quant_rows(&mut s, &scr.n1, p0, p1, d);
-            }
-            self.push_lin_rows_at(&mut s, &scr.n1, &self.final_w, &scr.out, p0, b * n_pred as u32, n_pred as u32, d, cin);
+            let a = if self.final_w.is_i8() { self.quant_rows(&mut s, &scr.n1, p0, p1, d) } else { None };
+            self.push_lin_rows_at(&mut s, &scr.n1, a.as_ref(), &self.final_w, &scr.out, p0, b * n_pred as u32, n_pred as u32, d, cin);
         }
 
         // debug aid: SMOKE_STEPS=k submits only the first k steps

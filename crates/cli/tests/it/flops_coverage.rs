@@ -25,7 +25,7 @@ fn assert_all_covered(what: &str, set: &[(&str, &str)]) {
 
 #[test]
 fn flux2_dit_kernels_are_all_costed() {
-    assert_all_covered("flux2::KERNELS", flux2::KERNELS);
+    assert_all_covered("flux2::KERNELS", &flux2::KERNELS);
 }
 
 #[test]

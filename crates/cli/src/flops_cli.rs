@@ -649,7 +649,7 @@ fn flux2_flops(
         if cfg.distilled { "distilled, no CFG" } else { "CFG: conditional + unconditional" }
     );
 
-    let gpu = gpu_core::Gpu::new(flux2::KERNELS);
+    let gpu = gpu_core::Gpu::new(&flux2::KERNELS);
     let roofs = gpu_core::roof::ensure(&gpu);
     let denoise = affine_block_cost(&["double", "single"], &[cfg.depth_double, cfg.depth_single], &[0, 0], &mut |c| {
         flux2_probe(&gpu, &cfg, c[0], c[1], lh, lw, &refs, bsz, prec, false)

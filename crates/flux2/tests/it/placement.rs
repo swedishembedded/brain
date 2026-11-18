@@ -514,17 +514,13 @@ fn the_decode_evicts_the_denoiser_only_when_they_share_a_card() {
     assert!(!evict_denoiser_before_decode(&h(vec![("dit", Home::Gpu(0))])), "no decode placement, no contract");
 }
 
-/// When NO device can hold the int8 parts, the planner used to fall back to
-/// an all-`Home::Cpu` placement anyway - "a finished image beats an abort".
-/// That premise is false for an int8 build: `Flux2Model::new_from` hard-`assert!`s
-/// int8 requires `gpu.caps().workgroup_reductions`, which the CPU backend does
-/// not have, so this fallback is not slow-but-working, it is a guaranteed
-/// panic several calls later with no mention of *why* a GPU was needed. The
-/// planner already knows both facts (it chose `int8` because it costed this
-/// model as a GGUF/int8 build, and it is the one deciding to fall back to
-/// `Cpu`) - it must not hand the caller a placement it knows cannot execute.
+/// When NO device can hold the int8 parts, the planner falls back to the host
+/// tier as it does for an fp32 build - slow, said out loud, but a finished image
+/// beats an abort. The int8 products are the shared façade's, which the CPU
+/// backend runs through the float-read tile decode, so the placement it hands
+/// out can execute.
 #[test]
-fn int8_that_fits_nowhere_is_a_placement_error_not_a_doomed_cpu_fallback() {
+fn int8_that_fits_nowhere_falls_back_to_the_host_tier() {
     struct NothingFits;
     impl Placer for NothingFits {
         fn place(&self, _needs: &[gpu_core::devices::Need]) -> Result<Vec<gpu_core::devices::Home>, String> {
@@ -537,8 +533,7 @@ fn int8_that_fits_nowhere_is_a_placement_error_not_a_doomed_cpu_fallback() {
     let _ = &g;
     let paths = flux2::Paths { dit: path.clone(), vae: "unused".to_string(), te: "unused".to_string(), tokenizer: "unused".to_string() };
     let vae = vae::VaeConfig::flux2();
-    let err = plan_parts(&cfg, &paths, &vae, Precision::Int8, 96, 32, 1, None)
-        .expect_err("no device fits and int8 cannot run on the host tier - this must be a reported error, not a silent Cpu placement");
-    assert!(err.contains("int8") && err.contains("GPU"), "error should say why the host-tier fallback was refused: {err}");
+    let (homes, _) = plan_parts(&cfg, &paths, &vae, Precision::Int8, 96, 32, 1, None).expect("an int8 build falls back to the host tier");
+    assert_eq!(homes.of("dit"), Some(gpu_core::devices::Home::Cpu), "{}", homes.describe());
     let _ = std::fs::remove_file(path);
 }

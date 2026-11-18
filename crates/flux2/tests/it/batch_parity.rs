@@ -88,7 +88,7 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
 fn batched_forward_is_bit_identical_to_single_forwards() {
     let cfg = tiny_cfg();
     let ts = tiny_tensors(&cfg);
-    let gpu = gpu_core::testgpu::dev(flux2::KERNELS);
+    let gpu = gpu_core::testgpu::dev(&flux2::KERNELS);
     let bsz = 3usize;
     let n_img = 4 * 4 + 2 * 2; // gen 4x4 + one 2x2 ref
     let n_pred = 16;
@@ -124,7 +124,7 @@ fn batched_forward_is_bit_identical_to_single_forwards() {
 fn batch_of_one_equals_the_unbatched_forward() {
     let cfg = tiny_cfg();
     let ts = tiny_tensors(&cfg);
-    let gpu = gpu_core::testgpu::dev(flux2::KERNELS);
+    let gpu = gpu_core::testgpu::dev(&flux2::KERNELS);
     let n_img = 4 * 4;
     let n_max = (cfg.txt_len + n_img) as u32;
     let ids = position_ids(cfg.txt_len, 4, 4, &[]);
@@ -146,7 +146,7 @@ fn batch_of_one_equals_the_unbatched_forward() {
 fn shared_timestep_batch_is_bit_identical() {
     let cfg = tiny_cfg();
     let ts = tiny_tensors(&cfg);
-    let gpu = gpu_core::testgpu::dev(flux2::KERNELS);
+    let gpu = gpu_core::testgpu::dev(&flux2::KERNELS);
     let bsz = 2usize;
     let n_img = 4 * 4;
     let n_max = (cfg.txt_len + n_img) as u32;
@@ -172,14 +172,10 @@ fn shared_timestep_batch_is_bit_identical() {
 
 /// The int8 (DP4A) tier batches too: the per-token activation scales and the
 /// packed-activation scratch are row-indexed, so a batched forward quantizes
-/// exactly the rows a single forward would. GPU only.
+/// exactly the rows a single forward would, on any device.
 #[test]
 fn int8_batched_forward_is_bit_identical() {
-    let gpu = gpu_core::testgpu::dev(flux2::KERNELS);
-    if !gpu.caps().workgroup_reductions {
-        brain_testutil::skip_unavailable(&format!("int8 needs a GPU backend, current is {}", gpu.kind()));
-        return;
-    }
+    let gpu = gpu_core::testgpu::dev(&flux2::KERNELS);
     // int8 additionally needs the JOINT token count to be a multiple of 64
     // (the per-token scale buffer is sliced by row): 64 txt + 64 img.
     let cfg = tiny_cfg();

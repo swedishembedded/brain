@@ -59,7 +59,7 @@ fn zeros_for(c: &Flux2Config) -> flux2::Tensors {
 fn record(c: &Flux2Config, lh: usize, lw: usize) -> CostReport {
     let ni = lh * lw;
     let ts = zeros_for(c);
-    let gpu = gpu_core::testgpu::dev(flux2::KERNELS);
+    let gpu = gpu_core::testgpu::dev(&flux2::KERNELS);
     let m = Flux2Model::new_with(c, &ts, gpu, (c.txt_len + ni) as u32, Precision::F32);
     let ids = position_ids(c.txt_len, lh, lw, &[]);
     let img = vec![0.0f32; ni * c.in_channels];

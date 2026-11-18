@@ -1259,21 +1259,9 @@ pub fn plan_parts(cfg: &Flux2Config, paths: &Paths, vae_cfg: &vae::VaeConfig, pr
     // `Homes::run` scopes a `Home::Cpu` part onto the CPU backend, so the
     // `homes.run("dit", ...)` calls below really do build a host-resident DiT.
     // Slow, and said out loud - but a finished image beats an abort.
-    //
-    // ...unless the build is `int8`: `Flux2Model::new_from` hard-asserts int8
-    // needs `gpu.caps().workgroup_reductions` (DP4A + workgroup barriers),
-    // which the CPU backend does not have. Falling back to `Cpu` there is not
-    // "slow but working" - it is a guaranteed panic several calls later, at a
-    // site with no idea a placement decision is why it was ever asked to run
-    // int8 on a CPU. This function is the one place that knows both facts (it
-    // chose int8 for this model, and it is the one about to hand out `Cpu`),
-    // so it must say so here rather than let the caller find out from an
-    // assert with no placement context attached.
-    if precision == crate::Precision::Int8 {
-        return Err(format!(
-            "flux2: no GPU placement fits ({why}), and this build is int8 - the host (CPU) backend cannot run int8 (needs DP4A + workgroup barriers), so there is no fallback; free up a GPU or use a smaller size/--tile-size"
-        ));
-    }
+    // An int8 build falls back the same way: its products are the shared
+    // façade's, which reads the codes through the float-read tile decode on a
+    // device without the packed-int8 dot (the CPU backend).
     if !why.is_empty() {
         eprintln!("flux2: no automatic GPU placement fits ({why}); falling back to the host tier - this will be VERY slow, and will use a card again as soon as one has room");
     }
@@ -1697,7 +1685,7 @@ impl Pipeline {
         let model = match te_place.before_denoiser {
             true => None,
             false => {
-                let gpu = homes.run("dit", || gpu_core::Gpu::new(crate::model::KERNELS))?;
+                let gpu = homes.run("dit", || gpu_core::Gpu::new(&crate::model::KERNELS))?;
                 Some(homes.run("dit", || Self::build_dit(cfg, paths, n_max, adapters, precision, max_batch, gpu, tuning))??)
             }
         };
@@ -1712,7 +1700,7 @@ impl Pipeline {
             let adapters = adapters.to_vec();
             let tuning = *tuning;
             Box::new(move || {
-                let gpu = homes.run("dit", || gpu_core::Gpu::new(crate::model::KERNELS))?;
+                let gpu = homes.run("dit", || gpu_core::Gpu::new(&crate::model::KERNELS))?;
                 Self::build_dit(&cfg, &paths, n_max, &adapters, precision, max_batch, gpu, &tuning)
             }) as Box<dyn Fn() -> Result<Flux2Model, String> + Send + Sync>
         };

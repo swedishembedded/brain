@@ -91,15 +91,14 @@ const K_ADD_INPLACE: usize = 26;
 const K_SOFTMAX_ROWS: usize = 27;
 const K_LN_ROWS: usize = 28;
 const K_LN_DX_ROWS: usize = 29;
-const K_MAXABS: usize = 30;
-const K_QUANT: usize = 31;
-const K_MM_I8: usize = 32;
 // The QK-RMSNorm input gradient's workgroup-per-row twin, selected like the
 // forward's (`model::block::rms_variant`).
-const K_RDX_ROWS: usize = 33;
+const K_RDX_ROWS: usize = 30;
 
-/// The kernel set the device trainer registers. Every entry is an existing,
-/// gradient-checked kernel - the trainer adds no WGSL of its own.
+/// The kernels the device trainer dispatches by index. Every entry is an existing,
+/// gradient-checked kernel - the trainer adds no WGSL of its own. An fp32 base
+/// trains on a device built from this alone; [`kernel_list`] adds what an int8
+/// base and the flash attention need.
 pub const KERNELS: &[(&str, &str)] = &[
     ("layernorm", kernels::LAYERNORM),
     ("film_row", kernels::FILM_ROW),
@@ -131,20 +130,21 @@ pub const KERNELS: &[(&str, &str)] = &[
     ("softmax_rows", kernels::SOFTMAX_ROWS),
     ("layernorm_rows", kernels::LAYERNORM_ROWS),
     ("layernorm_dx_rows", kernels::LAYERNORM_DX_ROWS),
-    // The int8 frozen base (`BlockDev::from_gpu_with`): per-row activation
-    // quantisation and the DP4A GEMM, the exact forward `crate::model` serves.
-    ("max_abs_row", kernels::MAX_ABS_ROW),
-    ("quant_pack", kernels::QUANT_PACK),
-    ("matmul_i8_dyn", kernels::MATMUL_I8_DYN),
     ("rmsnorm_dx_rows", kernels::RMSNORM_DX_ROWS),
 ];
 
 /// [`KERNELS`] plus the bidirectional flash-attention trio ([`AttentionPath::Flash`]), registered under the
 /// names [`model::block::flash_bidir_kernels`] gives them (attention scale 1: the `1/sqrt(head_dim)` is folded
-/// into the QK-RMSNorm weight). A device built from [`KERNELS`] alone still trains, on the GEMM attention.
+/// into the QK-RMSNorm weight), plus the shared façade's set the int8 frozen base's forward runs through
+/// ([`model::ops::Ops`], which selects the int8 product per device - the forward `crate::model` serves). A device
+/// built from [`KERNELS`] alone still trains an fp32 base, on the GEMM attention.
 pub fn kernel_list() -> &'static [(&'static str, &'static str)] {
     static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
-    LIST.get_or_init(|| KERNELS.iter().copied().chain(model::block::flash_bidir_kernels(true)).collect())
+    LIST.get_or_init(|| {
+        let mut list: Vec<_> = KERNELS.iter().copied().chain(model::block::flash_bidir_kernels(true)).collect();
+        model::ops::extend_kernel_list(&mut list, model::ops::kernel_list());
+        list
+    })
 }
 
 /// How the joint bidirectional attention runs.
@@ -324,9 +324,9 @@ pub struct BlockDev {
     /// gradient bit-identical.
     qk_grads: std::cell::Cell<bool>,
     b: HashMap<String, DeviceBuffer>,
-    /// The int8 activation scratch when the frozen base is resident as int8
+    /// The shared façade the int8 frozen base's forward products run through
     /// ([`BasePrecision::Int8`]); `None` for an fp32 base.
-    i8: Option<model::dispatch::I8Scratch>,
+    i8: Option<model::ops::Ops>,
     /// While armed ([`BlockDev::arm_profile`]): what the segments run since
     /// have cost.
     profile: std::cell::RefCell<Option<SegmentProfile>>,
@@ -424,7 +424,7 @@ impl BlockDev {
                 gpu.kind()
             );
             assert!(d.is_multiple_of(model::int8::GROUP) && mlp.is_multiple_of(model::int8::GROUP), "int8 base: widths {d}/{mlp} must be whole scale groups");
-            model::dispatch::I8Scratch::new(&gpu, n as u64, n as u64, &[d as u32, mlp as u32])
+            model::ops::Ops::new(gpu.share()).unwrap_or_else(|e| panic!("flux2: an int8 frozen base needs the shared kernel set: build the device from devgrad::kernel_list() ({e})"))
         });
         let hd = d / nh;
         assert!(d.is_multiple_of(nh), "hidden {d} must divide by n_heads {nh}");
@@ -798,14 +798,14 @@ impl BlockDev {
             (Base::F32(w), _) => {
                 s.push(self.mm_rows((x, xr0), w, (y, (yr0 * out) as u64), m, inn, out));
             }
-            (Base::I8 { wq, sw }, Some(scr)) => {
+            (Base::I8 { wq, sw }, Some(ops)) => {
                 // The served forward: this activation quantised per group, then
-                // the DP4A GEMM. Re-quantised per linear rather than shared
-                // between the linears that read it, which costs a pass over
-                // `x` each and changes nothing they compute.
-                scr.quant_rows(&self.gpu, [K_MAXABS, K_QUANT], s, x, xr0 as u32, (xr0 + m) as u32, inn as u32);
-                let tier = model::block::GemmVariants::Fast { gemv: None, tiled: K_MM_I8 };
-                s.push(model::dispatch::mm8_rows_off(&self.gpu, tier, scr, wq, sw, y, xr0 as u32, (yr0 * out) as u64, m as u32, inn as u32, out as u32));
+                // the int8 product the selector picks for the device.
+                // Re-quantised per linear rather than shared between the
+                // linears that read it, which costs a pass over `x` each and
+                // changes nothing they compute.
+                let act = ops.act_shared_scratch(s, x, xr0 as u32, m as u32, inn as u32);
+                ops.matmul(s, &model::ops::Weight::from_packed_int8(wq.clone(), sw.clone(), out, inn), &act, y, (yr0 * out) as u64);
             }
             (Base::I8 { .. }, None) => unreachable!("an int8 linear only exists on an int8 engine"),
         }

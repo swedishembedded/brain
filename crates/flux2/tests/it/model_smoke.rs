@@ -28,7 +28,7 @@ fn tiny_forward_runs_and_is_finite() {
         let data: Vec<f32> = (0..n).map(|i| ((i % 13) as f32 - 6.0) * 0.01).collect();
         ts.insert(name, (shape, data));
     }
-    let gpu = gpu_core::testgpu::dev(flux2::KERNELS);
+    let gpu = gpu_core::testgpu::dev(&flux2::KERNELS);
     let n_img = 4 * 4 + 2 * 2; // gen 4x4 + one 2x2 ref
     let model = Flux2Model::new(&cfg, &ts, gpu, (cfg.txt_len + n_img) as u32);
     let ids = position_ids(cfg.txt_len, 4, 4, &[(2, 2)]);
@@ -42,15 +42,12 @@ fn tiny_forward_runs_and_is_finite() {
 }
 
 /// Int8 smoke at the smallest dims meeting the DP4A slicing alignment
-/// (txt_len/hidden/mlp multiples of 64): every quant + sliced-i8-GEMM site
-/// runs, output is finite and loosely tracks the fp32 forward. GPU only.
+/// (txt_len/hidden/mlp multiples of 64): every quantized slab and int8 product
+/// site runs, output is finite and loosely tracks the fp32 forward. On any
+/// device: without the packed-int8 dot the codes are read through the tile decode.
 #[test]
 fn tiny_forward_int8_runs_and_tracks_fp32() {
-    let gpu = gpu_core::testgpu::dev(flux2::KERNELS);
-    if !gpu.caps().workgroup_reductions {
-        brain_testutil::skip_unavailable(&format!("int8 needs a GPU backend, current is {}", gpu.kind()));
-        return;
-    }
+    let gpu = gpu_core::testgpu::dev(&flux2::KERNELS);
     let cfg = Flux2Config {
         in_channels: 8,
         context_in_dim: 12,
@@ -84,4 +81,11 @@ fn tiny_forward_int8_runs_and_tracks_fp32() {
     }
     let cos = dot / (na.sqrt() * nb.sqrt());
     assert!(cos > 0.9, "int8 tiny forward diverges from fp32: cosine {cos:.4}");
+}
+
+/// The int8 tiers build a `model::ops::Ops` on the DiT's and the trainer's `Gpu`, which need the whole façade set.
+#[test]
+fn the_kernel_lists_register_the_whole_ops_facade_set() {
+    model::ops::assert_kernel_list_complete(&flux2::KERNELS);
+    model::ops::assert_kernel_list_complete(flux2::devgrad::kernel_list());
 }

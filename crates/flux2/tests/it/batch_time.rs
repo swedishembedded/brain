@@ -47,7 +47,7 @@ fn load_weights() -> Option<flux2::Tensors> {
 #[test]
 #[ignore = "measurement, not a gate"]
 fn gemm_throughput_vs_batch_rows() {
-    let gpu = gpu_core::testgpu::dev(flux2::KERNELS);
+    let gpu = gpu_core::testgpu::dev(&flux2::KERNELS);
     if !gpu.caps().workgroup_reductions {
         brain_testutil::skip_unavailable("needs a GPU backend");
         return;
@@ -91,7 +91,7 @@ fn klein_4b_forward_batch_scaling() {
     let b_max = *ladder.iter().max().unwrap();
     let Some(ts) = load_weights() else { return };
     let cfg = Flux2Config::klein_4b();
-    let gpu = gpu_core::testgpu::dev(flux2::KERNELS);
+    let gpu = gpu_core::testgpu::dev(&flux2::KERNELS);
     let (lh, lw) = (32usize, 32usize); // 512×512
     let n_img = lh * lw;
     let ids = position_ids(cfg.txt_len, lh, lw, &[]);
