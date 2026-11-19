@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 <!-- Copyright (c) 2026 Martin Schröder <info@swedishembedded.com> -->
 
-# 529. A preference run rescored its pairs after export at f32, one sequence at a time, for longer than it trained
+# 530. A preference run rescored its pairs after export at f32, one sequence at a time, for longer than it trained
 
 **Lesson:** A step that only reports on a run (a score of the exported adapter) must cost a small fraction of the run,
 and is sized by the run's own arithmetic, not by a wider reference tier. Count the forwards before choosing a default:
