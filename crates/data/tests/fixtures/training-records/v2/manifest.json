@@ -57,6 +57,19 @@
    ]
   },
   {
+   "path": "invalid/prompt_token_ids_mismatch.jsonl",
+   "kind": "chat",
+   "records": 2,
+   "valid_records": 1,
+   "refusals": [
+    {
+     "line": 1,
+     "rule": "prompt_token_ids_mismatch",
+     "field": "messages[1].prompt_token_ids"
+    }
+   ]
+  },
+  {
    "path": "invalid/missing_reward.jsonl",
    "kind": "chat",
    "records": 1,

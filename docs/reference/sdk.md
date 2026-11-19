@@ -649,9 +649,17 @@ lowers the probability of its action, a positive one raises it.
   log-probabilities shifted by one token read ratios 0.75 to 1.17, a temperature the trainer was not told 0.95 to 1.08,
   a greedy sampler's zeros 0.03 to 0.04).
 - `"token_ids"` (supervised assistant message, optional, beside `"behavior_logprobs"`): the ids the sampler generated
-  for the answer, end-of-turn marker included. The trainer renders the answer's text through the template again and
-  refuses the record, naming the first position that differs, when its ids are not these: a text that does not
-  round-trip to the sampled ids carries log-probabilities of tokens the trainer would not train.
+  for the answer, end-of-turn marker included. The trainer trains these ids, never the ids the answer's text renders
+  to again (a model writes a call's arguments, its whitespace, its think block its own way; the parsed message renders
+  the template's way), and `"behavior_logprobs"` holds one value per id. The ids are admitted when the template renders
+  the answer to exactly them, or when they read back by the template's reply format (its think block and
+  `<tool_call>` or `<function=` calls) as the same answer: the same reasoning and content up to the whitespace around
+  them, the same calls with arguments equal as JSON values. Otherwise the record is refused (`token_ids_mismatch`),
+  naming the first position that differs: the ids do not belong to the message.
+- `"prompt_token_ids"` (supervised assistant message, optional, beside `"token_ids"`): the ids the sampler was given
+  before the answer (a served reply's `policy_trace` prompt). The context the trainer renders before the answer must
+  encode to exactly these, or the record is refused (`prompt_token_ids_mismatch`, naming the first position that
+  differs): an importance ratio is exact only in the context the behaviour log-probabilities were taken in.
 - `"teacher_context"` (record, optional): `{"at": <index>, "messages": [{"role": "system"|"user", "content": "..."}]}`,
   the privileged messages of on-policy self-distillation (see below). `at` is the index of the record's message they are
   inserted before, at or before the first supervised message. Unknown fields, a missing `at`, no messages, an empty

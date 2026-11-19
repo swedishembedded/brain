@@ -28,7 +28,7 @@ use std::io;
 use std::path::Path;
 
 use crate::binio;
-use crate::chat_rollout::{self, RecordError, RecordFault, RecordRule, Rollout, Teacher};
+use crate::chat_rollout::{self, RecordError, RecordFault, RecordRule, Rollout, SampledIds, Teacher};
 use crate::chat_template::{ChatTemplate, TemplateError};
 use crate::tokenizer::Tokenizer;
 
@@ -227,8 +227,9 @@ pub struct RenderedSegment {
     pub supervised: bool,
     /// The log-probabilities the sampler gave the tokens of this supervised answer, when the collector recorded them.
     pub behavior_logprobs: Option<Vec<f32>>,
-    /// The ids the sampler generated for this supervised answer, which the rendering must reproduce ([`crate::chat_rollout`]).
-    pub token_ids: Option<Vec<u32>>,
+    /// The ids the sampler generated for this supervised answer (trained instead of the text's encoding) and the ids
+    /// it was given before it ([`crate::chat_rollout`]).
+    pub token_ids: Option<SampledIds>,
     /// The index of the record's message this supervised segment renders (0 for context), so a refusal names the
     /// field (`messages[i].behavior_logprobs`).
     pub message: usize,
@@ -240,11 +241,49 @@ impl RenderedSegment {
     }
 }
 
+/// The first position at which two id sequences differ, if they do (a sequence that ends first differs there).
+fn first_difference(a: &[u32], b: &[u32]) -> Option<usize> {
+    (0..a.len().max(b.len())).find(|&i| a.get(i) != b.get(i))
+}
+
+/// Admit the ids a sampler generated for supervised answer `answer` (message `message`), rendered as `text` after the
+/// example's ids so far, `before` ([`crate::chat_rollout`]): the context must be the prompt the sampler was given when the
+/// record names it, and the ids must be the template's rendering of the answer or read back as the same answer.
+#[allow(clippy::too_many_arguments)]
+fn check_sampled(tok: &dyn Tokenizer, tmpl: &ChatTemplate, before: &[u32], text: &str, sampled: &SampledIds, thinking_open: bool, message: usize, answer: usize) -> Result<(), TemplateError> {
+    let show = |ids: &[u32], at: usize| ids.get(at).map_or("nothing (the sequence ended)".to_string(), |t| t.to_string());
+    if let Some(prompt) = &sampled.prompt {
+        if let Some(at) = first_difference(prompt, before) {
+            let field = format!("messages[{message}].prompt_token_ids");
+            return Err(TemplateError::of_record(RecordFault::new(RecordRule::PromptTokenIdsMismatch, &field), format!(
+                "{field}: the sampler was given {} ids before supervised answer {answer} and the context the chat template renders encodes to {}: they first differ at position {at}, where the sampler was given {} and the context holds {}; the behaviour log-probabilities were taken in another context than the one the trainer would score them in",
+                prompt.len(),
+                before.len(),
+                show(prompt, at),
+                show(before, at)
+            )));
+        }
+    }
+    let rendered = tok.encode(text);
+    let Some(at) = first_difference(&sampled.answer, &rendered) else { return Ok(()) };
+    if tmpl.reads_as_same_reply(text, &tok.decode(&sampled.answer), thinking_open) {
+        return Ok(());
+    }
+    let field = format!("messages[{message}].token_ids");
+    Err(TemplateError::of_record(RecordFault::new(RecordRule::TokenIdsMismatch, &field), format!(
+        "{field}: \"token_ids\" of supervised answer {answer} ({} ids) are not the tokens the chat template renders for the answer ({} tokens) and do not read back as the same answer: they first differ at position {at}, where the sampler generated {} and the answer renders {}; the ids do not belong to the message the record holds",
+        sampled.answer.len(),
+        rendered.len(),
+        show(&sampled.answer, at),
+        show(&rendered, at)
+    )))
+}
+
 /// What a collector recorded about one answer's sampled tokens: their log-probabilities and ids.
 #[derive(Clone, Default)]
 struct Sampled {
     behavior_logprobs: Option<Vec<f32>>,
-    token_ids: Option<Vec<u32>>,
+    token_ids: Option<SampledIds>,
     /// The index of the message the answer is.
     message: usize,
 }
@@ -557,32 +596,31 @@ impl ChatSample {
         if let Some(Rendered { segments }) = &self.rendered {
             let (mut ids, mut mask, mut behavior) = (Vec::new(), Vec::new(), Vec::new());
             let mut answer = 0;
+            let mut context = "";
             for RenderedSegment { text, supervised, behavior_logprobs, token_ids, message } in segments {
-                let encoded = tok.encode(text);
-                if let Some(recorded) = token_ids {
-                    if let Some(at) = (0..recorded.len().max(encoded.len())).find(|&i| recorded.get(i) != encoded.get(i)) {
-                        let show = |ids: &[u32]| ids.get(at).map_or("nothing (the sequence ended)".to_string(), |t| t.to_string());
-                        let field = format!("messages[{message}].token_ids");
-                        return Err(TemplateError::of_record(RecordFault::new(RecordRule::TokenIdsMismatch, &field), format!(
-                            "{field}: \"token_ids\" of supervised answer {answer} ({} ids) are not the tokens the chat template renders for its text ({} tokens): they first differ at position {at}, where the sampler generated {} and the text renders {}; the answer text did not round-trip to the generated ids, so its behaviour log-probabilities do not belong to the tokens a trainer would train",
-                            recorded.len(),
-                            encoded.len(),
-                            show(recorded),
-                            show(&encoded)
-                        )));
+                let encoded = match token_ids {
+                    Some(sampled) => {
+                        let thinking_open = context.ends_with("<think>\n");
+                        check_sampled(tok, tmpl, &ids, text, sampled, thinking_open, *message, answer)?;
+                        sampled.answer.clone()
                     }
-                }
+                    None => tok.encode(text),
+                };
                 match behavior_logprobs {
                     Some(lps) if lps.len() == encoded.len() => behavior.extend_from_slice(lps),
                     Some(lps) => {
                         let field = format!("messages[{message}].behavior_logprobs");
+                        let what = if token_ids.is_some() { "the sampled \"token_ids\" number" } else { "the answer encodes to (the answer as the chat template renders it after its prompt, with its end-of-turn marker and not the whitespace after it)" };
                         return Err(TemplateError::of_record(RecordFault::new(RecordRule::BehaviorLogprobCount, &field), format!(
-                            "{field}: \"behavior_logprobs\" of supervised answer {answer} holds {} values, the answer encodes to {} tokens (the answer as the chat template renders it after its prompt, with its end-of-turn marker and not the whitespace after it)",
+                            "{field}: \"behavior_logprobs\" of supervised answer {answer} holds {} values, and {what} {} tokens",
                             lps.len(),
                             encoded.len()
                         )))
                     }
                     None => behavior.extend(std::iter::repeat_n(f32::NAN, encoded.len())),
+                }
+                if !*supervised {
+                    context = text;
                 }
                 answer += usize::from(*supervised);
                 mask.extend(std::iter::repeat_n(*supervised, encoded.len()));
@@ -775,6 +813,9 @@ pub(crate) struct WireMessage {
     /// Only on a supervised assistant message: the ids the sampler generated for the answer ([`crate::chat_rollout`]).
     #[serde(default)]
     pub(crate) token_ids: Option<Vec<u32>>,
+    /// Only beside `token_ids`: the ids the sampler was given before the answer ([`crate::chat_rollout`]).
+    #[serde(default)]
+    pub(crate) prompt_token_ids: Option<Vec<u32>>,
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -930,7 +971,7 @@ pub(crate) fn messages_from_wire(wire: Vec<WireMessage>) -> Result<Vec<ChatMessa
 /// [`messages_from_wire`] for a reader of images: the conversation's messages, and its images in the order its
 /// text places them, and the behaviour log-probabilities each message carried.
 #[allow(clippy::type_complexity)]
-fn messages_from_wire_with(wire: Vec<WireMessage>, reader: &dyn ImageReader) -> Result<(Vec<ChatMessage>, Vec<ImageBytes>, Vec<Option<Vec<f32>>>, Vec<Option<Vec<u32>>>), String> {
+fn messages_from_wire_with(wire: Vec<WireMessage>, reader: &dyn ImageReader) -> Result<(Vec<ChatMessage>, Vec<ImageBytes>, Vec<Option<Vec<f32>>>, Vec<Option<SampledIds>>), String> {
     let mut messages = Vec::with_capacity(wire.len());
     let mut behavior = Vec::with_capacity(wire.len());
     let mut token_ids = Vec::with_capacity(wire.len());
@@ -970,7 +1011,13 @@ fn messages_from_wire_with(wire: Vec<WireMessage>, reader: &dyn ImageReader) -> 
         if m.token_ids.as_ref().is_some_and(Vec::is_empty) {
             return Err(format!("messages[{i}]: \"token_ids\" is empty; omit it when the sampler did not record any"));
         }
-        token_ids.push(m.token_ids.clone());
+        if m.prompt_token_ids.is_some() && m.token_ids.is_none() {
+            return Err(format!("messages[{i}]: \"prompt_token_ids\" come with the \"token_ids\" the sampler generated after them"));
+        }
+        if m.prompt_token_ids.as_ref().is_some_and(Vec::is_empty) {
+            return Err(format!("messages[{i}]: \"prompt_token_ids\" is empty; omit it when the sampler did not record any"));
+        }
+        token_ids.push(m.token_ids.clone().map(|answer| SampledIds { answer, prompt: m.prompt_token_ids.clone() }));
         let content = m.content.into_text(reader, m.train, &mut media).map_err(|e| format!("messages[{i}]: {e}"))?;
         messages.push(ChatMessage { role: role.to_string(), content, tool_calls, tool_call_id: m.tool_call_id, reasoning_content: m.reasoning_content, train: m.train });
     }

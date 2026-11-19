@@ -23,10 +23,22 @@
 //!   each token of that answer, one per token of the answer as the chat template renders it after the prompt (the
 //!   answer's text and its closing end-of-turn marker; the whitespace the template writes after the marker, such as the newline after Qwen's
 //!   `<|im_end|>`, is context: the sampler stops at the marker and never chose it). A value above zero is not a log-probability.
-//! * `"token_ids": [<id>, ...]` on a supervised assistant message (beside `behavior_logprobs`): the ids the sampler generated
-//!   for the answer. The trainer renders the answer's text through the chat template again; the ids it gets must be exactly
-//!   these, or the record is refused naming the first position that differs: a text that does not round-trip to the
-//!   generated ids (trimmed whitespace, a merged token) carries log-probabilities of tokens the trainer would not train.
+//! * `"token_ids": [<id>, ...]` on a supervised assistant message (beside `behavior_logprobs`): the ids the sampler
+//!   generated for the answer, end-of-turn marker included. The trainer trains these ids, never the ids the answer's
+//!   text renders to again: a model writes a call's arguments, its whitespace and its think block its own way, and the
+//!   parsed message the record holds renders them the template's way, so a re-rendering would supervise tokens the
+//!   policy did not sample (and their behaviour log-probabilities would be another token's). The ids are admitted when
+//!   they are what the template renders for the answer, or when they read back, by the template's own reply format
+//!   (its think block and `<tool_call>` calls), as the same answer: the same reasoning and content (up to the
+//!   whitespace around them) and the same calls (names, and arguments as JSON values). Otherwise the record is refused
+//!   (rule `token_ids_mismatch`), naming the first position that differs: ids that do not belong to the message.
+//!   `behavior_logprobs` then holds one value per id.
+//! * `"prompt_token_ids": [<id>, ...]` on a supervised assistant message (with `token_ids`): the ids the sampler was
+//!   given before the answer. The trainer checks that the context it renders before the answer encodes to exactly
+//!   these, and refuses the record otherwise (rule `prompt_token_ids_mismatch`, naming the first position that
+//!   differs): a log-probability is the token's given everything before it, so an importance ratio is exact only in
+//!   the context the sampler saw (a server that adds an instruction to the prompt, a producer that rewrites the
+//!   history, a template that writes an earlier answer otherwise than it was generated all change it).
 //! * `"truncated": true` on the record: the rollout did not reach an outcome (the token budget cut it, a step timed
 //!   out), so its reward says nothing about the action. A policy-gradient run never trains on such a record and its
 //!   reward takes no part in its group's advantages; it is counted, not drawn. A truncated rollout is masked as a
@@ -67,8 +79,10 @@ use crate::chat::ChatSample;
 pub enum RecordRule {
     /// `behavior_logprobs` does not hold one value per token of its answer as the template renders it.
     BehaviorLogprobCount,
-    /// `token_ids` are not the tokens the template renders for the answer's text.
+    /// `token_ids` are neither the tokens the template renders for the answer nor ids that read back as that answer.
     TokenIdsMismatch,
+    /// `prompt_token_ids` are not the tokens of the context the trainer renders before the answer.
+    PromptTokenIdsMismatch,
     /// A rollout field (`behavior_logprobs`, `token_ids`, `truncated`, `rollout`, `tokenizer_digest`) on a record with
     /// no `reward` (and no `teacher_context`), or a `group` without a `reward`: nothing says what its tokens earned.
     MissingReward,
@@ -96,6 +110,7 @@ impl RecordRule {
         match self {
             RecordRule::BehaviorLogprobCount => "behavior_logprob_count",
             RecordRule::TokenIdsMismatch => "token_ids_mismatch",
+            RecordRule::PromptTokenIdsMismatch => "prompt_token_ids_mismatch",
             RecordRule::MissingReward => "missing_reward",
             RecordRule::MissingGroup => "missing_group",
             RecordRule::AdvantageRemoved => "advantage_removed",
@@ -205,10 +220,9 @@ pub struct Rollout {
     pub truncated: bool,
     /// One entry per message of the record; `Some` only on a supervised assistant message.
     pub behavior_logprobs: Vec<Option<Vec<f32>>>,
-    /// One entry per message of the record: the ids the sampler generated for that answer, when the collector recorded
-    /// them (`"token_ids"`). They are never used to train: they are checked against the tokens the chat template renders
-    /// for the answer, which proves that the text the trainer sees is the sequence the log-probabilities belong to.
-    pub token_ids: Vec<Option<Vec<u32>>>,
+    /// One entry per message of the record: the ids the sampler generated for that answer and, when recorded, the ids
+    /// it was given before it (`"token_ids"`, `"prompt_token_ids"`). The answer trains exactly these ids.
+    pub token_ids: Vec<Option<SampledIds>>,
     /// What the teacher is shown instead of the record's own conversation, when the record carries a
     /// `"teacher_context"`.
     pub teacher: Option<Teacher>,
@@ -217,6 +231,15 @@ pub struct Rollout {
     /// The record only sets its group's baseline (`"baseline_only": true`): its reward counts among the group's, and
     /// nothing of it is trained.
     pub baseline_only: bool,
+}
+
+/// What the sampler generated for one answer and what it was given before it, as the collector recorded them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SampledIds {
+    /// The ids generated for the answer (`"token_ids"`), end-of-turn marker included.
+    pub answer: Vec<u32>,
+    /// The ids of the prompt the answer was generated after (`"prompt_token_ids"`).
+    pub prompt: Option<Vec<u32>>,
 }
 
 /// The teacher's view of a record: the record's conversation with the privileged messages inserted. It goes through
@@ -237,7 +260,7 @@ impl Rollout {
 
     /// The rollout of a sample derived from this record's (a prefix, one answer, a packing): the same outcome, with
     /// the derived sample's log-probabilities and teacher view.
-    pub(crate) fn derived(&self, behavior_logprobs: Vec<Option<Vec<f32>>>, token_ids: Vec<Option<Vec<u32>>>, teacher: Option<Teacher>) -> Rollout {
+    pub(crate) fn derived(&self, behavior_logprobs: Vec<Option<Vec<f32>>>, token_ids: Vec<Option<SampledIds>>, teacher: Option<Teacher>) -> Rollout {
         Rollout { outcome: self.outcome.clone(), truncated: self.truncated, behavior_logprobs, token_ids, teacher, tokenizer_digest: self.tokenizer_digest.clone(), baseline_only: self.baseline_only }
     }
 }

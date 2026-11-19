@@ -395,6 +395,54 @@ impl ChatTemplate {
         framed(&reasoned, "<think>\nPROBE-REASONING\n</think>\nPROBE-CONTENT") && framed(&calling, "PROBE-CONTENT\n<tool_call>\n")
     }
 
+    /// The reply format this template writes an assistant turn in, when brain reads that format back
+    /// ([`crate::qwen_chat::ChatScanner`]): a `<function=` call (Qwen3.8), else a JSON `<tool_call>` or a think block
+    /// (Qwen3, or [`crate::qwen_chat::TemplateFlavor::JsonFramed`] when [`Self::frames_replies_with_newlines`]).
+    /// `None` for a template that writes neither.
+    #[must_use]
+    pub fn reply_flavor(&self) -> Option<crate::qwen_chat::TemplateFlavor> {
+        use crate::qwen_chat::TemplateFlavor;
+        let src = &self.source;
+        if src.contains("<function=") {
+            Some(TemplateFlavor::Qwen38)
+        } else if src.contains("<tool_call>") || src.contains("<think>") {
+            Some(if self.frames_replies_with_newlines() { TemplateFlavor::JsonFramed } else { TemplateFlavor::Qwen3 })
+        } else {
+            None
+        }
+    }
+
+    /// Whether `generated` (the text a sampler generated for an answer) is the same answer as `rendered` (this
+    /// template's rendering of the answer's parsed message), read back by the template's reply format
+    /// ([`Self::reply_flavor`]): the same reasoning and the same content up to the whitespace around them, and the same
+    /// calls (names, and arguments compared as JSON values, so `{"a": 1}` and `{"a":1}` agree), with no byte of either
+    /// discarded by the reader (a call's trailing text). Each may end with the
+    /// end-of-turn marker. `thinking_open`: the prompt before the answer opened the think block. `false` for a template
+    /// whose replies brain does not read: there only [`Tokenizer`](crate::tokenizer::Tokenizer)-exact ids are admitted.
+    #[must_use]
+    pub fn reads_as_same_reply(&self, rendered: &str, generated: &str, thinking_open: bool) -> bool {
+        let Some(flavor) = self.reply_flavor() else { return false };
+        let Ok(end) = self.assistant_turn_end() else { return false };
+        let end = end.trim_end();
+        let read = |text: &str| {
+            let text = text.strip_suffix(end).unwrap_or(text);
+            let mut scanner = crate::qwen_chat::ChatScanner::with_flavor(thinking_open, flavor);
+            let mut events = Vec::new();
+            scanner.push(text, &mut events);
+            scanner.finish(&mut events);
+            let calls: Vec<(String, Result<serde_json::Value, String>)> = scanner
+                .tool_calls()
+                .iter()
+                .map(|c| (c.name.clone(), serde_json::from_str::<serde_json::Value>(&c.arguments).map_err(|_| c.arguments.clone())))
+                .collect();
+            // Every anomaly but a discarded call tail keeps its bytes as reasoning or content, where they compare.
+            let kept_every_byte = !scanner.anomalies().contains(&crate::qwen_chat::ScanAnomaly::DiscardedToolCallTail);
+            (scanner.reasoning().trim().to_string(), scanner.content().trim().to_string(), calls, kept_every_byte)
+        };
+        let (a, b) = (read(rendered), read(generated));
+        a.3 && b.3 && (a.0, a.1, a.2) == (b.0, b.1, b.2)
+    }
+
     /// The conversation of a served request as this template reads it: `turns` are the request's messages as
     /// JSON (a tool call's `arguments` the JSON text a client sent), and the result is the ordered value to
     /// render, with each call's arguments parsed (key order kept) when [`Self::reads_argument_objects`].

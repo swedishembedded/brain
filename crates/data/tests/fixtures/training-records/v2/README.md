@@ -26,11 +26,12 @@ rollouts) and in its guide to training as a served job.
 |---|---|---|
 | `model/` | tokenizer | the tokenizer (letters `a` to `w` as ids 0 to 22, `<|endoftext|>` 151643, `<|im_start|>` 151644, `<|im_end|>` 151645) and the chat template every `token_ids` here is computed with; `check_dataset` reads nothing else of a model |
 | `chat.jsonl` | `generic-messages-v2` | supervised records: per-message `train` masks, a record with two supervised answers, an assistant turn that is context |
-| `chat_rollout.jsonl` | `generic-messages-v2` with rollout fields | group `cab`: two rollouts named by `rollout`, one of them two records (two calls) that share its reward, each record naming the `tokenizer_digest` (the sha256 of `model/tokenizer.json`); group `fed`: three records that are a rollout each, one of them `truncated` (it takes no part in the group); an imitation record (no `reward`) in the same file |
+| `chat_rollout.jsonl` | `generic-messages-v2` with rollout fields | group `cab`: two rollouts named by `rollout`, one of them two records (two calls) that share its reward, line 1's answer carrying the `prompt_token_ids` it was sampled after, each record naming the `tokenizer_digest` (the sha256 of `model/tokenizer.json`); group `fed`: three records that are a rollout each, one of them `truncated` (it takes no part in the group); an imitation record (no `reward`) in the same file |
 | `preference.jsonl` | `generic-preference-v1` | a prompt and its `chosen` and `rejected` answers; line 3's `chosen` is a continuation (a tool call, its result, the answer) against a single `rejected` turn |
 | `feedback.jsonl` | `generic-feedback-v1` | a desirable and an undesirable judged `completion`, and a desirable continuation |
 | `invalid/behavior_logprob_count.jsonl` | line 1 refused | `behavior_logprobs` holds three values for an answer of four tokens |
-| `invalid/token_ids_mismatch.jsonl` | line 1 refused | `token_ids` that are not the tokens the answer's text renders to |
+| `invalid/token_ids_mismatch.jsonl` | line 1 refused | `token_ids` that are not the tokens the answer's text renders to (this template's replies are not read back, so only exact ids belong to the answer) |
+| `invalid/prompt_token_ids_mismatch.jsonl` | line 1 refused | `prompt_token_ids` that are not the context the template renders before the answer (they differ at position 5) |
 | `invalid/missing_reward.jsonl` | refused | `behavior_logprobs` on a record with no `reward` |
 | `invalid/missing_group.jsonl` | refused | a `reward` without a `group` |
 | `invalid/advantage_removed.jsonl` | refused | version 1's `advantage` |
@@ -56,8 +57,13 @@ rollouts) and in its guide to training as a served job.
   served reply's `policy_trace` returns). Not the probability a sampler reports after top-k, top-p or min-p, and not
   the `0` a greedy sampler reports. Values are finite and at most 0. The training run is given the sampling
   temperature (`temperature`).
-- `token_ids`, when present, are the ids the sampler generated for the answer, end-of-turn marker included. The trainer
-  renders the answer's text again and refuses the record when the ids differ: the text must round-trip to them.
+- `token_ids`, when present, are the ids the sampler generated for the answer, end-of-turn marker included, and they
+  are what the trainer trains (with `behavior_logprobs` one value per id), never a re-encoding of the answer's text.
+  They are admitted when the template renders the answer to exactly them, or when they read back by the template's
+  reply format (a think block, `<tool_call>` calls) as the same answer: same reasoning and content up to surrounding
+  whitespace, same calls with arguments equal as JSON values. Otherwise the record is refused (`token_ids_mismatch`).
+- `prompt_token_ids`, only beside `token_ids`: the ids the sampler was given before the answer. The context the trainer
+  renders before the answer must encode to exactly these, or the record is refused (`prompt_token_ids_mismatch`).
 - `tokenizer_digest` (`sha256:` and 64 lowercase hex digits, as a `policy_trace` names it), when present, is the
   digest of the trained base's own `tokenizer.json` (`tokenizer_mismatch`, naming both), and where the base's is not
   known, the same on every record of one run that names one (`mixed_tokenizer_digest`).

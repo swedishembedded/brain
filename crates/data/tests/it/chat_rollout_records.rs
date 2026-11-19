@@ -208,11 +208,12 @@ fn the_tokens_of_an_observation_are_never_supervised() {
     assert_eq!(supervised, "y<|im_end|>", "only the final answer is action; the observation and the earlier turns are context");
 }
 
-/// `"token_ids"` on a supervised answer is the proof that its text is the sequence the sampler generated: the ids the chat
-/// template renders for the text must be exactly those, and a record whose text renders to others (the case where
-/// recorded log-probabilities would belong to tokens a trainer never trains) is refused at the first position that differs.
+/// `"token_ids"` on a supervised answer must belong to its message: under a template whose replies brain does not read
+/// back (no think block, no tool calls) the ids the template renders for the text must be exactly those, and a record
+/// whose text renders to others is refused at the first position that differs (`chat_rollout_sampled` covers the reply
+/// read back).
 #[test]
-fn recorded_token_ids_must_be_the_tokens_the_template_renders_for_the_text() {
+fn recorded_token_ids_must_be_the_tokens_the_template_renders_where_its_replies_are_not_read_back() {
     let tmp = tempfile::tempdir().unwrap();
     let rendered: Vec<u32> = tokenizer().encode("a<|im_end|>");
     let line = |ids: &[u32], lps: usize| {
@@ -229,7 +230,7 @@ fn recorded_token_ids_must_be_the_tokens_the_template_renders_for_the_text() {
     wrong[2] = wrong[2].wrapping_add(1);
     let bad = write_records(tmp.path(), &[line(&wrong, ANSWER_TOKENS)]);
     let why = prepare(&examples(&bad).unwrap(), &tmp.path().join("prepared")).expect_err("refused");
-    assert!(why.contains("token_ids") && why.contains("first differ at position 2") && why.contains("did not round-trip"), "{why}");
+    assert!(why.contains("token_ids") && why.contains("first differ at position 2") && why.contains("do not read back"), "{why}");
 
     // A sequence that ends early or runs on is the first difference too.
     let short = write_records(tmp.path(), &[line(&rendered[..rendered.len() - 1], ANSWER_TOKENS)]);
