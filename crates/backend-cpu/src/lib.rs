@@ -742,7 +742,9 @@ backend_api::check_binding_offsets(&self.shared.names[kind], offsets);
                     at += *c;
                     ok
                 });
-                if tiled {
+                // Below the shared grain the whole layer is one task: a tiny expert set fanned out over a wide
+                // pool pays a wake-up per expert for microseconds of arithmetic.
+                if tiled && par::task_count(rows * n * k) > 1 {
                     let mut blocks: Vec<(usize, &mut [f32])> = Vec::with_capacity(e);
                     let mut rest: &mut [f32] = out;
                     for (ei, c) in counts.iter().enumerate() {

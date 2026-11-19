@@ -121,7 +121,8 @@ pub fn blocked_linear_tiled(x: &[f32], rows: usize, in_dim: usize, w: &[f32], b:
         return out;
     }
     let m_tile = m_tile.max(1);
-    crate::par::chunks_mut(&mut out, m_tile * out_dim, |ti, tile| {
+    // One tile is `m_tile` rows of `out_dim * in_dim` multiply-adds; tiles are grouped into tasks by the shared grain.
+    crate::par::items_mut(&mut out, m_tile * out_dim, m_tile * out_dim * in_dim, |ti, tile| {
         let r0 = ti * m_tile;
         let tile_rows = tile.len() / out_dim;
         for j in 0..out_dim {

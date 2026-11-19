@@ -129,6 +129,9 @@ pub fn with_cores<R>(cores: &[usize], f: impl FnOnce() -> R) -> R {
 /// The row split is exact: `buf.len()` must be a multiple of `row_len` for the
 /// last row to be full; a short tail row is passed as-is (matching
 /// `chunks_mut`), never dropped.
+///
+/// Every row may become a task of its own: for rows that each carry little work, state the work and use
+/// [`items_mut`], which groups rows into tasks worth a hand-off.
 pub fn rows_mut(buf: &mut [f32], row_len: usize, f: impl Fn(usize, &mut [f32]) + Sync) {
     chunks_mut(buf, row_len, f)
 }
@@ -137,6 +140,81 @@ pub fn rows_mut(buf: &mut [f32], row_len: usize, f: impl Fn(usize, &mut [f32]) +
 /// [`with_threads`]. A caller sizing its work items to the pool asks here rather than the machine.
 pub fn threads() -> usize {
     routed(rayon::current_num_threads)
+}
+
+/// Work one parallel task must carry before handing it to another thread pays for the hand-off, in work units:
+/// one unit is about one `f32` touched by a streaming loop (a softmax element, a copied float, one multiply-add).
+///
+/// Waking a parked worker is a futex round trip, and stealing work across a wide pool costs microseconds a task.
+/// A loop cut into one task per row hands a 288-thread pool hundreds of tasks of a few dozen floats each for a
+/// kernel whose arithmetic takes microseconds, and the wake-ups and steals are then all of its time: a tiny
+/// model's training test spent 33 minutes in `attn_softmax_cross`'s per-row fan-out on such a host.
+///
+/// 64K units (256 KiB of streamed `f32`) is tens of microseconds of single-core work. It was measured as a byte
+/// grain on the real served path of a DeepSeek-OCR page on a 2x12-core host, where per-row fan-out made system time
+/// exceed user time: of the sweep 128 KiB / 256 KiB / 512 KiB / 1 MiB, 256 KiB gave the least kernel time. (The
+/// sweep ran on the served path because a microbenchmark of a whole prefill round holds ~10 GB of distinct weights,
+/// and its run-to-run spread at that footprint is wider than the effect.)
+pub const MIN_TASK_WORK: usize = 64 * 1024;
+
+/// Tasks for `work` units of streamed work: enough to use the pool on something big, exactly one (no fan-out at
+/// all) on something below [`MIN_TASK_WORK`].
+pub fn task_count(work: usize) -> usize {
+    (work / MIN_TASK_WORK).clamp(1, threads())
+}
+
+/// How many of `items` independent work items, costing `work_per_item` units each, one parallel task should take:
+/// enough that every task carries [`MIN_TASK_WORK`], at most about four tasks per pool thread (load balance for
+/// items of uneven cost), and all of them (one task, so no fan-out at all) when the whole job is below the grain.
+pub fn items_per_task(items: usize, work_per_item: usize) -> usize {
+    if items == 0 {
+        return 1;
+    }
+    let by_grain = MIN_TASK_WORK.div_ceil(work_per_item.max(1));
+    let by_balance = items.div_ceil(threads() * 4);
+    by_grain.max(by_balance).clamp(1, items)
+}
+
+/// Cut `buf`, a sequence of `item_len`-sized items costing `work_per_item` units each, into spans of whole items
+/// sized by [`items_per_task`], and call `f(first_item, span)` on each, in parallel.
+///
+/// A job below the grain runs as one span on the calling thread, without touching the pool. Spans are
+/// contiguous, whole-item and cover `buf` exactly (a short tail item is passed as-is), so a body whose result per
+/// item reads only that item and shared immutable state is bit-identical to the serial loop on any number of
+/// threads: the split is a scheduling decision, never a numerical one.
+pub fn spans_mut<T: Send>(buf: &mut [T], item_len: usize, work_per_item: usize, f: impl Fn(usize, &mut [T]) + Sync) {
+    assert!(item_len > 0, "spans_mut: item_len must be non-zero");
+    let items = buf.len().div_ceil(item_len);
+    let per = items_per_task(items, work_per_item);
+    if per >= items {
+        if !buf.is_empty() {
+            f(0, buf);
+        }
+        return;
+    }
+    routed(|| buf.par_chunks_mut(per * item_len).enumerate().for_each(|(t, span)| f(t * per, span)));
+}
+
+/// [`spans_mut`] calling `f(item_index, item)` once per item: the shape of a row loop (a softmax row, an output
+/// row of a product, one head's score block) whose rows are too small to be tasks of their own.
+pub fn items_mut<T: Send>(buf: &mut [T], item_len: usize, work_per_item: usize, f: impl Fn(usize, &mut [T]) + Sync) {
+    spans_mut(buf, item_len, work_per_item, |first, span| {
+        for (j, item) in span.chunks_mut(item_len).enumerate() {
+            f(first + j, item);
+        }
+    });
+}
+
+/// `for i in 0..n { f(i) }` over items costing `work_per_item` units each, grouped into tasks as
+/// [`items_per_task`] sizes them; inline on the calling thread below the grain. For loops that write through
+/// their own disjoint views of a shared output (per-head scatters) rather than through a slice split.
+pub fn for_each_index(n: usize, work_per_item: usize, f: impl Fn(usize) + Sync) {
+    let per = items_per_task(n, work_per_item);
+    if per >= n {
+        (0..n).for_each(f);
+        return;
+    }
+    routed(|| (0..n.div_ceil(per)).into_par_iter().for_each(|t| (t * per..((t + 1) * per).min(n)).for_each(&f)));
 }
 
 /// Run `f` with the CPU backend's parallel loops confined to a pool of `threads`
@@ -399,6 +477,46 @@ mod tests {
         assert!(cores.iter().all(|c| chosen.contains(c)), "ran on {cores:?}, asked for {chosen:?}");
         assert_eq!(allowed_cores(), allowed, "the thread's affinity is restored");
         assert_eq!(threads(), rayon::current_num_threads(), "the process pool serves loops again");
+    }
+
+    /// The threads that ran a loop's items, in a pool of `pool` threads.
+    fn threads_used(pool: usize, items: usize, work_per_item: usize) -> std::collections::HashSet<std::thread::ThreadId> {
+        let seen = Mutex::new(std::collections::HashSet::new());
+        let mut buf = vec![0u8; items];
+        with_threads(pool, || {
+            items_mut(&mut buf, 1, work_per_item, |_, _| {
+                // Long enough that idle workers would steal a share if the loop had been fanned out.
+                std::thread::sleep(std::time::Duration::from_micros(50));
+                seen.lock().unwrap().insert(std::thread::current().id());
+            })
+        });
+        seen.into_inner().unwrap()
+    }
+
+    /// A loop whose whole work is below the grain runs on ONE thread however wide the pool is: the 33-minute
+    /// tiny-model training test was a per-row softmax handed to every thread of a 288-thread pool. A loop with
+    /// enough work still uses the pool.
+    #[test]
+    fn small_work_stays_on_one_thread_and_large_work_fans_out() {
+        assert_eq!(threads_used(16, 256, 32).len(), 1, "256 rows of 32 units is below the grain");
+        assert!(threads_used(16, 256, MIN_TASK_WORK).len() > 1, "256 rows of a full grain each must use the pool");
+        assert_eq!(items_per_task(256, 32), 256);
+        assert_eq!(with_threads(4, || items_per_task(1 << 20, 1)), (1 << 20) / 16, "at most ~4 tasks a thread");
+        assert_eq!(items_per_task(0, 1), 1);
+    }
+
+    /// Every item is visited once, with its own index, whatever the split; and `for_each_index` covers `0..n`.
+    #[test]
+    fn grained_loops_cover_every_item_once() {
+        for (n, work) in [(0usize, 1usize), (1, 1), (1000, 1), (1000, MIN_TASK_WORK), (1001, 977)] {
+            let mut v = vec![usize::MAX; n * 3 + 1];
+            with_threads(7, || items_mut(&mut v, 3, work, |i, it| it.iter_mut().for_each(|x| *x = i)));
+            let want: Vec<usize> = (0..v.len()).map(|j| j / 3).collect();
+            assert_eq!(v, want, "n={n} work={work}");
+            let hits: Vec<std::sync::atomic::AtomicUsize> = (0..n).map(|_| Default::default()).collect();
+            with_threads(7, || for_each_index(n, work, |i| _ = hits[i].fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+            assert!(hits.iter().all(|h| h.load(std::sync::atomic::Ordering::Relaxed) == 1), "n={n} work={work}");
+        }
     }
 
     #[test]

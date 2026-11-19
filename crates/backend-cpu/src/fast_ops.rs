@@ -10,28 +10,32 @@
 
 use rayon::prelude::*;
 
+use crate::par;
+
 /// `silu`: `out[i] = x[i] / (1 + exp(-x[i]))`, elementwise.
 pub fn silu(x: &[f32], out: &mut [f32]) {
     let n = x.len().min(out.len());
-    // Parallel chunks; each chunk vectorised (AVX2) or scalar.
-    let chunk = (n / (rayon::current_num_threads() * 4)).max(4096);
     // Resolved once, before the chunk fan-out, not re-checked per chunk.
     #[cfg(target_arch = "x86_64")]
     let use_avx2 = crate::fast_conv::isa_tier() != crate::fast_conv::IsaTier::Scalar;
-    out[..n]
-        .par_chunks_mut(chunk)
-        .zip(x[..n].par_chunks(chunk))
-        .for_each(|(o, xi)| {
-            #[cfg(target_arch = "x86_64")]
-            if use_avx2 {
-                unsafe { silu_avx2(xi, o) };
-                return;
-            }
-            for (oo, &v) in o.iter_mut().zip(xi) {
-                *oo = v / (1.0 + (-v).exp());
-            }
-        });
+    // Spans of whole 8-lane vectors, so which elements take the vector path and which the scalar tail does not
+    // depend on the split, and a call below the grain runs inline.
+    par::spans_mut(&mut out[..n], SIMD_LANES, SIMD_LANES, |off, o| {
+        let xi = &x[off * SIMD_LANES..off * SIMD_LANES + o.len()];
+        #[cfg(target_arch = "x86_64")]
+        if use_avx2 {
+            unsafe { silu_avx2(xi, o) };
+            return;
+        }
+        for (oo, &v) in o.iter_mut().zip(xi) {
+            *oo = v / (1.0 + (-v).exp());
+        }
+    });
 }
+
+/// Elements of one vector register of the widest elementwise microkernel here (AVX2, 8 lanes): the item size of
+/// an elementwise span, so that spans cut where a single-threaded pass would cut its vectors.
+const SIMD_LANES: usize = 8;
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
@@ -68,25 +72,23 @@ unsafe fn silu_avx2(x: &[f32], out: &mut [f32]) {
 /// dispatch's rayon-chunked JIT path with no native fast path at all.
 pub fn silu_mul(a: &[f32], b: &[f32], out: &mut [f32]) {
     let n = a.len().min(b.len()).min(out.len());
-    let chunk = (n / (rayon::current_num_threads() * 4)).max(4096);
     // Resolved once, before the chunk fan-out, not re-checked per chunk.
     #[cfg(target_arch = "x86_64")]
     let use_avx2 = crate::fast_conv::isa_tier() != crate::fast_conv::IsaTier::Scalar;
-    out[..n]
-        .par_chunks_mut(chunk)
-        .zip(a[..n].par_chunks(chunk))
-        .zip(b[..n].par_chunks(chunk))
-        .for_each(|((o, ai), bi)| {
-            #[cfg(target_arch = "x86_64")]
-            if use_avx2 {
-                unsafe { silu_mul_avx2(ai, bi, o) };
-                return;
-            }
-            for ((oo, &av), &bv) in o.iter_mut().zip(ai).zip(bi) {
-                let s = av / (1.0 + (-av).exp());
-                *oo = s * bv;
-            }
-        });
+    // Whole-vector spans, as in `silu`.
+    par::spans_mut(&mut out[..n], SIMD_LANES, 2 * SIMD_LANES, |off, o| {
+        let lo = off * SIMD_LANES;
+        let (ai, bi) = (&a[lo..lo + o.len()], &b[lo..lo + o.len()]);
+        #[cfg(target_arch = "x86_64")]
+        if use_avx2 {
+            unsafe { silu_mul_avx2(ai, bi, o) };
+            return;
+        }
+        for ((oo, &av), &bv) in o.iter_mut().zip(ai).zip(bi) {
+            let s = av / (1.0 + (-av).exp());
+            *oo = s * bv;
+        }
+    });
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -181,11 +183,7 @@ pub fn matmul_abt(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: us
     // One thread's share of the output rows, blocked as above. `rows` is the
     // number of A rows starting at `row0`; `cchunk` is their `[rows, n]` slice
     // of C.
-    let threads = rayon::current_num_threads();
-    // The ORIGINAL chunking, and still the one every row-outer shape gets, so
-    // that nothing which did not opt into the new nest changes behaviour at
-    // all: same kernel, same chunk size, same schedule.
-    let rows_row_outer = (m / (threads * 4)).max(1);
+    let threads = par::threads();
     // WHICH operand should stay resident decides the nest, and it is a
     // property of the shape, not a constant. Column-outer keeps a B tile
     // resident and re-reads this thread's A rows; row-outer (the original)
@@ -223,7 +221,6 @@ pub fn matmul_abt(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: us
     // times. Floor division, not `div_ceil`, so `m >= threads` still yields at
     // least one chunk per thread (`div_ceil` would leave threads idle: `m=49`
     // over 48 threads is 25 chunks of 2, not 49 of 1).
-    let rows_per = if col_outer { (m / threads).max(1) } else { rows_row_outer };
     let block = |row0: usize, rows: usize, cchunk: &mut [f32]| {
         #[cfg(target_arch = "x86_64")]
         if col_outer {
@@ -256,9 +253,15 @@ pub fn matmul_abt(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: us
         gemv_cols(a, b, c, k, n);
         return;
     }
-    c.par_chunks_mut(rows_per * n).enumerate().for_each(|(ci, cchunk)| {
-        block(ci * rows_per, cchunk.len() / n, cchunk);
-    });
+    if col_outer {
+        let rows_per = (m / threads).max(1);
+        c.par_chunks_mut(rows_per * n).enumerate().for_each(|(ci, cchunk)| {
+            block(ci * rows_per, cchunk.len() / n, cchunk);
+        });
+        return;
+    }
+    // Row-outer: spans of whole output rows, each row `n*k` multiply-adds, sized by the shared grain.
+    par::spans_mut(&mut c[..m * n], n, n * k, |row0, cchunk| block(row0, cchunk.len() / n, cchunk));
 }
 
 /// [`matmul_abt`]'s blocked nest for one thread's row range - see that
@@ -626,14 +629,8 @@ pub fn matmul_i8_dyn(xq: &[u32], wq: &[u32], sx: &[f32], sw: &[f32], out: &mut [
         }
         return;
     }
-    let rows_per = (m / (rayon::current_num_threads() * 4)).max(1);
-    out.par_chunks_mut(rows_per * n).enumerate().for_each(|(ci, ochunk)| {
-        let row0 = ci * rows_per;
-        let nrows = ochunk.len() / n;
-        for r in 0..nrows {
-            row(row0 + r, &mut ochunk[r * n..r * n + n]);
-        }
-    });
+    // One output row is `n * kg` packed words of multiply-adds (four int8 lanes each).
+    par::items_mut(&mut out[..m * n], n, n * kg * 4, row);
 }
 
 /// The ISA tier [`matmul_i8_dyn`] dispatches its per-group dot product at -
@@ -968,16 +965,14 @@ pub fn bn_eval(params: &[u32], x: &[f32], mv: &[f32], gb: &[f32], out: &mut [f32
     // Per-channel collapse to an affine: out = x*scale + bias, then act.
     let scale: Vec<f32> = (0..c).map(|ci| gb[2 * ci] / (mv[2 * ci + 1] + 1e-5).sqrt()).collect();
     let bias: Vec<f32> = (0..c).map(|ci| gb[2 * ci + 1] - mv[2 * ci] * scale[ci]).collect();
-    // Coarse parallelism: ~threads*4 tasks, each handling many (n,c) planes, so
-    // rayon scheduling cost stays negligible vs the per-plane affine.
-    let planes = n * c;
-    let group = planes.div_ceil(rayon::current_num_threads().max(1) * 4).max(1);
+    // Spans of whole (n,c) planes sized by the shared grain, so scheduling cost
+    // stays negligible vs the per-plane affine.
     // Resolved once, before the per-plane fan-out, not re-checked per plane.
     #[cfg(target_arch = "x86_64")]
     let use_avx2 = crate::fast_conv::isa_tier() != crate::fast_conv::IsaTier::Scalar;
-    out.par_chunks_mut(hw * group).enumerate().for_each(|(gi, chunk)| {
+    par::spans_mut(&mut out[..n * c * hw], hw, hw, |plane0, chunk| {
         for (k, o) in chunk.chunks_mut(hw).enumerate() {
-            let plane = gi * group + k;
+            let plane = plane0 + k;
             let ci = plane % c;
             let (s, b) = (scale[ci], bias[ci]);
             let xi = &x[plane * hw..plane * hw + o.len()];
@@ -1033,10 +1028,7 @@ pub fn concat2(params: &[u32], a: &[f32], b: &[f32], y: &mut [f32]) {
     let (a_n, b_n, per_n) = (ca * hw, cb * hw, ctot * hw);
     // Segmented parallel copy: each (n, source) run is contiguous in both src and
     // dst, so it copies as one bulk memcpy. Coarse flat chunks across threads.
-    let total = n * per_n;
-    let chunk = total.div_ceil(rayon::current_num_threads().max(1) * 4).max(1);
-    y.par_chunks_mut(chunk).enumerate().for_each(|(ci, out)| {
-        let base = ci * chunk;
+    par::spans_mut(&mut y[..n * per_n], 1, 1, |base, out| {
         let mut o = 0usize;
         while o < out.len() {
             let g = base + o;
@@ -1064,10 +1056,7 @@ pub fn concat_split(params: &[u32], dy: &[f32], da: &mut [f32]) {
     let hw = h * w;
     // Per n, da[n] = dy[n][c_off*hw .. (c_off+csrc)*hw] is one contiguous run.
     let (src_n, dst_n) = (ctot * hw, csrc * hw);
-    let total = n * dst_n;
-    let chunk = total.div_ceil(rayon::current_num_threads().max(1) * 4).max(1);
-    da.par_chunks_mut(chunk).enumerate().for_each(|(ci, out)| {
-        let base = ci * chunk;
+    par::spans_mut(&mut da[..n * dst_n], 1, 1, |base, out| {
         let mut o = 0usize;
         while o < out.len() {
             let g = base + o;
@@ -1092,11 +1081,11 @@ pub fn chan_place(params: &[u32], src: &[f32], dst: &mut [f32]) {
     // Each n's source block is a contiguous run; place it at the channel offset.
     // Parallelise over n (and split large copies via coarse flat chunks of src).
     let total = n * src_n;
-    let chunk = total.div_ceil(rayon::current_num_threads().max(1) * 4).max(1);
+    let chunk = par::items_per_task(total, 1);
     // SAFETY: the destination slices written by distinct flat chunks are disjoint
     // (each maps to a distinct (n, channel-range, position) of dst).
     let dptr = SendMutPtr(dst.as_mut_ptr());
-    src.par_chunks(chunk).enumerate().for_each(|(ci, sin)| {
+    par::for_each_index(total.div_ceil(chunk), chunk, |ci| {
         // Rebinding the whole `Send` newtype is REQUIRED, not redundant: under
         // Rust 2021 disjoint capture a closure that only touches `dptr.0`
         // captures that raw pointer directly, which is not `Send`. Verified by
@@ -1105,6 +1094,7 @@ pub fn chan_place(params: &[u32], src: &[f32], dst: &mut [f32]) {
         #[allow(clippy::redundant_locals)]
         let dptr = dptr;
         let base = ci * chunk;
+        let sin = &src[base..(base + chunk).min(total)];
         let mut o = 0usize;
         while o < sin.len() {
             let g = base + o;
@@ -1128,11 +1118,9 @@ unsafe impl Sync for SendMutPtr {}
 pub fn upsample2(params: &[u32], x: &[f32], y: &mut [f32]) {
     let (n, c, h, w) = (params[0] as usize, params[1] as usize, params[2] as usize, params[3] as usize);
     let (oh, ow) = (h * 2, w * 2);
-    let planes = n * c;
-    let group = planes.div_ceil(rayon::current_num_threads().max(1) * 4).max(1);
-    y.par_chunks_mut(oh * ow * group).enumerate().for_each(|(gi, chunk)| {
+    par::spans_mut(&mut y[..n * c * oh * ow], oh * ow, oh * ow, |plane0, chunk| {
         for (k, o) in chunk.chunks_mut(oh * ow).enumerate() {
-            let nc = gi * group + k; // (n*C + c) flattened
+            let nc = plane0 + k; // (n*C + c) flattened
             let xc = &x[nc * h * w..nc * h * w + h * w];
             for ho in 0..oh {
                 let hi = ho / 2;
@@ -1154,7 +1142,6 @@ pub fn upsample2(params: &[u32], x: &[f32], y: &mut [f32]) {
 /// chunk-partials; validated against the scalar JIT within fp32 tolerance
 /// like the conv fast paths).
 pub fn gn_stats(params: &[u32], x: &[f32], stats: &mut [f32]) {
-    use rayon::prelude::*;
     let (n, c, h, w, g) =
         (params[0] as usize, params[1] as usize, params[2] as usize, params[3] as usize, params[4] as usize);
     let eps = f32::from_bits(params[5]);
@@ -1162,20 +1149,25 @@ pub fn gn_stats(params: &[u32], x: &[f32], stats: &mut [f32]) {
     let m = cpg * h * w;
     // n*g is tiny (2..8): keep groups sequential, parallelize each reduction
     // over a few LARGE chunks (no nested rayon - nesting inside the backend's
-    // pool oversubscribes and measured slower than the scalar JIT).
+    // pool oversubscribes and measured slower than the scalar JIT). The chunk
+    // partials are collected and added in order: rayon's own `sum` combines
+    // them in a tree shaped by how the work was stolen, so its last bits
+    // depended on how busy the pool was.
     const CH: usize = 32 * 1024;
     for k in 0..n * g {
         let (ni, gi) = (k / g, k % g);
         let base = (ni * c + gi * cpg) * h * w;
         let sl = &x[base..base + m];
         let mean = if m >= 2 * CH {
-            sl.par_chunks(CH).map(|ch| ch.iter().sum::<f32>()).sum::<f32>() / m as f32
+            sl.par_chunks(CH).map(|ch| ch.iter().sum::<f32>()).collect::<Vec<f32>>().iter().sum::<f32>() / m as f32
         } else {
             sl.iter().sum::<f32>() / m as f32
         };
         let var = if m >= 2 * CH {
             sl.par_chunks(CH)
                 .map(|ch| ch.iter().map(|&v| (v - mean) * (v - mean)).sum::<f32>())
+                .collect::<Vec<f32>>()
+                .iter()
                 .sum::<f32>()
                 / m as f32
         } else {
@@ -1190,16 +1182,13 @@ pub fn gn_stats(params: &[u32], x: &[f32], stats: &mut [f32]) {
 /// `gn_apply.wgsl`). Folded to one affine per contiguous channel slice:
 /// `y = a_c * x + b_c` with `a_c = gamma_c * rstd`, `b_c = beta_c - a_c*mean`.
 pub fn gn_apply(params: &[u32], x: &[f32], stats: &[f32], gb: &[f32], y: &mut [f32]) {
-    use rayon::prelude::*;
     let (n, c, h, w, g) =
         (params[0] as usize, params[1] as usize, params[2] as usize, params[3] as usize, params[4] as usize);
     let hw = h * w;
     let cpg = c / g;
-    // Coarse row batching: each rayon task handles >= ~32k elements so task
-    // overhead never dominates the (memory-bound) affine.
-    let rows_per_task = (32 * 1024 / hw).max(1);
-    y.par_chunks_mut(hw * rows_per_task).enumerate().for_each(|(t, yo)| {
-        let row0 = t * rows_per_task;
+    // Spans of whole channel rows sized by the shared grain, so task overhead
+    // never dominates the (memory-bound) affine.
+    par::spans_mut(&mut y[..n * c * hw], hw, hw, |row0, yo| {
         for (r, yrow) in yo.chunks_mut(hw).enumerate() {
             let row = row0 + r;
             let (ni, ci) = (row / c, row % c);
@@ -1214,13 +1203,11 @@ pub fn gn_apply(params: &[u32], x: &[f32], stats: &[f32], gb: &[f32], y: &mut [f
             }
         }
     });
-    let _ = n;
 }
 
 /// `gn_part` (stage 1): per-(group, t) partial (sum, sumsq) over contiguous
 /// chunks - matches `gn_part.wgsl`. Parallel over the partial index.
 pub fn gn_part(params: &[u32], x: &[f32], part: &mut [f32]) {
-    use rayon::prelude::*;
     let (n, c, h, w, g, pp) = (
         params[0] as usize,
         params[1] as usize,
@@ -1232,7 +1219,8 @@ pub fn gn_part(params: &[u32], x: &[f32], part: &mut [f32]) {
     let cpg = c / g;
     let m = cpg * h * w;
     let chunk = m.div_ceil(pp);
-    part.par_chunks_mut(2).enumerate().take(n * g * pp).for_each(|(idx, o)| {
+    let parts = (n * g * pp).min(part.len() / 2);
+    par::items_mut(&mut part[..2 * parts], 2, chunk, |idx, o| {
         let (k, t) = (idx / pp, idx % pp);
         let (ni, gi) = (k / g, k % g);
         let base = (ni * c + gi * cpg) * h * w;
@@ -1311,14 +1299,7 @@ pub fn matmul_dx(dy: &[f32], w: &[f32], dx: &mut [f32], m: usize, k: usize, n: u
         }
         return;
     }
-    let rows_per = (m / (rayon::current_num_threads() * 4)).max(1);
-    dx.par_chunks_mut(rows_per * k).enumerate().for_each(|(ci, chunk)| {
-        let row0 = ci * rows_per;
-        let nrows = chunk.len() / k;
-        for r in 0..nrows {
-            row(&dy[(row0 + r) * n..(row0 + r) * n + n], &mut chunk[r * k..r * k + k]);
-        }
-    });
+    par::items_mut(&mut dx[..m * k], k, n * k, |r, dxr| row(&dy[r * n..r * n + n], dxr));
 }
 
 /// dW[n,k] += sum_m dY[m,n] * X[m,k]   (always accumulates).
@@ -1357,14 +1338,7 @@ pub fn matmul_dw(dy: &[f32], x: &[f32], dw: &mut [f32], m: usize, k: usize, n: u
         }
         return;
     }
-    let rows_per = (n / (rayon::current_num_threads() * 4)).max(1);
-    dw.par_chunks_mut(rows_per * k).enumerate().for_each(|(ci, chunk)| {
-        let n0 = ci * rows_per;
-        let nrows = chunk.len() / k;
-        for r in 0..nrows {
-            row(n0 + r, &mut chunk[r * k..r * k + k]);
-        }
-    });
+    par::items_mut(&mut dw[..n * k], k, m * k, row);
 }
 
 /// `dst[i] += scale * src[i]` over `min(dst.len(), src.len())`. The shared
@@ -1468,22 +1442,7 @@ pub fn scale_add(
             }
         }
     };
-    let total = seq_len * d_model;
-    if total < 4096 {
-        for t in 0..seq_len {
-            row(t, &src[t * d_model..t * d_model + d_model], &mut acc[t * d_model..t * d_model + d_model]);
-        }
-        return;
-    }
-    let rows_per = (seq_len / (rayon::current_num_threads() * 4)).max(1);
-    acc.par_chunks_mut(rows_per * d_model).enumerate().for_each(|(ci, chunk)| {
-        let row0 = ci * rows_per;
-        let nrows = chunk.len() / d_model;
-        for r in 0..nrows {
-            let t = row0 + r;
-            row(t, &src[t * d_model..t * d_model + d_model], &mut chunk[r * d_model..r * d_model + d_model]);
-        }
-    });
+    par::items_mut(&mut acc[..seq_len * d_model], d_model, d_model, |t, arow| row(t, &src[t * d_model..t * d_model + d_model], arow));
 }
 
 // ---------------------------------------------------------------------------
@@ -1583,44 +1542,24 @@ pub fn moe_linear_gated_fwd(
     // order, zeroing the rows that are not routed, so every output element is
     // computed by the same microkernel over the same `k` in the same order as
     // before.
-    let rows_per = m.div_ceil(live.min(rayon::current_num_threads()).max(1));
-    out.par_chunks_mut(rows_per * n).enumerate().for_each(|(ci, cchunk)| {
-        let row0 = ci * rows_per;
-        let nrows = cchunk.len() / n;
-        for r in 0..nrows {
+    let tasks = par::task_count(live * n * k).min(live);
+    let span = |row0: usize, cchunk: &mut [f32]| {
+        for r in 0..cchunk.len() / n {
             row(row0 + r, &x[(row0 + r) * k..(row0 + r) * k + k], &mut cchunk[r * n..r * n + n]);
         }
-    });
-}
-
-/// Bytes of streamed operand one rayon task must be given before fanning out
-/// pays for itself on this scheduler.
-///
-/// Waking a sleeping worker is a futex round trip, and a dispatch that hands
-/// 48 of them a few kilobytes each spends more time in the kernel than in the
-/// arithmetic - measured on a 2x12-core host as system time exceeding user time
-/// across one real DeepSeek-OCR page, almost all of it in
-/// per-row fan-out on kernels like this one. At a single core's streaming
-/// rate, 256 KiB is tens of microseconds of work - past that cost, and measured
-/// as the point where extra parallelism stops paying for extra wake-ups. The
-/// sweep that picked it (128 KiB / 256 KiB / 512 KiB / 1 MiB) ran on the REAL
-/// served path rather than on a microbenchmark, because the microbenchmark
-/// that models a whole prefill round has to hold ~10 GB of distinct weights
-/// and its run-to-run spread at that footprint is wider than the effect being
-/// tuned. On one real page's prefill, 256 KiB gave the least kernel time
-/// of the four candidates.
-const MIN_TASK_BYTES: usize = 256 * 1024;
-
-/// Task count for `bytes` of streamed work: enough to use the pool on
-/// something big, exactly one (i.e. no fan-out at all) on something small.
-fn task_count(bytes: usize) -> usize {
-    (bytes / MIN_TASK_BYTES).clamp(1, rayon::current_num_threads())
+    };
+    if tasks == 1 {
+        span(0, &mut out[..m * n]);
+        return;
+    }
+    let rows_per = m.div_ceil(tasks);
+    out[..m * n].par_chunks_mut(rows_per * n).enumerate().for_each(|(ci, cchunk)| span(ci * rows_per, cchunk));
 }
 
 /// `buf.fill(0.0)`, fanned out only when there is enough of it to be worth a
 /// wake-up.
 fn zero_par(buf: &mut [f32]) {
-    let tasks = task_count(buf.len() * 4);
+    let tasks = par::task_count(buf.len());
     if tasks <= 1 {
         buf.fill(0.0);
         return;
@@ -1670,7 +1609,7 @@ fn gemv_cols(a: &[f32], b: &[f32], c: &mut [f32], k: usize, n: usize) {
         }
         row_abt_scalar(a, b, c, k, cols);
     };
-    let tasks = task_count(n * k * 4);
+    let tasks = par::task_count(n * k);
     if tasks <= 1 {
         run(b, c, n);
         return;
@@ -1730,14 +1669,7 @@ pub fn moe_linear_gated_dx(
         }
         return;
     }
-    let rows_per = (m / (rayon::current_num_threads() * 4)).max(1);
-    dx.par_chunks_mut(rows_per * k).enumerate().for_each(|(ci, chunk)| {
-        let row0 = ci * rows_per;
-        let nrows = chunk.len() / k;
-        for r in 0..nrows {
-            row(row0 + r, &dy[(row0 + r) * n..(row0 + r) * n + n], &mut chunk[r * k..r * k + k]);
-        }
-    });
+    par::items_mut(&mut dx[..m * k], k, n * k, |r, dxr| row(r, &dy[r * n..r * n + n], dxr));
 }
 
 /// `moe_linear_gated_dw`: `dW[n,:] += sum_{row routed} dY[row,n]*X[row,:]` -
@@ -1781,14 +1713,7 @@ pub fn moe_linear_gated_dw(
         }
         return;
     }
-    let rows_per = (n / (rayon::current_num_threads() * 4)).max(1);
-    dw.par_chunks_mut(rows_per * k).enumerate().for_each(|(ci, chunk)| {
-        let n0 = ci * rows_per;
-        let nrows = chunk.len() / k;
-        for r in 0..nrows {
-            row(n0 + r, &mut chunk[r * k..r * k + k]);
-        }
-    });
+    par::items_mut(&mut dw[..n * k], k, m * k, row);
 }
 
 // ---------------------------------------------------------------------------
@@ -1866,7 +1791,7 @@ pub fn gqa_scores(
 ) {
     let scale = 1.0 / (hd as f32).sqrt();
     let (q_row, k_row) = (n_heads * hd, n_kv_heads * hd);
-    scores[..bsz * n_heads * t * t].par_chunks_mut(t * t).enumerate().for_each(|(bh, out)| {
+    par::items_mut(&mut scores[..bsz * n_heads * t * t], t * t, t * t * hd, |bh, out| {
         let (b, h) = (bh / n_heads, bh % n_heads);
         let qh = head_rows(q, b, t, q_row, h, hd, scale);
         let kh = head_rows(k, b, t, k_row, h / group, hd, 1.0);
@@ -1882,7 +1807,8 @@ pub fn gqa_scores(
 /// header). Parallel over rows, matching `attn_softmax_cross`'s own shape.
 pub fn attn_softmax_causal(scores: &[f32], probs: &mut [f32], bsz: usize, n_heads: usize, t: usize) {
     let rows = bsz * n_heads * t;
-    probs.par_chunks_mut(t).zip(scores.par_chunks(t)).take(rows).enumerate().for_each(|(r, (p, s))| {
+    par::items_mut(&mut probs[..rows * t], t, t, |r, p| {
+        let s = &scores[r * t..r * t + t];
         let i = r % t;
         let valid = &s[..=i];
         let mx = valid.iter().fold(f32::NEG_INFINITY, |a, &v| a.max(v));
@@ -1918,7 +1844,7 @@ pub fn gqa_apply(
 ) {
     let (q_row, k_row) = (n_heads * hd, n_kv_heads * hd);
     let out = SharedOut(ctx.as_mut_ptr());
-    (0..bsz * n_heads).into_par_iter().for_each(|bh| {
+    par::for_each_index(bsz * n_heads, t * t * hd, |bh| {
         let (b, h) = (bh / n_heads, bh % n_heads);
         let vt = head_t(v, b, t, k_row, h / group, hd, 1.0);
         let mut ctxh = vec![0f32; t * hd];
@@ -1945,7 +1871,7 @@ pub fn gqa_bwd_dscores(
     group: usize,
 ) {
     let (q_row, k_row) = (n_heads * hd, n_kv_heads * hd);
-    d_scores[..bsz * n_heads * t * t].par_chunks_mut(t * t).enumerate().for_each(|(bh, out)| {
+    par::items_mut(&mut d_scores[..bsz * n_heads * t * t], t * t, t * t * hd, |bh, out| {
         let (b, h) = (bh / n_heads, bh % n_heads);
         let ctxh = head_rows(d_ctx, b, t, q_row, h, hd, 1.0);
         let vh = head_rows(v, b, t, k_row, h / group, hd, 1.0);
@@ -2015,7 +1941,7 @@ pub fn gqa_bwd_dq(
     let scale0 = 1.0 / (hd as f32).sqrt();
     let (q_row, k_row) = (n_heads * hd, n_kv_heads * hd);
     let out = SharedOut(d_q.as_mut_ptr());
-    (0..bsz * n_heads).into_par_iter().for_each(|bh| {
+    par::for_each_index(bsz * n_heads, t * t * hd, |bh| {
         let (b, h) = (bh / n_heads, bh % n_heads);
         let kt = head_t(k, b, t, k_row, h / group, hd, scale0);
         // The kernel sums `j <= i` only: the product runs over the causal part of the row.
@@ -2050,7 +1976,7 @@ pub fn gqa_bwd_dk(
 fn gqa_bwd_kv(s: &[f32], x: &[f32], out: &mut [f32], bsz: usize, n_heads: usize, n_kv_heads: usize, t: usize, hd: usize, group: usize, scale: f32) {
     let (q_row, k_row) = (n_heads * hd, n_kv_heads * hd);
     let dst = SharedOut(out.as_mut_ptr());
-    (0..bsz * n_kv_heads).into_par_iter().for_each(|bk| {
+    par::for_each_index(bsz * n_kv_heads, group * t * t * hd, |bk| {
         let (b, hkv) = (bk / n_kv_heads, bk % n_kv_heads);
         let mut head = vec![0f32; t * hd];
         for gi in 0..group {
@@ -2229,8 +2155,7 @@ pub fn attn_scores_cross_kt(
 /// `attn_softmax_cross`: row softmax over the key axis, scores → probs.
 /// params = [bsz, heads, t_dec, t_enc].
 pub fn attn_softmax_cross(scores: &[f32], probs: &mut [f32], rows: usize, tk: usize) {
-    use rayon::prelude::*;
-    probs.par_chunks_mut(tk).enumerate().take(rows).for_each(|(r, p)| {
+    par::items_mut(&mut probs[..rows * tk], tk, tk, |r, p| {
         let s = &scores[r * tk..r * tk + tk];
         let mx = s.iter().fold(f32::NEG_INFINITY, |a, &v| a.max(v));
         let mut sum = 0f32;
@@ -2373,7 +2298,9 @@ fn softmax_stats(row: &[f32]) -> (f32, f32) {
 /// `ce_grad_masked.wgsl`: `d_logits[n,v] = (softmax(logits[n])_v - [v == target[n]]) / count`, zero for a row whose
 /// target is `ignore`. Each row's statistics are reduced once (the kernel re-reduces them for every element).
 pub fn ce_grad_masked(logits: &[f32], targets: &[u32], dlogits: &mut [f32], bins: usize, ignore: u32, count: f32) {
-    dlogits.par_chunks_mut(bins).zip(logits.par_chunks(bins)).zip(targets.par_iter()).for_each(|((d, row), &tgt)| {
+    let rows = targets.len().min(logits.len() / bins).min(dlogits.len() / bins);
+    par::items_mut(&mut dlogits[..rows * bins], bins, bins, |r, d| {
+        let (row, tgt) = (&logits[r * bins..r * bins + bins], targets[r]);
         if tgt == ignore {
             d.fill(0.0);
             return;
@@ -2390,13 +2317,15 @@ pub fn ce_grad_masked(logits: &[f32], targets: &[u32], dlogits: &mut [f32], bins
 
 /// `ce_value_masked.wgsl`: `out[n] = logsumexp(logits[n]) - logits[n, target[n]]`, zero for an ignored row.
 pub fn ce_value_masked(logits: &[f32], targets: &[u32], out: &mut [f32], bins: usize, ignore: u32) {
-    out.par_iter_mut().zip(logits.par_chunks(bins)).zip(targets.par_iter()).for_each(|((o, row), &tgt)| {
+    let rows = targets.len().min(logits.len() / bins).min(out.len());
+    par::items_mut(&mut out[..rows], 1, bins, |r, o| {
+        let (row, tgt) = (&logits[r * bins..r * bins + bins], targets[r]);
         if tgt == ignore {
-            *o = 0.0;
+            o[0] = 0.0;
             return;
         }
         let (mx, sum) = softmax_stats(row);
-        *o = (mx + sum.ln()) - row.get(tgt as usize).copied().unwrap_or(0.0);
+        o[0] = (mx + sum.ln()) - row.get(tgt as usize).copied().unwrap_or(0.0);
     });
 }
 
@@ -2405,7 +2334,10 @@ pub fn transpose(src: &[f32], rows: usize, cols: usize) -> Vec<f32> {
     const T: usize = 32;
     let mut dst = vec![0f32; rows * cols];
     // Disjoint column bands of the source are disjoint row bands of the destination.
-    dst.par_chunks_mut(T * rows).enumerate().for_each(|(band, out)| {
+    if rows == 0 || cols == 0 {
+        return dst;
+    }
+    par::items_mut(&mut dst, T * rows, T * rows, |band, out| {
         let c0 = band * T;
         let cn = (cols - c0).min(T);
         let mut r0 = 0;
@@ -2871,6 +2803,60 @@ mod tests {
     fn lcg(s: &mut u32) -> f32 {
         *s = s.wrapping_mul(1664525).wrapping_add(1013904223);
         ((*s >> 8) as f32 / (1u32 << 24) as f32) * 2.0 - 1.0
+    }
+
+    /// How the row kernels are cut into tasks is a scheduling decision, never a numerical one: each kernel gives the
+    /// same bits on one thread as on a pool, at a shape below the task grain (one inline task) and one well above it
+    /// (many tasks). Covers the families whose fan-out the shared grain sizes: row softmaxes, products and their
+    /// gradients, per-head attention, elementwise spans, copies and the masked cross-entropy pair.
+    #[test]
+    fn row_kernels_give_the_same_bits_on_any_pool() {
+        let mut seed = 7u32;
+        let mut fill = |n: usize| -> Vec<f32> { (0..n).map(|_| lcg(&mut seed) * 4.0).collect() };
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        for (rows, cols) in [(48usize, 32usize), (2048, 96)] {
+            let a = fill(rows * cols);
+            let b = fill(rows * cols);
+            let w = fill(cols * cols);
+            let targets: Vec<u32> = (0..rows as u32).map(|r| if r % 5 == 0 { u32::MAX } else { r % cols as u32 }).collect();
+            let run = |threads: usize| {
+                par::with_threads(threads, || {
+                    let mut out: Vec<Vec<f32>> = Vec::new();
+                    let mut p = vec![0f32; rows * cols];
+                    attn_softmax_cross(&a, &mut p, rows, cols);
+                    out.push(p);
+                    let t = cols;
+                    let heads = rows / t;
+                    let mut p = vec![0f32; heads * t * t];
+                    attn_softmax_causal(&a[..heads * t * t], &mut p, 1, heads, t);
+                    out.push(p);
+                    let mut c = vec![0f32; rows * cols];
+                    matmul_abt(&a, &w, &mut c, rows, cols, cols);
+                    out.push(c);
+                    let mut dx = vec![0f32; rows * cols];
+                    matmul_dx(&b, &w, &mut dx, rows, cols, cols, false);
+                    out.push(dx);
+                    let mut dw = vec![0f32; cols * cols];
+                    matmul_dw(&b, &a, &mut dw, rows, cols, cols);
+                    out.push(dw);
+                    let mut s = vec![0f32; rows * cols];
+                    silu_mul(&a, &b, &mut s);
+                    out.push(s);
+                    let mut d = vec![0f32; rows * cols];
+                    ce_grad_masked(&a, &targets, &mut d, cols, u32::MAX, 3.0);
+                    out.push(d);
+                    let mut v = vec![0f32; rows];
+                    ce_value_masked(&a, &targets, &mut v, cols, u32::MAX);
+                    out.push(v);
+                    out.push(transpose(&a, rows, cols));
+                    out.iter().map(|o| bits(o)).collect::<Vec<_>>()
+                })
+            };
+            let reference = run(1);
+            for threads in [3, 16] {
+                assert_eq!(run(threads), reference, "{rows}x{cols} on {threads} threads");
+            }
+        }
     }
 
     /// `transpose_rows_tiled` against the naive `vt[d*tk+j] = src[j*stride+off+d]`

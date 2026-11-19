@@ -20,7 +20,7 @@
 //! microkernel vectorises over `P` (contiguous in both `B` and the output),
 //! accumulating a `4×16` tile in eight `__m256` registers.
 
-use rayon::prelude::*;
+use crate::par;
 
 /// Decoded `conv2d.wgsl` uniform params (`[N,Cin,H,W,Cout,K,stride,pad,Ho,Wo]`).
 /// `dilation` is 1 for the dense ABI; the grouped ABI (`from_u32_gd`) carries it.
@@ -287,7 +287,7 @@ pub fn conv2d_gd(p: &ConvParams, groups: usize, x: &[f32], w: &[f32], y: &mut [f
 /// Interior rows skip the bounds checks (the hot path for K=3/5 same-pad).
 fn conv2d_depthwise(p: &ConvParams, x: &[f32], w: &[f32], y: &mut [f32]) {
     let (hw, psz, kk) = (p.h * p.w, p.ho * p.wo, p.k * p.k);
-    y.par_chunks_mut(psz).enumerate().for_each(|(plane, yc)| {
+    par::items_mut(y, psz, psz * kk, |plane, yc| {
         let c = plane % p.cout;
         let n = plane / p.cout;
         let xc = &x[(n * p.cin + c) * hw..(n * p.cin + c) * hw + hw];
@@ -326,7 +326,7 @@ pub fn conv2d_bias(p: &ConvParams, x: &[f32], w: &[f32], bias: &[f32], y: &mut [
         return;
     }
     // plane index = n*Cout + co, so the channel is plane % Cout.
-    y.par_chunks_mut(psz).enumerate().for_each(|(plane, row)| {
+    par::items_mut(y, psz, psz, |plane, row| {
         let b = bias[plane % p.cout];
         for v in row.iter_mut() {
             *v += b;
@@ -372,15 +372,16 @@ fn conv2d_impl(p: &ConvParams, x: &[f32], w: &[f32], y: &mut [f32], sb: Option<(
     };
     // Thread-parallel column bands (~4 per thread), each subdivided into nc
     // panels so the panel stays cache-resident across the channel loop.
-    let threads = rayon::current_num_threads().max(1);
+    let threads = par::threads();
     let band = (psz.div_ceil(threads * 4)).max(1).div_ceil(16) * 16;
 
     for n in 0..p.n {
         let x_img = &x[n * p.cin * p.h * p.w..(n + 1) * p.cin * p.h * p.w];
         let y_img = &mut y[n * p.cout * psz..(n + 1) * p.cout * psz];
         let cptr = SendMutPtr(y_img.as_mut_ptr());
-        let starts: Vec<usize> = (0..psz).step_by(band).collect();
-        starts.par_iter().for_each(|&pa| {
+        // Bands are grouped into tasks by the shared grain: a band is `band` columns of `kg * cout` multiply-adds.
+        par::for_each_index(psz.div_ceil(band), band * kg * p.cout, |bi| {
+            let pa = bi * band;
             // Rebinding the whole `Send` newtype is REQUIRED, not redundant: under
             // Rust 2021 disjoint capture a closure that only touches `cptr.0`
             // captures that raw pointer directly, which is not `Send`. Verified by
@@ -718,7 +719,7 @@ mod winograd {
         let mut u = vec![0.0f32; 16 * cout * cin];
         {
             let uptr = SendMutPtr(u.as_mut_ptr());
-            (0..cout).into_par_iter().for_each(|co| {
+            par::for_each_index(cout, 16 * 9 * cin, |co| {
                 // Rebinding the whole `Send` newtype is REQUIRED, not redundant: under
                 // Rust 2021 disjoint capture a closure that only touches `uptr.0`
                 // captures that raw pointer directly, which is not `Send`. Verified by
@@ -744,7 +745,7 @@ mod winograd {
             let mut v = vec![0.0f32; 16 * cin * nt];
             {
                 let vptr = SendMutPtr(v.as_mut_ptr());
-                (0..cin).into_par_iter().for_each(|ci| {
+                par::for_each_index(cin, 16 * 16 * nt, |ci| {
                     // Rebinding the whole `Send` newtype is REQUIRED, not redundant: under
                     // Rust 2021 disjoint capture a closure that only touches `vptr.0`
                     // captures that raw pointer directly, which is not `Send`. Verified by
@@ -786,7 +787,7 @@ mod winograd {
             let mut m = vec![0.0f32; 16 * cout * nt];
             {
                 let mptr = SendMutPtr(m.as_mut_ptr());
-                (0..16usize).into_par_iter().for_each(|t| {
+                par::for_each_index(16, cout * cin * nt, |t| {
                     // Rebinding the whole `Send` newtype is REQUIRED, not redundant: under
                     // Rust 2021 disjoint capture a closure that only touches `mptr.0`
                     // captures that raw pointer directly, which is not `Send`. Verified by
@@ -810,7 +811,7 @@ mod winograd {
             //    parallel over Cout.
             let y_img = &mut y[n * cout * ho * wo..(n + 1) * cout * ho * wo];
             let yptr = SendMutPtr(y_img.as_mut_ptr());
-            (0..cout).into_par_iter().for_each(|co| {
+            par::for_each_index(cout, 16 * 4 * nt, |co| {
                 // Rebinding the whole `Send` newtype is REQUIRED, not redundant: under
                 // Rust 2021 disjoint capture a closure that only touches `yptr.0`
                 // captures that raw pointer directly, which is not `Send`. Verified by

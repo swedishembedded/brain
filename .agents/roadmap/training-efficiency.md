@@ -72,10 +72,12 @@ new path's largest difference from the old (loss relative, log-probabilities abs
 | A6 | Head product skipped for rows with no supervised token (`HeadCe`) | not attempted | about 7% of an SFT step (prompt rows are most of a record) | open: the recorded tape fixes every dispatch's row count, so skipping rows per batch needs a gather/scatter of supervised rows with device-side counts or per-batch recording; kernel work |
 | D1 | The policy-gradient objective fills `step_work` (forward, backward, tokens) as SFT does | test `rl` `a_policy_gradient_step_reports_its_work` | the step's time is no longer all put down to the optimizer | done |
 | D2 | `--activations` help lists exactly `SavedPolicy::ACTIVATIONS_CHOICES` | test `cli` `the_activations_help_names_what_the_parser_accepts` | | done |
+| C1 | CPU fast paths fan out by work (`par::items_mut`/`spans_mut`/`for_each_index`, grain `par::MIN_TASK_WORK`) instead of one rayon task per row (knowledge #535) | split is bit-identical: test `backend-cpu` `row_kernels_give_the_same_bits_on_any_pool`; `qwen3` `step_parity` and `rl` `kto_step_parity` green | `brain` `decision_promote` on a 288-core node: 1974 s before (during a concurrent build), 76 s after, CPU backend, `--test-threads=1`; test `par::tests::small_work_stays_on_one_thread_and_large_work_fans_out` | done; open: callers of `par::rows_mut`/`chunks_mut`/`map` with small items still split by item count (their per-item cost is the caller's to state) |
 
 ## Status
 
 - Done (lane E1, 2026-11-19): the tier-1 harness, A1, A2, A3, D1, D2 (table above).
+- Done (2026-11-19): C1, CPU fast-path fan-out sized by work (table above).
 - Open: A4, A6, A7a (table above); R6 first, then R10 and R1-R9. A7b and A8 deferred for their measured size.
 - Known flaky, unrelated: `rl` `mixture_anchor_regression` draws random seeds and failed once in six runs on the CPU backend
   (primary-only training did not raise the anchor loss by 0.05); it trains full, unweighted rows, which trimming never touches.

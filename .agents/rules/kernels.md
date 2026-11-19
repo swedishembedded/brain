@@ -506,6 +506,12 @@ existing caller. Assume nothing about units.
   fp32), and `model::int8::check_scale_len` refuses a pre-group-wise
   checkpoint by its old `[n]` scale shape. Every NPU topology's quantized
   linear goes through the one emitter `npu::topo::linear_quant`.
+- **A CPU fast path fans out by its work, not by its row count.** A per-row
+  `par_chunks_mut(row)` hands a wide pool one task per softmax row or output
+  row however little each carries, and the wake-ups then cost more than the
+  arithmetic (knowledge #535). Loop through `backend_cpu::par::items_mut`,
+  `spans_mut` or `for_each_index` with the work of one item; they group items
+  into tasks of at least `par::MIN_TASK_WORK` and run a job below it inline.
 
 ## E. Optimizing: measure first, because the guess is wrong
 
