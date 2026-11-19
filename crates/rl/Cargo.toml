@@ -138,6 +138,11 @@ path = "tests/kto_gradcheck.rs"
 required-features = ["qwen3"]
 
 [[test]]
+name = "kto_step_parity"
+path = "tests/kto_step_parity.rs"
+required-features = ["qwen3"]
+
+[[test]]
 name = "preference_gradcheck"
 path = "tests/preference_gradcheck.rs"
 required-features = ["qwen3"]

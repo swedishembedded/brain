@@ -476,7 +476,7 @@ test/rl:
 	$(CARGO_TEST) -p brain-rl --features qwen3 \
 		--test grpo_gradcheck --test grpo_objective \
 		--test dpo_gradcheck --test dpo_objective --test distill_gradcheck \
-		--test dr_grpo_gradcheck --test rloo_gradcheck --test dapo_gradcheck --test kto_gradcheck --test preference_gradcheck \
+		--test dr_grpo_gradcheck --test rloo_gradcheck --test dapo_gradcheck --test kto_gradcheck --test kto_step_parity --test preference_gradcheck \
 		--test distill_full_kl --test mixture_anchor_regression \
 		--test qwen3_fit_weighted --test improve_cycle \
 		--test grpo_fixes --test grpo_qwen35 --test improve_cycle_qwen35 \

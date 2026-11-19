@@ -25,12 +25,14 @@
 //! one's `-lambda_U * beta * sigma(u) * sigma(-u)` with `u = beta * (z - r)` (it lowers it), times the forward's
 //! active-position count the model's weighted cross-entropy divides by.
 //!
-//! ## One batch, two rows
+//! ## Two rows, each its own pass
 //!
-//! An example is packed as the two rows of one `b = 2` batch: row 0 its own completion (trained), row 1 its prompt
-//! with the next example's completion (forwarded for `z`, weight zero). The reference is the model the run starts
-//! from, scored once per row before the first step ([`Objective::check_data`]), so no second model is held. A step
-//! of `k` micro-batches forwards every one of its examples once to measure `z`, then again to train.
+//! An example is packed as two rows of `seq_len`: its own completion (trained) and its prompt with the next example's
+//! completion (forwarded for `z` only). The model is built at `b = 1`: a step of `k` micro-batches forwards its `k`
+//! mismatched rows to measure `z`, then forwards and backwards each own row, so no pass computes a row that trains
+//! nothing. The own row's loss and gradient are divided by both rows' supervised count (the count the two-row batch
+//! this replaces divided by), so the term and its gradient are unchanged. The reference is the model the run starts
+//! from, scored once per row before the first step ([`Objective::check_data`]), so no second model is held.
 
 use data::rng::Rng;
 use model::training::Unsupported;
@@ -44,7 +46,10 @@ pub const DEFAULT_KTO_BETA: f32 = 0.1;
 pub const DEFAULT_KTO_DESIRABLE_WEIGHT: f32 = 1.0;
 pub const DEFAULT_KTO_UNDESIRABLE_WEIGHT: f32 = 1.0;
 
-/// KTO's hyperparameters. `seq_len` is one row's length; the model is built at `b = 2`, `t = seq_len`.
+/// The rows a KTO model is built with: each row of an example is its own pass.
+pub const FEEDBACK_ROWS: u32 = 1;
+
+/// KTO's hyperparameters. `seq_len` is one row's length; the model is built at `b = 1`, `t = seq_len`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FeedbackConfig {
     /// Scales the log-ratio's distance from the reference point inside the sigmoid.
@@ -109,7 +114,7 @@ fn sigmoid(x: f64) -> f64 {
 }
 
 /// The term of an example with log-ratio `logratio` against the reference point `z` (see the module doc), for a
-/// forward of `count` active positions (both rows). Evaluated in f64.
+/// loss divided by `count` active positions (both rows'). Evaluated in f64.
 pub fn feedback_term(cfg: &FeedbackConfig, desirable: bool, logratio: f32, z: f32, count: f32) -> FeedbackTerm {
     let beta = f64::from(cfg.beta);
     let (lambda, sign) = if desirable { (f64::from(cfg.desirable_weight), 1.0) } else { (f64::from(cfg.undesirable_weight), -1.0) };
@@ -129,13 +134,67 @@ pub fn reference_point(mismatched: &[f32]) -> f32 {
     mean.max(0.0) as f32
 }
 
-/// One example packed as the two rows of a `b = 2` batch: its own completion (row 0) and its prompt with another
-/// example's completion (row 1), with the frozen reference's log-probability of every supervised target.
+/// One row of an example: `seq_len` tokens, the targets of its supervised positions, and the frozen reference's
+/// log-probability of each target.
 #[derive(Clone, Debug, PartialEq)]
-pub struct PackedFeedback {
+struct FeedbackRow {
     tokens: Vec<u32>,
     targets: Vec<u32>,
     ref_lp: Vec<f32>,
+    /// Supervised positions.
+    count: usize,
+}
+
+impl FeedbackRow {
+    fn pack(seq_len: usize, name: &str, (ids, mask): (&[u32], &[bool])) -> Result<FeedbackRow, String> {
+        if ids.len() != mask.len() {
+            return Err(format!("{name}: {} token ids but {} mask entries", ids.len(), mask.len()));
+        }
+        if ids.len() > seq_len {
+            return Err(format!("{name}: {} tokens do not fit a row of {seq_len}", ids.len()));
+        }
+        let mut tokens = vec![0u32; seq_len];
+        let mut targets = vec![IGNORE; seq_len];
+        tokens[..ids.len()].copy_from_slice(ids);
+        for t in 1..ids.len() {
+            if mask[t] {
+                targets[t - 1] = ids[t];
+            }
+        }
+        let count = targets.iter().filter(|&&y| y != IGNORE).count();
+        if count == 0 {
+            return Err(format!("{name}: no supervised token after the first, so the row has no log-probability"));
+        }
+        Ok(FeedbackRow { tokens, targets, ref_lp: vec![0f32; seq_len], count })
+    }
+
+    /// Forward the row alone and return the log-probability of each position's target.
+    fn forward<M: Model>(&self, model: &M) -> Vec<f32> {
+        model.set_batch(Batch::Lm { tokens: &self.tokens, targets: &self.targets });
+        let _ = model.forward();
+        model::training::objectives(model).batch_token_logprobs()
+    }
+
+    /// The row's log-ratio from the log-probabilities of a forward of it.
+    fn logratio(&self, new_lp: &[f32]) -> f32 {
+        let (new, reference, _) = row_sum(new_lp, &self.ref_lp, &self.targets, 0, self.tokens.len());
+        new - reference
+    }
+
+    fn score_reference<M: Model>(&mut self, reference: &M) {
+        let lp = self.forward(reference);
+        for (i, &y) in self.targets.iter().enumerate() {
+            self.ref_lp[i] = if y == IGNORE { 0.0 } else { lp[i] };
+        }
+    }
+}
+
+/// One example: its own completion and its prompt with another example's completion, each a row of `seq_len`, with the
+/// frozen reference's log-probability of every supervised target.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PackedFeedback {
+    own: FeedbackRow,
+    mismatched: FeedbackRow,
     desirable: bool,
 }
 
@@ -145,94 +204,62 @@ impl PackedFeedback {
     /// when that token is supervised. Refused, never truncated: a conversation longer than `seq_len`, a mask of another
     /// length than its ids, a row with no supervised token after the first.
     pub fn from_masked(seq_len: usize, own: (&[u32], &[bool]), mismatched: (&[u32], &[bool]), desirable: bool) -> Result<PackedFeedback, String> {
-        let mut tokens = vec![0u32; 2 * seq_len];
-        let mut targets = vec![IGNORE; 2 * seq_len];
-        for (row, (name, (ids, mask))) in [("completion", own), ("mismatched completion", mismatched)].into_iter().enumerate() {
-            if ids.len() != mask.len() {
-                return Err(format!("{name}: {} token ids but {} mask entries", ids.len(), mask.len()));
-            }
-            if ids.len() > seq_len {
-                return Err(format!("{name}: {} tokens do not fit a row of {seq_len}", ids.len()));
-            }
-            let base = row * seq_len;
-            tokens[base..base + ids.len()].copy_from_slice(ids);
-            for t in 1..ids.len() {
-                if mask[t] {
-                    targets[base + t - 1] = ids[t];
-                }
-            }
-            if targets[base..base + seq_len].iter().all(|&y| y == IGNORE) {
-                return Err(format!("{name}: no supervised token after the first, so the row has no log-probability"));
-            }
-        }
-        Ok(PackedFeedback { tokens, targets, ref_lp: vec![0f32; 2 * seq_len], desirable })
+        Ok(PackedFeedback { own: FeedbackRow::pack(seq_len, "completion", own)?, mismatched: FeedbackRow::pack(seq_len, "mismatched completion", mismatched)?, desirable })
     }
 
-    /// Make `reference` the frozen reference of both rows: one forward, keeping its log-probability of every target.
+    /// Make `reference` the frozen reference of both rows: one forward of each, keeping its log-probability of every
+    /// target.
     pub fn score_reference<M: Model>(&mut self, reference: &M) {
-        reference.set_batch(Batch::Lm { tokens: &self.tokens, targets: &self.targets });
-        let _ = reference.forward();
-        let lp = model::training::objectives(reference).batch_token_logprobs();
-        for (i, &y) in self.targets.iter().enumerate() {
-            self.ref_lp[i] = if y == IGNORE { 0.0 } else { lp[i] };
-        }
+        self.own.score_reference(reference);
+        self.mismatched.score_reference(reference);
     }
 
     pub fn desirable(&self) -> bool {
         self.desirable
     }
 
-    pub fn tokens(&self) -> &[u32] {
-        &self.tokens
-    }
-
-    pub fn targets(&self) -> &[u32] {
-        &self.targets
+    /// The reference's log-probability of each supervised target of the example's own row, in position order.
+    pub fn reference_logprobs(&self) -> Vec<f32> {
+        self.own.targets.iter().zip(&self.own.ref_lp).filter(|(&y, _)| y != IGNORE).map(|(_, &lp)| lp).collect()
     }
 
     fn seq_len(&self) -> usize {
-        self.tokens.len() / 2
+        self.own.tokens.len()
     }
 
     /// Refuse a token id the model has no embedding row for.
     pub fn check_vocab(&self, vocab: u32) -> Result<(), String> {
-        match self.tokens.iter().copied().chain(self.targets.iter().copied().filter(|&y| y != IGNORE)).find(|&id| id >= vocab) {
+        let ids = |row: &FeedbackRow| row.tokens.iter().copied().chain(row.targets.iter().copied().filter(|&y| y != IGNORE)).collect::<Vec<u32>>();
+        match ids(&self.own).into_iter().chain(ids(&self.mismatched)).find(|&id| id >= vocab) {
             Some(id) => Err(format!("token id {id} is outside the model's vocabulary of {vocab}")),
             None => Ok(()),
         }
     }
 }
 
-/// The log-ratios of both rows of `packed` under `model` (forwarded here): its own and the mismatched one.
+/// The log-ratios of both rows of `packed` under `model` (each forwarded here): its own and the mismatched one.
 pub fn logratios<M: Model>(model: &M, packed: &PackedFeedback) -> (f32, f32) {
-    let seq_len = packed.seq_len();
-    model.set_batch(Batch::Lm { tokens: &packed.tokens, targets: &packed.targets });
-    let _ = model.forward();
-    let new_lp = model::training::objectives(model).batch_token_logprobs();
-    let (new_own, ref_own, _) = row_sum(&new_lp, &packed.ref_lp, &packed.targets, 0, seq_len);
-    let (new_mis, ref_mis, _) = row_sum(&new_lp, &packed.ref_lp, &packed.targets, 1, seq_len);
-    (new_own - ref_own, new_mis - ref_mis)
+    (packed.own.logratio(&packed.own.forward(model)), mismatched_logratio(model, packed))
 }
 
-/// One example's training forward against the held reference point `z`: the term, and its weight installed on the
-/// supervised positions of row 0 (row 1 weighs nothing) - everything a micro-step does before its backward. Also
-/// returns the example's log-ratio. `model` is built at `b = 2`, `t = seq_len`, with weighted loss enabled.
+/// The log-ratio of the mismatched row of `packed` under `model` (forwarded here): one term of the reference point.
+pub fn mismatched_logratio<M: Model>(model: &M, packed: &PackedFeedback) -> f32 {
+    packed.mismatched.logratio(&packed.mismatched.forward(model))
+}
+
+/// One example's training forward against the held reference point `z`: its own row forwarded, the term, and its
+/// weight installed on the row's supervised positions, with the loss divided by both rows' supervised count -
+/// everything a micro-step does before its backward. Also returns the example's log-ratio. `model` is built at
+/// `b = 1`, `t = seq_len`, with weighted loss enabled.
 pub fn weigh_feedback<M: Model>(cfg: &FeedbackConfig, model: &M, packed: &PackedFeedback, z: f32) -> (FeedbackTerm, f32) {
-    let seq_len = packed.seq_len();
-    model.set_batch(Batch::Lm { tokens: &packed.tokens, targets: &packed.targets });
-    let _ = model.forward();
+    let row = &packed.own;
+    let new_lp = row.forward(model);
     let objectives = model::training::objectives(model);
-    let new_lp = objectives.batch_token_logprobs();
-    let (new_own, ref_own, count_own) = row_sum(&new_lp, &packed.ref_lp, &packed.targets, 0, seq_len);
-    let (_, _, count_mis) = row_sum(&new_lp, &packed.ref_lp, &packed.targets, 1, seq_len);
-    let logratio = new_own - ref_own;
-    let term = feedback_term(cfg, packed.desirable, logratio, z, (count_own + count_mis).max(1) as f32);
-    let mut weights = vec![0f32; 2 * seq_len];
-    for (i, w) in weights.iter_mut().enumerate().take(seq_len) {
-        if packed.targets[i] != IGNORE {
-            *w = term.weight;
-        }
-    }
+    let count = (row.count + packed.mismatched.count) as f32;
+    objectives.set_loss_denominator(count);
+    let logratio = row.logratio(&new_lp);
+    let term = feedback_term(cfg, packed.desirable, logratio, z, count);
+    let weights: Vec<f32> = row.targets.iter().map(|&y| if y == IGNORE { 0.0 } else { term.weight }).collect();
     objectives.set_loss_weights(&weights);
     (term, logratio)
 }
@@ -295,7 +322,12 @@ impl Feedback {
 impl Feedback {
     /// Each example's log-ratio of its own completion under `model` against the reference it was scored with.
     pub fn logratios<M: Model>(&self, model: &M) -> Vec<f32> {
-        self.examples.iter().map(|e| logratios(model, e).0).collect()
+        self.examples.iter().map(|e| e.own.logratio(&e.own.forward(model))).collect()
+    }
+
+    /// Every example's [`PackedFeedback::reference_logprobs`], concatenated in example order.
+    pub fn reference_logprobs(&self) -> Vec<f32> {
+        self.examples.iter().flat_map(PackedFeedback::reference_logprobs).collect()
     }
 }
 
@@ -332,7 +364,7 @@ impl<M: Model> Objective<M> for Feedback {
     fn micro_steps(&mut self, model: &M, rng: &mut Rng, k: u32) -> f32 {
         assert!(self.referenced, "Feedback: the reference is scored in check_data(), which was not called");
         let drawn: Vec<usize> = (0..k.max(1)).map(|_| rng.gen_range_inclusive(0, self.examples.len() as i64 - 1) as usize).collect();
-        let mismatched: Vec<f32> = drawn.iter().map(|&e| logratios(model, &self.examples[e]).1).collect();
+        let mismatched: Vec<f32> = drawn.iter().map(|&e| mismatched_logratio(model, &self.examples[e])).collect();
         let z = reference_point(&mismatched);
         let mut loss = 0.0;
         for &e in &drawn {
@@ -349,7 +381,7 @@ impl<M: Model> Objective<M> for Feedback {
     /// The loss of one example drawn from the probe's generator against its own mismatched row's reference point.
     fn loss_probe(&mut self, model: &M, rng: &mut Rng) -> f32 {
         let e = rng.gen_range_inclusive(0, self.examples.len() as i64 - 1) as usize;
-        let z = reference_point(&[logratios(model, &self.examples[e]).1]);
+        let z = reference_point(&[mismatched_logratio(model, &self.examples[e])]);
         weigh_feedback(&self.cfg, model, &self.examples[e], z).0.loss
     }
 
@@ -364,9 +396,9 @@ impl<M: Model> Objective<M> for Feedback {
         vec![("kto_reference_point", self.last_z), ("kto_logratio", self.last_logratio)]
     }
 
-    /// Both rows of an example share one forward.
+    /// Each row is its own pass.
     fn batch_shape(&self) -> Option<(u32, u32)> {
-        Some((2, self.cfg.seq_len as u32))
+        Some((FEEDBACK_ROWS, self.cfg.seq_len as u32))
     }
 }
 

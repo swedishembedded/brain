@@ -14,7 +14,7 @@ use std::cell::Cell;
 
 use gradcheck::{directional_check, CheckModel};
 use qwen3::{Qwen, QwenConfig};
-use rl::objective::feedback::{weigh_feedback, FeedbackConfig, PackedFeedback};
+use rl::objective::feedback::{weigh_feedback, FeedbackConfig, PackedFeedback, FEEDBACK_ROWS};
 
 const SEQ_LEN: usize = 6;
 const CFG: FeedbackConfig = FeedbackConfig { beta: 0.4, desirable_weight: 1.0, undesirable_weight: 1.3, seq_len: SEQ_LEN };
@@ -36,9 +36,9 @@ impl KtoHarness {
         let mask = [false, false, false, true, true, true];
         let mut example = PackedFeedback::from_masked(SEQ_LEN, (&own, &mask), (&mismatched, &mask), desirable).expect("the example fits");
         // A differently initialised reference, so the log-ratio is not the degenerate zero of a policy against itself.
-        let reference = Qwen::new(cfg.clone(), 2, SEQ_LEN as u32, &qwen3::init_weights(&cfg, seed + 1));
+        let reference = Qwen::new(cfg.clone(), FEEDBACK_ROWS, SEQ_LEN as u32, &qwen3::init_weights(&cfg, seed + 1));
         example.score_reference(&reference);
-        let mut m = Qwen::new(cfg.clone(), 2, SEQ_LEN as u32, &qwen3::init_weights(&cfg, seed));
+        let mut m = Qwen::new(cfg.clone(), FEEDBACK_ROWS, SEQ_LEN as u32, &qwen3::init_weights(&cfg, seed));
         m.enable_weighted_loss();
         KtoHarness { m, example, forwarded: Cell::new(false) }
     }

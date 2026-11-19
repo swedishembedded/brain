@@ -39,11 +39,11 @@ use data::feedback::FeedbackSample;
 use data::preference::EncodedTurn;
 use data::qwen_tokenizer::QwenBpe;
 use model::training::Capability;
-use rl::objective::feedback::{FeedbackConfig, PackedFeedback};
+use rl::objective::feedback::{FeedbackConfig, PackedFeedback, FEEDBACK_ROWS};
 
 use crate::chat_trainer::FeedbackJob;
 use crate::finetune::{base_digest, block_for, digest, fit_opts, lora_shape, resolve_seed, tokenizer_and_template};
-use crate::{CancelToken, Device, Error, FineTuneProgress, FineTuneStatus, Result, PAIR_ROWS};
+use crate::{CancelToken, Device, Error, FineTuneProgress, FineTuneStatus, Result};
 
 pub use rl::objective::feedback::{DEFAULT_KTO_BETA, DEFAULT_KTO_DESIRABLE_WEIGHT, DEFAULT_KTO_UNDESIRABLE_WEIGHT};
 
@@ -294,7 +294,7 @@ impl FeedbackFineTune {
                 if let Some(dir) = &self.models_dir {
                     sizing = sizing.models_dir(dir.as_str());
                 }
-                chat.lora_bases.parse(&sizing.footprint(block.saturating_mul(PAIR_ROWS), card_bytes)?.base_tier).map_err(Error::Backend)?
+                chat.lora_bases.parse(&sizing.footprint(block.saturating_mul(FEEDBACK_ROWS), card_bytes)?.base_tier).map_err(Error::Backend)?
             }
             None => gpu_core::select::Dtype::F32,
         };
@@ -311,7 +311,7 @@ impl FeedbackFineTune {
         }
         let state_path = self.resume_state.clone().unwrap_or_else(|| out_dir.join(STATE_FILE));
         let seed = resolve_seed(self.seed, Some(&state_path))?;
-        let requested = model::FitOpts { batch_size: PAIR_ROWS, grad_accum: self.grad_accum, strict_updates: self.strict_updates, ..fit_opts(self.steps, block, self.lr, seed) };
+        let requested = model::FitOpts { batch_size: FEEDBACK_ROWS, grad_accum: self.grad_accum, strict_updates: self.strict_updates, ..fit_opts(self.steps, block, self.lr, seed) };
         let cfg = config(seq_len);
         let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &[&cfg]).map_err(|e| Error::Backend(format!("FeedbackFineTune: {e}")))?.into_opts();
         let base_digest = base_digest(&weights)?;

@@ -29,7 +29,7 @@ use crate::objective::distill::{DistillConfig, DistillExample, DistillTopK, TopK
 use crate::objective::dpo::{weigh_pair, PackedPair, PairLoss};
 use crate::objective::advantage::group_advantages_with;
 use crate::objective::external::{PolicyGradientAlgorithm, PolicyGradientConfig};
-use crate::objective::feedback::{weigh_feedback, Feedback, FeedbackConfig, PackedFeedback};
+use crate::objective::feedback::{weigh_feedback, Feedback, FeedbackConfig, PackedFeedback, FEEDBACK_ROWS};
 use crate::objective::grpo::{token_term, Grpo, GrpoConfig};
 use crate::objective::grpo_term::ClipBand;
 use crate::objective::pg_batch::{backward_weighted, PgBatch, PgSpec};
@@ -87,12 +87,14 @@ pub fn run_objectives<M: Model>(subject: &Subject<M>, seed: u64) -> Result<(), S
         })?;
     }
 
-    // KTO: an example (row 0) and its prompt with another completion (row 1, the reference point's), against the frozen
-    // starting model, once desirable and once undesirable; the reference point is the starting policy's (zero).
+    // KTO: an example and its prompt with another completion (the reference point's), each its own one-row pass,
+    // against the frozen starting model, once desirable and once undesirable; the reference point is the starting
+    // policy's (zero).
+    let one_row_reference = fresh(FEEDBACK_ROWS)?;
     for desirable in [true, false] {
-        let m = fresh(2)?;
+        let m = fresh(FEEDBACK_ROWS)?;
         let mut example = PackedFeedback::from_masked(row, (&tokens[..row], &mask), (&tokens[row..2 * row], &mask), desirable)?;
-        example.score_reference(&reference);
+        example.score_reference(&one_row_reference);
         let kto = FeedbackConfig { beta: BETA, desirable_weight: 1.0, undesirable_weight: 1.0, seq_len: row };
         lowers(subject.name, if desirable { "kto (desirable)" } else { "kto (undesirable)" }, &m, &mut || {
             let (term, _) = weigh_feedback(&kto, &m, &example, 0.0);
