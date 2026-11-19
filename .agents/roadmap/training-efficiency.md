@@ -8,8 +8,9 @@ floored at the binary32 agreement bound of the step's longest reduction):
 on fixed real records, loss, gradients and post-step weights stay within the old path's run-to-run band. An item that changes
 numerics or the draw order is a new arm, checked deliberately, never shipped as an optimisation.
 
-Measured before the work (one GH200, Qwen3-4B bf16 LoRA rank 16, all 7 projections): packed SFT reached about 2% MFU and 1.3k
-useful tokens/s (3.0k computed; rows padded to the 16k block, 56% of the work); a policy-gradient step with behaviour and reference
+Measured before the work (one GH200, Qwen3-4B bf16 LoRA rank 16, all 7 projections): packed SFT reached about 2% MFU (a whole-run
+estimate the step profile refuted, knowledge 533) and 1.3k useful tokens/s (3.0k computed; rows padded to the 16k block, 56% of
+the work); a policy-gradient step with behaviour and reference
 scoring took about 150 s (27 s of it scoring); a KTO run started 55 minutes late (eager reference scoring of the dataset) and then
 ran 170 s per step.
 
