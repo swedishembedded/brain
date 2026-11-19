@@ -24,7 +24,10 @@ fn bin() -> String {
 }
 
 fn assert_help_flag(flag: &str) {
-    let out = Command::new(bin()).args(["perf", "flops"]).arg(flag).output().expect("run brain perf flops");
+    // `--device cpu` keeps the machine out of stderr: with no flag the CLI resolves every device it has, and says
+    // so when `BRAIN_DEVICE`/`BRAIN_BACKEND` are set or an NVIDIA card is driven without CUDA. Those notices are
+    // the start-up's, not the help's.
+    let out = Command::new(bin()).args(["--device", "cpu", "perf", "flops"]).arg(flag).output().expect("run brain perf flops");
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(out.status.success(), "brain perf flops {flag} exited {:?}; stderr: {stderr}", out.status.code());
