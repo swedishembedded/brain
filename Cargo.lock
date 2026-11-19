@@ -3265,9 +3265,11 @@ dependencies = [
 name = "brain-testutil"
 version = "6.0.0"
 dependencies = [
+ "blake3",
  "brain-checkpoint",
  "brain-modelref",
  "brain-modelstore",
+ "serde",
  "serde_json",
 ]
 

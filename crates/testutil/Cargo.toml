@@ -19,3 +19,6 @@ brain-modelstore.workspace = true
 brain-checkpoint.workspace = true
 # `golden::Source` reads the provenance block out of a dumper's manifest.json.
 serde_json.workspace = true
+# `step_parity` pins its record fixtures by digest and reads their encoding.
+blake3.workspace = true
+serde.workspace = true

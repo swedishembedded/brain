@@ -29,6 +29,7 @@ pub mod parity;
 mod process;
 pub mod rounding;
 mod scratch;
+pub mod step_parity;
 pub mod training;
 
 pub use process::{output_within, run_alone};
