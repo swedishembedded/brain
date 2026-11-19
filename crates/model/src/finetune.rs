@@ -324,13 +324,15 @@ pub trait ChatTrainer {
 
     /// Per-pair preference margins of the adapter at `policy` against
     /// `reference` (or the base), `None` when the family does not score
-    /// preference pairs.
+    /// preference pairs. The base is held at `base`, the tier the run trained it at: a scoring pass at a wider
+    /// tier than the run's costs several times the run's own forwards for numbers the run never computed.
     fn preference_margins(
         _weights: &Path,
         _reference: Option<&Path>,
         _policy: &Path,
         _pairs: &[(data::preference::EncodedTurn, data::preference::EncodedTurn)],
         _block: u32,
+        _base: Dtype,
     ) -> Option<PreferenceMargins> {
         None
     }

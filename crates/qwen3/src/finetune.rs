@@ -949,10 +949,11 @@ impl model::finetune::ChatTrainer for Qwen3Trainer {
         policy: &Path,
         pairs: &[(data::preference::EncodedTurn, data::preference::EncodedTurn)],
         block: u32,
+        base: Dtype,
     ) -> Option<model::finetune::PreferenceMargins> {
         let weights = path_str(weights).ok()?;
         let reference = reference.map(path_str).transpose().ok()?;
-        Some(crate::eval::preference_margins(weights, reference, Some(path_str(policy).ok()?), pairs, block))
+        Some(crate::eval::preference_margins(weights, reference, Some(path_str(policy).ok()?), pairs, block, base))
     }
 }
 

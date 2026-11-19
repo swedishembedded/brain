@@ -97,7 +97,7 @@ type FullFn = for<'c> fn(&Path, &Path, &FitOpts, &Path, OptimizerState, FitContr
 type PreferenceFn = for<'j, 'c> fn(PreferenceJob<'j>, FitControl<'c>) -> std::io::Result<(FitReport, ResidentMargins)>;
 /// The run's report and, after a completed run, each training example's log-ratio against the starting policy.
 type FeedbackFn = for<'j, 'c> fn(FeedbackJob<'j>, FitControl<'c>) -> std::io::Result<(FitReport, Vec<f32>)>;
-type MarginsFn = fn(&Path, Option<&Path>, &Path, &[(EncodedTurn, EncodedTurn)], u32) -> Option<PreferenceMargins>;
+type MarginsFn = fn(&Path, Option<&Path>, &Path, &[(EncodedTurn, EncodedTurn)], u32, gpu_core::select::Dtype) -> Option<PreferenceMargins>;
 type SearchFn = for<'j> fn(SearchJob<'j>, &mut dyn FnMut(Progress)) -> std::io::Result<Report>;
 
 /// One weight precision search of a base, on a prepared dataset.

@@ -107,6 +107,15 @@ fn dpo_trains_over_the_base_format_it_is_given() {
         assert!((initial - std::f32::consts::LN_2).abs() < 1e-3, "{format}: the starting policy is the reference: {initial}");
         let last = outcome.final_loss.expect("measured");
         assert!(last.is_finite() && last < initial, "{format}: DPO loss {initial} -> {last}");
+        if format == "bf16" {
+            // The run scores its adapter over the base held at the run's own tier; the public scorer reads f32. The
+            // two agree to the rounding of the half tier, not to a different answer.
+            let run = outcome.train_score.expect("scored");
+            let f32_score = brain::score_preference(model.join("model.safetensors").to_str().unwrap(), outcome.adapter.as_ref().expect("exported"), &model.join("train.jsonl")).expect("the public scorer");
+            let (a, b) = (run.mean_margin.expect("measured"), f32_score.mean_margin.expect("measured"));
+            assert!((a - b).abs() <= 0.1 * b.abs().max(0.5), "bf16 scoring {a} against f32 scoring {b}");
+            assert_eq!(run.pairs, f32_score.pairs);
+        }
     }
     let err = fine_tune(&model, &model.join("run-refused")).base_format("fp3").run().unwrap_err().to_string();
     assert!(err.contains("fp3") && err.contains("qwen3"), "{err}");

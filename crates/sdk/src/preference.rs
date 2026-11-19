@@ -568,8 +568,11 @@ impl PreferenceFineTune {
 
         let reference = self.continue_from.as_deref();
         if chat.scores_exported_pairs {
-            outcome.train_score = score_pairs(&chat, &weights, reference, &adapter_path, &train);
-            outcome.held_out_score = held_out.as_ref().and_then(|pairs| score_pairs(&chat, &weights, reference, &adapter_path, pairs));
+            // Each scored pair is four forwards of two rows (policy and reference, chosen and rejected) on the serving
+            // path, so the training pairs are estimated on an even sample: the held-out pairs are the measurement.
+            let sample = even_sample(&train, MAX_TRAIN_SCORE_PAIRS);
+            outcome.train_score = score_pairs(&chat, &weights, reference, &adapter_path, &sample, base_format);
+            outcome.held_out_score = held_out.as_ref().and_then(|pairs| score_pairs(&chat, &weights, reference, &adapter_path, pairs, base_format));
         } else {
             outcome.train_score = resident.first().map(|margins| margins_score(margins, 0));
             outcome.held_out_score = resident.get(1).map(|margins| margins_score(margins, held_out_skipped));
@@ -630,8 +633,8 @@ pub struct PreferenceFineTuneOutcome {
     /// `TrainingProvenance::base_digest`. `None` when the run did not compute
     /// it.
     pub base_digest: Option<String>,
-    /// The tuned adapter against the run's reference on the training pairs;
-    /// `None` unless completed.
+    /// The tuned adapter against the run's reference on the training pairs (an even sample of at most 32 of them when
+    /// the run trained on more: the held-out score is the measurement); `None` unless completed.
     pub train_score: Option<PreferenceScore>,
     /// The same on the held-out pairs; `None` unless completed with a
     /// held-out set.
@@ -705,15 +708,15 @@ pub fn score_preference(base: &str, adapter: &Path, dataset: &Path) -> Result<Pr
     let pairs = encode_checked(dataset, &tok, &tmpl, None, data::chat::RenderOpts::default())?;
     // Scoring folds an adapter into the base the way serving does: a qwen3 path.
     let chat = crate::study::arch("qwen3")?.chat.expect("qwen3 has chat fine-tuners");
-    score_pairs(&chat, &weights, None, adapter, &pairs).ok_or_else(|| Error::Backend("qwen3 does not score preference pairs".to_string()))
+    score_pairs(&chat, &weights, None, adapter, &pairs, gpu_core::select::Dtype::F32).ok_or_else(|| Error::Backend("qwen3 does not score preference pairs".to_string()))
 }
 
 /// The policy `weights` + `policy` against the reference `weights` +
 /// `reference` (or the base alone), on a scoring row that fits the longest
 /// candidate; `None` when the architecture does not score preference pairs.
-fn score_pairs(chat: &ChatEntry, weights: &Path, reference: Option<&Path>, policy: &Path, pairs: &[(EncodedTurn, EncodedTurn)]) -> Option<PreferenceScore> {
+fn score_pairs(chat: &ChatEntry, weights: &Path, reference: Option<&Path>, policy: &Path, pairs: &[(EncodedTurn, EncodedTurn)], base: gpu_core::select::Dtype) -> Option<PreferenceScore> {
     let block = block_for(longest(pairs), None).expect("no cap, so every length fits");
-    let m = (chat.margins)(weights, reference, policy, pairs, block)?;
+    let m = (chat.margins)(weights, reference, policy, pairs, block, base)?;
     let n = m.margins.len();
     let scored = (n > 0).then_some(n as f64);
     Some(PreferenceScore {
@@ -744,6 +747,39 @@ fn encode_checked(path: &Path, tok: &QwenBpe, tmpl: &ChatTemplate, max_block: Op
     Ok(pairs)
 }
 
+/// The most training pairs a run scores after it exported ([`PreferenceFineTuneOutcome::train_score`]).
+const MAX_TRAIN_SCORE_PAIRS: usize = 32;
+
+/// At most `n` of `pairs`, evenly spaced through them in order (all of them when there are no more than `n`).
+fn even_sample(pairs: &[(EncodedTurn, EncodedTurn)], n: usize) -> Vec<(EncodedTurn, EncodedTurn)> {
+    if pairs.len() <= n {
+        return pairs.to_vec();
+    }
+    (0..n).map(|i| pairs[i * pairs.len() / n].clone()).collect()
+}
+
 fn longest(pairs: &[(EncodedTurn, EncodedTurn)]) -> usize {
     pairs.iter().map(|(c, r)| c.ids.len().max(r.ids.len())).max().unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn turn(id: u32) -> EncodedTurn {
+        EncodedTurn { ids: vec![id], mask: vec![true] }
+    }
+
+    /// The training pairs scored after a run are an even sample in dataset order, never more than asked, and all of
+    /// them when there are no more than asked.
+    #[test]
+    fn the_training_score_sample_is_even_ordered_and_bounded() {
+        let pairs: Vec<_> = (0..175).map(|i| (turn(i), turn(1000 + i))).collect();
+        let sample = even_sample(&pairs, 32);
+        assert_eq!(sample.len(), 32);
+        assert!(sample.windows(2).all(|w| w[0].0.ids[0] < w[1].0.ids[0]), "in dataset order, none twice");
+        assert_eq!(sample[0].0.ids[0], 0);
+        assert!(sample[31].0.ids[0] >= 175 - 175 / 32 - 1, "reaches the end of the set");
+        assert_eq!(even_sample(&pairs[..5], 32).len(), 5);
+    }
 }

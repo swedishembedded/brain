@@ -204,12 +204,16 @@ pub use model::finetune::PreferenceMargins;
 /// base alone - and each pair's margin between them. The two models are
 /// built one after the other on the same inference path serving uses, never
 /// both at once. A pair with a candidate longer than `block` is skipped and
-/// counted.
-pub fn preference_margins(weights: &str, reference_adapter: Option<&str>, policy_adapter: Option<&str>, pairs: &[(EncodedTurn, EncodedTurn)], block: u32) -> PreferenceMargins {
+/// counted. The models hold the base at `base`, the tier the run trained it at (an adapter is folded into the base
+/// tensors first, so a half tier rounds the folded sum once): scoring a bf16 run at f32 reads every linear at
+/// several times the cost of the run's own forwards.
+pub fn preference_margins(weights: &str, reference_adapter: Option<&str>, policy_adapter: Option<&str>, pairs: &[(EncodedTurn, EncodedTurn)], block: u32, base: Dtype) -> PreferenceMargins {
     let fits = |t: &EncodedTurn| t.ids.len() >= 2 && t.ids.len() <= block as usize;
     let scored: Vec<&(EncodedTurn, EncodedTurn)> = pairs.iter().filter(|(c, r)| fits(c) && fits(r)).collect();
     let sequence_logprobs = |adapter: Option<&str>| -> Vec<(f64, f64)> {
-        let model = load_scored_model(weights, adapter, block, Dtype::F32);
+        // A half tier is what the run trained over; the others (a quantized base) are scored at f32, as before.
+        let tier = if base == Dtype::BF16 { base } else { Dtype::F32 };
+        let model = load_scored_model(weights, adapter, block, tier);
         scored.iter().map(|(c, r)| (supervised_logprob(&model, c), supervised_logprob(&model, r))).collect()
     };
     let reference = sequence_logprobs(reference_adapter);
