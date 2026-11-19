@@ -612,9 +612,10 @@ reading claims below, they have very different capabilities:
   progress to bring this down.
 
 `reasoning_effort` (xhigh/medium/low) is wired through the shared chat path
-(`qwen3::chat::parse_request`, defaulting to `xhigh` when thinking is
-enabled), validated against the real Qwen3.8 chat template. The template
+(`qwen3::chat::parse_request`; left out, the template's own `xhigh` applies
+when thinking is enabled), validated against the real Qwen3.8 chat template. The template
 flavor is selectable too: requests default to this model's own Qwen3.8
 template (XML `<function=...>` tool-call payloads, prefilled open `<think>`,
 live `preserve_thinking`), and `template_flavor: "qwen3"` opts back into the
-Qwen3-era JSON tool-call form.
+Qwen3-era JSON tool-call form, whose template does not read
+`reasoning_effort`: a request that sets both is refused.

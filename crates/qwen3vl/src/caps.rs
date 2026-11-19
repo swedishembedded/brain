@@ -803,19 +803,10 @@ impl Prepared {
         // call directly: `render` returns one whole messages+tools prompt as
         // a single string, with no seam to splice an image-token run into
         // the middle of it the way Qwen3-VL needs.
-        //
-        // NOT byte-for-byte identical to what `qwen3::caps generate` renders
-        // for the same tools: `qwen3::chat::parse_request` resolves
-        // `reasoning_effort` to `Some("xhigh")` whenever `enable_thinking` is
-        // true (its own default), and `qwen_chat::render` then injects an
-        // extra "Reasoning effort is set to..." directive paragraph into the
-        // preamble for both template flavors. This action has no
-        // `enable_thinking`/`reasoning_effort` param, so `TemplateOpts`
-        // resolves that to `None` here and the directive paragraph is always
-        // omitted. The `<tools>` JSON block and surrounding structure match;
-        // this one paragraph does not - pinned by
-        // `caps::tests::tools_preamble_matches_qwen3_except_the_reasoning_effort_directive_it_cannot_opt_into`
-        // rather than left as an unverified comment.
+        // The preamble is byte-for-byte what `qwen3::caps generate` renders for
+        // the same tools under the Qwen3 flavor, whose template writes no
+        // reasoning-effort instruction (pinned by
+        // `caps::tests::tools_preamble_matches_qwen3`).
         let mut tokens = if tools.is_empty() {
             Vec::new()
         } else {
@@ -950,17 +941,10 @@ impl PreparedVideo {
         // call directly: `render` returns one whole messages+tools prompt as
         // a single string, with no seam to splice an image-token run into
         // the middle of it the way Qwen3-VL needs.
-        //
-        // NOT byte-for-byte identical to what `qwen3::caps generate` renders
-        // for the same tools: `qwen3::chat::parse_request` resolves
-        // `reasoning_effort` to `Some("xhigh")` whenever `enable_thinking` is
-        // true (its own default), and `qwen_chat::render` then injects an
-        // extra "Reasoning effort is set to..." directive paragraph into the
-        // preamble for both template flavors. This action has no
-        // `enable_thinking`/`reasoning_effort` param, so `TemplateOpts`
-        // resolves that to `None` here and the directive paragraph is always
-        // omitted. The `<tools>` JSON block and surrounding structure match;
-        // this one paragraph does not.
+        // The preamble is byte-for-byte what `qwen3::caps generate` renders for
+        // the same tools under the Qwen3 flavor, whose template writes no
+        // reasoning-effort instruction (pinned by
+        // `caps::tests::tools_preamble_matches_qwen3`).
         let mut tokens = if tools.is_empty() {
             Vec::new()
         } else {
@@ -1637,24 +1621,16 @@ mod tests {
 
     /// The tools preamble this action renders (`Prepared::build`'s
     /// `qwen_chat::render(&[], tools, TemplateOpts { add_generation_prompt:
-    /// false, .. })` call, with `reasoning_effort: None` since this action has
-    /// no `enable_thinking`/`reasoning_effort` param) is NOT byte-for-byte what
-    /// `qwen3::caps generate` renders under ITS OWN default
-    /// (`enable_thinking: true` resolves `reasoning_effort` to `Some("xhigh")`,
-    /// per `qwen3::chat::parse_request`) - the two differ by exactly one
-    /// injected "reasoning effort" directive paragraph. This test pins that
-    /// real, narrower relationship rather than leaving the comment's claim
-    /// unverified.
+    /// false, .. })` call) is byte-for-byte the system turn `qwen3::chat`
+    /// serves for the same tools under its default (Qwen3) flavor: that
+    /// template writes no reasoning-effort instruction.
     #[test]
-    fn tools_preamble_matches_qwen3_except_the_reasoning_effort_directive_it_cannot_opt_into() {
-        let tools = vec![r#"{"type":"function","function":{"name":"get_weather","parameters":{}}}"#.to_string()];
-        let this_crate_render = qwen_chat::render(&[], &tools, TemplateOpts { add_generation_prompt: false, ..Default::default() }).unwrap();
-        let qwen3_default_render =
-            qwen_chat::render(&[], &tools, TemplateOpts { add_generation_prompt: false, reasoning_effort: Some("xhigh".into()), ..Default::default() })
-                .unwrap();
-        assert_ne!(this_crate_render, qwen3_default_render, "the two must actually differ, or the documented gap is imaginary");
-        assert!(!this_crate_render.to_lowercase().contains("reasoning effort"), "this crate's preamble has no enable_thinking param, so it must omit the directive");
-        assert!(qwen3_default_render.to_lowercase().contains("reasoning effort"), "qwen3's own thinking-enabled default must inject the directive");
+    fn tools_preamble_matches_qwen3() {
+        let tools = r#"[{"type":"function","function":{"name":"get_weather","parameters":{}}}]"#;
+        let this_crate_render = qwen_chat::render(&[], &qwen3::chat::parse_tools(Some(tools)).unwrap(), TemplateOpts { add_generation_prompt: false, ..Default::default() }).unwrap();
+        let served = qwen3::chat::render_prompt(&Invocation::new().set("prompt", json!("hi")).set("tools", json!(tools))).unwrap().text;
+        assert!(served.starts_with(&this_crate_render), "{served:?} vs {this_crate_render:?}");
+        assert!(!served.to_lowercase().contains("reasoning effort"), "{served}");
     }
 
     /// Server-side named-function validation runs BEFORE any weights are

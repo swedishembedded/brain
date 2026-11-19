@@ -97,16 +97,15 @@ fn parse_tool_call_msg(c: &serde_json::Value) -> ToolCallMsg {
 }
 
 /// Parse the `tools` param (a JSON array of OpenAI-shaped tool-schema objects) into
-/// one raw JSON text per tool. Re-serializes each element via plain `serde_json`
-/// (NOT `qwen_chat`'s Python-`json.dumps`-exact `json_py`, which is crate-private to
-/// `brain-data`) — exact byte-for-byte matching only matters inside the prompt
-/// renderer itself, which re-normalizes every tool's text through its own
+/// one raw JSON text per tool, exactly as the request wrote it. The prompt renderer
+/// re-serializes every tool's text through `qwen_chat`'s order-preserving
 /// `json_py::dumps` when it emits the `<tools>` block (see `qwen_chat::render`).
 pub fn parse_tools(raw: Option<&str>) -> Result<Vec<String>, String> {
     let Some(raw) = raw.filter(|s| !s.is_empty()) else { return Ok(Vec::new()) };
-    let v: serde_json::Value = serde_json::from_str(raw).map_err(|e| format!("qwen: tools JSON: {e}"))?;
-    let arr = v.as_array().ok_or("qwen: tools must be a JSON array")?;
-    arr.iter().map(|t| serde_json::to_string(t).map_err(|e| format!("qwen: tools JSON: {e}"))).collect()
+    // Each schema's own text, members in the order the request wrote them: the template prints a schema as written
+    // (`tool | tojson`), and a parsed `serde_json::Value` would sort its members.
+    let arr: Vec<&serde_json::value::RawValue> = serde_json::from_str(raw).map_err(|e| format!("qwen: tools must be a JSON array: {e}"))?;
+    Ok(arr.into_iter().map(|t| t.get().to_string()).collect())
 }
 
 /// The OpenAI-compatible `tool_choice` constraint, parsed from the raw JSON
@@ -432,26 +431,33 @@ fn sampler_params(tok: &QwenBpe, inv: &Invocation, temp: f32, top_k: usize, top_
 }
 
 /// The chat-template settings [`render_prompt`] reads beside `enable_thinking`, as the params a `generate` action
-/// whose requests it renders declares: `reasoning_effort`, `preserve_thinking` and `template_flavor`, each defaulting
-/// to what the render does when it is left out, except the flavor, which defaults to `flavor` (the model's own: a
-/// Qwen3.8 model renders the 3.8 template). Declaring them is what lets a serving surface pass them on (it refuses a
-/// param the action does not declare) and fill an omitted one with the model's default.
-pub fn template_params(flavor: qwen_chat::TemplateFlavor) -> [capability::ParamSpec; 3] {
+/// whose requests it renders declares: `preserve_thinking` and `template_flavor`, and `reasoning_effort` where the
+/// model's own template reads it (Qwen3.8's; the Qwen3-era template does not, so a Qwen3 model refuses it by name at
+/// admission instead of serving a prompt its template never writes). `reasoning_effort` has no default of brain's
+/// own: left out, the template's own default applies. The flavor defaults to `flavor` (the model's own: a Qwen3.8
+/// model renders the 3.8 template). Declaring them is what lets a serving surface pass them on (it refuses a param the
+/// action does not declare) and fill an omitted one with the model's default.
+pub fn template_params(flavor: qwen_chat::TemplateFlavor) -> Vec<capability::ParamSpec> {
     use capability::{ParamSpec, ParamType};
+    let reads_effort = flavor == qwen_chat::TemplateFlavor::Qwen38;
     let flavor = match flavor {
         qwen_chat::TemplateFlavor::Qwen38 => "qwen3.8",
         _ => "qwen3",
     };
-    [
-        ParamSpec::new("reasoning_effort", ParamType::Str, "reasoning effort level: xhigh (default, detailed deliberation), medium (no instruction), or low (brief thinking)").default(json!("xhigh")),
-        ParamSpec::new("preserve_thinking", ParamType::Bool, "Qwen3.8 chat-template kwarg: keep <think> blocks from prior assistant turns in the rendered history (inert under the Qwen3-era template, whose history framing is positional)").default(json!(true)),
+    let mut params = Vec::with_capacity(3);
+    if reads_effort {
+        params.push(ParamSpec::new("reasoning_effort", ParamType::Str, "reasoning effort level the chat template writes as an instruction: xhigh (the template's default, detailed deliberation), medium (no instruction), or low (brief thinking)"));
+    }
+    params.push(ParamSpec::new("preserve_thinking", ParamType::Bool, "Qwen3.8 chat-template kwarg: keep <think> blocks from prior assistant turns in the rendered history (inert under the Qwen3-era template, whose history framing is positional)").default(json!(true)));
+    params.push(
         ParamSpec::new(
             "template_flavor",
             ParamType::Str,
             "chat template flavor: qwen3.8 (XML <function=> tool-call payloads, prefilled open <think>, preserve_thinking kwarg) or qwen3 (JSON <tool_call> payloads, positional think framing)",
         )
         .default(json!(flavor)),
-    ]
+    );
+    params
 }
 
 /// The chat-template render of one request, before tokenization: the prompt
@@ -481,13 +487,9 @@ pub struct RenderedPrompt {
 /// [`parse_reply`] - gets it from here without loading a model.
 pub fn render_prompt(inv: &Invocation) -> Result<RenderedPrompt, String> {
     let enable_thinking = inv.get_bool("enable_thinking").unwrap_or(true);
-    // Resolve reasoning_effort: upstream Qwen3.8 defaults to "xhigh" when
-    // thinking is enabled and no value is provided.
-    let reasoning_effort = if enable_thinking {
-        Some(inv.get_str("reasoning_effort").unwrap_or_else(|| "xhigh".into()))
-    } else {
-        None // thinking disabled: reasoning_effort is ignored
-    };
+    // `reasoning_effort` goes to the template as the request set it: the Qwen3.8 template reads it (its own default
+    // when absent), and the Qwen3-era renderer refuses a value it would have no place to write.
+    let reasoning_effort = inv.get_str("reasoning_effort");
     // Qwen3.8's `preserve_thinking` chat-template kwarg: only takes effect on
     // a Qwen38-flavor render (see data::qwen_chat); under this module's
     // Qwen3-era flavor the upstream template has no such kwarg and the value
@@ -1613,5 +1615,42 @@ mod tests {
         assert!(e.contains("no chat template"), "{e}");
         let raw = render_prompt_as(&format, &Invocation::new().set("prompt", json!("def f(")).set("chat", json!(false))).unwrap();
         assert_eq!(raw.text, "def f(");
+    }
+
+    /// The Qwen3-era template never reads `reasoning_effort`, so a Qwen3-flavor prompt carries no instruction about
+    /// it, and a request that asks for one is refused by name rather than answered with text the template never
+    /// writes. Only a template that reads it (Qwen3.8's) declares it, with no default of brain's own: left out, the
+    /// template's own default applies.
+    #[test]
+    fn reasoning_effort_reaches_only_a_template_that_reads_it() {
+        let names = |flavor| template_params(flavor).iter().map(|p| p.name.clone()).collect::<Vec<_>>();
+        assert!(!names(qwen_chat::TemplateFlavor::Qwen3).contains(&"reasoning_effort".to_string()), "the Qwen3 template does not read it");
+        let qwen38 = template_params(qwen_chat::TemplateFlavor::Qwen38);
+        let effort = qwen38.iter().find(|p| p.name == "reasoning_effort").expect("the Qwen3.8 template reads it");
+        assert!(effort.default.is_none() && !effort.required, "left out, the template's own default applies");
+
+        let tools = r#"[{"type":"function","function":{"name":"shell","parameters":{"type":"object"}}}]"#;
+        let base = Invocation::new().set("messages", json!(r#"[{"role":"system","content":"You are an agent."},{"role":"user","content":"Time: 2026-11-19\nfix it"}]"#)).set("tools", json!(tools));
+        let plain = render_prompt(&base).unwrap().text;
+        assert!(!plain.contains("Reasoning effort"), "{plain}");
+        assert!(plain.starts_with("<|im_start|>system\nYou are an agent.\n\n# Tools"), "{plain}");
+        for effort in ["xhigh", "medium", "low"] {
+            let e = render_prompt(&base.clone().set("reasoning_effort", json!(effort))).unwrap_err();
+            assert!(e.contains("reasoning_effort"), "{effort}: {e}");
+        }
+
+        let qwen38 = base.clone().set("template_flavor", json!("qwen3.8"));
+        assert!(render_prompt(&qwen38).unwrap().text.contains("Reasoning effort is set to xhigh"), "the Qwen3.8 template's own default");
+        let low = render_prompt(&qwen38.clone().set("reasoning_effort", json!("low"))).unwrap().text;
+        assert!(low.contains("Reasoning effort is set to low"), "{low}");
+    }
+
+    /// A tool schema reaches the prompt with its members in the order the request wrote them, as the template's
+    /// `tojson` prints them; re-sorting them would show the model a schema its template never renders.
+    #[test]
+    fn tool_schemas_keep_the_order_the_request_wrote() {
+        let tools = r#"[{"type":"function","function":{"name":"shell","description":"run","parameters":{"type":"object","properties":{"cmd":{"type":"string"}}}}}]"#;
+        let text = render_prompt(&Invocation::new().set("prompt", json!("hi")).set("tools", json!(tools))).unwrap().text;
+        assert!(text.contains(r#"{"type": "function", "function": {"name": "shell", "description": "run", "parameters": {"type": "object", "properties""#), "{text}");
     }
 }

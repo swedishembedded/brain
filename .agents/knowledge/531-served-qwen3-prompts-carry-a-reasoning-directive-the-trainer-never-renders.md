@@ -33,3 +33,26 @@ log-probabilities):
   Qwen3.8's template reads it) changes the served prompt of every Qwen3 and Qwen3.5-MoE model, so it is a campaign
   decision taken with a fresh baseline, not a silent fix; until then a collector that wants exact ratios has
   to request `reasoning_effort: medium` (no instruction), where its client can pass it.
+
+## Update 2026-11-19 (lane T2): the served prompt is the template's rendering
+
+The serving default was changed at the root, not per request:
+
+- `qwen_chat::render` writes a reasoning-effort instruction only under the Qwen3.8 flavor (whose template reads
+  `reasoning_effort`, default `xhigh`); under the Qwen3 flavor a value is an error, never text.
+- `qwen3::chat::template_params` declares `reasoning_effort` only for a Qwen3.8-flavor model, with no default of
+  brain's own; a Qwen3 model (Qwen3-4B, the Qwen3.5-MoE residents) refuses it at admission by name
+  (`unsupported_parameter`), as brain refuses any param its action does not take.
+- A second silent rewrite was found on the way: every client JSON (`tools`, `messages`, `tool_choice`) went through
+  `capability::escape_client_json`, which parsed it into a key-sorted `serde_json::Value`, and `qwen3::chat::parse_tools`
+  sorted again, so a tool schema reached the prompt as `{"function": ..., "type": "function"}` where the request and
+  the template write `{"type": "function", "function": ...}` (and the generic-template path's `with_tools_as_written`
+  was undone by the escape). Both keep the order the request wrote now.
+- Pinned by `crates/qwen3/tests/it/served_prompt_template.rs`: an agent request (system, user turn with the harness's
+  time line, tools, a reasoned tool call and its result) admitted through Qwen3-4B's served `generate` spec encodes to
+  exactly the ids of Qwen3-4B's own Jinja rendering; on Qwen3.8-27B's template, every `reasoning_effort` value
+  (and none) renders exactly as the template does.
+
+**Every dev and exam result measured before this build was served with the xhigh instruction in every Qwen3
+prompt** (and with re-sorted tool schemas). Results compare within a build only: a run on a build with this change
+against a run before it differs in the prompt, not only in the model.

@@ -205,7 +205,7 @@ async fn claude_code_on_the_anthropic_route_is_admitted() {
     assert_eq!(got["max_new"], json!(32000), "{got}");
     assert!(got["messages"].as_str().is_some_and(|m| m.contains("toolu_1") && m.contains("I should read it.")), "the turns reach the model: {got}");
     assert!(got["tools"].as_str().is_some_and(|t| t.contains("file_path") && !t.contains("DeferredToolPlaceholder")), "a deferred tool is not shown to the model: {got}");
-    assert_eq!(got["reasoning_effort"], json!("xhigh"), "Anthropic's default effort is the model's default: {got}");
+    assert!(got.get("reasoning_effort").is_none(), "Anthropic's default effort leaves the model's template its own default: {got}");
 
     // A lower effort reaches the model's reasoning-effort setting; a member brain does not do is refused by name.
     let mut low = body.clone();

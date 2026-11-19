@@ -1026,3 +1026,11 @@ After, `brain perf run serve`, 128 output tokens, gpu3 (before: the shared measu
 With equal prompt lengths a burst's median first token is half its total prefill under any order; what remains at
 c64 and 32K is the prefill row rate (knowledge 400). The 4B's ITL p95 at 8K and 32K is one prompt's round, read in
 between decode steps instead of before them.
+
+## The served prompt is the checkpoint template's rendering (2026-11-19, knowledge #531)
+
+- [x] No reasoning-effort instruction in a Qwen3-flavor prompt: only a template that reads `reasoning_effort` (Qwen3.8's)
+      gets it, a Qwen3 model refuses it by name at admission, and an omitted value is the template's own default.
+- [x] Tool schemas reach the prompt in the order the request wrote them (`escape_client_json`, `parse_tools`).
+- [x] Gated by `qwen3` `served_prompt_template` (Qwen3-4B served ids equal its own Jinja rendering token for token;
+      Qwen3.8's template receives each `reasoning_effort`). Results before this build compare within their build only.

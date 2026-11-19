@@ -145,6 +145,11 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   default) and `max` leave the model's default, `medium` and `low` ask for less
   reasoning and are refused, naming `reasoning_effort`, by a model without that
   setting; any other `output_config` member (`format`) is refused by name.
+  A model has that setting only where its chat template reads it (Qwen3.8's):
+  a Qwen3 model refuses `reasoning_effort` on every surface rather than serve a
+  prompt with an instruction its own template never writes, and the prompt it
+  is served is its template's rendering of the request, tool schemas in the
+  order the request wrote them.
   `context_management` is accepted when it edits nothing (`{"type":
   "clear_thinking_20251015", "keep": "all"}`); an edit that would drop part of the
   prompt is refused by name, since brain edits no context.
@@ -195,8 +200,9 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   before anything is queued (a streamed request is refused with a plain 400,
   never an event stream). A setting the request leaves out takes the default the
   action declares - the sampler's and the chat template's alike
-  (`enable_thinking`, `reasoning_effort`, `template_flavor`, `preserve_thinking`
-  where the model declares them) - and a field the model's action does not take
+  (`enable_thinking`, `template_flavor`, `preserve_thinking` where the model
+  declares them; `reasoning_effort` has none of brain's own, so a template that
+  reads it applies its own default) - and a field the model's action does not take
   is refused with 400 `unsupported_parameter` naming the field and the model
   (OpenAI's `error.param` is the field), never dropped. A top-level field the
   dialect does not define, or one brain does not read (`functions`,

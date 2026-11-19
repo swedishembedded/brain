@@ -5189,9 +5189,9 @@ mod tests {
     }
 
     /// `reasoning_effort` is declared in `caps.rs`'s manifest but was missing
-    /// from this resident's own - `qwen3::chat::parse_request` still defaulted
-    /// it to `xhigh` either way, but a caller passing it EXPLICITLY through
-    /// this path was rejected by param validation before it ever reached the
+    /// from this resident's own - the Qwen3.8 template applied its own `xhigh`
+    /// either way, but a caller passing it EXPLICITLY through this path was
+    /// rejected by param validation before it ever reached the
     /// parser. `Qwen35GgufResident::new` needs no real file (`manifest()`
     /// touches only `self.cap`, never the checkpoint), so this needs no GPU.
     #[test]
@@ -5201,7 +5201,7 @@ mod tests {
         let g = m.actions.iter().find(|a| a.name == "generate").expect("the resident generates");
         assert!(
             g.params.iter().any(|p| p.name == "reasoning_effort" && !p.required),
-            "reasoning_effort must be declared (and optional, defaulting to xhigh) so a caller passing it is not rejected"
+            "reasoning_effort must be declared (and optional: left out, the template's own xhigh applies) so a caller passing it is not rejected"
         );
     }
 

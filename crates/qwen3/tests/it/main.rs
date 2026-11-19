@@ -83,6 +83,7 @@ mod real_resident_full_ft;
 mod resident_full_ft;
 mod rope_scaling_model;
 mod serve_conformance;
+mod served_prompt_template;
 mod shard_microbatch;
 mod shard_parity;
 mod slice;

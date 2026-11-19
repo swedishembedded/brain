@@ -899,25 +899,39 @@ pub fn content_text(content: Option<&Value>) -> String {
 const CLIENT_TEXT_JSON: [&str; 3] = ["messages", "tools", "tool_choice"];
 
 /// A JSON document a client wrote (tool schemas, messages, tool-call
-/// arguments) with every string in it passed through `escape`, after parsing,
-/// so a `\u003c` spelling cannot slip past; text that is not JSON is escaped
-/// as text. See [`Invocation::escape_client_text`].
+/// arguments) with every string in it, member names included, passed through
+/// `escape` after decoding, so a `\u003c` spelling cannot slip past; text that
+/// is not JSON is escaped as text. Everything else is kept as written, member
+/// order included (a chat template prints a tool schema as the client wrote
+/// it), and a string `escape` leaves alone keeps its own spelling. See
+/// [`Invocation::escape_client_text`].
 pub fn escape_client_json(text: &str, escape: &dyn Fn(&str) -> String) -> String {
-    fn walk(escape: &dyn Fn(&str) -> String, v: &mut Value) {
-        match v {
-            Value::String(s) => *s = escape(s),
-            Value::Array(items) => items.iter_mut().for_each(|item| walk(escape, item)),
-            Value::Object(fields) => fields.values_mut().for_each(|field| walk(escape, field)),
-            _ => {}
-        }
+    if serde_json::from_str::<Value>(text).is_err() {
+        return escape(text);
     }
-    match serde_json::from_str::<Value>(text) {
-        Ok(mut v) => {
-            walk(escape, &mut v);
-            v.to_string()
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('"') {
+        out.push_str(&rest[..open]);
+        let literal = &rest[open..];
+        // The literal ends at the first quote no backslash escapes; the document parsed, so there is one.
+        let mut end = 1;
+        let bytes = literal.as_bytes();
+        while bytes[end] != b'"' {
+            end += if bytes[end] == b'\\' { 2 } else { 1 };
         }
-        Err(_) => escape(text),
+        let literal = &literal[..=end];
+        let decoded: String = serde_json::from_str(literal).unwrap_or_default();
+        let escaped = escape(&decoded);
+        if escaped == decoded {
+            out.push_str(literal);
+        } else {
+            out.push_str(&Value::String(escaped).to_string());
+        }
+        rest = &rest[open + end + 1..];
     }
+    out.push_str(rest);
+    out
 }
 
 impl Invocation {
@@ -1698,6 +1712,25 @@ mod tests {
             let err = Invocation::new().set("seed", bad.clone()).seed().expect_err(&bad.to_string());
             assert!(err.starts_with("seed: "), "{err}");
         }
+    }
+}
+
+#[cfg(test)]
+mod client_text_tests {
+    /// A client's JSON keeps its members in the order it wrote them (a chat template prints a tool schema as
+    /// written), every string in it, member names included, passes through `escape`, and a document with nothing to
+    /// escape comes back byte for byte.
+    #[test]
+    fn escaping_client_json_keeps_its_order_and_escapes_every_string() {
+        let mark = |t: &str| t.replace("<|x|>", "[x]");
+        let tools = r#"[{"type":"function","function":{"name":"f","description":"say \"<|x|>\"","parameters":{"type":"object","properties":{"<|x|>":{"type":"string"}}}}}]"#;
+        assert_eq!(
+            super::escape_client_json(tools, &mark),
+            r#"[{"type":"function","function":{"name":"f","description":"say \"[x]\"","parameters":{"type":"object","properties":{"[x]":{"type":"string"}}}}}]"#
+        );
+        let plain = "[ {\"z\": 1, \"a\": \"caf\\u00e9\"} ]";
+        assert_eq!(super::escape_client_json(plain, &mark), plain, "nothing to escape: unchanged");
+        assert_eq!(super::escape_client_json("not <|x|> json", &mark), "not [x] json", "text that is not JSON is escaped as text");
     }
 }
 

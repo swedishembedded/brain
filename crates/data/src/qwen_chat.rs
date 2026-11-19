@@ -133,12 +133,10 @@ pub enum TemplateFlavor {
 pub struct TemplateOpts {
     pub add_generation_prompt: bool,
     pub enable_thinking: bool,
-    /// Qwen3.8 `reasoning_effort`: `xhigh` (default when thinking enabled),
-    /// `medium`, or `low`.  Injected as a system-prompt instruction before the
-    /// tools/system content.  `None` means "use the template default" (which
-    /// is `xhigh` when `enable_thinking` is true, ignored when false). Under
-    /// [`TemplateFlavor::Qwen38`] the template's own `\|default('xhigh')` applies
-    /// at render time, so `None` and `Some("xhigh")` render identically.
+    /// Qwen3.8 `reasoning_effort`: `xhigh` (the template's default when thinking is enabled), `medium` (no
+    /// instruction) or `low`, written as a system-turn instruction before the tools/system content; ignored when
+    /// thinking is disabled, as the template does. `None` is the template's own default. The Qwen3-era template
+    /// does not read it: under [`TemplateFlavor::Qwen3`] a value is an error, never injected text.
     pub reasoning_effort: Option<String>,
     /// Which template generation to transcribe (default [`TemplateFlavor::Qwen3`],
     /// the behavior this port was originally validated against).
@@ -485,27 +483,26 @@ pub fn render(msgs: &[ChatMessage], tools: &[String], opts: TemplateOpts) -> Res
     let has_tools = !tools.is_empty();
     let first_is_system = msgs.first().map(|m| m.role) == Some(Role::System);
 
-    // Resolve reasoning_effort. Qwen3 flavor: None means "no injection"
-    // (callers resolve defaults). Qwen38 flavor: the template's own
-    // `|default('xhigh')` applies at render time, so None renders as xhigh.
-    let reasoning_directive = if opts.enable_thinking {
-        let effort = if opts.flavor == TemplateFlavor::Qwen38 {
-            Some(opts.reasoning_effort.as_deref().unwrap_or("xhigh"))
-        } else {
-            opts.reasoning_effort.as_deref()
-        };
-        match effort {
-            Some("low") => Some("Reasoning effort is set to low. Keep your thinking brief and focused, \
+    // `reasoning_effort` is a variable of the Qwen3.8 template only (its `reasoning_instructions`, defaulting to
+    // `xhigh`); the Qwen3-era template never reads it, so a value for it is refused there rather than written as text
+    // that template never writes.
+    let reasoning_directive = match opts.flavor {
+        TemplateFlavor::Qwen38 if opts.enable_thinking => match opts.reasoning_effort.as_deref().unwrap_or("xhigh") {
+            "low" => Some("Reasoning effort is set to low. Keep your thinking brief and focused, \
                  moving directly to the conclusion without unnecessary elaboration."),
-            Some("medium") => None, // medium: no injected instruction
-            None => None, // not specified: no injection (Qwen3 flavor; callers resolve defaults)
-            Some("xhigh") => Some("Reasoning effort is set to xhigh. Please think carefully through the task, \
+            "medium" => None, // medium: no injected instruction
+            "xhigh" => Some("Reasoning effort is set to xhigh. Please think carefully through the task, \
                  validate key assumptions, consider plausible alternatives, and prioritize \
                  correctness, consistency, and clarity in the final answer."),
-            Some(other) => return Err(format!("Unexpected reasoning effort '{other}'. Supported types are xhigh (default), medium, and low.")),
-        }
-    } else {
-        None // thinking disabled: reasoning_effort is ignored
+            other => return Err(format!("Unexpected reasoning effort '{other}'. Supported types are xhigh (default), medium, and low.")),
+        },
+        TemplateFlavor::Qwen38 => None, // thinking disabled: the template ignores reasoning_effort
+        TemplateFlavor::Qwen3 | TemplateFlavor::JsonFramed => match opts.reasoning_effort.as_deref() {
+            None => None,
+            Some(effort) => {
+                return Err(format!("reasoning_effort '{effort}': the Qwen3 chat template does not read reasoning_effort (only the Qwen3.8 template does); leave it out"))
+            }
+        },
     };
 
     if has_tools {
@@ -544,10 +541,6 @@ pub fn render(msgs: &[ChatMessage], tools: &[String], opts: TemplateOpts) -> Res
             out.push_str("<|im_end|>\n");
         } else {
             out.push_str("<|im_start|>system\n");
-            if let Some(dir) = reasoning_directive {
-                out.push_str(dir);
-                out.push_str("\n\n");
-            }
             if first_is_system {
                 out.push_str(&msgs[0].content);
                 out.push_str("\n\n");
@@ -591,15 +584,9 @@ pub fn render(msgs: &[ChatMessage], tools: &[String], opts: TemplateOpts) -> Res
             out.push_str(dir);
             out.push_str("<|im_end|>\n");
         }
-    } else if first_is_system || reasoning_directive.is_some() {
+    } else if first_is_system {
         out.push_str("<|im_start|>system\n");
-        if let Some(dir) = reasoning_directive {
-            out.push_str(dir);
-            out.push_str("\n\n");
-        }
-        if first_is_system {
-            out.push_str(&msgs[0].content);
-        }
+        out.push_str(&msgs[0].content);
         out.push_str("<|im_end|>\n");
     }
 
@@ -2464,7 +2451,7 @@ mod tests {
         );
     }
 
-    // ---- render: reasoning_effort ----------------------------------------------------
+    // ---- render: reasoning_effort (read by the Qwen3.8 template only) -----------------
 
     #[test]
     fn reasoning_effort_xhigh_injects_system_instruction() {
@@ -2472,6 +2459,7 @@ mod tests {
         let s = render(&msgs, &[], TemplateOpts {
             enable_thinking: true,
             reasoning_effort: Some("xhigh".into()),
+            flavor: TemplateFlavor::Qwen38,
             ..Default::default()
         }).unwrap();
         assert!(s.contains("Reasoning effort is set to xhigh"), "xhigh should inject instruction: {s:?}");
@@ -2484,6 +2472,7 @@ mod tests {
         let s = render(&msgs, &[], TemplateOpts {
             enable_thinking: true,
             reasoning_effort: Some("medium".into()),
+            flavor: TemplateFlavor::Qwen38,
             ..Default::default()
         }).unwrap();
         assert!(!s.contains("Reasoning effort"), "medium should not inject instruction: {s:?}");
@@ -2495,21 +2484,26 @@ mod tests {
         let s = render(&msgs, &[], TemplateOpts {
             enable_thinking: true,
             reasoning_effort: Some("low".into()),
+            flavor: TemplateFlavor::Qwen38,
             ..Default::default()
         }).unwrap();
         assert!(s.contains("Reasoning effort is set to low"), "low should inject instruction: {s:?}");
         assert!(s.contains("brief and focused"), "low should mention brevity: {s:?}");
     }
 
+    /// The Qwen3-era template never reads `reasoning_effort`: its rendering carries no instruction, and a value is
+    /// refused by name, never written as text the template does not write.
     #[test]
-    fn reasoning_effort_none_means_no_injection() {
+    fn the_qwen3_template_does_not_read_reasoning_effort() {
         let msgs = vec![ChatMessage::user("hi")];
-        let s = render(&msgs, &[], TemplateOpts {
-            enable_thinking: true,
-            reasoning_effort: None,
-            ..Default::default()
-        }).unwrap();
-        assert!(!s.contains("Reasoning effort"), "None should inject nothing (caller resolves defaults): {s:?}");
+        let s = render(&msgs, &[], TemplateOpts { enable_thinking: true, reasoning_effort: None, ..Default::default() }).unwrap();
+        assert!(!s.contains("Reasoning effort"), "{s:?}");
+        for effort in ["xhigh", "medium", "low"] {
+            for enable_thinking in [true, false] {
+                let e = render(&msgs, &[], TemplateOpts { enable_thinking, reasoning_effort: Some(effort.into()), ..Default::default() }).unwrap_err();
+                assert!(e.contains("reasoning_effort"), "{effort}: {e}");
+            }
+        }
     }
 
     #[test]
@@ -2518,6 +2512,7 @@ mod tests {
         let s = render(&msgs, &[], TemplateOpts {
             enable_thinking: false,
             reasoning_effort: Some("xhigh".into()),
+            flavor: TemplateFlavor::Qwen38,
             ..Default::default()
         }).unwrap();
         assert!(!s.contains("Reasoning effort"), "should be ignored when thinking disabled: {s:?}");
@@ -2529,6 +2524,7 @@ mod tests {
         let result = render(&msgs, &[], TemplateOpts {
             enable_thinking: true,
             reasoning_effort: Some("high".into()),
+            flavor: TemplateFlavor::Qwen38,
             ..Default::default()
         });
         assert!(result.is_err(), "invalid effort should error");
@@ -2542,6 +2538,7 @@ mod tests {
         let s = render(&msgs, &tools, TemplateOpts {
             enable_thinking: true,
             reasoning_effort: Some("xhigh".into()),
+            flavor: TemplateFlavor::Qwen38,
             ..Default::default()
         }).unwrap();
         let re_pos = s.find("Reasoning effort").unwrap();

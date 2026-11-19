@@ -22,11 +22,12 @@
 //!   `enable_thinking`/tool-call scanning) is `qwen3::chat`'s
 //!   `parse_request`/`SeqState`, reused as-is, exactly like `qwen35moe::caps`
 //!   does. `reasoning_effort` (xhigh/medium/low) is wired through the same
-//!   path: resolved in `qwen3::chat::parse_request` (default `xhigh` when
-//!   thinking is enabled, ignored when it is disabled) and injected by
-//!   `data::qwen_chat::render` as a system-turn instruction ahead of the
-//!   system content / tools preamble, matching the upstream Qwen3.8 chat
-//!   template's own convention.
+//!   path: passed on by `qwen3::chat::parse_request` as the request set it
+//!   and written by `data::qwen_chat::render`'s Qwen3.8 flavor as a
+//!   system-turn instruction ahead of the system content / tools preamble
+//!   (the template's own default `xhigh` when the request leaves it out,
+//!   nothing when thinking is disabled), as the upstream Qwen3.8 chat
+//!   template does.
 //! - A LoRA adapter (`adapter`) is folded into the loaded base tensors once,
 //!   before the model is built (`crate::lora::fold_adapter_into`), so decoding
 //!   is a plain adapted model at no per-token cost. No multi-GPU sharding is
