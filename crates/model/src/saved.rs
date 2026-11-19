@@ -190,7 +190,7 @@ impl SavedPolicy {
     pub fn parse_activations(value: &str) -> Result<SavedPolicy, String> {
         match SavedPolicy::parse(value) {
             Some(policy @ (SavedPolicy::Keep | SavedPolicy::Recompute)) => Ok(policy),
-            _ => Err(format!("activations: {value} is not one of keep, recompute")),
+            _ => Err(format!("activations: {value} is not one of {}", SavedPolicy::ACTIVATIONS_CHOICES.join(", "))),
         }
     }
 }

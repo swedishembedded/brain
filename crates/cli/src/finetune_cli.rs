@@ -105,7 +105,7 @@ brain finetune BASE --dataset FILE --out DIR [options]
   --behaviour B      with --policy-gradient: where the behaviour log-probabilities of the ratio come from.
                      recorded (default): the sampler's own, on every supervised token of every record; start_of_run_proxy:
                      where none was recorded, the start-of-run policy's (exact only if the rollouts were sampled from it).
-  --activations P    what the backward keeps of the forward: keep|recompute|bf16|fp8.
+  --activations P    what the backward keeps of the forward: keep|recompute.
   --train-precision SPEC
                      a full fine-tune's storage: `state=f32|bf16|int8[:B]|log8[:B]` for the optimizer state,
                      `weights=bf16|fp8[:B]` to hold the linears and the tables on the device in that encoding with
@@ -580,6 +580,19 @@ mod tests {
         assert!(err.contains("--lora"), "{err}");
         let a = parse(&argv("base --lora 4 --policy-gradient --kl-beta 0.1 --held-out h.jsonl")).unwrap();
         assert!(a.policy_gradient && a.kl_beta == Some(0.1) && a.held_out.as_deref() == Some("h.jsonl"));
+    }
+
+    /// The help lists exactly the values `--activations` accepts, from the one list the parser and every capability
+    /// read, and each of them parses.
+    #[test]
+    fn the_activations_help_names_what_the_parser_accepts() {
+        let choices = model::saved::SavedPolicy::ACTIVATIONS_CHOICES;
+        let line = USAGE.lines().find(|l| l.trim_start().starts_with("--activations")).expect("--activations is in the help");
+        assert!(line.trim_end().ends_with(&format!(": {}.", choices.join("|"))), "the help lists {choices:?}: {line}");
+        for value in choices {
+            assert!(parse(&argv(&format!("base --activations {value}"))).is_ok(), "{value} parses");
+        }
+        assert!(parse(&argv("base --activations fp8")).unwrap_err().contains(&choices.join(", ")));
     }
 
     #[test]
