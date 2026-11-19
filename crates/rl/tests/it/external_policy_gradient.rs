@@ -285,6 +285,26 @@ fn without_recorded_behaviour_the_first_step_is_the_on_policy_estimator() {
     assert!(worst <= 1e-4 * scale.max(1e-6), "worst {worst} of scale {scale}");
 }
 
+/// A policy-gradient step reports its work as a supervised one does: the tokens its forwards computed, the record tokens
+/// and supervised positions among them, and time in its forward and backward passes, so a step's time is not all put
+/// down to the optimizer.
+#[test]
+fn a_policy_gradient_step_reports_its_work() {
+    let mut m = lora_model(data::rng::random_seed());
+    let rows = [Row::new(&[1, 2, 3, 4, 5, 6], 3, Some(1.0)), Row::new(&[2, 3, 4, 5, 6, 7], 3, Some(-1.0))];
+    let dir = tempfile::tempdir().unwrap();
+    write_dataset(dir.path(), &rows);
+    let mut obj = ExternalPolicyGradient::open(dir.path(), &opts(1, 2, 1e-2), no_kl()).unwrap();
+    Objective::<Qwen35>::prepare(&mut obj, &mut m).unwrap();
+    Objective::<Qwen35>::begin(&mut obj, 17, 0);
+    m.zero_grads();
+    Objective::<Qwen35>::micro_steps(&mut obj, &m, &mut Rng::new(1), 2);
+    let work = Objective::<Qwen35>::step_work(&mut obj).expect("a policy-gradient step reports its work");
+    assert!(work.useful_tokens > 0 && work.supervised_positions > 0 && work.computed_tokens >= work.useful_tokens, "{work:?}");
+    assert!(work.forward_secs > 0.0 && work.backward_secs > 0.0, "{work:?}");
+    assert!(Objective::<Qwen35>::step_work(&mut obj).is_none(), "the work is taken once");
+}
+
 /// A dataset mixing imitation records with rollouts trains the imitation ones as the supervised fine-tune does.
 #[test]
 fn a_record_without_an_advantage_trains_as_the_supervised_fine_tune_does() {

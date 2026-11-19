@@ -73,7 +73,7 @@ pub use data::chat_rollout::TruncatedRollouts;
 use data::loader::{BatchConfig, TokenDataset};
 use data::rng::Rng;
 use model::training::{self, Capability, Unsupported};
-use model::{Batch, FitOpts, Model, ModelConfig, Objective, Split, StepVerdict, IGNORE};
+use model::{Batch, FitOpts, Model, ModelConfig, Objective, Split, StepVerdict, StepWork, IGNORE};
 
 use super::advantage::{group_advantages_with, AdvantageFloor, AdvantageNorm};
 use super::grpo::LossAgg;
@@ -712,6 +712,8 @@ pub struct ExternalPolicyGradient {
     anchors: Option<Anchors>,
     /// The adapter may differ from the one the run started from: a step ran, or a resumed run restored its weights.
     weights_moved: bool,
+    /// What the micro-steps since the last [`Objective::step_work`] measured.
+    work: Option<StepWork>,
     scoring_seconds: f32,
     accumulating: StepAccumulator,
     stats: PolicyGradientStats,
@@ -804,7 +806,7 @@ impl ExternalPolicyGradient {
         let rows = Rows { starts, ends, advantage, eligible, behavior, teacher };
         let cache = ScoreCache::create(dir, rows.starts.len())?;
         let max_token = tokens.iter().copied().chain(rows.teacher.iter().flat_map(|t| (0..rows.starts.len()).filter_map(|e| t.example(e)).flat_map(|(ids, _)| ids.iter().copied()))).max().unwrap_or(0);
-        Ok(ExternalPolicyGradient { cfg, train, batch_cfg, rows, mask, tag_examples, order: None, cache, max_token, anchors: None, weights_moved: false, scoring_seconds: 0.0, accumulating: StepAccumulator::default(), stats, consecutive_nonfinite: 0, consecutive_guard: 0, gate: NumericsAccumulator::default(), verdict: None })
+        Ok(ExternalPolicyGradient { cfg, train, batch_cfg, rows, mask, tag_examples, order: None, cache, max_token, anchors: None, weights_moved: false, work: None, scoring_seconds: 0.0, accumulating: StepAccumulator::default(), stats, consecutive_nonfinite: 0, consecutive_guard: 0, gate: NumericsAccumulator::default(), verdict: None })
     }
 
     /// The scalar advantage example `example` of the training split trains with: its rollout's, computed from the
@@ -1246,20 +1248,32 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
     /// `k` micro-batches of one optimiser step. Their gradients accumulate; a model with a loss denominator divides
     /// each by the step's mean supervised-token count under [`LossAgg::TokenSum`].
     fn micro_steps(&mut self, model: &M, _rng: &mut Rng, k: u32) -> f32 {
+        // Preparation is the draws, the scoring of examples no earlier step drew and the layout; the passes are
+        // measured around each forward and backward, as supervised training measures them.
+        let clock = std::time::Instant::now();
         let drawn: Vec<Vec<Option<usize>>> = (0..k.max(1)).map(|_| self.draw()).collect();
         // `prepare` checked that the model can be scored under every policy the run names.
         self.ensure_scored(model, &drawn.concat()).expect("Objective::prepare checked the scoring policies");
         let laid: Vec<Laid> = drawn.iter().map(|picks| self.lay_out(picks)).collect();
         let supervised: usize = laid.iter().map(|l| l.targets.iter().filter(|&&t| t != IGNORE).count()).sum();
+        let useful = laid.iter().flat_map(|l| l.picks.iter().flatten()).map(|&e| (self.rows.ends[e] - self.rows.starts[e]).min(self.batch_cfg.block_size) as u64).sum();
+        let mut work = StepWork { useful_tokens: useful, supervised_positions: supervised as u64, prepare_secs: clock.elapsed().as_secs_f64(), ..StepWork::default() };
         let denominator = self.cfg.loss_agg.denominator(self.batch_cfg.batch_size, supervised, laid.len());
         let spec = self.spec();
         let mut loss = 0.0;
         let mut finite = true;
         for l in &laid {
+            let pass = std::time::Instant::now();
             self.upload(model, &l.tokens, &l.targets, &l.picks);
+            work.prepare_secs += pass.elapsed().as_secs_f64();
+            let pass = std::time::Instant::now();
             let _ = model.forward();
+            work.forward_secs += pass.elapsed().as_secs_f64();
+            work.computed_tokens += model.computed_tokens().unwrap_or(l.tokens.len() as u64);
             let batch = PgBatch { targets: &l.targets, old_lp: &l.old_lp, ref_lp: l.has_ref.then_some(&l.ref_lp[..]), advantage: &l.advantage, is_weight: l.is_weight.as_deref() };
+            let pass = std::time::Instant::now();
             let (terms, new_lp) = backward_weighted_lp(model, &batch, &spec, denominator);
+            work.backward_secs += pass.elapsed().as_secs_f64();
             if self.cfg.numerics.is_some() {
                 self.measure_numerics(l, &new_lp, spec.band);
             }
@@ -1291,7 +1305,12 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
         }
         self.close_step(grad_norm);
         self.verdict = Some(self.rule(finite));
+        self.work = Some(work);
         loss
+    }
+
+    fn step_work(&mut self) -> Option<StepWork> {
+        self.work.take()
     }
 
     fn step_verdict(&mut self) -> StepVerdict {
