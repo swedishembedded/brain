@@ -104,8 +104,7 @@ def title_header(book, out: Path, title: str, subtitle: str) -> Path:
     generated, from that revision.\\[10pt]
     Corrections and questions are welcome:
     \href{{mailto:{book.author_email}}}{{{book.author_email}}}.
-    Each correction is recorded in the history of the source, so every
-    edition can be traced to the one before it.\\[10pt]
+    \\[10pt]
     Published by Swedish Embedded AB, Sweden.
     \href{{https://swedishembedded.com}}{{swedishembedded.com}}\par}}
   \cleardoublepage

@@ -247,9 +247,7 @@ Edition of {source_date()}, built from source revision `{source_revision()}`.
 Every worked example in this edition was computed, and every figure
 generated, from that revision.
 
-Corrections and questions are welcome: <{book.author_email}>. Each correction
-is recorded in the history of the source, so every edition can be traced to
-the one before it.
+Corrections and questions are welcome: <{book.author_email}>.
 
 Published by Swedish Embedded AB, Sweden. <https://swedishembedded.com>
 
