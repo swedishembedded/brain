@@ -49,6 +49,50 @@ toy `qwen3`) hold the wire to them.
 | IPO, SimPO, ORPO (`PairLoss`, beside DPO) | L4 (`objective: preference`, `loss`, `gamma`; `trainjob` `the_preference_objective_names_its_pair_loss`, `a_preference_job_trains_with_every_pair_loss`) | L1 `rl` `dpo::every_pair_loss_matches_its_oracle_and_its_weights_are_its_gradient` (fp64 oracles from each paper, weights by central differences, the reference-free losses blind to the reference); L2 `rl/tests/preference_gradcheck.rs`; L3 `rl::conformance` (`ipo`, `simpo`, `orpo` on every family); SDK `preference_finetune.rs` `every_pair_loss_trains_and_is_recorded`; CLI `--objective preference --loss dpo|ipo|simpo|orpo --gamma`, `cli` `finetune_objectives::a_preference_run_trains_the_named_pair_loss_and_scores_the_held_out_pairs` |
 | Dr. GRPO (`LossAgg::ConstantLength`, mean-centred) | L4 | L1 `rl` `pg_batch::every_tokens_weight_is_minus_the_derivative_of_its_loss_inside_and_past_the_clip`, `grpo::each_aggregation_divides_a_step_as_its_definition_says`; L2 `rl/tests/dr_grpo_gradcheck.rs`; L3 `rl::conformance::policy_gradient_regimes`; L4 `trainjob` `the_constant_length_aggregation_takes_its_constant_or_the_runs_max_block` |
 
+## Release checks for training and serving builds
+
+A new build never becomes the default for a result already proven on an older one without these (standing rule, 2026-11-19: never
+degrade a proven result unknowingly). The reference adapter is whichever adapter the operator pins as champion, with its recipe
+and records; reproducing it must not need an expensive retrain, so the checks are tiered and stop early:
+
+1. **Fixed-batch numerical parity.** On fixed real records the loss, gradients and post-step weights of the new path equal the old
+   path's within the old path's own run-to-run band.
+2. **Trajectory band.** About 20 training steps stay inside the old path's band (loss curve and held-out loss).
+3. **Teacher-forced logit parity for serving.** The reference adapter served on the new build gives the same per-token logprobs
+   as on the pinned build, within the documented numerics (an untruncated draw's `policy_trace` equals the decode's own logprobs).
+4. **Small paired dev, only if tier 3 differs.** Early stop on a paired difference against the pinned build.
+
+Reproducing the reference recipe within its seed band on the new build is the final gate before a build is frozen as the default.
+Each run uses its own frozen binary copy (commit and sha recorded); never switch mid-run.
+
+## Prompt parity and numerics rules (landed, kept as rules)
+
+- A served prompt is the checkpoint template's rendering of the request: no hidden system text, tool schemas keep the request's
+  member order. A parameter a model does not declare is refused by name (`unsupported_parameter`); `reasoning_effort` is declared
+  only by flavors whose template reads it, with no server default. Every route is admitted through `bridge::admit`: declared
+  defaults, undeclared parameters refused. An omitted sampler draws at the checkpoint's declared defaults, not at parser constants.
+  Test: `qwen3` `served_prompt_template`. Results from builds before 1bdd5400c were served with an injected instruction.
+- The record contract trains the token ids as sampled, admitted by read-back, plus `prompt_token_ids` checked against the rendered
+  context (`prompt_token_ids_mismatch`).
+- An untruncated draw's `policy_trace` is the decode's own logprobs (the GPU parity gate is tightened); a truncated draw's trace
+  comes from decode, not a serial re-prefill. Numerics of the 27B FP8 model: KV tier is not the gap (0.019 int8 against 0.018 f32),
+  sequence ESS about 0.5, so use `--importance truncate:2` for its policy gradient.
+- The replies of every chat route carry the `brain` identity object (base and adapter digests), so an examiner can name the served
+  model; a reply without it cannot be named in a verdict.
+
+## Open (from the 2026-11-17..19 validation work)
+
+- Batch-invariant decode: a request is repeatable alone but still depends on co-batching (remaining 2.6e-3 on the 27B; exact decode
+  costs 0.34x throughput). Prefill FP8 E4M3 activations against bf16 decode, and two bf16 weight-rounding candidates, are the suspects.
+- `preserve_thinking` is declared and inert for Qwen3 models.
+- A frozen `brain-<sha>` binary finds no worker beside it unless the frozen layout is one directory per commit; supervision stays off
+  otherwise.
+- The on-card LoRA footprint test leaves +1.3-2.2 GiB unitemised against the estimate; qwen35 and Ripple estimates still use the old
+  rate; the CPU tightness test is 4.5 KB short on CUDA (pre-existing).
+- A served training job needs its client to cancel it on interrupt (owner-only cancel and `GET /v1/jobs` landed).
+- Served preference/feedback jobs: KTO's reference pass was 55 minutes and 170 s per step; see `training-efficiency.md`.
+- Distillation from a teacher served elsewhere (step 10b) below is still the open training-capability item.
+
 ## Not yet done
 
 - [ ] Distillation from a teacher served elsewhere (step 10b of the plan, not built): the student would read the

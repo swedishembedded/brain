@@ -108,6 +108,7 @@ heading and a `Scope: <one sentence>` line under it, then run `make generate/roa
 | [`timesfm3`](timesfm3.md) | timesfm3 | TimesFM-3 forecaster (`crates/timesfm3`). |
 | [`training-27b`](training-27b.md) | Training the 27B on one card, generically | Training Qwen3.8-27B on one card. |
 | [`training-correctness`](training-correctness.md) | training correctness | Source-level training-correctness audit (2026-11-08): items T001-T060, their gates and the conformance-suite plan. |
+| [`training-efficiency`](training-efficiency.md) | training efficiency | Where a served LoRA training step spends its time on Qwen3-class models (diagnosis of 2026-11-19), the parity-preserving fixes, and the deferred items that change numerics or draw order. |
 | [`video-api`](video-api.md) | video-api | Serving video generation and editing over the OpenRouter `/videos` contract, with encoded output (`crates/apiserve/src/video.rs`, `capability::video`). |
 | [`visualclick`](visualclick.md) | visualclick | Validation experiment: splicing rendered-scene rows into the decision encoder. |
 | [`vlm`](vlm.md) | vlm | Vision-language models: Qwen3-VL, FastVLM, Moondream 3 (`crates/qwen3vl`, `fastvlm`, `moondream3`). |
