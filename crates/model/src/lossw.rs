@@ -97,6 +97,13 @@ impl WeightedCe {
         gpu.write_f32(&self.loss_weights, weights);
     }
 
+    /// Write the weights of a batch laid out shorter than `n` (a model that trims its rows to the positions that
+    /// train): the first `weights.len()` rows, the rest left unread.
+    pub fn write_prefix(&self, gpu: &Gpu, weights: &[f32]) {
+        assert!(weights.len() as u64 <= self.n, "WeightedCe::write_prefix: {} weights for {} rows", weights.len(), self.n);
+        gpu.write_f32(&self.loss_weights, weights);
+    }
+
     /// The scalar weighted loss `Σ loss_weights[i]·ce_loss[i] / count` - the
     /// SAME scalar the (weighted) gradient [`Self::hook`] wired up
     /// differentiates (the `Model::forward` contract): per-row terms don't

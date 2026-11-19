@@ -1770,7 +1770,9 @@ impl Qwen {
     /// to whole [`TRIM_QUANTUM`]s, so a run of records needs few recorded passes). The full row is kept by a build that is not training, and by
     /// every build whose passes read the whole row: quantized boundaries (sized for it), a pipeline stage (its
     /// neighbours run the whole row), an external head, an image splice, DeepStack, M-RoPE, native sparse
-    /// attention, a weighted or scaled loss, the padded-key mask and a resident full fine-tune.
+    /// attention, a scaled loss, the padded-key mask and a resident full fine-tune. A weighted loss trims: its weights
+    /// are laid out at the run length as the targets are ([`Self::write_weights`]), and a trimmed position carries no
+    /// target, so its weight multiplies a zero gradient.
     fn needed_len(&self, targets: &[u32]) -> u32 {
         let trimmable = !self.bwd_steps.steps.is_empty()
             && self.res_saved.is_none()
@@ -1781,7 +1783,6 @@ impl Qwen {
             && self.deepstack.get().is_none()
             && !self.mrope.get()
             && self.nlsa.is_none()
-            && self.weighted_ce.is_none()
             && self.logit_scale.is_none()
             && !self.kmask_on.get()
             && self.resident.is_none()
@@ -3183,6 +3184,8 @@ impl Qwen {
         let n = (self.b * self.t) as u64;
         let v = self.cfg.vocab as u64;
         self.weighted_ce = Some(model::lossw::WeightedCe::new_chunked(&self.gpu, n, v, self.head_rows as u64));
+        // A trimmed run's recorded passes were recorded without the weighting.
+        self.run_tapes.get_mut().clear();
         if !self.bwd_steps.steps.is_empty() {
             self.bwd_steps = self.build_backward_steps();
         }
@@ -3215,12 +3218,19 @@ impl Qwen {
         self.logit_scale.as_ref().expect("created above").set(&self.gpu, scale);
     }
 
-    /// Write the per-position CE gradient weights (`[b·t]`) for the next
-    /// `backward`. Panics if [`Self::enable_weighted_loss`] was never called - the
-    /// same "opt in before use" contract as the M-RoPE/VLM splice setters above.
+    /// Write the per-position CE gradient weights (`[b·t]`) of the batch [`Self::set_batch`] last set, for the next
+    /// `backward`. A trimmed batch keeps each row's first [`Self::run_len`] weights, laid out row after row as its
+    /// tokens and targets are. Panics if [`Self::enable_weighted_loss`] was never called - the same "opt in before
+    /// use" contract as the M-RoPE/VLM splice setters above.
     pub fn write_weights(&self, weights: &[f32]) {
         let w = self.weighted_ce.as_ref().expect("Qwen::write_weights: call enable_weighted_loss() first");
-        w.write(&self.gpu, weights);
+        let (t, run) = (self.t as usize, self.run_len() as usize);
+        assert_eq!(weights.len(), self.b as usize * t, "Qwen::write_weights: one weight per position of the {} rows of {t}", self.b);
+        if run == t {
+            w.write(&self.gpu, weights);
+        } else {
+            w.write_prefix(&self.gpu, &weights.chunks(t).flat_map(|row| row[..run].iter().copied()).collect::<Vec<f32>>());
+        }
     }
 
     /// Write the per-token M-RoPE cos/sin tables (`[b·t, head_dim/2]` row-major)
@@ -4536,9 +4546,8 @@ impl model::Model for Qwen {
                 // reproduce the unweighted gradient exactly, so weight every
                 // position 1.0 rather than leaving the weighted-CE weights
                 // stale from a previous `Batch::LmWeighted` call.
-                if self.weighted_ce.is_some() {
-                    let ones = vec![1.0f32; (self.b * self.t) as usize];
-                    self.write_weights(&ones);
+                if let Some(w) = &self.weighted_ce {
+                    w.write_prefix(&self.gpu, &vec![1.0f32; (self.b * self.run_len()) as usize]);
                 }
             }
             model::Batch::LmWeighted { tokens, targets, weights } => {

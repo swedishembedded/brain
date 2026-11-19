@@ -88,6 +88,7 @@ mod shard_microbatch;
 mod shard_parity;
 mod slice;
 mod split_encode;
+mod step_parity;
 mod step_parity_fixture;
 mod step_timing;
 mod train_cuda_matches_cpu;
