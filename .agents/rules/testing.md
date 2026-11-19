@@ -162,6 +162,15 @@ Imported models are additionally parity-gated stage by stage against dumped
 goldens (`tools/goldens/*_dump_reference.py`); parity proves the forward,
 never the backward.
 
+## 2b. A training optimisation is held to the path it replaces
+
+An optimisation of a training path (fewer rows, fewer passes, a lazier reference) lands with a step-parity test on the
+fixed real records of `brain_testutil::step_parity`: one optimiser step from a fixed adapter state through the old and the
+new path, comparing loss, per-token log-probabilities, every adapter gradient and the post-step weights. The band is the
+old path run twice, floored at the agreement bound of the step's longest reduction (knowledge #532); the old path stays
+runnable in the test. Examples: `qwen3` `step_parity`, `rl` `kto_step_parity`. A change that cannot meet the band is a
+new arm, not an optimisation.
+
 ## 2a. Concurrency protocols are model-checked
 
 A protocol between threads (a lock-guarded handoff, a reply that must be sent

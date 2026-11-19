@@ -56,7 +56,7 @@ degrade a proven result unknowingly). The reference adapter is whichever adapter
 and records; reproducing it must not need an expensive retrain, so the checks are tiered and stop early:
 
 1. **Fixed-batch numerical parity.** On fixed real records the loss, gradients and post-step weights of the new path equal the old
-   path's within the old path's own run-to-run band.
+   path's within the old path's own run-to-run band. Implemented as `brain_testutil::step_parity` (eight real SFT records; `.agents/rules/testing.md` 2b).
 2. **Trajectory band.** About 20 training steps stay inside the old path's band (loss curve and held-out loss).
 3. **Teacher-forced logit parity for serving.** The reference adapter served on the new build gives the same per-token logprobs
    as on the pinned build, within the documented numerics (an untruncated draw's `policy_trace` equals the decode's own logprobs).
