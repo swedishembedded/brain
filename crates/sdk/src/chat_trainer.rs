@@ -95,8 +95,9 @@ type LoraFn = for<'j, 'c> fn(LoraJob<'j>, FitControl<'c>) -> std::io::Result<Lor
 type ExportFn = fn(&Path, &Path, &Path, Option<&Path>, &mut dyn FnMut() -> bool) -> Result<(), String>;
 type FullFn = for<'c> fn(&Path, &Path, &FitOpts, &Path, OptimizerState, FitControl<'c>) -> std::io::Result<FitReport>;
 type PreferenceFn = for<'j, 'c> fn(PreferenceJob<'j>, FitControl<'c>) -> std::io::Result<(FitReport, ResidentMargins)>;
-/// The run's report and, after a completed run, each training example's log-ratio against the starting policy.
-type FeedbackFn = for<'j, 'c> fn(FeedbackJob<'j>, FitControl<'c>) -> std::io::Result<(FitReport, Vec<f32>)>;
+/// The run's report and, after a completed run, each training example's log-ratio against the starting policy (`None`
+/// for an example the run never drew).
+type FeedbackFn = for<'j, 'c> fn(FeedbackJob<'j>, FitControl<'c>) -> std::io::Result<(FitReport, Vec<Option<f32>>)>;
 type MarginsFn = fn(&Path, Option<&Path>, &Path, &[(EncodedTurn, EncodedTurn)], u32, gpu_core::select::Dtype) -> Option<PreferenceMargins>;
 type SearchFn = for<'j> fn(SearchJob<'j>, &mut dyn FnMut(Progress)) -> std::io::Result<Report>;
 
@@ -286,7 +287,7 @@ fn preference<T: ChatTrainer>(job: PreferenceJob<'_>, control: FitControl<'_>) -
     Ok((report, fit.into_margins()))
 }
 
-fn feedback<T: ChatTrainer>(job: FeedbackJob<'_>, control: FitControl<'_>) -> std::io::Result<(FitReport, Vec<f32>)> {
+fn feedback<T: ChatTrainer>(job: FeedbackJob<'_>, control: FitControl<'_>) -> std::io::Result<(FitReport, Vec<Option<f32>>)> {
     let mut fit = FeedbackFit::new(job.cfg, job.examples, job.opts, control);
     let (report, trained) = T::train_lora(job.base, &job.lora, job.opts, &mut fit)?;
     if !report.interrupted {

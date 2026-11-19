@@ -94,7 +94,7 @@ impl ModelFit for DpoFit<'_, '_> {
 pub struct FeedbackFit<'a, 'c> {
     cfg: FeedbackConfig,
     examples: Option<Vec<PackedFeedback>>,
-    logratios: Vec<f32>,
+    logratios: Vec<Option<f32>>,
     opts: &'a FitOpts,
     control: Option<FitControl<'c>>,
 }
@@ -105,8 +105,8 @@ impl<'a, 'c> FeedbackFit<'a, 'c> {
     }
 
     /// Per training example, in order, `log pi(y | x) - log ref(y | x)` of the trained policy against the policy the
-    /// run started from (empty unless the run completed).
-    pub fn into_logratios(self) -> Vec<f32> {
+    /// run started from, `None` for an example the run never drew (empty unless the run completed).
+    pub fn into_logratios(self) -> Vec<Option<f32>> {
         self.logratios
     }
 }

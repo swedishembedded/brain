@@ -564,13 +564,13 @@ dataset of fewer than two examples. A mismatched pair (below) is an example's pr
 whole completion.
 
 The objective: with `r = log pi(completion | prompt) - log ref(completion | prompt)` (summed over the completion's
-tokens, the reference the model the run starts from, frozen and scored once) and `z` the step's estimate of
+tokens, the reference the model the run starts from, frozen and scored once, when a step first draws the example) and `z` the step's estimate of
 `KL(pi || ref)` (the mean log-ratio over the step's examples of each one's prompt followed by the next example's
 completion, at least 0, held fixed), a desirable example costs `desirable_weight * (1 - sigmoid(beta * (r - z)))` and an
 undesirable one `undesirable_weight * (1 - sigmoid(beta * (z - r)))`. Defaults: `beta` 0.1, both weights 1
 (`brain::DEFAULT_KTO_*`). The reference point is estimated over the `grad_accum` examples of a step, so a step should
 hold several. The first loss is half the weight of each example (`1 - sigmoid(0)`). `desirable_logratio` and
-`undesirable_logratio` are the mean `r` of each kind after the run; KTO pushes the first above the reference point and
+`undesirable_logratio` are the mean `r` of each kind over the examples the run drew, after the run; KTO pushes the first above the reference point and
 the second below it. Resume, provenance (regime `"feedback"`), `continue_from`, `base_format` and `placed` are as for
 `PreferenceFineTune`. `dataset_report::check_dataset` takes `DatasetKind::Feedback`.
 

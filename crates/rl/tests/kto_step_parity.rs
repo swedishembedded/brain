@@ -70,11 +70,6 @@ fn build(cfg: &QwenConfig, b: u32) -> Qwen {
     Qwen::new_lora_dt_gemm(cfg.clone(), b, BLOCK as u32, &init(cfg), Dtype::F32, GemmPrecision::Fp32Reference)
 }
 
-fn drawn(n: usize) -> Vec<usize> {
-    let mut rng = Rng::new(SEED);
-    (0..STEP).map(|_| rng.gen_range_inclusive(0, n as i64 - 1) as usize).collect()
-}
-
 /// Both rows of an example packed as one `b = 2` batch.
 fn two_rows(e: &Example) -> (Vec<u32>, Vec<u32>) {
     let (mut x, mut y) = (vec![0u32; 2 * BLOCK], vec![IGNORE; 2 * BLOCK]);
@@ -100,11 +95,25 @@ fn forward(m: &Qwen, x: &[u32], y: &[u32]) -> Vec<f32> {
     m.batch_token_logprobs()
 }
 
-fn finish(m: &Qwen, obs: &mut Observation) {
+/// Read the gradients and take optimiser step `step`, then read the weights.
+fn finish(m: &Qwen, step: u32, obs: &mut Observation) {
     let names = Model::optimized_params(m).expect("a LoRA build trains its adapters");
     obs.grads = names.iter().map(|n| (n.clone(), m.read_grad(n))).collect();
-    m.adamw_step(1, 1e-3, 0.0, model::Adam::default(), Some(1.0), 1.0);
+    m.adamw_step(step, 1e-3, 0.0, model::Adam::default(), Some(1.0), 1.0);
     obs.weights = names.iter().map(|n| (n.clone(), m.read_weight(n))).collect();
+}
+
+/// The examples `steps` steps draw, in the order the objective draws them, each once.
+fn drawn_in(n: usize, steps: u32) -> Vec<usize> {
+    let mut rng = Rng::new(SEED);
+    let mut seen = Vec::new();
+    for _ in 0..steps * STEP {
+        let e = rng.gen_range_inclusive(0, n as i64 - 1) as usize;
+        if !seen.contains(&e) {
+            seen.push(e);
+        }
+    }
+    seen
 }
 
 /// The step KTO took when an example was the two rows of one batch.
@@ -117,10 +126,7 @@ fn old_step() -> Observation {
     let mut m = build(&cfg, 2);
     m.enable_weighted_loss();
     let mut obs = Observation::default();
-    for (e, (_, y)) in packed.iter().enumerate() {
-        obs.logprobs.extend((0..BLOCK).filter(|&i| y[i] != IGNORE).map(|i| ref_lp[e][i]));
-    }
-    let drawn = drawn(examples.len());
+    let drawn: Vec<usize> = { let mut rng = Rng::new(SEED); (0..STEP).map(|_| rng.gen_range_inclusive(0, examples.len() as i64 - 1) as usize).collect() };
     m.zero_grads();
     let mismatched: Vec<f32> = drawn.iter().map(|&e| {
         let (x, y) = &packed[e];
@@ -139,36 +145,67 @@ fn old_step() -> Observation {
         m.backward();
         obs.loss += f64::from(term.loss);
     }
-    finish(&m, &mut obs);
-    for (e, (x, y)) in packed.iter().enumerate() {
+    finish(&m, 1, &mut obs);
+    let seen = drawn_in(examples.len(), 1);
+    for &e in &seen {
+        let y = &packed[e].1;
+        obs.logprobs.extend((0..BLOCK).filter(|&i| y[i] != IGNORE).map(|i| ref_lp[e][i]));
+    }
+    for &e in &seen {
+        let (x, y) = &packed[e];
         let (new, old, _) = row_sum(&forward(&m, x, y), &ref_lp[e], y, 0);
         obs.logprobs.push(new - old);
     }
     obs
 }
 
-/// The step [`Feedback`] takes.
-fn new_step() -> Observation {
+/// `steps` optimiser steps of [`Feedback`] at `b = 1`. `lazy` leaves each example to be scored when a step first draws
+/// it; otherwise every example is scored up front under the start, as `check_data` did before scoring was lazy.
+fn new_steps(lazy: bool, steps: u32) -> Observation {
     let (examples, vocab) = examples();
     let cfg = config(vocab);
-    let packed: Vec<PackedFeedback> = examples.iter().map(|(own, mis, desirable)| PackedFeedback::from_masked(BLOCK, (&own.0, &own.1), (&mis.0, &mis.1), *desirable).unwrap()).collect();
+    let mut packed: Vec<PackedFeedback> = examples.iter().map(|(own, mis, desirable)| PackedFeedback::from_masked(BLOCK, (&own.0, &own.1), (&mis.0, &mis.1), *desirable).unwrap()).collect();
+    if !lazy {
+        let start = build(&cfg, FEEDBACK_ROWS);
+        packed.iter_mut().for_each(|e| e.score_reference(&start));
+    }
     let mut m = build(&cfg, FEEDBACK_ROWS);
     let mut kto = Feedback::try_from_dataset(CFG, packed).unwrap();
     Objective::<Qwen>::prepare(&mut kto, &mut m).unwrap();
     Objective::<Qwen>::check_data(&mut kto, &m).unwrap();
     let mut obs = Observation::default();
-    m.zero_grads();
     let mut rng = Rng::new(SEED);
-    obs.loss = f64::from(Objective::<Qwen>::micro_steps(&mut kto, &m, &mut rng, STEP));
-    finish(&m, &mut obs);
-    obs.logprobs = kto.reference_logprobs();
-    obs.logprobs.extend(kto.logratios(&m));
+    for step in 1..=steps {
+        m.zero_grads();
+        obs.loss += f64::from(Objective::<Qwen>::micro_steps(&mut kto, &m, &mut rng, STEP));
+        finish(&m, step, &mut obs);
+        Objective::<Qwen>::updates_applied(&mut kto, step);
+    }
+    let seen = drawn_in(examples.len(), steps);
+    let reference = kto.reference_logprobs();
+    if lazy {
+        assert_eq!(reference.iter().filter(|r| r.is_some()).count(), seen.len(), "only the drawn examples are scored");
+    }
+    obs.logprobs = seen.iter().flat_map(|&e| reference[e].clone().expect("a drawn example is scored")).collect();
+    let logratios = kto.logratios(&m);
+    obs.logprobs.extend(seen.iter().map(|&e| logratios[e].expect("scored")));
     obs
 }
 
 #[test]
 fn a_kto_step_of_one_row_passes_trains_as_the_two_row_batches_did() {
-    let (old, old_again, new) = (old_step(), old_step(), new_step());
+    let (old, old_again, new) = (old_step(), old_step(), new_steps(false, 1));
     let floor = brain_testutil::training::step_bound(2 * BLOCK + STEP as usize);
     step_parity::assert_parity("kto one-row passes", &old, &old_again, &new, floor);
+}
+
+/// Two steps, so that the second draws examples the first did not after the weights have moved: their reference is
+/// the start-of-run policy's, put back while they are scored, as when every example was scored before the first step.
+#[test]
+fn a_kto_reference_scored_on_first_draw_is_the_start_of_runs() {
+    let n = examples().0.len();
+    assert!(drawn_in(n, 2).len() > drawn_in(n, 1).len(), "the second step draws an example the first did not");
+    let (old, old_again, new) = (new_steps(false, 2), new_steps(false, 2), new_steps(true, 2));
+    let floor = brain_testutil::training::step_bound(BLOCK + 2 * STEP as usize);
+    step_parity::assert_parity("kto lazy reference", &old, &old_again, &new, floor);
 }

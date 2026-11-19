@@ -247,6 +247,11 @@ impl AdapterState {
         AdapterState { tensors: names.map(|n| { let w = model.read_weight(&n); (n, w) }).collect() }
     }
 
+    /// Whether the model had no adapter tensors to capture.
+    pub fn is_empty(&self) -> bool {
+        self.tensors.is_empty()
+    }
+
     /// Host bytes the copy holds.
     pub fn bytes(&self) -> usize {
         self.tensors.iter().map(|(_, w)| 4 * w.len()).sum()

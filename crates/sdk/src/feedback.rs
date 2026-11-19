@@ -375,7 +375,7 @@ impl FeedbackFineTune {
         };
         let (report, logratios) = (chat.feedback)(job, control).map_err(|e| Error::Backend(format!("training: {e}")))?;
         let mean_of = |want: bool| {
-            let picked: Vec<f64> = examples.iter().zip(&logratios).filter(|(e, _)| e.desirable == want).map(|(_, r)| f64::from(*r)).collect();
+            let picked: Vec<f64> = examples.iter().zip(&logratios).filter(|(e, _)| e.desirable == want).filter_map(|(_, r)| r.map(f64::from)).collect();
             (!picked.is_empty()).then(|| (picked.iter().sum::<f64>() / picked.len() as f64) as f32)
         };
         let mut outcome = FeedbackFineTuneOutcome {
@@ -445,9 +445,9 @@ pub struct FeedbackFineTuneOutcome {
     pub undesirable_weight: f32,
     pub trained_from: Option<String>,
     pub base_digest: Option<String>,
-    /// The mean over the desirable training examples of `log pi(y | x) - log ref(y | x)` after the run (it should be
-    /// above zero), and the same over the undesirable ones (below); `None` when the run did not complete or the set has
-    /// none.
+    /// The mean over the desirable training examples the run drew of `log pi(y | x) - log ref(y | x)` after the run
+    /// (it should be above zero), and the same over the undesirable ones (below); `None` when the run did not complete
+    /// or drew none. An example no step drew has no reference score, which is measured when a step first draws it.
     pub desirable_logratio: Option<f32>,
     pub undesirable_logratio: Option<f32>,
 }

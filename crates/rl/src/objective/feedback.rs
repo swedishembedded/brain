@@ -32,13 +32,18 @@
 //! mismatched rows to measure `z`, then forwards and backwards each own row, so no pass computes a row that trains
 //! nothing. The own row's loss and gradient are divided by both rows' supervised count (the count the two-row batch
 //! this replaces divided by), so the term and its gradient are unchanged. The reference is the model the run starts
-//! from, scored once per row before the first step ([`Objective::check_data`]), so no second model is held.
+//! from, so no second model is held. An example is scored when a step first draws it, under the frozen start: once
+//! the weights have moved, a copy of the start-of-run adapter tensors is put in while it is scored
+//! ([`super::pg_batch::AdapterState`], as the policy-gradient objective does). A run never pays for examples it does not
+//! draw, and its first step starts at once. A model without adapters has no start to put back, so it scores every
+//! example before the first step ([`Objective::check_data`]).
 
 use data::rng::Rng;
 use model::training::Unsupported;
 use model::{Batch, Model, ModelConfig, Objective, StepVerdict, IGNORE};
 
 use super::dpo::row_sum;
+use super::pg_batch::AdapterState;
 
 /// The default `beta` (the paper's).
 pub const DEFAULT_KTO_BETA: f32 = 0.1;
@@ -143,6 +148,8 @@ struct FeedbackRow {
     ref_lp: Vec<f32>,
     /// Supervised positions.
     count: usize,
+    /// `ref_lp` holds the reference's log-probabilities.
+    scored: bool,
 }
 
 impl FeedbackRow {
@@ -165,7 +172,7 @@ impl FeedbackRow {
         if count == 0 {
             return Err(format!("{name}: no supervised token after the first, so the row has no log-probability"));
         }
-        Ok(FeedbackRow { tokens, targets, ref_lp: vec![0f32; seq_len], count })
+        Ok(FeedbackRow { tokens, targets, ref_lp: vec![0f32; seq_len], count, scored: false })
     }
 
     /// Forward the row alone and return the log-probability of each position's target.
@@ -186,6 +193,7 @@ impl FeedbackRow {
         for (i, &y) in self.targets.iter().enumerate() {
             self.ref_lp[i] = if y == IGNORE { 0.0 } else { lp[i] };
         }
+        self.scored = true;
     }
 }
 
@@ -218,9 +226,15 @@ impl PackedFeedback {
         self.desirable
     }
 
-    /// The reference's log-probability of each supervised target of the example's own row, in position order.
-    pub fn reference_logprobs(&self) -> Vec<f32> {
-        self.own.targets.iter().zip(&self.own.ref_lp).filter(|(&y, _)| y != IGNORE).map(|(_, &lp)| lp).collect()
+    /// Whether the reference has been scored ([`Self::score_reference`]).
+    pub fn is_scored(&self) -> bool {
+        self.own.scored && self.mismatched.scored
+    }
+
+    /// The reference's log-probability of each supervised target of the example's own row, in position order; `None`
+    /// before the reference is scored.
+    pub fn reference_logprobs(&self) -> Option<Vec<f32>> {
+        self.is_scored().then(|| self.own.targets.iter().zip(&self.own.ref_lp).filter(|(&y, _)| y != IGNORE).map(|(_, &lp)| lp).collect())
     }
 
     fn seq_len(&self) -> usize {
@@ -298,7 +312,11 @@ impl From<FeedbackConfigError> for std::io::Error {
 pub struct Feedback {
     cfg: FeedbackConfig,
     examples: Vec<PackedFeedback>,
-    referenced: bool,
+    /// The start-of-run adapter tensors ([`Objective::prepare`]); `None` for a model without adapters, which is scored
+    /// whole before the first step.
+    start: Option<AdapterState>,
+    /// An update was applied since the start (also true of a resumed run), so the live adapter is not the start's.
+    weights_moved: bool,
     vocab: Option<u32>,
     trained: u32,
     last_z: f32,
@@ -315,19 +333,41 @@ impl Feedback {
         if let Some((index, e)) = examples.iter().enumerate().find(|(_, e)| e.seq_len() != cfg.seq_len) {
             return Err(FeedbackConfigError::Width { index, got: e.seq_len(), expected: cfg.seq_len });
         }
-        Ok(Feedback { cfg, examples, referenced: false, vocab: None, trained: 0, last_z: 0.0, last_logratio: 0.0 })
+        Ok(Feedback { cfg, examples, start: None, weights_moved: false, vocab: None, trained: 0, last_z: 0.0, last_logratio: 0.0 })
     }
 }
 
 impl Feedback {
-    /// Each example's log-ratio of its own completion under `model` against the reference it was scored with.
-    pub fn logratios<M: Model>(&self, model: &M) -> Vec<f32> {
-        self.examples.iter().map(|e| e.own.logratio(&e.own.forward(model))).collect()
+    /// Each example's log-ratio of its own completion under `model` against the reference it was scored with; `None`
+    /// for an example no step drew, whose reference was never scored.
+    pub fn logratios<M: Model>(&self, model: &M) -> Vec<Option<f32>> {
+        self.examples.iter().map(|e| e.is_scored().then(|| e.own.logratio(&e.own.forward(model)))).collect()
     }
 
-    /// Every example's [`PackedFeedback::reference_logprobs`], concatenated in example order.
-    pub fn reference_logprobs(&self) -> Vec<f32> {
-        self.examples.iter().flat_map(PackedFeedback::reference_logprobs).collect()
+    /// Every example's [`PackedFeedback::reference_logprobs`], in example order.
+    pub fn reference_logprobs(&self) -> Vec<Option<Vec<f32>>> {
+        self.examples.iter().map(PackedFeedback::reference_logprobs).collect()
+    }
+
+    /// Score the reference of every example in `drawn` that has none yet, under the start-of-run policy.
+    fn ensure_scored<M: Model>(&mut self, model: &M, drawn: &[usize]) {
+        let mut todo: Vec<usize> = drawn.iter().copied().filter(|&e| !self.examples[e].is_scored()).collect();
+        todo.sort_unstable();
+        todo.dedup();
+        if todo.is_empty() {
+            return;
+        }
+        let examples = &mut self.examples;
+        let mut score = || {
+            for &e in &todo {
+                examples[e].score_reference(model);
+            }
+        };
+        match (&self.start, self.weights_moved) {
+            (Some(start), true) => start.with_applied(model, score),
+            (_, false) => score(),
+            (None, true) => unreachable!("a model without adapters is scored whole in check_data"),
+        }
     }
 }
 
@@ -336,9 +376,18 @@ impl<M: Model> Objective<M> for Feedback {
         "feedback"
     }
 
+    /// Opt into the weighted loss and keep the start-of-run adapter tensors the reference is scored under. Runs before
+    /// a resumed run restores its weights, so the start captured is the run's own.
     fn prepare(&mut self, model: &mut M) -> Result<(), Unsupported> {
         model::training::require_token_objectives(model)?.enable_weighted_loss();
+        let start = AdapterState::capture(model);
+        self.start = (!start.is_empty()).then_some(start);
         Ok(())
+    }
+
+    /// The weights differ from the start-of-run ones exactly when an update was applied (also true of a resumed run).
+    fn updates_applied(&mut self, applied: u32) {
+        self.weights_moved = applied > 0;
     }
 
     fn check_data(&mut self, model: &M) -> Result<(), std::io::Error> {
@@ -347,11 +396,9 @@ impl<M: Model> Objective<M> for Feedback {
         for (index, e) in self.examples.iter().enumerate() {
             e.check_vocab(vocab).map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("feedback example {index}: {why}")))?;
         }
-        if !self.referenced {
-            for e in &mut self.examples {
-                e.score_reference(model);
-            }
-            self.referenced = true;
+        if self.start.is_none() {
+            let all: Vec<usize> = (0..self.examples.len()).collect();
+            self.ensure_scored(model, &all);
         }
         Ok(())
     }
@@ -362,8 +409,8 @@ impl<M: Model> Objective<M> for Feedback {
 
     /// Draw the step's examples, measure the reference point on their mismatched rows, then train each against it.
     fn micro_steps(&mut self, model: &M, rng: &mut Rng, k: u32) -> f32 {
-        assert!(self.referenced, "Feedback: the reference is scored in check_data(), which was not called");
         let drawn: Vec<usize> = (0..k.max(1)).map(|_| rng.gen_range_inclusive(0, self.examples.len() as i64 - 1) as usize).collect();
+        self.ensure_scored(model, &drawn);
         let mismatched: Vec<f32> = drawn.iter().map(|&e| mismatched_logratio(model, &self.examples[e])).collect();
         let z = reference_point(&mismatched);
         let mut loss = 0.0;
@@ -381,6 +428,7 @@ impl<M: Model> Objective<M> for Feedback {
     /// The loss of one example drawn from the probe's generator against its own mismatched row's reference point.
     fn loss_probe(&mut self, model: &M, rng: &mut Rng) -> f32 {
         let e = rng.gen_range_inclusive(0, self.examples.len() as i64 - 1) as usize;
+        self.ensure_scored(model, &[e]);
         let z = reference_point(&[mismatched_logratio(model, &self.examples[e])]);
         weigh_feedback(&self.cfg, model, &self.examples[e], z).0.loss
     }
