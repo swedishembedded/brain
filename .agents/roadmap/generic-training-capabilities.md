@@ -65,6 +65,40 @@ and records; reproducing it must not need an expensive retrain, so the checks ar
 Reproducing the reference recipe within its seed band on the new build is the final gate before a build is frozen as the default.
 Each run uses its own frozen binary copy (commit and sha recorded); never switch mid-run.
 
+### Verdict 2026-11-19: 1bdd5400c against ad44162a7, champion A2s1 (tiers 3 and 4): PASS
+
+Frozen copies `containers/bin/brain-<commit>/` (brain sha256 `6107dcc8...` for ad44162a7, `ae65e6f1...` for 1bdd5400c; the
+same worker `509d51d6...`), Qwen3-4B + A2s1 (adapter digest `sha256:386cc64d...`), every run on one card, one request at a time.
+
+- **What was expected.** The two builds differ only in the served prompt: ad44162a7 writes a 37-token reasoning-effort
+  instruction into the system turn of every Qwen3 request (knowledge 531); 1bdd5400c renders the template alone. The tool
+  schemas the agent sends are already key-sorted, so the order fix changes no id here. So the prompt ids differ in every context
+  by those 37 ids and nothing else, and a small but nonzero change of the next-token distribution was the expected size.
+- **Tier 3, served next-token parity on 484 recorded contexts** (every request of 50 recorded A2s1 trajectories, 12-13 per
+  domain, drawn with a fixed seed from G=8 practice rollouts whose agent runtime recorded the exact requests; each replayed
+  greedy with `policy_trace`, 32 tokens). The `score` action refuses records with tools, and no route returns top-k
+  log-probabilities, so a full-distribution KL over agent turns is not measurable through the API: the reported quantities are
+  top-1 agreement of the first token, identity of the 32-token greedy continuation and |delta log p| of the shared greedy tokens.
+
+  | Pair | Prompt ids equal | First-token top-1 | 32-token greedy identical | mean / max abs delta log p (shared) |
+  |---|---|---|---|---|
+  | ad44162a7 run 1 vs run 2 (band) | 100% | 100% | 100% | 0 / 0 |
+  | 1bdd5400c run 1 vs run 2 (band) | 100% | 100% | 100% | 0 / 0 |
+  | ad44162a7 vs 1bdd5400c | 0% (37 ids shorter) | 98.8% [97.6, 99.8] | 56.0% [51.5, 60.4] | 0.021 / 0.79 nats |
+  | ad44162a7 with `reasoning_effort: medium` vs 1bdd5400c | 100% | 100% | 100% | 0 / 0 |
+
+  The band is zero (repeats are bit-identical), so tier 3 differs. The last row places the whole difference in the removed
+  instruction: with no instruction the old build is bit-identical to the new one. Teacher-forced along the recorded completions,
+  the first 4.56 (old) and 4.51 (new) recorded tokens are each build's argmax on average (398 contexts).
+- **Tier 4, paired dev** (the pilot's dev recipe: the same agent build and profile, server-default sampling, concurrency 24)
+  on a fixed 48-task eval subset (12 per domain), both builds at once on two cards, sequential non-inferiority at margin 0.05
+  (look 1 at 2 attempts on a 99% interval, final look at 4 attempts on a 95% interval, cluster bootstrap over 35 families).
+  Look 1: old 0.490, new 0.510, +0.021 [-0.119, +0.167] (99%): continue. Final: old 0.510, new 0.557, **+0.047 [+0.000, +0.095]**
+  (95%; 192 trials each): non-inferior. Per domain old/new: support 0.79/0.79, compiled 0.75/0.83, legal 0.29/0.35, accounting
+  0.21/0.25.
+- **Verdict.** 1bdd5400c does not degrade the champion; it may help (the prompt now matches what A2 was trained on), but the
+  gain is not shown. It is the default for new A2 work; results from older builds stay comparable within their build only.
+
 ## Prompt parity and numerics rules (landed, kept as rules)
 
 - A served prompt is the checkpoint template's rendering of the request: no hidden system text, tool schemas keep the request's
