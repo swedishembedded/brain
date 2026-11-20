@@ -1506,12 +1506,20 @@ mod tests {
 
     const WEATHER_CALL: &str = "<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>";
 
-    /// A call written inside the reasoning is not run, so the reply looks like a turn that ended with prose;
-    /// the outcome names what happened.
+    /// A complete call written before the reasoning is closed ends the reasoning and is served as a call (the
+    /// reference parser's implicit reasoning end); the outcome names the rescue. A call the output cuts off inside
+    /// the reasoning is not run, so the reply looks like a turn that ended with prose, and the outcome names that.
     #[test]
     fn a_tool_call_inside_the_reasoning_is_named_in_the_outcome() {
         let (tok, req) = chatml_request(&[]);
         let out = finished(&tok, &req, &format!("I should check the weather.\n{WEATHER_CALL}"));
+        assert!(out.outputs["tool_calls"].as_str().unwrap().contains("get_weather"), "{:?}", out.outputs);
+        assert_eq!(out.outputs.get("finish_reason"), Some(&json!("tool_calls")));
+        assert_eq!(out.outputs.get("scan_anomalies"), Some(&json!(["tool_call_rescued_from_think"])));
+        assert_eq!(out.outputs["reasoning_content"], json!("I should check the weather."));
+
+        let cut = &WEATHER_CALL[..WEATHER_CALL.len() - "</tool_call>".len()];
+        let out = finished(&tok, &req, &format!("I should check the weather.\n{cut}"));
         assert!(out.outputs.get("tool_calls").is_none());
         assert_eq!(out.outputs.get("finish_reason"), Some(&json!("stop")));
         assert_eq!(out.outputs.get("scan_anomalies"), Some(&json!(["ended_inside_think", "tool_call_inside_think"])));

@@ -785,9 +785,13 @@ pub enum ChatEvent {
 /// chose not to call a tool from one whose call was lost.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScanAnomaly {
-    /// A `<tool_call>` or `<function=` opener inside the reasoning: the scanner only watches for `</think>` there,
-    /// so the call was kept as reasoning text and not run.
+    /// A `<tool_call>` or `<function=` opener inside the reasoning that is not a complete call (a bare `<function=`,
+    /// a payload that is not a call, a `</think>` or the end of the output before its `</tool_call>`): kept as
+    /// reasoning text and not run.
     ToolCallInsideThink,
+    /// A complete call written before the reasoning was closed: it ended the reasoning and was run as a call
+    /// (the reference parser's implicit reasoning end), though the model never wrote `</think>`.
+    ToolCallRescuedFromThink,
     /// A `<tool_call>` whose payload is not the flavor's call syntax: kept as visible content, not a call.
     InvalidToolCallHeader,
     /// The generation ended inside a `<tool_call>` before its header resolved: kept as visible content, not a call.
@@ -807,6 +811,7 @@ impl ScanAnomaly {
     pub fn name(self) -> &'static str {
         match self {
             ScanAnomaly::ToolCallInsideThink => "tool_call_inside_think",
+            ScanAnomaly::ToolCallRescuedFromThink => "tool_call_rescued_from_think",
             ScanAnomaly::InvalidToolCallHeader => "invalid_tool_call_header",
             ScanAnomaly::TruncatedToolCallHeader => "truncated_tool_call_header",
             ScanAnomaly::TruncatedToolCall => "truncated_tool_call",
@@ -830,6 +835,11 @@ enum St {
     Raw,
     Content,
     Think,
+    /// A `<tool_call>` opened inside the reasoning: `pending` holds it (after the newline the template writes before
+    /// a call, when the model wrote one) until its `</tool_call>`, a `</think>` or the end of the output decides it.
+    /// A complete call ends the reasoning and is read as a call from [`St::Content`]; anything else stays reasoning.
+    /// `scanned` is where the next search for either closing marker may resume, as in [`St::XmlValue`].
+    ThinkCall { scanned: usize },
     CallHeader,
     CallArgs { in_string: bool, escape: bool, depth: i32, started: bool },
     /// Between XML parameter blocks: awaiting the next `<parameter=` or the
@@ -896,7 +906,11 @@ pub struct ChatScanner {
 }
 
 const MARKERS_CONTENT: [&str; 2] = ["<think>", "<tool_call>"];
-const MARKERS_THINK: [&str; 1] = ["</think>"];
+/// `</think>` ends the reasoning; a `<tool_call>` inside it ends it too when the call turns out complete
+/// ([`St::ThinkCall`]).
+const MARKERS_THINK: [&str; 2] = ["</think>", TOOL_CALL_OPEN];
+const TOOL_CALL_OPEN: &str = "<tool_call>";
+const TOOL_CALL_CLOSE: &str = "</tool_call>";
 /// Ends a Qwen3.8 XML parameter value.
 const XML_VALUE_END: &str = "</parameter>";
 const MARKERS_TAIL: [&str; 1] = ["</tool_call>"];
@@ -917,6 +931,10 @@ impl ChatScanner {
     /// Same, with an explicit template flavor selecting the tool-call payload
     /// form the scanner expects ([`TemplateFlavor::Qwen38`] = the XML form).
     pub fn with_flavor(thinking_open: bool, flavor: TemplateFlavor) -> ChatScanner {
+        ChatScanner::blank(thinking_open, flavor, format!("call_{:016x}", crate::rng::random_seed()))
+    }
+
+    fn blank(thinking_open: bool, flavor: TemplateFlavor, id_prefix: String) -> ChatScanner {
         ChatScanner {
             state: if thinking_open { St::Think } else { St::Content },
             flavor,
@@ -928,7 +946,7 @@ impl ChatScanner {
             call_object_closed: false,
             tool_calls: Vec::new(),
             next_index: 0,
-            id_prefix: format!("call_{:016x}", crate::rng::random_seed()),
+            id_prefix,
             cur_name: String::new(),
             cur_args: String::new(),
             anomalies: Vec::new(),
@@ -957,7 +975,8 @@ impl ChatScanner {
         match self.state {
             St::Raw => return,
             St::Content => self.flush_pending_as(out, false),
-            St::Think => {
+            // A call still open inside the reasoning when the output ends is incomplete: it stays reasoning.
+            St::Think | St::ThinkCall { .. } => {
                 self.flush_pending_as(out, true);
                 self.note(ScanAnomaly::EndedInsideThink);
             }
@@ -1010,8 +1029,8 @@ impl ChatScanner {
                 self.close_call(out);
             }
         }
-        // A call written inside the reasoning is never opened (only `</think>` ends that state), so it shows
-        // up here as text; checked on the whole reasoning, so where the chunks fell cannot hide it.
+        // A call opener left in the reasoning (a bare `<function=`, or a `<tool_call>` that was not a complete call)
+        // shows up here as text; checked on the whole reasoning, so where the chunks fell cannot hide it.
         if self.reasoning.contains("<tool_call>") || self.reasoning.contains("<function=") {
             self.note(ScanAnomaly::ToolCallInsideThink);
         }
@@ -1142,6 +1161,44 @@ impl ChatScanner {
                 St::Think => {
                     if !self.scan_for_marker(out, &MARKERS_THINK, true) {
                         return;
+                    }
+                }
+                St::ThinkCall { scanned } => {
+                    let lead = usize::from(self.pending.starts_with('\n'));
+                    let body = lead + TOOL_CALL_OPEN.len();
+                    let from = (*scanned).max(body);
+                    let call_end = find_from(&self.pending, TOOL_CALL_CLOSE, from);
+                    let think_end = find_from(&self.pending, "</think>", from);
+                    match (call_end, think_end) {
+                        (Some(c), t) if t.is_none_or(|t| c < t) => {
+                            let end = c + TOOL_CALL_CLOSE.len();
+                            if self.is_complete_call(&self.pending[lead..end]) {
+                                // The reference parser's implicit reasoning end: the newline before the call is
+                                // the template's framing, and the call is read as any call after `</think>` is.
+                                self.note(ScanAnomaly::ToolCallRescuedFromThink);
+                                self.pending.drain(..lead);
+                                self.think_lead_nl = false;
+                                self.state = St::Content;
+                            } else {
+                                self.note(ScanAnomaly::ToolCallInsideThink);
+                                let text: String = self.pending.drain(..end).collect();
+                                self.push_reasoning(text, out);
+                                self.state = St::Think;
+                            }
+                        }
+                        (None, None) => {
+                            let resume = resume_offset(&self.pending, TOOL_CALL_CLOSE.len());
+                            self.state = St::ThinkCall { scanned: resume };
+                            return;
+                        }
+                        _ => {
+                            // The reasoning closed before the call did: the opener is reasoning text, and the rest
+                            // is scanned as reasoning again, so its `</think>` closes the block as usual.
+                            self.note(ScanAnomaly::ToolCallInsideThink);
+                            let text: String = self.pending.drain(..body).collect();
+                            self.push_reasoning(text, out);
+                            self.state = St::Think;
+                        }
                     }
                 }
                 St::CallHeader => {
@@ -1291,13 +1348,22 @@ impl ChatScanner {
     fn scan_for_marker(&mut self, out: &mut Vec<ChatEvent>, markers: &[&str], reasoning: bool) -> bool {
         let found = markers.iter().filter_map(|m| self.pending.find(m).map(|p| (p, *m))).min_by_key(|(p, _)| *p);
         match found {
+            Some((pos, TOOL_CALL_OPEN)) if reasoning => {
+                // A call opened inside the reasoning: the text before it is reasoning, all but a last newline, which
+                // is the framing before a call if the call turns out complete and reasoning otherwise
+                // ([`St::ThinkCall`] decides).
+                let held = pos - usize::from(self.pending[..pos].ends_with('\n'));
+                let text: String = self.pending.drain(..held).collect();
+                self.push_reasoning(text, out);
+                self.state = St::ThinkCall { scanned: 0 };
+                true
+            }
             Some((pos, marker)) => {
                 if pos > 0 {
                     let mut text: String = self.pending.drain(..pos).collect();
                     if reasoning {
-                        // The marker is `</think>` (the only Think-state
-                        // marker): the text right before it may end with the
-                        // render's framing newline.
+                        // The marker is `</think>`: the text right before it
+                        // may end with the render's framing newline.
                         self.strip_think_framing(&mut text, true);
                         if !text.is_empty() {
                             self.reasoning.push_str(&text);
@@ -1343,13 +1409,9 @@ impl ChatScanner {
                     emit_len -= 1;
                 }
                 if emit_len > 0 {
-                    let mut text: String = self.pending.drain(..emit_len).collect();
+                    let text: String = self.pending.drain(..emit_len).collect();
                     if reasoning {
-                        self.strip_think_framing(&mut text, false);
-                        if !text.is_empty() {
-                            self.reasoning.push_str(&text);
-                            out.push(ChatEvent::Reasoning(text));
-                        }
+                        self.push_reasoning(text, out);
                     } else {
                         self.content.push_str(&text);
                         out.push(ChatEvent::Content(text));
@@ -1357,6 +1419,35 @@ impl ChatScanner {
                 }
                 false
             }
+        }
+    }
+
+    /// Reasoning text that does not end at a `</think>`: only the open-side framing newline is stripped.
+    fn push_reasoning(&mut self, mut text: String, out: &mut Vec<ChatEvent>) {
+        self.strip_think_framing(&mut text, false);
+        if !text.is_empty() {
+            self.reasoning.push_str(&text);
+            out.push(ChatEvent::Reasoning(text));
+        }
+    }
+
+    /// Whether `block` (`<tool_call>` through `</tool_call>`) reads, under this scanner's flavor, as exactly one
+    /// call with a name and a JSON object of arguments, and nothing else: no text around it and no anomaly. Read by
+    /// the same scanner a call after `</think>` goes through, so a block that passes is read identically once it is
+    /// fed back from [`St::Content`].
+    fn is_complete_call(&self, block: &str) -> bool {
+        let mut probe = ChatScanner::blank(false, self.flavor, String::new());
+        let mut events = Vec::new();
+        probe.push(block, &mut events);
+        probe.finish(&mut events);
+        match probe.tool_calls.as_slice() {
+            [call] => {
+                probe.anomalies.is_empty()
+                    && probe.content.is_empty()
+                    && !call.name.is_empty()
+                    && matches!(json_py::parse(&call.arguments), Ok(json_py::Node::Obj(_)))
+            }
+            _ => false,
         }
     }
 
@@ -2287,16 +2378,125 @@ mod tests {
         }
     }
 
-    /// A call written before the reasoning is closed stays reasoning text (only `</think>` ends that state), so
-    /// the agent sees no call: it is named, whichever way the chunks fall.
-    #[test]
-    fn a_tool_call_inside_the_think_block_is_reported() {
-        for chunk in [1, 5, usize::MAX] {
-            let s = scan_all(&format!("let me run it\n{XML_CALL}"), true, TemplateFlavor::Qwen38, chunk);
-            assert!(s.tool_calls().is_empty());
-            assert!(s.reasoning().contains("<function=f>"));
-            assert_eq!(s.anomalies(), [ScanAnomaly::EndedInsideThink, ScanAnomaly::ToolCallInsideThink], "chunk {chunk}");
+    // ---- scanner: a call written before the reasoning is closed ----------------------------------------------------
+
+    /// A whole scan's report: coalesced events, reasoning, content, calls as `(name, arguments)`, and anomalies.
+    type ScanReport = (Vec<ChatEvent>, String, String, Vec<(String, String)>, Vec<ScanAnomaly>);
+
+    /// What a scan of `text` reports, after checking that every chunking gives it: one push, every two-piece split,
+    /// and one byte per push all yield the same report.
+    fn scan_every_way(text: &str, thinking_open: bool, flavor: TemplateFlavor) -> ScanReport {
+        let scan = |pieces: &[&str]| {
+            let mut s = ChatScanner::with_flavor(thinking_open, flavor);
+            let mut events = Vec::new();
+            for p in pieces {
+                s.push(p, &mut events);
+            }
+            s.finish(&mut events);
+            let calls = s.tool_calls().iter().map(|c| (c.name.clone(), c.arguments.clone())).collect();
+            (coalesce(events), s.reasoning().to_string(), s.content().to_string(), calls, s.anomalies().to_vec())
+        };
+        let whole = scan(&[text]);
+        for at in (0..=text.len()).filter(|&at| text.is_char_boundary(at)) {
+            assert_eq!(scan(&[&text[..at], &text[at..]]), whole, "split at byte {at} of {text:?}");
         }
+        let bytes: Vec<&str> = (0..text.len()).map(|i| &text[i..i + 1]).collect();
+        assert_eq!(scan(&bytes), whole, "one byte at a time: {text:?}");
+        whole
+    }
+
+    /// A complete, well-formed `<tool_call>` the model writes before it closes `</think>` ends the reasoning there
+    /// and is a call, as the reference Qwen3 parser reads it (vLLM `vllm/parser/qwen3.py`: `(REASONING, TOOL_START)`
+    /// is an implicit reasoning end). The text before it stays reasoning, without the framing newline the template
+    /// writes before a call; the rescue is never silent: it is reported as its own anomaly. Same events whether the
+    /// think block was opened by the model or prefilled, and under every JSON flavor.
+    #[test]
+    fn a_complete_call_inside_an_unclosed_think_block_ends_the_reasoning_and_is_a_call() {
+        let call = "<tool_call>\n{\"name\": \"shell\", \"arguments\": {\"cmd\": \"ls\"}}\n</tool_call>";
+        for flavor in [TemplateFlavor::Qwen3, TemplateFlavor::JsonFramed] {
+            for (text, open) in [(format!("<think>\nI will run it.\n{call}"), false), (format!("I will run it.\n{call}"), true)] {
+                let (events, reasoning, content, calls, anomalies) = scan_every_way(&text, open, flavor);
+                assert_eq!(
+                    events,
+                    vec![
+                        ChatEvent::Reasoning("I will run it.".into()),
+                        ChatEvent::ToolCallStart { index: 0, id: "call_0".into(), name: "shell".into() },
+                        ChatEvent::ToolCallArgs { index: 0, fragment: "{\"cmd\": \"ls\"}".into() },
+                        ChatEvent::ToolCallEnd { index: 0 },
+                    ],
+                    "{flavor:?} {text:?}"
+                );
+                assert_eq!((reasoning.as_str(), content.as_str()), ("I will run it.", ""));
+                assert_eq!(calls, [("shell".to_string(), "{\"cmd\": \"ls\"}".to_string())]);
+                assert_eq!(anomalies, [ScanAnomaly::ToolCallRescuedFromThink], "{flavor:?} {text:?}");
+            }
+        }
+        // What follows the rescued call is read as after any call: a second call is a call.
+        let (_, _, _, calls, anomalies) = scan_every_way(&format!("<think>\nr\n{call}{call}"), false, TemplateFlavor::Qwen3);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(anomalies, [ScanAnomaly::ToolCallRescuedFromThink]);
+    }
+
+    /// The Qwen3.8 XML call shares the path: a complete `<tool_call><function=…>` inside the prefilled think block
+    /// is rescued with its JSON arguments. A bare `<function=` without the `<tool_call>` fence is not a reference
+    /// transition out of reasoning, so it stays reasoning and is reported.
+    #[test]
+    fn a_complete_qwen38_call_inside_the_think_block_is_a_call() {
+        let (events, reasoning, _, calls, anomalies) = scan_every_way(&format!("let me run it\n{XML_CALL}"), true, TemplateFlavor::Qwen38);
+        assert_eq!(reasoning, "let me run it");
+        assert_eq!(calls, [("f".to_string(), "{\"a\": 1}".to_string())]);
+        assert_eq!(anomalies, [ScanAnomaly::ToolCallRescuedFromThink]);
+        assert!(matches!(events.first(), Some(ChatEvent::Reasoning(r)) if r == "let me run it"), "{events:?}");
+
+        let bare = "let me run it\n<function=f>\n<parameter=a>\n1\n</parameter>\n</function>";
+        let (_, reasoning, _, calls, anomalies) = scan_every_way(bare, true, TemplateFlavor::Qwen38);
+        assert!(calls.is_empty());
+        assert!(reasoning.contains("<function=f>"));
+        assert_eq!(anomalies, [ScanAnomaly::EndedInsideThink, ScanAnomaly::ToolCallInsideThink]);
+    }
+
+    /// Only a complete call that parses rescues: a `<tool_call>` inside the reasoning whose payload is not a call
+    /// object with a name (bad JSON, no name, the other flavor's syntax), that the reasoning closes before its
+    /// `</tool_call>`, or that the generation cuts off, stays reasoning text byte for byte, and is reported.
+    #[test]
+    fn a_malformed_or_incomplete_call_inside_the_think_block_stays_reasoning_and_is_reported() {
+        let closed = [
+            ("<tool_call>\n{\"name\": \"shell\", \"arguments\": {\"cmd\": }\n</tool_call>", TemplateFlavor::Qwen3),
+            ("<tool_call>\n{\"arguments\": {\"cmd\": \"ls\"}}\n</tool_call>", TemplateFlavor::Qwen3),
+            ("<tool_call>\n{\"name\": \"\", \"arguments\": {}}\n</tool_call>", TemplateFlavor::Qwen3),
+            ("<tool_call>\n{\"name\": \"f\", \"arguments\": {}} trailing\n</tool_call>", TemplateFlavor::Qwen3),
+            ("<tool_call>\n<function=f>\n</function>\n</tool_call>", TemplateFlavor::Qwen3),
+            ("<tool_call>\n{\"name\": \"f\", \"arguments\": {}}\n</tool_call>", TemplateFlavor::Qwen38),
+            ("I would write <tool_call> tags here", TemplateFlavor::Qwen3),
+            ("<tool_call>\n{\"name\": \"f\", \"arguments\": {}}", TemplateFlavor::Qwen3),
+        ];
+        for (inner, flavor) in closed {
+            let text = format!("<think>\nr\n{inner}\nmore\n</think>\n\nanswer");
+            let (_, reasoning, content, calls, anomalies) = scan_every_way(&text, false, flavor);
+            assert!(calls.is_empty(), "{text:?}: {calls:?}");
+            assert_eq!(reasoning, format!("r\n{inner}\nmore"), "{text:?}");
+            assert_eq!(content, "\n\nanswer");
+            assert_eq!(anomalies, [ScanAnomaly::ToolCallInsideThink], "{text:?}");
+        }
+        for cut in ["<tool_call>\n{\"name\": \"shell\", \"arguments\": {\"cmd\"", "<tool_call>\n{\"name\": \"f\", \"arguments\": {}}\n</tool_"] {
+            let (_, reasoning, content, calls, anomalies) = scan_every_way(&format!("<think>\nr\n{cut}"), false, TemplateFlavor::Qwen3);
+            assert!(calls.is_empty());
+            assert_eq!((reasoning, content.as_str()), (format!("r\n{cut}"), ""));
+            assert_eq!(anomalies, [ScanAnomaly::EndedInsideThink, ScanAnomaly::ToolCallInsideThink]);
+        }
+    }
+
+    /// A think block the model closes itself reads exactly as before: its call after `</think>` is a call with no
+    /// anomaly, under both payload forms.
+    #[test]
+    fn a_closed_think_block_then_a_call_is_unchanged() {
+        let (events, _, _, calls, anomalies) = scan_every_way(transcript(), false, TemplateFlavor::Qwen3);
+        assert_eq!(events, run_whole(transcript()));
+        assert_eq!(calls.len(), 2);
+        assert!(anomalies.is_empty(), "{anomalies:?}");
+        let (_, reasoning, _, calls, anomalies) = scan_every_way(xml_transcript(), false, TemplateFlavor::Qwen38);
+        assert_eq!((reasoning.as_str(), calls.len()), ("checking the weather", 1));
+        assert!(anomalies.is_empty(), "{anomalies:?}");
     }
 
     /// A `<tool_call>` the flavor cannot read stays visible as text and is named, in the JSON form under the XML

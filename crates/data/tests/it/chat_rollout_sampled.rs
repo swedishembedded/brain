@@ -79,6 +79,19 @@ fn a_sampled_answer_trains_its_own_ids_where_the_template_writes_its_text_differ
     assert!(encoded.behavior.iter().zip(&encoded.mask).all(|(b, m)| *m != b.is_nan()));
 }
 
+/// A call the model wrote before closing its think block is served as a call (the scanner's implicit reasoning end),
+/// so the record holds the reasoning and the call, which the template renders with a `</think>` the model never
+/// wrote. The trainer still trains what was served: the sampled ids read back as that answer and are admitted as they
+/// are, without the closing tag.
+#[test]
+fn a_call_written_inside_an_unclosed_think_block_trains_the_ids_that_were_served() {
+    let tok = tokenizer();
+    let served = "<think>\nr\n<tool_call>\n{\"name\": \"f\", \"arguments\": {\"a\": 1}}\n</tool_call><|im_end|>";
+    let encoded = encode(&record(r#"{"a":1}"#, served, Some(PROMPT))).expect("a rescued call reads back as the answer the record holds");
+    let supervised: Vec<u32> = encoded.ids.iter().zip(&encoded.mask).filter(|(_, m)| **m).map(|(i, _)| *i).collect();
+    assert_eq!(supervised, tok.encode(served), "the trained answer is what was served, with no `</think>` added");
+}
+
 #[test]
 fn sampled_ids_that_read_back_as_another_answer_are_refused() {
     let other = GENERATED.replace("{\"a\": 1}", "{\"a\": 2}");

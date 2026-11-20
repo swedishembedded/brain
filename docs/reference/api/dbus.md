@@ -87,7 +87,10 @@ A text `generate` result also carries `cached_tokens` (the prompt tokens the
 prefix cache served), the `seed` the decode sampled with (drawn or given: pass
 it back to reproduce the decode), and `scan_anomalies` when the chat scanner
 could not read the output cleanly (a tool call written inside the reasoning,
-a call in the wrong syntax or cut off, text dropped from a call). Passing
+a call in the wrong syntax or cut off, text dropped from a call).
+`tool_call_rescued_from_think` names a complete call the model wrote before it
+closed `</think>`: the call ended the reasoning and was returned as a call, as
+the reference Qwen3 parser reads it. Passing
 `return_raw: true` adds `raw_output` - the completion exactly as the model wrote
 it, every reasoning and tool-call marker included, ending with the stop token
 (`stop_token`) when one ended it - so a client can tell a turn that ended in
