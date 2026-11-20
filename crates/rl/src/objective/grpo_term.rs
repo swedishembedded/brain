@@ -57,12 +57,26 @@ fn bounded_exp(x: f64) -> (f64, f64) {
 pub struct ClipBand {
     pub low: f32,
     pub high: f32,
+    /// Dual-clip PPO's lower bound `c` (Ye et al. 2020), `c > 1`: with a negative advantage the surrogate is
+    /// `max(min(r*A, clip(r)*A), c*A)`, so a token whose ratio ran past `c` costs at most `c*|A|` and gives no
+    /// gradient instead of entering the step at its full ratio. `None`: the plain clipped surrogate.
+    pub dual: Option<f32>,
 }
 
 impl ClipBand {
     /// The band `[1 - eps, 1 + eps]`.
     pub fn symmetric(eps: f32) -> ClipBand {
-        ClipBand { low: eps, high: eps }
+        ClipBand { low: eps, high: eps, dual: None }
+    }
+
+    /// The band `[1 - low, 1 + high]` without a dual clip.
+    pub const fn new(low: f32, high: f32) -> ClipBand {
+        ClipBand { low, high, dual: None }
+    }
+
+    /// The same band with dual-clip PPO's bound `c` on a negative advantage's term.
+    pub fn with_dual(self, c: f32) -> ClipBand {
+        ClipBand { dual: Some(c), ..self }
     }
 }
 
@@ -77,6 +91,9 @@ pub struct TokenTerm {
     /// The policy term sat outside the clip band on the side its advantage pushes toward, so it contributes no
     /// gradient (`false` for a token without an advantage).
     pub clipped: bool,
+    /// The policy term had a negative advantage and a ratio past the band's dual clip `c`, so it was bounded at
+    /// `c*A` and contributes no gradient.
+    pub dual_clipped: bool,
 }
 
 /// [`token_term_banded`] with a symmetric band `[1 - clip_eps, 1 + clip_eps]`.
@@ -121,16 +138,24 @@ pub fn token_term_weighted(old_lp: f32, new_lp: f32, advantage: f32, band: ClipB
     let mut weight = 0.0f64;
     let mut loss = 0.0f64;
     let mut clipped_out = false;
+    let mut dual_clipped = false;
 
     if advantage != 0.0 {
         let unclipped = ratio * advantage;
         let clipped = ratio.clamp(1.0 - f64::from(band.low), 1.0 + f64::from(band.high)) * advantage;
         let surrogate = unclipped.min(clipped);
-        loss += -surrogate * policy_weight;
-        if unclipped <= clipped {
-            weight += advantage * ratio_slope * policy_weight;
+        let floor = band.dual.filter(|_| advantage < 0.0).map(|c| f64::from(c) * advantage);
+        if let Some(floor) = floor.filter(|floor| surrogate < *floor) {
+            // Dual clip: the term is held at c*A, locally constant in r.
+            loss += -floor * policy_weight;
+            dual_clipped = true;
         } else {
-            clipped_out = true;
+            loss += -surrogate * policy_weight;
+            if unclipped <= clipped {
+                weight += advantage * ratio_slope * policy_weight;
+            } else {
+                clipped_out = true;
+            }
         }
     }
 
@@ -141,7 +166,7 @@ pub fn token_term_weighted(old_lp: f32, new_lp: f32, advantage: f32, band: ClipB
         loss += f64::from(kl_beta) * k3;
     }
 
-    TokenTerm { weight: weight as f32, loss: loss as f32, clipped: clipped_out }
+    TokenTerm { weight: weight as f32, loss: loss as f32, clipped: clipped_out, dual_clipped }
 }
 
 /// The k3 estimator of `KL(policy || reference)` at one sampled token,
@@ -224,10 +249,43 @@ mod tests {
     fn a_wider_upper_edge_keeps_a_rewarded_token_moving_past_the_symmetric_clip() {
         let (old, new) = (0.0, 1.25_f32.ln());
         assert_eq!(token_term(old, new, 1.0, 0.2, None, 0.0).weight, 0.0);
-        let wide = token_term_banded(old, new, 1.0, ClipBand { low: 0.2, high: 0.28 }, None, 0.0);
+        let wide = token_term_banded(old, new, 1.0, ClipBand::new(0.2, 0.28), None, 0.0);
         assert!((wide.weight - 1.25).abs() < 1e-5, "{wide:?}");
         // Past the upper edge it clips again.
-        assert_eq!(token_term_banded(old, 1.3_f32.ln(), 1.0, ClipBand { low: 0.2, high: 0.28 }, None, 0.0).weight, 0.0);
+        assert_eq!(token_term_banded(old, 1.3_f32.ln(), 1.0, ClipBand::new(0.2, 0.28), None, 0.0).weight, 0.0);
+    }
+
+    /// Dual-clip PPO (Ye et al. 2020): with a negative advantage the surrogate is also bounded below by `c*A`, so a
+    /// token whose ratio ran far above one (a token the behaviour policy all but never drew) costs at most `c*|A|`
+    /// and gives no gradient, instead of entering the step at its full ratio.
+    #[test]
+    fn a_dual_clip_bounds_a_negative_advantage_term_whose_ratio_ran_past_c() {
+        let band = ClipBand::symmetric(0.2).with_dual(3.0);
+        let t = token_term_banded(0.0, 10.0_f32.ln(), -1.0, band, None, 0.0);
+        assert_eq!(t.weight, 0.0, "{t:?}");
+        assert!((t.loss - 3.0).abs() < 1e-5, "{t:?}");
+        assert!(t.dual_clipped && !t.clipped, "{t:?}");
+        // The enormous ratio that once reached a step at full size is bounded the same way.
+        let far = token_term_banded(0.0, 14.3, -0.5, band, None, 0.0);
+        assert_eq!(far.weight, 0.0, "{far:?}");
+        assert!((far.loss - 1.5).abs() < 1e-5 && far.dual_clipped, "{far:?}");
+    }
+
+    #[test]
+    fn below_c_a_negative_advantage_term_is_the_plain_surrogate() {
+        let dual = token_term_banded(0.0, 2.0_f32.ln(), -1.0, ClipBand::symmetric(0.2).with_dual(3.0), None, 0.0);
+        let plain = token_term(0.0, 2.0_f32.ln(), -1.0, 0.2, None, 0.0);
+        assert_eq!((dual.weight, dual.loss, dual.clipped), (plain.weight, plain.loss, plain.clipped));
+        assert!(!dual.dual_clipped && (dual.weight - -2.0).abs() < 1e-5, "{dual:?}");
+    }
+
+    #[test]
+    fn a_dual_clip_leaves_a_positive_advantage_term_unchanged() {
+        for ratio in [0.5_f32, 1.0, 1.5, 10.0] {
+            let dual = token_term_banded(0.0, ratio.ln(), 1.0, ClipBand::symmetric(0.2).with_dual(3.0), None, 0.0);
+            let plain = token_term(0.0, ratio.ln(), 1.0, 0.2, None, 0.0);
+            assert_eq!((dual.weight, dual.loss, dual.clipped, dual.dual_clipped), (plain.weight, plain.loss, plain.clipped, false), "ratio {ratio}");
+        }
     }
 
     /// R7: a log-ratio of 100 must not overflow the weight; the exponent is capped.

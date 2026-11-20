@@ -1303,6 +1303,7 @@ impl ChatFineTune {
             "policy_gradient": self.policy_gradient.map(|c| serde_json::json!({
                 "clip_eps_bits": c.clip_eps.to_bits(),
                 "clip_eps_high_bits": c.clip_eps_high.map(f32::to_bits),
+                "dual_clip_bits": c.dual_clip.map(f32::to_bits),
                 "importance": serde_json::to_value(c.importance).unwrap_or_default(),
                 "numerics_gate": c.numerics,
                 "kv_roundtrip": c.kv_roundtrip.map(|e| format!("{e:?}")),
@@ -1615,6 +1616,7 @@ impl PolicyGradientOutcome {
             "numerics": s.numerics,
             "mean_loss": s.mean_loss(),
             "mean_clip_fraction": s.mean_clip_fraction(),
+            "mean_clip_fraction_dual": s.mean_clip_fraction_dual(),
             "mean_kl": s.mean_kl(),
             // The card is part of the adapter's bytes, so it holds what the run computed and nothing it timed: a
             // run resumed from its saved state scores again the examples its predecessor scored, and a step's
@@ -1640,6 +1642,7 @@ impl PolicyGradientOutcome {
         serde_json::json!({
             "clip_eps": c.clip_eps,
             "clip_eps_high": c.clip_eps_high,
+            "dual_clip": c.dual_clip,
             "importance": c.importance.to_string(),
             "max_step_kl": c.max_step_kl,
             "max_step_grad_norm": c.max_step_grad_norm,

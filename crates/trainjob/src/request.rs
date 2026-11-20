@@ -53,6 +53,7 @@ pub fn implied_defaults() -> Map<String, Value> {
         ("weight_decay", Some(float(brain::LORA_WEIGHT_DECAY))),
         ("clip_eps", Some(float(pg.clip_eps))),
         ("clip_eps_high", pg.clip_eps_high.map(float)),
+        ("dual_clip", pg.dual_clip.map(float)),
         ("importance", Some(json!(pg.importance.to_string()))),
         ("max_step_kl", pg.max_step_kl.map(float)),
         ("max_step_grad_norm", pg.max_step_grad_norm.map(float)),
@@ -123,6 +124,7 @@ fn spec_without_defaults() -> ActionSpec {
         .param(ParamSpec::new("algorithm", ParamType::Enum(brain::PolicyGradientAlgorithm::ALL.iter().map(|a| a.name().to_string()).collect()), "policy gradient: a named algorithm whose settings are the defaults of this run (any setting named beside it overrides it): `grpo` (z-score, seq-mean, symmetric clip, the KL term), `dr-grpo` (mean-centred, constant-length over max_block, no KL), `dapo` (z-score, clip-higher 0.28, token-sum, truncated masked, no KL) or `rloo` (leave-one-out, token-sum); the result records every setting the run trained with"))
         .param(optional_f("clip_eps", "policy gradient: half-width of the clip band of the importance ratio", 0.0, 1.0))
         .param(optional_f("clip_eps_high", "policy gradient: the upper edge of the clip band is 1 + this (clip-higher), at least clip_eps; omitted, the band is symmetric", 0.0, 10.0))
+        .param(optional_f("dual_clip", "policy gradient: dual-clip PPO's bound c on a negative advantage's term, max(min(r*A, clip(r)*A), c*A): a token whose ratio ran past c costs at most c*|A| and gives no gradient (each step reports the share as clip_fraction_dual); above 1", 1.0, 1e9))
         .param(ParamSpec::new("importance", ParamType::Str, "policy gradient: the correction for the sampling engine's gap to the trainer: `none`, `truncate:CAP` or `mask:CAP`; needs recorded behaviour log-probabilities"))
         .param(optional_f("max_step_kl", "policy gradient: skip (and log) an optimiser step whose mean KL to the reference is over this", 0.0, 1e9))
         .param(optional_f("max_step_grad_norm", "policy gradient: skip (and log) an optimiser step whose gradient norm is over this", 0.0, 1e12))
@@ -352,6 +354,7 @@ pub struct Params {
     pub algorithm: Option<String>,
     pub clip_eps: Option<f32>,
     pub clip_eps_high: Option<f32>,
+    pub dual_clip: Option<f32>,
     pub importance: Option<String>,
     pub max_step_kl: Option<f32>,
     pub max_step_grad_norm: Option<f32>,
@@ -399,6 +402,7 @@ impl Request {
             (params.algorithm.is_some(), "algorithm"),
             (params.clip_eps.is_some(), "clip_eps"),
             (params.clip_eps_high.is_some(), "clip_eps_high"),
+            (params.dual_clip.is_some(), "dual_clip"),
             (params.importance.is_some(), "importance"),
             (params.max_step_kl.is_some(), "max_step_kl"),
             (params.max_step_grad_norm.is_some(), "max_step_grad_norm"),
@@ -804,6 +808,9 @@ mod tests {
         assert_eq!((dapo.clip_eps_high, dapo.kl_beta, dapo.truncated, dapo.loss_agg), (Some(0.35), 0.01, brain::TruncatedRollouts::Keep, brain::LossAgg::TokenSum));
         assert_eq!(pg(json!({"algorithm": "dr-grpo", "loss_agg_length": 64})).unwrap().loss_agg, brain::LossAgg::ConstantLength(64), "dr-grpo takes its constant alone");
         assert!(pg(json!({"algorithm": "dapo", "loss_agg_length": 64})).is_err(), "dapo's aggregation has no constant");
+        assert_eq!(pg(json!({})).unwrap().dual_clip, Some(brain::DEFAULT_DUAL_CLIP), "the dual clip is on by default");
+        assert_eq!(pg(json!({"dual_clip": 5.0})).unwrap().dual_clip, Some(5.0));
+        assert!(pg(json!({"dual_clip": 1.0})).is_err(), "a dual clip of one or less is refused");
         assert!(pg(json!({"algorithm": "ppo"})).is_err());
         let e = request(json!({"base": "a/b", "data": data, "algorithm": "rloo"}), &[]).unwrap_err();
         assert!(e.contains("algorithm") && e.contains("sft"), "{e}");

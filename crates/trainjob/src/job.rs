@@ -269,6 +269,7 @@ pub(crate) fn policy_gradient_config(params: &crate::request::Params) -> Result<
         config.clip_eps = v;
     }
     config.clip_eps_high = params.clip_eps_high.or(config.clip_eps_high);
+    config.dual_clip = params.dual_clip.or(config.dual_clip);
     if let Some(v) = &params.importance {
         config.importance = v.parse().map_err(|e| format!("train: importance: {e}"))?;
     }

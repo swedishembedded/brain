@@ -60,6 +60,9 @@ pub struct BatchTerms {
     /// are tuned separately, so they are read separately.
     pub clipped_high: usize,
     pub clipped_low: usize,
+    /// Tokens with a negative advantage whose ratio ran past the band's dual clip, bounded at `c*A` with no gradient
+    /// ([`super::grpo_term::ClipBand::dual`]); not among [`Self::clipped`].
+    pub dual_clipped: usize,
     /// Tokens with a non-zero advantage (what [`Self::clipped`] is a fraction of).
     pub signed_tokens: usize,
     /// Policy tokens whose importance-sampling weight is zero (dropped by the mismatch mask) and those it is below
@@ -102,6 +105,7 @@ impl Default for BatchTerms {
             policy_tokens: 0,
             clipped: 0,
             clipped_high: 0,
+            dual_clipped: 0,
             clipped_low: 0,
             signed_tokens: 0,
             weight_masked: 0,
@@ -143,6 +147,7 @@ pub fn weigh(new_lp: &[f32], batch: &PgBatch<'_>, spec: &PgSpec) -> (Vec<f32>, B
         terms.signed_tokens += usize::from(advantage != 0.0);
         terms.clipped += usize::from(term.clipped);
         terms.clipped_high += usize::from(term.clipped && advantage > 0.0);
+        terms.dual_clipped += usize::from(term.dual_clipped);
         terms.clipped_low += usize::from(term.clipped && advantage < 0.0);
         terms.weight_masked += usize::from(is_weight == 0.0);
         terms.weight_truncated += usize::from(is_weight > 0.0 && is_weight < 1.0);
@@ -276,7 +281,7 @@ impl AdapterState {
 mod tests {
     use super::*;
 
-    const SPEC: PgSpec = PgSpec { band: ClipBand { low: 0.2, high: 0.2 }, kl_beta: 0.0 };
+    const SPEC: PgSpec = PgSpec { band: ClipBand::new(0.2, 0.2), kl_beta: 0.0 };
 
     fn batch<'a>(targets: &'a [u32], old: &'a [f32], advantage: &'a [f32]) -> PgBatch<'a> {
         PgBatch { targets, old_lp: old, ref_lp: None, advantage, is_weight: None }
@@ -353,7 +358,7 @@ mod tests {
     /// and the batch's normalised loss divides by what the regime's aggregation says.
     #[test]
     fn every_tokens_weight_is_minus_the_derivative_of_its_loss_inside_and_past_the_clip() {
-        let band = ClipBand { low: 0.2, high: 0.28 };
+        let band = ClipBand::new(0.2, 0.28);
         // (log ratio, advantage, importance weight): inside, past the upper edge with A > 0 (clipped) and A < 0
         // (not), under the lower edge with A < 0 (clipped) and A > 0 (not), and a zero advantage (KL only).
         let tokens = [(0.05f64, 1.3f64, 1.0f64), (0.5, 0.7, 1.0), (0.5, -0.7, 0.6), (-0.6, -1.1, 1.0), (-0.6, 0.9, 1.0), (0.1, 0.0, 1.0), (-0.1, -0.4, 0.0)];

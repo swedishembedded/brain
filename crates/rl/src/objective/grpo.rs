@@ -442,7 +442,7 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
     }
 
     fn band(&self) -> ClipBand {
-        ClipBand { low: self.cfg.clip_eps, high: self.cfg.options.clip_eps_high }
+        ClipBand::new(self.cfg.clip_eps, self.cfg.options.clip_eps_high)
     }
 
     /// Rollout parameters for the model's own rollout: its logits already

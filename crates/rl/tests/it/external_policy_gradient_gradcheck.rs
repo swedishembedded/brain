@@ -128,7 +128,13 @@ impl Harness {
 
     /// The clip band `[1 - low, 1 + high]`.
     fn with_band(mut self, low: f32, high: f32) -> Harness {
-        self.band = ClipBand { low, high };
+        self.band = ClipBand::new(low, high);
+        self
+    }
+
+    /// The same band with dual-clip PPO's bound `c` on a negative advantage's term.
+    fn with_dual_clip(mut self, c: f32) -> Harness {
+        self.band = self.band.with_dual(c);
         self
     }
 
@@ -153,7 +159,8 @@ impl Harness {
         let lp = training::objectives(&self.m).batch_token_logprobs();
         for i in (0..self.rows * T).filter(|&i| self.targets[i] != IGNORE && !self.advantage[i].is_nan() && self.advantage[i] != 0.0) {
             let ratio = (lp[i] - self.old_lp[i]).exp();
-            let near = (ratio - (1.0 - self.band.low)).abs() < MARGIN || (ratio - (1.0 + self.band.high)).abs() < MARGIN;
+            let near_dual = self.band.dual.is_some_and(|c| (ratio - c).abs() < MARGIN);
+            let near = (ratio - (1.0 - self.band.low)).abs() < MARGIN || (ratio - (1.0 + self.band.high)).abs() < MARGIN || near_dual;
             assert!(!near, "token {i}: base ratio {ratio} sits within the FD-unsafe margin of a clip boundary");
         }
     }
@@ -230,4 +237,17 @@ fn the_adapters_match_finite_differences_when_every_token_has_its_own_advantage(
 #[test]
 fn the_adapters_match_finite_differences_under_a_wide_upper_clip_edge_and_importance_weights() {
     check(&Harness::new(19, &[1.2, -1.1, 0.8], false).with_band(0.2, 1.4).with_importance_weights(&[1.0, 0.5, 0.0, 2.0]), "clip-higher and weights");
+}
+
+/// Dual-clip PPO: with `c = 1.5` every negative-advantage token whose base ratio is past `c` (the offsets put them
+/// at 1.7-2.0) is held at `c*A` and gives no gradient, the rest keep theirs; the backward still matches finite
+/// differences of the loss the host computes, and some tokens are bounded.
+#[test]
+fn the_adapters_match_finite_differences_under_a_dual_clip() {
+    let h = Harness::new(23, &[1.2, -1.1, -0.7], false).with_dual_clip(1.5);
+    h.load();
+    let _ = h.m.forward();
+    let (_, terms) = weigh(&training::objectives(&h.m).batch_token_logprobs(), &h.batch(), &h.spec());
+    assert!(terms.dual_clipped > 0, "the base point exercises the dual clip: {terms:?}");
+    check(&h, "dual clip");
 }

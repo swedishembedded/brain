@@ -294,6 +294,12 @@ pub struct PolicyGradientConfig {
     /// token that turns out well can then keep gaining mass instead of being clipped at `1 + clip_eps`, which
     /// counters the entropy collapse a symmetric band causes. `None`: symmetric. At least `clip_eps`.
     pub clip_eps_high: Option<f32>,
+    /// Dual-clip PPO's bound `c` on a negative advantage's term (Ye et al. 2020): the surrogate is
+    /// `max(min(r*A, clip(r)*A), c*A)` there, so a token whose ratio ran past `c` costs at most `c*|A|` and gives no
+    /// gradient. A token the behaviour policy all but never drew (a re-rendered proxy weighed against the start of the
+    /// run) otherwise reaches a step at its full ratio: 1.6e6 and a gradient norm of 1.4e5 on real agent rollouts.
+    /// Each step reports the share of terms it bounded. `None`: the plain clipped surrogate. Above one.
+    pub dual_clip: Option<f32>,
     /// The engine-versus-trainer correction ([`ImportanceCorrection`]).
     pub importance: ImportanceCorrection,
     /// Skip, and log, the optimiser step of a step whose mean KL to the reference (the step's `kl`) exceeds this: a rare step with a
@@ -349,7 +355,7 @@ pub struct PolicyGradientConfig {
 
 impl Default for PolicyGradientConfig {
     fn default() -> PolicyGradientConfig {
-        PolicyGradientConfig { clip_eps: 0.2, clip_eps_high: None, importance: ImportanceCorrection::None, max_step_kl: None, max_step_grad_norm: None, numerics: None, kv_roundtrip: None, kl_beta: 0.02, reference: ReferencePolicy::Base, behaviour: BehaviourSource::Recorded, loss_agg: LossAgg::SeqMean, temperature: 1.0, log_kl: true, teacher: ReferencePolicy::Base, advantage_bound: None, sequence_advantage_cap: None, advantage_norm: AdvantageNorm::MeanCentered, advantage_floor: AdvantageFloor::None, truncated: TruncatedRollouts::Mask }
+        PolicyGradientConfig { clip_eps: 0.2, clip_eps_high: None, dual_clip: Some(DEFAULT_DUAL_CLIP), importance: ImportanceCorrection::None, max_step_kl: None, max_step_grad_norm: None, numerics: None, kv_roundtrip: None, kl_beta: 0.02, reference: ReferencePolicy::Base, behaviour: BehaviourSource::Recorded, loss_agg: LossAgg::SeqMean, temperature: 1.0, log_kl: true, teacher: ReferencePolicy::Base, advantage_bound: None, sequence_advantage_cap: None, advantage_norm: AdvantageNorm::MeanCentered, advantage_floor: AdvantageFloor::None, truncated: TruncatedRollouts::Mask }
     }
 }
 
@@ -414,9 +420,15 @@ impl model::training_plan::PlanCheck for PolicyGradientConfig {
     }
 }
 
+/// The dual clip [`PolicyGradientConfig`] defaults to: the `c = 3` of dual-clip PPO.
+pub const DEFAULT_DUAL_CLIP: f32 = 3.0;
+
 impl PolicyGradientConfig {
     /// Refuse a setting that has no meaning.
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(c) = self.dual_clip.filter(|c| !(c.is_finite() && *c > 1.0)) {
+            return Err(format!("dual_clip is {c}; it must be a finite number above 1 (leave it unset for the plain clipped surrogate)"));
+        }
         if !(self.clip_eps.is_finite() && self.clip_eps > 0.0 && self.clip_eps < 1.0) {
             return Err(format!("clip_eps is {}; it must lie in (0, 1)", self.clip_eps));
         }
@@ -493,6 +505,10 @@ pub struct PolicyGradientStep {
     /// advantage past `1 + eps_high`) and at the lower one (a negative advantage under `1 - eps`). They add up to it.
     pub clip_fraction_high: f32,
     pub clip_fraction_low: f32,
+    /// Of the signed tokens, the share whose negative-advantage term the dual clip bounded (a ratio past `c`): no
+    /// gradient, and not counted in [`Self::clip_fraction`]. Zero without a dual clip, and in records written before it.
+    #[serde(default)]
+    pub clip_fraction_dual: f32,
     /// The mean of `-log p(y)` over the policy tokens under the current policy: an estimator of the policy's entropy
     /// while the rollouts are on-policy (a falling series is the entropy collapse clip-higher counters).
     pub entropy_estimate: f32,
@@ -575,6 +591,11 @@ impl PolicyGradientStats {
     /// The mean clip fraction over all steps.
     pub fn mean_clip_fraction(&self) -> Option<f32> {
         self.mean(|s| s.clip_fraction)
+    }
+
+    /// The mean share of the signed tokens the dual clip bounded, over all steps.
+    pub fn mean_clip_fraction_dual(&self) -> Option<f32> {
+        self.mean(|s| s.clip_fraction_dual)
     }
 
     /// The mean KL to the reference over the steps that measured one.
@@ -827,7 +848,7 @@ impl ExternalPolicyGradient {
     }
 
     fn spec(&self) -> PgSpec {
-        PgSpec { band: ClipBand { low: self.cfg.clip_eps, high: self.cfg.clip_eps_high.unwrap_or(self.cfg.clip_eps) }, kl_beta: self.cfg.kl_beta }
+        PgSpec { band: ClipBand { low: self.cfg.clip_eps, high: self.cfg.clip_eps_high.unwrap_or(self.cfg.clip_eps), dual: self.cfg.dual_clip }, kl_beta: self.cfg.kl_beta }
     }
 
     fn upload<M: Model>(&self, model: &M, tokens: &[u32], targets: &[u32], picks: &[Option<usize>]) {
@@ -1068,6 +1089,7 @@ impl ExternalPolicyGradient {
             sum.clipped += t.clipped;
             sum.clipped_high += t.clipped_high;
             sum.clipped_low += t.clipped_low;
+            sum.dual_clipped += t.dual_clipped;
             sum.weight_masked += t.weight_masked;
             sum.weight_sum += t.weight_sum;
             sum.nll_sum += t.nll_sum;
@@ -1089,6 +1111,7 @@ impl ExternalPolicyGradient {
             clip_fraction: if sum.signed_tokens > 0 { sum.clipped as f32 / sum.signed_tokens as f32 } else { 0.0 },
             clip_fraction_high: if sum.signed_tokens > 0 { sum.clipped_high as f32 / sum.signed_tokens as f32 } else { 0.0 },
             clip_fraction_low: if sum.signed_tokens > 0 { sum.clipped_low as f32 / sum.signed_tokens as f32 } else { 0.0 },
+            clip_fraction_dual: if sum.signed_tokens > 0 { sum.dual_clipped as f32 / sum.signed_tokens as f32 } else { 0.0 },
             entropy_estimate: if sum.policy_tokens > 0 { (sum.nll_sum / f64::from(policy)) as f32 } else { 0.0 },
             mean_response_tokens: if acc.sequences > 0 { sum.supervised as f32 / acc.sequences as f32 } else { 0.0 },
             grad_norm,
@@ -1336,12 +1359,12 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
         let teacher = if self.stats.sequences_with_teacher > 0 { format!("  adv mean {:+.3} max {:.3} clipped {:.3}", last.token_advantage_mean, last.token_advantage_max, last.token_advantage_clip_fraction) } else { String::new() };
         let scoring = if last.scoring_seconds > 0.0 { format!("  scoring {:.1}s", last.scoring_seconds) } else { String::new() };
         let skipped = if last.skipped.is_some() { "  SKIPPED" } else { "" };
-        Some(format!("{kl}clip {:.3} (hi {:.3} lo {:.3})  ratio {:.3}  entropy~{:.3}  len {:.0}  gnorm {:.3}{teacher}{scoring}{skipped}", last.clip_fraction, last.clip_fraction_high, last.clip_fraction_low, last.ratio_mean, last.entropy_estimate, last.mean_response_tokens, last.grad_norm))
+        Some(format!("{kl}clip {:.3} (hi {:.3} lo {:.3} dual {:.3})  ratio {:.3}  entropy~{:.3}  len {:.0}  gnorm {:.3}{teacher}{scoring}{skipped}", last.clip_fraction, last.clip_fraction_high, last.clip_fraction_low, last.clip_fraction_dual, last.ratio_mean, last.entropy_estimate, last.mean_response_tokens, last.grad_norm))
     }
 
     fn metrics(&self) -> Vec<(&'static str, f32)> {
         let Some(last) = self.stats.steps.last() else { return Vec::new() };
-        let mut m = vec![("pg_loss", last.loss), ("pg_clip_fraction", last.clip_fraction), ("pg_clip_fraction_high", last.clip_fraction_high), ("pg_clip_fraction_low", last.clip_fraction_low), ("pg_entropy_estimate", last.entropy_estimate), ("pg_response_tokens", last.mean_response_tokens), ("pg_grad_norm", last.grad_norm), ("pg_importance_weight_mean", last.importance_weight_mean), ("pg_importance_masked_fraction", last.importance_masked_fraction), ("pg_ratio_mean", last.ratio_mean), ("pg_ratio_min", last.ratio_min), ("pg_ratio_max", last.ratio_max), ("pg_mean_advantage", last.mean_advantage), ("pg_scoring_seconds", last.scoring_seconds)];
+        let mut m = vec![("pg_loss", last.loss), ("pg_clip_fraction", last.clip_fraction), ("pg_clip_fraction_high", last.clip_fraction_high), ("pg_clip_fraction_low", last.clip_fraction_low), ("pg_clip_fraction_dual", last.clip_fraction_dual), ("pg_entropy_estimate", last.entropy_estimate), ("pg_response_tokens", last.mean_response_tokens), ("pg_grad_norm", last.grad_norm), ("pg_importance_weight_mean", last.importance_weight_mean), ("pg_importance_masked_fraction", last.importance_masked_fraction), ("pg_ratio_mean", last.ratio_mean), ("pg_ratio_min", last.ratio_min), ("pg_ratio_max", last.ratio_max), ("pg_mean_advantage", last.mean_advantage), ("pg_scoring_seconds", last.scoring_seconds)];
         if let Some(kl) = last.kl {
             m.push(("pg_kl", kl));
         }

@@ -19,6 +19,6 @@ use rl::objective::grpo_term::ClipBand;
 
 #[test]
 fn dapo_adapter_gradients_match_finite_differences() {
-    let regime = pg_regime::Regime { name: "dapo", norm: AdvantageNorm::ZScore, band: ClipBand { low: 0.2, high: 0.28 }, kl_beta: 0.0, loss_agg: LossAgg::TokenSum };
+    let regime = pg_regime::Regime { name: "dapo", norm: AdvantageNorm::ZScore, band: ClipBand::new(0.2, 0.28), kl_beta: 0.0, loss_agg: LossAgg::TokenSum };
     pg_regime::check(regime, [1.0, 0.25]);
 }

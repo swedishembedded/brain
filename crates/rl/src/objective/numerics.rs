@@ -239,7 +239,7 @@ fn violations(r: &NumericsReport, bounds: &NumericsBounds) -> Vec<String> {
 mod tests {
     use super::*;
 
-    const BAND: ClipBand = ClipBand { low: 0.2, high: 0.2 };
+    const BAND: ClipBand = ClipBand::new(0.2, 0.2);
 
     #[test]
     fn identical_log_probabilities_are_one_policy() {
