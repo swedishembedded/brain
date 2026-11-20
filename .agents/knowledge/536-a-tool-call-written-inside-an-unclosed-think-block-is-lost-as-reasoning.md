@@ -61,9 +61,30 @@ that carries the sampled `token_ids` trains those ids: `check_sampled` admits th
 refused as `TokenIdsMismatch`. A record without `token_ids` is imitation from the message and renders the canonical
 form, with `</think>`.
 
+## Measured (2026-11-20, GPU)
+
+- **Design:** two arms that differ only in the serving build: 1bdd5400c (before the fix) and 5e25d5b82 (the fix), the
+  same Qwen3-4B LoRA adapter, launch flags (`--max-batch 64`, seed, `-v`), agent build, profile and sampling (T 1.0,
+  top-p 0.95, top-k 20, per-trial seeds shared by the arms). 24 fresh accounting practice tasks (two draws of 12 at the
+  generator's default rung) x 8 attempts = 192 trials per arm, one server per card, four cards in parallel.
+- **Pass rate:** pass@1 0.376 on 1bdd5400c, 0.354 on 5e25d5b82; paired by task -0.022, task bootstrap 95%
+  [-0.105, +0.071]. No measurable change. 16 of 24 tasks solved at least once in each arm.
+- **The defect is common and the fix works:** on 1bdd5400c, 42 of 190 graded trials (22%) had at least one response with
+  a `<tool_call>` in the reasoning and no `tool_calls` (53 responses of 4,311; the server logged 54
+  `tool_call_inside_think`). On 5e25d5b82, 56 generations were logged `tool_call_rescued_from_think`, in 37 of 192 trials
+  (19%), and only 4 trials still had a lost call (invalid or cut-off calls, which stay reasoning by design).
+- **Why no gain:** the shape marks trajectories that are already failing. Trials with a lost call passed 0.19 against
+  0.43 for the others (old build); trials with a rescued call passed 0.22 against 0.39 (new build). Running the call
+  does not rescue the trial; the rate of the shape, not the parser, tracks task difficulty.
+- **Other measures (old / new):** agent timeouts 19 / 25 (trials with the shape: 12 of 42 / 6 of 37), git-history probe
+  share of trials 0.016 / 0.052, 2 / 0 trials marked exposed by the examiner. Neither difference is tested; the probe
+  share is 3 against 10 trials.
+- **What else differs between the builds:** 15 commits, none on the serving path except this fix. The device worker
+  binary is byte-identical (sha256 509d51d6...). The rest is training (weighted-loss trim in the Qwen3 step, KTO and
+  policy-gradient changes, dual clip, a step-parity harness), CPU-backend fan-out (the servers ran on CUDA) and CLI help
+  text. Pass rates hold per serving build, so this pair isolates the parser.
+
 ## Open
 
-- **Re-measure** the same practice tasks on a build with the fix. The pass rate holds per serving build (the
-  examiner's own finding), so compare within one build pair only.
 - The thinking budget and the reasoning-token count are token-level and still count a rescued call's tokens as
   reasoning, since only `</think>` ends the block for them.
