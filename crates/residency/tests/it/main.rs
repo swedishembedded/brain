@@ -19,3 +19,4 @@ mod plan;
 mod sibling_models;
 mod supervision;
 mod supervisor_model;
+mod workload_cards;
