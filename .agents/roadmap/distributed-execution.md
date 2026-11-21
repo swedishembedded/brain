@@ -468,7 +468,7 @@ Scope: Running one training job as ranks across machines, and serving one model 
     tok/s, TTFT p95 1.69 against 2.07 s, ITL p95 0.28 against 0.38 s.
   - Overload (3000 independent, 1500 in flight, 128 tokens): the first run
     reset 1976 client connections at the router's listener cap (knowledge
-    544); with the cap sized from the fleet 28297/29814 tok/s, 0 errors, the
+    545); with the cap sized from the fleet 28297/29814 tok/s, 0 errors, the
     router holding 1052 in flight (the fleet's slots) and about 450 queued,
     TTFT p95 9.33/7.91 s; round-robin 29932 tok/s, TTFT p95 7.63 s.
   - Token keying: 9216 requests, 1.73M tokens encoded in 8.13 s of encoder

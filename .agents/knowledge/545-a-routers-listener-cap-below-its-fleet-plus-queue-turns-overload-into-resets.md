@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: CC-BY-4.0 -->
 <!-- Copyright (c) 2026 Martin Schröder <info@swedishembedded.com> -->
 
-# 544. A router's listener cap below its fleet plus its queue turns overload into resets
+# 545. A router's listener cap below its fleet plus its queue turns overload into resets
 
 **Lesson:** the HTTP listener closes a connection over its cap at accept, before reading a byte (the right defence for
 one server). A router fronting a fleet holds a client connection for every request its upstreams run and every
