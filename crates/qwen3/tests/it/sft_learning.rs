@@ -116,8 +116,8 @@ struct Trained {
     _scratch: brain_testutil::Scratch,
 }
 
-/// Steps of both learning runs: about 15 s each on the CPU backend. Measured held-out accuracy 0.81-0.86 over
-/// repeated runs (random seeds), chance 0.05.
+/// Steps of both learning runs: enough for the rule to be learned, few enough that the CPU backend runs each in
+/// seconds. Measured held-out accuracy 0.81-0.86 over repeated runs (random seeds), chance 0.05.
 const STEPS: u32 = 8000;
 
 /// Trained on 79 of the 100 single-digit additions, the model answers most of the 21 it never saw: it learned the
