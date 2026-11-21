@@ -830,11 +830,19 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         prefetches the next layer; `finish_layer` reduce-scatters the layer's
         lanes and updates the owner's slice on the card. No rank holds the
         whole gradient or a host copy of the model. The remainder (norms) is
-        all-reduced. Clip: none or two-pass; running is refused. The fit loop
+        all-reduced. Clip: none, two-pass, or the one-pass running clip (each
+        layer's slice norm summed over the group by one scalar all-reduce on the
+        device; the head is not counted before the layers). The fit loop
         runs `Sharding::Parameters` through `Model::parameter_shards`. Tests:
-        `resident_shard`, qwen35 `sharded_parameters`. Open: writing the trained
-        model or a resume state of a parameter-sharded run is refused (no
-        collective gather on save yet); the SDK path therefore refuses too.
+        `resident_shard`, qwen35 `sharded_parameters`. Saving (2026-11-21): the
+        trained model is streamed unit by unit into the family's brain
+        checkpoint (bf16 linears and tables, f32 norms, card; rank 0 writes,
+        no rank holds more than a layer), and each rank commits its slices into
+        the C8 generation layout; a resumed run ends bit for bit where the
+        uninterrupted one does and writes the same file (CPU tests). Open:
+        selection on held-out loss and timed model saves are not run for such
+        a run; the `brain finetune` 27B run end to end (export, serve) is not
+        yet run on cards.
       - [x] The 27B gate (2026-11-21): a full-parameter fine-tune step of
         Qwen3.8-27B-FP8 (all 64 layers, bf16 values from the FP8 checkpoint,
         f32 master and AdamW state) parameter-sharded over 8 GH200s on two
@@ -842,7 +850,9 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         planner at 116 GB a card against 89 GB free, one card would need about
         384 GB of state alone. Harness: qwen35
         `measure_sharded_parameters_rank` (one process per card under srun).
-        Open: a 12- and 16-card scaling point; saving the trained model.
+        Open: a 12- and 16-card scaling point; the running clip at 27B on 8
+        cards (on 16 layers and 4 cards: 0.80 s a step against 1.46 s with two
+        passes, 2026-11-21, n467, block 1024).
       - [ ] Overlap of ZeRO-2's reduce-scatter with the backward (per-unit
         gradient-ready hook in whole-model backwards).
 - [ ] **C4 serving across nodes.** A router capability in front of several
