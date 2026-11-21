@@ -53,8 +53,8 @@ fn instance() -> &'static str {
 
 /// `{"status", "instance", "decode_slots", "free_slots", "kv_free_tokens", "kv_total_tokens", "edge_concurrency",
 /// "queue_depth", "served": {...}}`: the process's identity, the sequences the served models decode at once and how
-/// many of those are free now, the KV pool's free and total tokens summed over the paged text models (null when none
-/// is resident), the requests the surface admits at once before it sheds with 503, the jobs waiting for a lane now,
+/// many of those are free now, the KV tokens a new request can claim (free blocks and blocks only the prefix cache
+/// holds, an upper bound) and the pool's total, summed over the paged text models (null when none is resident), the requests the surface admits at once before it sheds with 503, the jobs waiting for a lane now,
 /// and the cumulative counts of finished generations, prompt, completion and prefix-cached prompt tokens (a reader
 /// takes rates from two readings). Model counters are as of the dispatcher's last pass.
 async fn health(State(state): State<AppState>) -> Json<Value> {

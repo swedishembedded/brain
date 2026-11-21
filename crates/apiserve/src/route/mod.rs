@@ -435,6 +435,13 @@ impl Fleet {
         found
     }
 
+    /// The client connections the router must accept to run every decode slot of its upstreams (as last probed), hold
+    /// a full queue, and still answer the overflow with 503: twice the slots and the queue bound.
+    fn connections_needed(&self) -> usize {
+        let slots: usize = self.members.iter().map(|m| m.advertised().slots).sum();
+        slots.saturating_add(self.queue_bound).saturating_mul(2)
+    }
+
     /// Whether some upstream, in rotation or not, lists `model`.
     fn lists(&self, model: &str) -> bool {
         self.members.iter().any(|m| m.advertised().ids.contains(model))
@@ -1034,6 +1041,11 @@ pub fn serve(fleet: Arc<Fleet>, addrs: Vec<SocketAddr>, authenticator: Arc<dyn A
         fleet.probe().await;
         let up = fleet.members.iter().filter(|m| m.healthy.load(Ordering::SeqCst)).count();
         eprintln!("brain route: {up} of {} upstreams in rotation", fleet.members.len());
+        // A connection over the listener's cap is closed unanswered: the cap must hold every request the fleet runs
+        // and the router queues, so that overload is answered with 503 and Retry-After, not a reset.
+        let mut limits = opts.limits;
+        limits.max_connections = limits.max_connections.max(fleet.connections_needed());
+        eprintln!("brain route: up to {} client connections (the upstreams' decode slots and --route-queue, with room to answer the rest)", limits.max_connections);
         let mut bound = Vec::new();
         let mut set = tokio::task::JoinSet::new();
         let scheme = if opts.tls.is_some() { "https" } else { "http" };
@@ -1043,7 +1055,7 @@ pub fn serve(fleet: Arc<Fleet>, addrs: Vec<SocketAddr>, authenticator: Arc<dyn A
             eprintln!("brain apiserve: {PROVIDER} on {scheme}://{addr} (routing to {} upstreams)", fleet.members.len());
             opts.ready.bound(PROVIDER.as_str());
             bound.push(addr);
-            set.spawn(run(fleet.clone(), listener, authenticator.clone(), opts.limits, opts.tls.clone(), shutdown.clone()));
+            set.spawn(run(fleet.clone(), listener, authenticator.clone(), limits, opts.tls.clone(), shutdown.clone()));
         }
         if let Some((path, key)) = &opts.record {
             let entries: Vec<(Provider, SocketAddr, String)> = bound.iter().map(|&a| (PROVIDER, a, key.clone())).collect();

@@ -207,7 +207,8 @@ on the command line instead.
   hint for a conversation) stay on one upstream while it has a free slot.
   Embeddings, images and speech go by load alone.
 - **Health.** Every upstream's `/v1/health` (its instance id, decode slots and
-  how many are free, its KV pool's free and total tokens, its own queue and
+  how many are free, the KV tokens a request can claim there (free blocks and
+  blocks only its prefix cache holds) and its pool's total, its own queue and
   what it has served) and `/v1/models` are read every
   `--upstream-health-ms` (default 2000). An upstream is in rotation while both
   answer; one that a request cannot connect to is taken out at once.

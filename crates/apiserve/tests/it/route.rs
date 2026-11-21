@@ -796,3 +796,47 @@ async fn prompts_are_keyed_by_tokens_and_kv_headroom_steers_the_choice() {
     assert!(keying["memo_tokens"].as_u64().unwrap() > 0, "resent messages came from the memo: {keying}");
 }
 
+#[test]
+fn overload_past_the_listeners_default_cap_is_answered_not_reset() {
+    // The router's own listener must hold every request its upstreams run and its queue holds: a connection over
+    // the cap is closed unanswered. With a cap of 2, one slot and a queue of 2, the fourth request is still answered.
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let (a, ua) = rt.block_on(mock("a", 1, 256, &["m"]));
+    let fleet = Fleet::new(config(&[ua]).with_queue(2, Duration::from_secs(30))).unwrap();
+    let addr = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    let (trigger, shutdown) = brain_shutdown::channel();
+    let limits = ConnectionLimits { max_connections: 2, ..ConnectionLimits::default() };
+    let opts = route::RouteOpts { shutdown: Some(shutdown), limits, ..route::RouteOpts::default() };
+    let serving = std::thread::spawn(move || route::serve(fleet, vec![addr], Arc::new(StaticKey::new(CLIENT_KEY)), opts));
+    rt.block_on(async {
+        let mut up = false;
+        for _ in 0..200 {
+            if TcpStream::connect(addr).await.is_ok() {
+                up = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(up, "the router listens");
+        let mut held = Vec::new();
+        for n in 0..3 {
+            let mut body = conversation("m", "s", 1);
+            body["hold"] = json!(true);
+            held.push(tokio::spawn(chat(addr, body)));
+            if n == 0 {
+                until("the first to run", || a.count() == 1).await;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let (code, headers, _) = chat(addr, conversation("m", "s", 1)).await;
+        assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE, "the overflow is answered");
+        assert!(headers.contains_key("retry-after"));
+        a.release.add_permits(3);
+        for h in held {
+            assert_eq!(h.await.unwrap().0, StatusCode::OK);
+        }
+    });
+    trigger.fire();
+    serving.join().unwrap().unwrap();
+}
+

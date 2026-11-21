@@ -447,6 +447,40 @@ Scope: Running one training job as ranks across machines, and serving one model 
     router's queue under overload (the four upstreams' 1052 slots were never
     exceeded).
 
+- **Router follow-up, streamed, 2026-11-21 18:32-18:37** (cost choice,
+  token keys, keep-alive pool). Same fleet as above (four Qwen3-4B servers on
+  n442, router on n424 CPU), now with no other lane on the cards; client
+  streams with `include_usage`; TTFT = first delta, ITL = interval between
+  streamed chunks (deltas are coalesced, so a chunk can carry several
+  tokens); hit = cached / prompt tokens. Router binary at 10cadb127 (cost
+  choice), "previous" = 40c42d559 (balance_slack, one connection per
+  request).
+  - Multi-turn (256 x 6 turns, 256 in flight): cost router 10067 and 10497
+    completion tok/s, hit 0.81, TTFT p50 1.00/1.06 s, p95 3.35/2.67 s, ITL
+    p95 0.68/0.69 s; client round-robin 6172 and 6658 tok/s, hit 0.43/0.42,
+    TTFT p95 5.24/3.77 s, ITL p95 1.42/1.49 s. Previous router against cost
+    router back to back: 8473/8607 against 8546/8340 tok/s, hit 0.80-0.81
+    both, TTFT p95 3.33-3.41 against 3.28-3.33 s: no regression, and no gain
+    while the KV term had nothing to say (see below).
+  - Shared system prompt (512 single-turn): 4964/5096 against round-robin
+    5233/5177 tok/s, hit 0.98 both, TTFT p95 3.48/3.20 against 3.78/4.03 s.
+  - Independent short prompts (1024, 256 in flight): 12572 against 13110
+    tok/s, TTFT p95 1.69 against 2.07 s, ITL p95 0.28 against 0.38 s.
+  - Overload (3000 independent, 1500 in flight, 128 tokens): the first run
+    reset 1976 client connections at the router's listener cap (knowledge
+    544); with the cap sized from the fleet 28297/29814 tok/s, 0 errors, the
+    router holding 1052 in flight (the fleet's slots) and about 450 queued,
+    TTFT p95 9.33/7.91 s; round-robin 29932 tok/s, TTFT p95 7.63 s.
+  - Token keying: 9216 requests, 1.73M tokens encoded in 8.13 s of encoder
+    time (about 0.9 ms a request), 9.80M more served from the per-message
+    memo (85% of what was keyed).
+  - What the run showed of the upstream readings: an idle server reported
+    20624 free KV tokens of 1052672, the rest held by its prefix cache, so the
+    KV term now counts cache-held blocks as claimable (not re-measured on
+    cards); and `free_slots`/KV refresh only between a lane's batch groups,
+    so under sustained load they lag and the router's own in-flight count is
+    what bounds an upstream.
+
 ## Plan: multi-node clusters (2026-11-21)
 
 Target machine class: Slurm allocations of GH200 nodes, 4 cards per node on
@@ -574,7 +608,9 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
       byte-level BPE (`QwenBpe`), exact for that family and only consistent
       (not the model's ids) for others; the base-weight digest is not in the
       namespace (a base changes only with a restart, which the instance id
-      catches). Connections are a bounded
+      catches). The upstream's KV and free-slot readings lag under load (refreshed
+      between batch groups); KV-aware choice is unmeasured beyond showing no
+      regression. A least-loaded-only policy was not measured. Connections are a bounded
       keep-alive pool per upstream, and a drain cuts what still runs at its
       deadline (`--drain-deadline-ms`, default 300000).
 - [ ] **C5 cluster launch sample and gates.** `samples/` gains a Slurm launch

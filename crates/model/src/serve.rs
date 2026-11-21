@@ -43,11 +43,15 @@ pub use taps::TapPool;
 use speculate::Scored;
 pub use speculate::{verify_proposals, DraftQuery, Drafter, NgramDrafter, SpecPolicy, SpecStats, SpeculativeMode, Verdict};
 
-/// `(free tokens, total tokens)` of `dec`'s KV pool.
+/// `(claimable tokens, total tokens)` of `dec`'s KV pool. Claimable is the free blocks plus the blocks the prefix cache
+/// holds, which it gives up when the pool needs them: once the cache has filled, free blocks alone are near zero
+/// however idle the pool is. A cached block a running sequence also shares is counted, so claimable is an upper bound.
 fn pool_reading<D: PagedDecoder>(dec: &mut D) -> (u64, u64) {
+    let cached = dec.prefix_stats().2 as u64;
     let alloc = dec.alloc_mut();
     let block = alloc.block_size() as u64;
-    (alloc.free_blocks() as u64 * block, alloc.num_blocks() as u64 * block)
+    let total = alloc.num_blocks() as u64;
+    ((alloc.free_blocks() as u64 + cached).min(total) * block, total * block)
 }
 
 /// The seam a model's paged serving engine implements. Every method mirrors
@@ -2175,8 +2179,8 @@ impl<D: PagedDecoder> Scheduler<D> {
         completed
     }
 
-    /// The KV pool after the last iteration: `(free tokens, total tokens)`. Free counts unreferenced blocks only; a
-    /// block the prefix cache holds is not free, though it is evicted when the pool needs it.
+    /// The KV pool after the last iteration: `(claimable tokens, total tokens)`, claimable being free blocks plus the
+    /// blocks only the prefix cache holds (an upper bound: see `pool_reading`).
     pub fn kv_pool(&self) -> (u64, u64) {
         self.kv_pool
     }
