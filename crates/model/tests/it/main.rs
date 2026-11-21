@@ -35,6 +35,7 @@ mod collective_errors;
 mod conv_dtype_roundtrip;
 mod cq_tier;
 mod cross_scores_kt;
+mod depth_attn;
 mod device_gradnorm;
 mod distributed_job;
 mod distributed_model;

@@ -60,6 +60,31 @@ pub fn rmsnorm_rows_with_inv(
     (y, inv)
 }
 
+/// Depth attention (`crate::depth_attn`): per row, a softmax over the RMS-normed (no gain) `states` (each
+/// `[rows, d]`, in stack order, the partial last) scored against each of the `nq` `queries` (`[nq, d]`) at scale
+/// `d^-0.5`, returning the mixes of the normed states, `[nq, rows, d]`. The reference of `kernels::DEPTH_ATTN_FWD`.
+pub fn depth_attention(states: &[&[f32]], rows: usize, d: usize, queries: &[f32], nq: usize, eps: f32) -> Vec<f32> {
+    assert!(!states.is_empty(), "depth attention: an empty stack");
+    assert!(queries.len() >= nq * d, "depth attention: queries are {}, need {}", queries.len(), nq * d);
+    let normed: Vec<Vec<f32>> = states.iter().map(|s| rmsnorm_rows(s, &vec![1.0; d], rows, d, eps)).collect();
+    let scale = (d as f32).powf(-0.5);
+    let mut out = vec![0.0f32; nq * rows * d];
+    for q in 0..nq {
+        let query = &queries[q * d..(q + 1) * d];
+        for r in 0..rows {
+            let mut w: Vec<f32> = normed.iter().map(|n| scale * n[r * d..(r + 1) * d].iter().zip(query).map(|(a, b)| a * b).sum::<f32>()).collect();
+            softmax(&mut w);
+            let o = &mut out[(q * rows + r) * d..(q * rows + r + 1) * d];
+            for (n, wi) in normed.iter().zip(&w) {
+                for (oj, nj) in o.iter_mut().zip(&n[r * d..(r + 1) * d]) {
+                    *oj += wi * nj;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Single-row convenience: `rmsnorm_rows(x, g, 1, x.len(), eps)`.
 pub fn rmsnorm(x: &[f32], g: &[f32], eps: f32) -> Vec<f32> {
     rmsnorm_rows(x, g, 1, x.len(), eps)

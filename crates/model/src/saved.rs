@@ -501,6 +501,112 @@ pub fn check_always_recomputes<M: crate::Model>(name: &str, model: &mut M) -> Re
     }
 }
 
+/// Kernels a [`RetainedStates`] store dispatches; append to the model's kernel list.
+#[must_use]
+pub fn retained_kernels() -> &'static [(&'static str, &'static str)] {
+    &[("copy_cols", kernels::COPY_COLS), ("axpy_at", kernels::AXPY_AT)]
+}
+
+/// States a forward retains for later consumers to read, and the gradient every consumer adds into.
+///
+/// A plain residual stream hands each layer's output to the next layer only, so a boundary residual has one
+/// consumer and one gradient producer ([`Residuals`]). A model that attends over its own earlier states
+/// (block attention residuals, cross-pass messages) reads one retained state from several later points: its
+/// gradient is the sum over every consumer, so the store holds a gradient per slot that consumers ADD into
+/// (`model::depth_attn`'s backward does), and the producer collects it once the backward reaches it
+/// ([`RetainedStates::grad_add_step`]). Plain residuals are the degenerate case: one slot per boundary, one consumer.
+///
+/// Values and gradients are two `[capacity, rows, width]` f32 buffers; slot `k` is rows `k * rows ..`. The states are
+/// full-precision values the model's own forward produced (never narrowed: a narrow [`SavedFormat`] applies to the
+/// boundary stream the backward rebuilds layers from, which [`Residuals`] holds).
+pub struct RetainedStates {
+    rows: u32,
+    width: u32,
+    capacity: u32,
+    values: DeviceBuffer,
+    grads: Option<DeviceBuffer>,
+    copy: usize,
+    axpy: usize,
+}
+
+impl RetainedStates {
+    /// A store of `capacity` slots of `rows x width`, with a gradient per slot when `train`. The device must have
+    /// registered [`retained_kernels`].
+    pub fn new(gpu: &Gpu, capacity: u32, rows: u32, width: u32, train: bool) -> Result<RetainedStates, String> {
+        if capacity == 0 || rows == 0 || width == 0 {
+            return Err(format!("retained states: {capacity} slots of {rows} x {width} hold nothing"));
+        }
+        let total = (capacity as u64) * (rows as u64) * (width as u64);
+        if total > u32::MAX as u64 {
+            return Err(format!("retained states: {capacity} x {rows} x {width} elements overflow a u32 index"));
+        }
+        let kernel = |name: &str| gpu.kernel_index(name).ok_or_else(|| format!("retained states: kernel {name} is not registered (append model::saved::retained_kernels() to the kernel list)"));
+        Ok(RetainedStates { rows, width, capacity, values: gpu.storage(total), grads: train.then(|| gpu.storage(total)), copy: kernel("copy_cols")?, axpy: kernel("axpy_at")? })
+    }
+
+    pub fn rows(&self) -> u32 {
+        self.rows
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn capacity(&self) -> u32 {
+        self.capacity
+    }
+
+    /// The `[capacity, rows, width]` values.
+    pub fn values(&self) -> &DeviceBuffer {
+        &self.values
+    }
+
+    /// The `[capacity, rows, width]` gradients consumers accumulate into; `None` on an inference store. A training
+    /// pass zeroes them before its backward (`SegmentedPass::clear_on_submit`).
+    pub fn grads(&self) -> Option<&DeviceBuffer> {
+        self.grads.as_ref()
+    }
+
+    fn slot_len(&self) -> u32 {
+        self.rows * self.width
+    }
+
+    fn check(&self, slot: u32) {
+        assert!(slot < self.capacity, "retained states: slot {slot} out of 0..{}", self.capacity);
+    }
+
+    /// The step that retains `src` (`[rows, width]`) in `slot`.
+    pub fn retain_step(&self, gpu: &Gpu, slot: u32, src: &DeviceBuffer) -> Step {
+        self.check(slot);
+        let n = self.slot_len();
+        gpu.step(self.copy, &[src, &self.values], &[1, n, n, 0, n * self.capacity, slot * n], n)
+    }
+
+    /// The step that adds slot `slot`'s accumulated gradient into `dst` (`[rows, width]`): how the state's producer
+    /// collects what every consumer contributed.
+    pub fn grad_add_step(&self, gpu: &Gpu, slot: u32, dst: &DeviceBuffer) -> Step {
+        self.check(slot);
+        let grads = self.grads.as_ref().expect("retained states: an inference store has no gradients");
+        let n = self.slot_len();
+        gpu.step(self.axpy, &[dst, grads], &[n, 1.0f32.to_bits(), 0, slot * n], n)
+    }
+
+    /// Slot `slot`'s value, read back (tests and taps).
+    pub fn read_value(&self, gpu: &Gpu, slot: u32) -> Vec<f32> {
+        self.check(slot);
+        let n = self.slot_len() as usize;
+        gpu.read(&self.values, (slot as usize + 1) * n).split_off(slot as usize * n)
+    }
+
+    /// Slot `slot`'s accumulated gradient, read back.
+    pub fn read_grad(&self, gpu: &Gpu, slot: u32) -> Vec<f32> {
+        self.check(slot);
+        let grads = self.grads.as_ref().expect("retained states: an inference store has no gradients");
+        let n = self.slot_len() as usize;
+        gpu.read(grads, (slot as usize + 1) * n).split_off(slot as usize * n)
+    }
+}
+
 /// What a block stack keeps of its forward for its backward, for a trainer that holds each block's forward state
 /// itself (a host trainer's per-block cache, a device trainer's per-block buffers): under [`SavedPolicy::Keep`] every
 /// block's cache, under [`SavedPolicy::Recompute`] only every block's input, the cache rebuilt by the trainer's own

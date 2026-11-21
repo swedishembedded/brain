@@ -35,6 +35,7 @@ pub mod attninject;
 pub mod block;
 pub mod dispatch;
 pub mod collective;
+pub mod depth_attn;
 pub mod acceptance;
 pub mod conformance;
 pub mod conformance_adapter;

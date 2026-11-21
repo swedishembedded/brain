@@ -252,6 +252,8 @@ pub const AVGPOOL2D: &str = include_str!("../wgsl/avgpool2d.wgsl");
 pub const AVGPOOL2D_DX: &str = include_str!("../wgsl/avgpool2d_dx.wgsl");
 /// `wgsl/axpy.wgsl`
 pub const AXPY: &str = include_str!("../wgsl/axpy.wgsl");
+/// `wgsl/axpy_at.wgsl`
+pub const AXPY_AT: &str = include_str!("../wgsl/axpy_at.wgsl");
 /// `wgsl/bce_logits.wgsl`
 pub const BCE_LOGITS: &str = include_str!("../wgsl/bce_logits.wgsl");
 /// `wgsl/bce_logits_grad.wgsl`
@@ -430,6 +432,12 @@ pub const DECODE_FEED: &str = include_str!("../wgsl/decode_feed.wgsl");
 pub const DECODE_SOFTMAX: &str = include_str!("../wgsl/decode_softmax.wgsl");
 /// `wgsl/decode_softmax_batched.wgsl`
 pub const DECODE_SOFTMAX_BATCHED: &str = include_str!("../wgsl/decode_softmax_batched.wgsl");
+/// `wgsl/depth_attn_bwd.wgsl`
+pub const DEPTH_ATTN_BWD: &str = include_str!("../wgsl/depth_attn_bwd.wgsl");
+/// `wgsl/depth_attn_bwd_query.wgsl`
+pub const DEPTH_ATTN_BWD_QUERY: &str = include_str!("../wgsl/depth_attn_bwd_query.wgsl");
+/// `wgsl/depth_attn_fwd.wgsl`
+pub const DEPTH_ATTN_FWD: &str = include_str!("../wgsl/depth_attn_fwd.wgsl");
 /// `wgsl/depth_to_space3d.wgsl`
 pub const DEPTH_TO_SPACE3D: &str = include_str!("../wgsl/depth_to_space3d.wgsl");
 /// `wgsl/dfl_decode.wgsl`
@@ -1852,6 +1860,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("avgpool2d", AVGPOOL2D),
     ("avgpool2d_dx", AVGPOOL2D_DX),
     ("axpy", AXPY),
+    ("axpy_at", AXPY_AT),
     ("bce_logits", BCE_LOGITS),
     ("bce_logits_grad", BCE_LOGITS_GRAD),
     ("bias_add", BIAS_ADD),
@@ -1941,6 +1950,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("decode_feed", DECODE_FEED),
     ("decode_softmax", DECODE_SOFTMAX),
     ("decode_softmax_batched", DECODE_SOFTMAX_BATCHED),
+    ("depth_attn_bwd", DEPTH_ATTN_BWD),
+    ("depth_attn_bwd_query", DEPTH_ATTN_BWD_QUERY),
+    ("depth_attn_fwd", DEPTH_ATTN_FWD),
     ("depth_to_space3d", DEPTH_TO_SPACE3D),
     ("dfl_decode", DFL_DECODE),
     ("dfl_grad", DFL_GRAD),

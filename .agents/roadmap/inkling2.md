@@ -370,6 +370,17 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
   - `model::saved` gains a retained-state store whose entries accumulate gradients from
     several consumers.
   - This is the block-AttnRes primitive. Plain residuals are its degenerate case.
+
+  Done (2026-11-21): `model::depth_attn::{DepthAttn, DepthAttnIds, kernels}` over
+  `model::saved::{RetainedStates, retained_kernels}`; kernels `depth_attn_fwd`,
+  `depth_attn_bwd`, `depth_attn_bwd_query` (one thread per row / query element, CPU JIT
+  safe) and `axpy_at`; host reference `hostmath::depth_attention`. Spec in
+  `crates/model/tests/it/depth_attn.rs`: forward = host reference, backward = per-element
+  f64 central differences for every retained state, the partial and every query, two
+  consumers of one slot sum their gradients, and every tiny-golden attention input plus the
+  final readout reproduce the reference within 1e-5 (CPU backend).
+  Left: a workgroup-per-row candidate behind `gpu_core::provider` once the model runs and a
+  profile shows these on the gap list; CUDA not exercised.
 - **I1.8** `model` (compose first, fuse only on profile evidence): the message gate
   `(1 - tanh(a)) x + tanh(b) m`, with forward and backward over existing
   `rmsnorm`/`concat2`/`matmul`/`tanh` kernels.
