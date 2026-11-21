@@ -342,6 +342,21 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
   - Check `router_gate_sigmoid` at `n_group = topk_group = 1` and the `+1e-20` renorm
     against the reference.
   - Gate: `moe_block_gradcheck` per activation and layout.
+  Done (2026-11-21): kernels `glu_act` / `glu_act_bwd` and module `model::glu` (`GatedAct::{SwiGlu,
+  SoftcapSigmoid{gate_cap,up_cap}}`, `GluLayout::{Separate,Concat,Interleaved}`, `GluSpec`, `glu_act_step`,
+  `glu_act_bwd_step`, `expert_fwd_glu`, `expert_bwd_glu`). The projection kernels (`moe_linear_gated*`, `moe_nvfp4_*`,
+  `moe_i8_*`) are layout-agnostic GEMVs over `[E, n, k]` banks, so a fused `[E, 2 ff, d]` interleaved bank is read by
+  them unchanged with `n = 2 ff`; the layout is declared where gate and up meet, the activation kernel, which reads
+  the interleaved projection output in place. `GluSpec::default()` (SwiGLU, separate) is `silu_mul` /
+  `silu_bwd_da` / `silu_bwd_db` to the bit and `expert_fwd_glu` / `expert_bwd_glu` reproduce `expert_fwd` /
+  `moe_layer_bwd`'s experts bit for bit (tested). Router: `router_gate_sigmoid` / `router_bwd_sigmoid` at
+  `n_group = topk_group = 1` matched the reference except the denominator, a floor `max(sum, 1e-20)` where the reference
+  adds `sum + 1e-20`; both kernels now add (differs only when the selected scores are below ~1e-12), spec
+  `router_sigmoid_reference.rs` at E=128, top-8, scale 8 including that case. Gates: `moe_block_gradcheck` per
+  activation and layout (5 cases + bit identity + interleaved == permuted concat), `glu_act.rs`. Left: the row-compacted
+  (`MoeActs::compact`) and grouped (`expert_fwd_grouped`) paths and the CUDA-only fused NVFP4 gate/up launch
+  (`Fused::MoeNvfp4GateUp`, SwiGLU only) still take the default activation; a model on another activation uses the
+  unfused slot path (`glu_act_step` after the projection GEMVs). CPU backend verified; CUDA not exercised.
 - **I1.4** `kernels` + `model::moe` + `model::ops::sink`:
   - An MXFP8 `MicroBank` (no global scale).
   - MXFP8 GEMV and MXFP8 MoE gather and grouped kernels.

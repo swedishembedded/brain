@@ -20,7 +20,7 @@
 //
 //   s_e = sigmoid(logit_e) ; selected set S = { e : gate_e > 0 }
 //   no-norm:  w_e = scale * s_e
-//   norm:     w_e = scale * s_e / Z ,   Z = sum_{e in S} s_e
+//   norm:     w_e = scale * s_e / Z ,   Z = sum_{e in S} s_e + 1e-20  (the forward's denominator)
 // Given d_gate_e = dL/dw_e (e in S):
 //   no-norm:  dL/ds_k = scale * d_gate_k                              (k in S)
 //   norm:     dL/ds_k = scale * ( d_gate_k/Z - sdp/Z^2 ),  sdp = sum_{S} d_gate_e s_e
@@ -58,7 +58,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
             sdp = sdp + d_gate[base + e] * s;
         }
     }
-    let zz = max(z, 1e-20);
+    let zz = z + 1e-20;
 
     for (var e: u32 = 0u; e < E; e = e + 1u) {
         if (gate[base + e] > 0.0) {

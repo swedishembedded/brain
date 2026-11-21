@@ -342,6 +342,8 @@ load of it must already be bare-identifier-indexed.
 | [`gelu_erf`](../../../crates/kernels/wgsl/gelu_erf.wgsl) | Exact (erf-based) GELU, matching torch's default `F.gelu` | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`gelu_erf_bwd`](../../../crates/kernels/wgsl/gelu_erf_bwd.wgsl) | Exact (erf-based) GELU backward - gradient w.r.t | one thread per output element | 3/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`glu`](../../../crates/kernels/wgsl/glu.wgsl) | Gated Linear Unit over the middle dim, matching torch `F.glu(x, dim=1)` | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
+| [`glu_act`](../../../crates/kernels/wgsl/glu_act.wgsl) | Gated expert activation h = act(gate, up) over separate, concatenated or row-interleaved gate/up values: SwiGLU or the softcapped-sigmoid gate | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
+| [`glu_act_bwd`](../../../crates/kernels/wgsl/glu_act_bwd.wgsl) | Backward of glu_act: gradients of the gate and up values from dh, in the same separate, concatenated or interleaved layout | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`glu_bwd`](../../../crates/kernels/wgsl/glu_bwd.wgsl) | Backward of glu.wgsl (F.glu over the middle dim) | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`gn_apply`](../../../crates/kernels/wgsl/gn_apply.wgsl) | GroupNorm forward apply, NCHW x[N,C,H,W] - spec | one thread per output element | 3/5 | native | ✓ | ✓ | - | f32 |
 | [`gn_dbeta`](../../../crates/kernels/wgsl/gn_dbeta.wgsl) | GroupNorm backward w.r.t. beta, NCHW - spec | one thread per output element, 3 nested serial reductions | 1/5 | ✓ | ✓ | ✓ | - | f32 |

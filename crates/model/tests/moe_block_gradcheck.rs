@@ -23,9 +23,10 @@ use std::collections::HashMap;
 use data::rng::Lcg;
 use gpu_core::{DeviceBuffer, Gpu};
 use gradcheck::{elementwise_check, CheckModel};
+use model::glu::{expert_bwd_glu, expert_fwd_glu, GatedAct, GluBwdScratch, GluGrads, GluIds, GluLayout, GluScratch, GluSpec, GluWeights};
 use model::moe::{
-    expert_fwd, experts_fwd_train, moe_layer_bwd, router_fwd_kind, ExpertBwdScratch, ExpertGrads, ExpertWeights, MoeActs, MoeIds, MoeIdsBwd, MoeShape,
-    RouterBwdIds, RouterKind, COMPACT_TRAIN_KERNELS,
+    expert_dgate, expert_fwd, experts_fwd_train, moe_layer_bwd, router_bwd, router_fwd_kind, ExpertBwdScratch, ExpertGrads, ExpertScratch, ExpertWeights,
+    MoeActs, MoeIds, MoeIdsBwd, MoeShape, RouterBwdIds, RouterKind, COMPACT_TRAIN_KERNELS,
 };
 
 const PIPES: &[(&str, &str)] = &[
@@ -43,6 +44,8 @@ const PIPES: &[(&str, &str)] = &[
     ("silu_mul", kernels::SILU_MUL),
     ("silu_bwd_da", kernels::SILU_BWD_DA),
     ("silu_bwd_db", kernels::SILU_BWD_DB),
+    ("glu_act", kernels::GLU_ACT),
+    ("glu_act_bwd", kernels::GLU_ACT_BWD),
     ("scale_add", kernels::SCALE_ADD),
     ("scale_add_dexp", kernels::SCALE_ADD_DEXP),
     ("scale_add_dgate", kernels::SCALE_ADD_DGATE),
@@ -103,14 +106,59 @@ struct MoeLayerCheck {
     d_moe_acc: DeviceBuffer,
     d_x: DeviceBuffer,
 
+    /// `Some` runs the experts through `model::glu` under this declared activation and layout (dense activations only).
+    glu: Option<GluCase>,
+
     // shape sizes cached for read/write
     sizes: HashMap<String, usize>,
     // the last computed dx, exposed for a direct (non-CheckModel) spot-check
     last_dx: RefCell<Option<Vec<f32>>>,
 }
 
+/// The declared activation of a `model::glu` case and the per-expert buffers it saves and propagates through.
+struct GluCase {
+    spec: GluSpec,
+    ids: GluIds,
+    /// Per expert: the saved `gate_up` (`gate_pre` when separate), `up` (separate only), `h`, `expert_out`.
+    saved: Vec<(DeviceBuffer, Option<DeviceBuffer>, DeviceBuffer, DeviceBuffer)>,
+    d_gate_up: DeviceBuffer,
+    /// The up gradient (separate), or an unused buffer distinct from `d_gate_up` (fused).
+    d_up: DeviceBuffer,
+}
+
+impl GluCase {
+    fn new(g: &Gpu, spec: GluSpec) -> GluCase {
+        let (rows, ff, d) = (ROWS as u64, FF as u64, D as u64);
+        let gu = if spec.is_fused() { 2 * ff } else { ff };
+        let saved = (0..E)
+            .map(|_| (g.storage(rows * gu), (!spec.is_fused()).then(|| g.storage(rows * ff)), g.storage(rows * ff), g.storage(rows * d)))
+            .collect();
+        GluCase {
+            spec,
+            ids: GluIds { act: idx(g, "glu_act"), act_bwd: idx(g, "glu_act_bwd") },
+            saved,
+            d_gate_up: g.storage(rows * gu),
+            d_up: g.storage(if spec.is_fused() { 1 } else { rows * ff }),
+        }
+    }
+
+    fn scratch(&self, e: usize) -> GluScratch<'_> {
+        let (gate_up, up, h, expert_out) = &self.saved[e];
+        GluScratch { gate_up, up: up.as_ref(), h, expert_out }
+    }
+}
+
 impl MoeLayerCheck {
     fn new(kind: RouterKind, top_k: u32, seed: u64, compact: bool) -> MoeLayerCheck {
+        Self::build(kind, top_k, seed, compact, None)
+    }
+
+    fn new_glu(kind: RouterKind, top_k: u32, seed: u64, spec: GluSpec) -> MoeLayerCheck {
+        Self::build(kind, top_k, seed, false, Some(spec))
+    }
+
+    fn build(kind: RouterKind, top_k: u32, seed: u64, compact: bool, glu: Option<GluSpec>) -> MoeLayerCheck {
+        let fused = glu.is_some_and(|s| s.is_fused());
         let pipes: Vec<(&str, &str)> = PIPES.iter().chain(COMPACT_TRAIN_KERNELS).copied().collect();
         let g = Gpu::new_cpu(&pipes);
         let shape = MoeShape { rows: ROWS, d_model: D, moe_ff: FF, n_experts: E, top_k };
@@ -146,18 +194,22 @@ impl MoeLayerCheck {
         let mut expert_w = Vec::new();
         let mut expert_grad = Vec::new();
         for _ in 0..E {
-            let gw = b(&g, &r.vec_scaled((FF * D) as usize, 0.4));
-            let uw = b(&g, &r.vec_scaled((FF * D) as usize, 0.4));
+            // A fused expert holds one `[2 * FF, D]` gate/up matrix in the first slot; the second slot is then unused.
+            let gate_rows = if fused { 2 * FF } else { FF };
+            let gw = b(&g, &r.vec_scaled((gate_rows * D) as usize, 0.4));
+            let uw = if fused { g.storage(1) } else { b(&g, &r.vec_scaled((FF * D) as usize, 0.4)) };
             let dw = b(&g, &r.vec_scaled((D * FF) as usize, 0.4));
             expert_w.push((gw, uw, dw));
-            expert_grad.push((g.storage((FF * D) as u64), g.storage((FF * D) as u64), g.storage((D * FF) as u64)));
+            expert_grad.push((g.storage((gate_rows * D) as u64), g.storage(if fused { 1 } else { (FF * D) as u64 }), g.storage((D * FF) as u64)));
         }
 
         let mut sizes = HashMap::new();
         sizes.insert("router.weight".to_string(), (E * D) as usize);
         for e in 0..E {
-            sizes.insert(format!("expert{e}.gate_w"), (FF * D) as usize);
-            sizes.insert(format!("expert{e}.up_w"), (FF * D) as usize);
+            sizes.insert(format!("expert{e}.gate_w"), ((if fused { 2 * FF } else { FF }) * D) as usize);
+            if !fused {
+                sizes.insert(format!("expert{e}.up_w"), (FF * D) as usize);
+            }
             sizes.insert(format!("expert{e}.down_w"), (D * FF) as usize);
         }
 
@@ -192,6 +244,7 @@ impl MoeLayerCheck {
             expert_grad,
             sizes,
             last_dx: RefCell::new(None),
+            glu: glu.map(|spec| GluCase::new(&g, spec)),
             kind,
             shape,
             g,
@@ -258,7 +311,14 @@ impl CheckModel for MoeLayerCheck {
         steps.push(router_fwd_kind(g, &self.fwd_ids, self.kind, &self.shape, &self.logits, self.bias.as_ref(), &self.gate, self.probs.as_ref()));
         g.submit(&[], &steps);
 
-        if self.compact {
+        if let Some(case) = &self.glu {
+            for e in 0..E as usize {
+                let (gw, uw, dw) = &self.expert_w[e];
+                let w = GluWeights { gate_w: gw, up_w: (!case.spec.is_fused()).then_some(uw), down_w: dw, gate_off: 0, down_off: 0 };
+                let steps = expert_fwd_glu(g, &self.fwd_ids, &case.ids, &case.spec, &self.shape, &self.x, &self.gate, &w, &case.scratch(e), &self.acc, e as u32, e != 0);
+                g.submit(&[], &steps);
+            }
+        } else if self.compact {
             // Each expert holds and computes its routed rows only; every row's top-k experts add into `acc`.
             let acts = MoeActs::compact(g, &self.shape, &g.read(&self.gate, (ROWS * E) as usize));
             g.submit(&[&self.acc], &experts_fwd_train(g, &self.fwd_ids, &self.shape, &self.x, &self.gate, &self.expert_weights(), &acts, &self.acc));
@@ -282,9 +342,10 @@ impl CheckModel for MoeLayerCheck {
     fn zero_grads(&self) {
         let g = &self.g;
         g.write_f32(&self.router_grad, &vec![0.0; (E * D) as usize]);
+        let fused = self.glu.as_ref().is_some_and(|c| c.spec.is_fused());
         for (gw, uw, dw) in &self.expert_grad {
-            g.write_f32(gw, &vec![0.0; (FF * D) as usize]);
-            g.write_f32(uw, &vec![0.0; (FF * D) as usize]);
+            g.write_f32(gw, &vec![0.0; ((if fused { 2 * FF } else { FF }) * D) as usize]);
+            g.write_f32(uw, &vec![0.0; if fused { 1 } else { (FF * D) as usize }]);
             g.write_f32(dw, &vec![0.0; (D * FF) as usize]);
         }
     }
@@ -304,6 +365,28 @@ impl CheckModel for MoeLayerCheck {
         let expert_weights = self.expert_weights();
         // The compacted backward adds each expert's column into `d_gate`.
         g.submit(&[&self.d_gate], &[]);
+        if let Some(case) = &self.glu {
+            // `moe_layer_bwd`'s dense phases with the experts' phase C under the declared activation.
+            let mut steps = Vec::new();
+            for e in 0..E as usize {
+                let s = case.scratch(e);
+                let saved = ExpertScratch { gate_pre: s.gate_up, up: s.up.unwrap_or(s.gate_up), h: s.h, expert_out: s.expert_out };
+                steps.push(expert_dgate(g, &self.bwd_ids, &self.shape, &saved, &self.d_moe_acc, &self.d_gate, e as u32));
+            }
+            steps.extend(router_bwd(g, &self.router_bwd_ids, self.kind, &self.shape, &self.logits, &self.gate, &self.d_gate, &self.d_router_logits, self.fe.as_ref()));
+            steps.extend(router_weight_bwd);
+            let sb = GluBwdScratch { d_expert_out: &self.d_expert_out, d_h: &self.d_h, d_gate_up: &case.d_gate_up, d_up: &case.d_up };
+            let fused = case.spec.is_fused();
+            for e in 0..E as usize {
+                let ((gw, uw, dw), (ggw, guw, gdw)) = (&self.expert_w[e], &self.expert_grad[e]);
+                let w = GluWeights { gate_w: gw, up_w: (!fused).then_some(uw), down_w: dw, gate_off: 0, down_off: 0 };
+                let gr = GluGrads { gate_w: Some(ggw), up_w: (!fused).then_some(guw), down_w: Some(gdw) };
+                expert_bwd_glu(g, &self.bwd_ids, &case.ids, &case.spec, &self.shape, &self.x, &self.gate, &w, &gr, &case.scratch(e), &sb, &self.d_moe_acc, &self.d_x, e as u32, true, &mut steps);
+            }
+            g.submit(&[], &steps);
+            *self.last_dx.borrow_mut() = Some(g.read(&self.d_x, (ROWS * D) as usize));
+            return;
+        }
         let acts = self.acts.borrow();
         let steps = moe_layer_bwd(
             g,
@@ -353,7 +436,10 @@ fn run_case(kind: RouterKind, top_k: u32, seed: u64) {
 }
 
 fn run_case_on(kind: RouterKind, top_k: u32, seed: u64, compact: bool) {
-    let m = MoeLayerCheck::new(kind, top_k, seed, compact);
+    check_model(MoeLayerCheck::new(kind, top_k, seed, compact), kind, top_k);
+}
+
+fn check_model(m: MoeLayerCheck, kind: RouterKind, top_k: u32) {
     let mut checked = 0usize;
     let mut worst_rel = 0.0f32;
     for name in m.param_names() {
@@ -465,4 +551,81 @@ fn compacted_experts_match_the_dense_path() {
     for (i, (a, b)) in dx.iter().zip(&cx).enumerate() {
         assert!((a - b).abs() <= 1e-5 * a.abs().max(1e-3), "d_x[{i}]: compact {b} vs dense {a}");
     }
+}
+
+// ---- declared expert activation and gate/up layout (`model::glu`) ----
+
+/// Small caps keep the softcap in its nonlinear range at this harness's activation magnitudes (a few tenths), so the
+/// check exercises `1 - tanh^2`, not the identity the caps degenerate to when large.
+const SOFTCAP: GatedAct = GatedAct::SoftcapSigmoid { gate_cap: 0.6, up_cap: 0.9 };
+
+fn glu_case(act: GatedAct, layout: GluLayout, seed: u64) {
+    let kind = RouterKind::SigmoidNoAuxTc { n_group: 1, topk_group: 1, norm_topk_prob: true, routed_scaling: 1.5 };
+    check_model(MoeLayerCheck::new_glu(kind, 2, seed, GluSpec { act, layout }), kind, 2);
+}
+
+#[test]
+fn swiglu_over_a_concat_fused_bank_passes_the_gradcheck() {
+    glu_case(GatedAct::SwiGlu, GluLayout::Concat, 0x61A1);
+}
+
+#[test]
+fn swiglu_over_an_interleaved_fused_bank_passes_the_gradcheck() {
+    glu_case(GatedAct::SwiGlu, GluLayout::Interleaved, 0x61A2);
+}
+
+#[test]
+fn softcap_sigmoid_over_separate_projections_passes_the_gradcheck() {
+    glu_case(SOFTCAP, GluLayout::Separate, 0x61A3);
+}
+
+#[test]
+fn softcap_sigmoid_over_a_concat_fused_bank_passes_the_gradcheck() {
+    glu_case(SOFTCAP, GluLayout::Concat, 0x61A4);
+}
+
+#[test]
+fn softcap_sigmoid_over_an_interleaved_fused_bank_passes_the_gradcheck() {
+    glu_case(SOFTCAP, GluLayout::Interleaved, 0x61A5);
+}
+
+/// The default spec is today's SwiGLU over separate projections, bit for bit: the layer output and every gradient equal
+/// `expert_fwd` / `moe_layer_bwd`'s.
+#[test]
+fn default_glu_spec_reproduces_the_existing_expert_path_exactly() {
+    let kind = RouterKind::SigmoidNoAuxTc { n_group: 1, topk_group: 1, norm_topk_prob: true, routed_scaling: 1.5 };
+    let (old, new) = (MoeLayerCheck::new(kind, 2, 0x61A6, false), MoeLayerCheck::new_glu(kind, 2, 0x61A6, GluSpec::default()));
+    assert_eq!(old.loss().to_bits(), new.loss().to_bits(), "loss differs");
+    for m in [&old, &new] {
+        m.zero_grads();
+        m.backward();
+    }
+    for name in old.param_names() {
+        let (a, b) = (old.read_grad(&name), new.read_grad(&name));
+        assert!(a.iter().zip(&b).all(|(x, y)| x.to_bits() == y.to_bits()), "{name}: gradient differs from the existing path");
+    }
+    assert_eq!(old.last_dx.borrow().as_ref().map(|v| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>()), new.last_dx.borrow().as_ref().map(|v| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>()), "d_x differs");
+}
+
+/// The two fused layouts are the same function of a permuted weight: an interleaved bank holds the concat bank's rows
+/// in the order g0,u0,g1,u1,..., and gives the same layer output.
+#[test]
+fn interleaved_bank_computes_what_the_permuted_concat_bank_computes() {
+    let kind = RouterKind::SigmoidNoAuxTc { n_group: 1, topk_group: 1, norm_topk_prob: true, routed_scaling: 1.5 };
+    let concat = MoeLayerCheck::new_glu(kind, 2, 0x61A7, GluSpec { act: SOFTCAP, layout: GluLayout::Concat });
+    let inter = MoeLayerCheck::new_glu(kind, 2, 0x61A7, GluSpec { act: SOFTCAP, layout: GluLayout::Interleaved });
+    for e in 0..E {
+        let name = format!("expert{e}.gate_w");
+        let rows = concat.read_weight(&name); // [2 * FF, D]: gate rows then up rows
+        let (ff, d) = (FF as usize, D as usize);
+        let mut permuted = vec![0.0f32; rows.len()];
+        for j in 0..ff {
+            permuted[(2 * j) * d..(2 * j + 1) * d].copy_from_slice(&rows[j * d..(j + 1) * d]);
+            permuted[(2 * j + 1) * d..(2 * j + 2) * d].copy_from_slice(&rows[(ff + j) * d..(ff + j + 1) * d]);
+        }
+        inter.write_weight(&name, &permuted);
+        inter.write_weight(&format!("expert{e}.down_w"), &concat.read_weight(&format!("expert{e}.down_w")));
+    }
+    let (a, b) = (concat.loss(), inter.loss());
+    assert!((a - b).abs() <= 1e-6 * a.abs().max(1.0), "interleaved bank gives {b}, concat bank {a}");
 }

@@ -84,6 +84,7 @@ pub mod lora;
 pub mod lsa;
 pub mod lossw;
 pub mod lut4;
+pub mod glu;
 pub mod moe;
 pub mod moe_i8;
 pub mod objective;

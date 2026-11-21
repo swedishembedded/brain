@@ -16,7 +16,8 @@
 //   group-limited top-k: split E into `n_group` groups, score each group by the
 //     sum of its top-2 `choice`, keep the best `topk_group` groups, then take the
 //     global top-`top_k` `choice` among the kept groups.
-//   gate[e]   = selected ? s[e] : 0 ; if norm: gate /= sum_selected s ; *= scale
+//   gate[e]   = selected ? s[e] : 0 ; if norm: gate /= (sum_selected s + 1e-20) ; *= scale
+//     (the epsilon is ADDED to the sum, as the DeepSeek-V3 / Inkling reference does, not a floor under it)
 // The bias steers *selection* only; the combine weight is the raw sigmoid score
 // (aux-loss-free load balancing). One invocation per row.
 //
@@ -142,7 +143,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
 
     // ---- finalise: keep the selected experts (renormalised iff `norm`, then
     // scaled), zero the rest ----
-    let denom = select(1.0, 1.0 / max(sel_sum, 1e-20), p.norm != 0u);
+    let denom = select(1.0, 1.0 / (sel_sum + 1e-20), p.norm != 0u);
     for (var e: u32 = 0u; e < E; e = e + 1u) {
         var selected = false;
         for (var s: u32 = 0u; s < k; s = s + 1u) {

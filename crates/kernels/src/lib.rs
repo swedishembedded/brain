@@ -620,6 +620,10 @@ pub const GELU_ERF: &str = include_str!("../wgsl/gelu_erf.wgsl");
 pub const GELU_ERF_BWD: &str = include_str!("../wgsl/gelu_erf_bwd.wgsl");
 /// `wgsl/glu.wgsl`
 pub const GLU: &str = include_str!("../wgsl/glu.wgsl");
+/// `wgsl/glu_act.wgsl`
+pub const GLU_ACT: &str = include_str!("../wgsl/glu_act.wgsl");
+/// `wgsl/glu_act_bwd.wgsl`
+pub const GLU_ACT_BWD: &str = include_str!("../wgsl/glu_act_bwd.wgsl");
 /// `wgsl/glu_bwd.wgsl`
 pub const GLU_BWD: &str = include_str!("../wgsl/glu_bwd.wgsl");
 /// `wgsl/gn_apply.wgsl`
@@ -2041,6 +2045,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("gelu_erf", GELU_ERF),
     ("gelu_erf_bwd", GELU_ERF_BWD),
     ("glu", GLU),
+    ("glu_act", GLU_ACT),
+    ("glu_act_bwd", GLU_ACT_BWD),
     ("glu_bwd", GLU_BWD),
     ("gn_apply", GN_APPLY),
     ("gn_dbeta", GN_DBETA),
