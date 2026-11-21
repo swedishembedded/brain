@@ -54,5 +54,13 @@ reporting is a `not-run` row.
   `cargo deny check advisories sources` (`deny.toml`); there is no crate-license
   allowlist, because licensing here is per model and per ported table
   (`.agents/rules/licensing.md`).
+- **Automatic release.** `release.yml` also starts when `ci.yml` succeeds for a
+  push to `main`: if the workspace version has no `v<version>` tag yet, it builds
+  that exact commit for every platform, creates the tag and publishes the
+  release with the version's `CHANGELOG.md` section as notes. CI has already
+  passed for that commit, so the gates are not repeated; a green `main` whose
+  version is already tagged releases nothing. The release is therefore made by
+  merging `make release/{patch,minor,major}`'s commit, and pushing the tag
+  yourself (`make release/publish`) remains supported.
 - **Provenance.** The attestation action is pinned by version tag, the one pin
   in the workflows that is not a commit.

@@ -3,9 +3,16 @@
 #
 # Builds the `brain` executable for every supported system from a release
 # tag and publishes them as the tag's GitHub release, with the tag's own
-# CHANGELOG section as its notes. Started by `make release/publish`, which
-# only pushes main and the tag: no release build runs on a developer's
-# machine.
+# CHANGELOG section as its notes. Two ways in, both ending in the same jobs:
+#
+#   * a pushed tag v<version> (`make release/publish` pushes main and the tag):
+#     the CI gates run again on the tagged commit;
+#   * a green CI run on a push to main whose workspace version has no tag yet
+#     (the commit `make release/{patch,minor,major}` made): CI is already green
+#     for that exact commit, so the release builds it and creates the tag
+#     itself. A green main whose version is already released does nothing.
+#
+# No release build runs on a developer's machine.
 #
 #   Linux   x86_64, aarch64   brain-linux-<arch>, brain-gpu-worker-linux-<arch>,
 #                             brain-linux-<arch>.deb (both programs)
@@ -34,6 +41,10 @@ run-name: >-
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
       dry_run:
@@ -53,17 +64,70 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  # What is being released, and whether anything is. A tag push and a manual
+  # run always release; a CI run on main releases only when that CI run
+  # succeeded for a push (not a pull request) of this repository and the
+  # workspace version has no tag yet. `sha` is the commit every job builds:
+  # the one CI tested, not whatever main has moved on to since.
+  plan:
+    name: Plan the release
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.plan.outputs.release }}
+      tag: ${{ steps.plan.outputs.tag }}
+      sha: ${{ steps.plan.outputs.sha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          CI_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          CI_EVENT: ${{ github.event.workflow_run.event }}
+          CI_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          THIS_REPO: ${{ github.repository }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)"
+          [ -n "$version" ] || { echo "no workspace version in Cargo.toml" >&2; exit 1; }
+          release=true
+          tag="v$version"
+          case "$EVENT" in
+            push) tag="$REF_NAME" ;;
+            workflow_run)
+              if [ "$CI_CONCLUSION" != success ] || [ "$CI_EVENT" != push ] || [ "$CI_REPO" != "$THIS_REPO" ]; then
+                release=false
+                echo "CI did not succeed for a push to this repository: nothing to release."
+              elif git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+                release=false
+                echo "$tag is already released: nothing to release."
+              fi ;;
+          esac
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "event=$EVENT release=$release tag=$tag sha=$(git rev-parse HEAD)"
+
   # ── Gates: nothing is published unless these pass on the tagged commit ──────
+  # A release started by a green CI run on main skips them: CI just passed for that commit.
   gates:
     name: CI gates (static, clippy, CPU)
+    needs: plan
+    if: ${{ needs.plan.outputs.release == 'true' && github.event_name != 'workflow_run' }}
     uses: ./.github/workflows/ci.yml
 
   # Known-vulnerable or yanked dependencies and unexpected sources (deny.toml).
   audit:
     name: Dependency audit
+    needs: plan
+    if: ${{ needs.plan.outputs.release == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
@@ -77,9 +141,13 @@ jobs:
   # The software bill of materials of the `brain` executable, from the lockfile's resolved graph.
   sbom:
     name: SBOM (CycloneDX)
+    needs: plan
+    if: ${{ needs.plan.outputs.release == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
@@ -102,6 +170,8 @@ jobs:
   # ── Linux: x86_64 and aarch64, each on its own architecture's runner ────────
   build-linux:
     name: Linux ${{ matrix.arch }}
+    needs: plan
+    if: ${{ needs.plan.outputs.release == 'true' }}
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -114,6 +184,8 @@ jobs:
             deb_arch: arm64
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
@@ -149,9 +221,13 @@ jobs:
   # ── macOS: one universal binary, Intel and Apple silicon ────────────────────
   build-macos:
     name: macOS (universal)
+    needs: plan
+    if: ${{ needs.plan.outputs.release == 'true' }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
@@ -187,6 +263,8 @@ jobs:
   # ── Windows x86_64 ──────────────────────────────────────────────────────────
   build-windows:
     name: Windows x86_64
+    needs: plan
+    if: ${{ needs.plan.outputs.release == 'true' }}
     runs-on: windows-latest
     steps:
       # Some .agents/knowledge file names put the checkout path past Windows'
@@ -194,6 +272,10 @@ jobs:
       - name: Allow long paths
         run: git config --system core.longpaths true
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
@@ -222,13 +304,17 @@ jobs:
   publish:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    needs: [gates, audit, sbom, build-linux, build-macos, build-windows]
+    needs: [plan, gates, audit, sbom, build-linux, build-macos, build-windows]
+    # `gates` is skipped, not green, when CI had already passed on main.
+    if: ${{ !cancelled() && needs.plan.outputs.release == 'true' && (needs.gates.result == 'success' || needs.gates.result == 'skipped') && needs.audit.result == 'success' && needs.sbom.result == 'success' && needs.build-linux.result == 'success' && needs.build-macos.result == 'success' && needs.build-windows.result == 'success' }}
     permissions:
       contents: write
       id-token: write # the provenance attestation is signed with the run's OIDC identity
       attestations: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
 
       - name: Download every platform's artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -272,5 +358,8 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: dist/*
-          body_path: target/release-notes-${{ github.ref_name }}.md
+          # Creates the tag on the tested commit when the release started from main.
+          tag_name: ${{ needs.plan.outputs.tag }}
+          target_commitish: ${{ needs.plan.outputs.sha }}
+          body_path: target/release-notes-${{ needs.plan.outputs.tag }}.md
           fail_on_unmatched_files: true
