@@ -24,8 +24,10 @@ brain is one of three open projects that work together. Each stands on its own:
 | Project | Its role |
 | --- | --- |
 | **[brain](https://github.com/swedishembedded/brain)** (this repository) | **Runs the models.** Inference, training, fine-tuning, quantization and serving. |
-| **[Sven](https://sven.swedishembedded.com)** | **Runs the agent.** A terminal AI agent that reads code, runs tools and works through tasks, using any model provider, brain included. |
-| **[Splinter](https://github.com/mkschreder/splinter)** | **Turns agent experience into better local models.** It runs Sven on real tasks, checks the results, trains a model with brain, and releases it only when held-out tests show it improved. |
+| **[Sven CLI](https://github.com/swedishembedded/sven)** | **Runs the agent.** A terminal AI agent that reads code, runs tools and works through tasks, using any model provider, brain included. |
+| **[Splinter](https://github.com/mkschreder/splinter)** | **Turns agent experience into better local models.** It runs Sven CLI on real tasks, checks the results, trains a model with brain, and releases it only when held-out tests show it improved. |
+
+Swedish Embedded also offers **[Sven Cloud](https://sven.swedishembedded.com)**, an enterprise agentic AI cloud solution that gives your teams access to 700+ AI models for daily work.
 
 You can use brain without the other two: it serves models to any application that speaks the OpenAI, Anthropic or OpenRouter API or D-Bus, or links the Rust SDK.
 
