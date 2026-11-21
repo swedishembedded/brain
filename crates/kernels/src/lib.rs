@@ -1477,6 +1477,8 @@ pub const ROOF_FMA: &str = include_str!("../wgsl/roof_fma.wgsl");
 pub const ROPE: &str = include_str!("../wgsl/rope.wgsl");
 /// `wgsl/rope2d.wgsl`
 pub const ROPE2D: &str = include_str!("../wgsl/rope2d.wgsl");
+/// `wgsl/rope2d_pairs.wgsl`
+pub const ROPE2D_PAIRS: &str = include_str!("../wgsl/rope2d_pairs.wgsl");
 /// `wgsl/rope2d_partial.wgsl`
 pub const ROPE2D_PARTIAL: &str = include_str!("../wgsl/rope2d_partial.wgsl");
 /// `wgsl/rope_at.wgsl`
@@ -1527,6 +1529,10 @@ pub const ROUTER_TOPK_COMPACT: &str = include_str!("../wgsl/router_topk_compact.
 pub const ROW_DOT: &str = include_str!("../wgsl/row_dot.wgsl");
 /// `wgsl/row_scatter.wgsl`
 pub const ROW_SCATTER: &str = include_str!("../wgsl/row_scatter.wgsl");
+/// `wgsl/rows_gather_weighted.wgsl`
+pub const ROWS_GATHER_WEIGHTED: &str = include_str!("../wgsl/rows_gather_weighted.wgsl");
+/// `wgsl/rows_gather_weighted_bwd.wgsl`
+pub const ROWS_GATHER_WEIGHTED_BWD: &str = include_str!("../wgsl/rows_gather_weighted_bwd.wgsl");
 /// `wgsl/rows_scatter_add.wgsl`
 pub const ROWS_SCATTER_ADD: &str = include_str!("../wgsl/rows_scatter_add.wgsl");
 /// `wgsl/scale_add.wgsl`
@@ -2497,6 +2503,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("roof_fma", ROOF_FMA),
     ("rope", ROPE),
     ("rope2d", ROPE2D),
+    ("rope2d_pairs", ROPE2D_PAIRS),
     ("rope2d_partial", ROPE2D_PARTIAL),
     ("rope_at", ROPE_AT),
     ("rope_base", ROPE_BASE),
@@ -2522,6 +2529,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("router_topk_compact", ROUTER_TOPK_COMPACT),
     ("row_dot", ROW_DOT),
     ("row_scatter", ROW_SCATTER),
+    ("rows_gather_weighted", ROWS_GATHER_WEIGHTED),
+    ("rows_gather_weighted_bwd", ROWS_GATHER_WEIGHTED_BWD),
     ("rows_scatter_add", ROWS_SCATTER_ADD),
     ("scale_add", SCALE_ADD),
     ("scale_add_dexp", SCALE_ADD_DEXP),

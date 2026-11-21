@@ -109,6 +109,7 @@ pub mod sealedwire;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod parallel;
 pub mod plan;
+pub mod postable;
 pub mod projector;
 pub mod prunable;
 /// Real per-device, per-dtype GEMM throughput measurement - see the module doc.

@@ -420,6 +420,42 @@ pub fn rope_neox_row(buf: &mut [f32], heads: usize, hd: usize, pos: usize, theta
     rope_neox(buf, 1, heads, hd, pos, theta);
 }
 
+/// The reference of `kernels::ROPE2D_PAIRS`: rotate the adjacent channel pairs `(2d, 2d + 1)` of every head of the
+/// `[rows, row_stride]` buffer's region starting at column `off`, with the per-pair angle `cos`/`sin` of table row
+/// `row % tmod` (`[tmod, half]`). `sign` is `1.0` forward and `-1.0` for the exact inverse rotation.
+#[allow(clippy::too_many_arguments)]
+pub fn rope_pairs_rows(buf: &mut [f32], rows: usize, heads: usize, half: usize, row_stride: usize, off: usize, cos: &[f32], sin: &[f32], tmod: usize, sign: f32) {
+    for row in 0..rows {
+        for h in 0..heads {
+            for d in 0..half {
+                let t = (row % tmod) * half + d;
+                let (c, s) = (cos[t], sin[t] * sign);
+                let base = row * row_stride + off + h * 2 * half + 2 * d;
+                let (x1, x2) = (buf[base], buf[base + 1]);
+                buf[base] = x1 * c - x2 * s;
+                buf[base + 1] = x2 * c + x1 * s;
+            }
+        }
+    }
+}
+
+/// The reference of `kernels::ROWS_GATHER_WEIGHTED`: `out[r] = sum_t weight[r, t] * table[idx[r, t]]` over `taps` taps
+/// per output row, rows of `width` floats, summed in tap order.
+pub fn gather_weighted_rows(idx: &[u32], weight: &[f32], taps: usize, table: &[f32], width: usize) -> Vec<f32> {
+    let rows = idx.len() / taps;
+    let mut out = vec![0f32; rows * width];
+    for r in 0..rows {
+        for c in 0..width {
+            let mut acc = 0f32;
+            for t in 0..taps {
+                acc += weight[r * taps + t] * table[idx[r * taps + t] as usize * width + c];
+            }
+            out[r * width + c] = acc;
+        }
+    }
+    out
+}
+
 /// The lowest `m` functions of the real orthonormal Fourier basis of `R^d`,
 /// as the `[d, m]` row-major synthesis matrix `S` (`S[j, i] = phi_i(j)`).
 ///
