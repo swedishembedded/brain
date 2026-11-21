@@ -531,3 +531,4 @@ What belongs where:
 | 534 | Weighted-loss objectives computed the full block, and KTO did twice the work | [`534-weighted-loss-objectives-computed-the-full-block-and-kto-did-twice-the-work.md`](534-weighted-loss-objectives-computed-the-full-block-and-kto-did-twice-the-work.md) |
 | 535 | A per-row CPU fan-out spends a wide pool on wake-ups | [`535-a-per-row-cpu-fan-out-spends-a-wide-pool-on-wake-ups.md`](535-a-per-row-cpu-fan-out-spends-a-wide-pool-on-wake-ups.md) |
 | 536 | A tool call written inside an unclosed think block is lost as reasoning | [`536-a-tool-call-written-inside-an-unclosed-think-block-is-lost-as-reasoning.md`](536-a-tool-call-written-inside-an-unclosed-think-block-is-lost-as-reasoning.md) |
+| 537 | An unweighted k3 penalty pulls hardest on the tokens the policy has left | [`537-an-unweighted-k3-penalty-pulls-hardest-on-the-tokens-the-policy-has-left.md`](537-an-unweighted-k3-penalty-pulls-hardest-on-the-tokens-the-policy-has-left.md) |

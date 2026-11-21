@@ -337,7 +337,7 @@ mod tests {
     }
 
     /// One token's loss written from the definition in f64, independently of `token_term`: the negated clipped
-    /// surrogate scaled by the importance weight, plus `kl_beta` times k3 against the reference.
+    /// surrogate scaled by the importance weight, plus `kl_beta` times the ratio-weighted k3 against the reference.
     fn oracle(new: f64, old: f64, advantage: f64, band: ClipBand, ref_lp: Option<f64>, kl_beta: f64, is_weight: f64) -> f64 {
         let r = (new - old).exp();
         let mut loss = 0.0;
@@ -346,7 +346,7 @@ mod tests {
         }
         if let Some(reference) = ref_lp {
             let u = reference - new;
-            loss += kl_beta * (u.exp() - u - 1.0);
+            loss += kl_beta * r * (u.exp() - u - 1.0);
         }
         loss
     }

@@ -16,9 +16,9 @@
 //! and `0` on a clipped one: `r` is not stop-gradient here, its own derivative
 //! `dr/dz = r * dlogp/dz` is what produces the `A*r` factor, so the ordinary
 //! cross-entropy backward differentiates the real clipped objective by using
-//! this weight. The optional k3 KL-to-reference term (`e^u - u - 1`,
-//! `u = ref_lp - new_lp`) adds `kl_beta*(e^u - 1)` to the same weight by an
-//! identical derivation.
+//! this weight. The optional KL-to-reference term, the k3 estimate
+//! (`e^u - u - 1`, `u = ref_lp - new_lp`) weighted by the same ratio, adds
+//! `kl_beta*r*u` to the same weight by an identical derivation.
 //!
 //! Swedish Embedded AB implements solutions for reward-driven training that
 //! reduces to one gradient-checked weighted cross-entropy kernel, for its
@@ -112,12 +112,14 @@ pub fn token_term(old_lp: f32, new_lp: f32, advantage: f32, clip_eps: f32, ref_l
 /// `A*r`. When the clipped term is strictly smaller, the surrogate is locally
 /// constant in `r` (the clamp has saturated), so the weight is exactly `0.0`.
 ///
-/// KL penalty direction: `kl_beta * k3` is added to the loss with the sample
-/// held fixed, so its expected gradient under `pi` samples is the gradient of
-/// `KL(ref || pi)` (see [`k3_kl`]), even though the reported value estimates
-/// `KL(pi || ref)`. Descending `KL(pi || ref)` itself would need the penalty
-/// folded into the reward (`-kl_beta * (new_lp - ref_lp)` per token) so the
-/// policy gradient differentiates through the sampling distribution.
+/// KL penalty: `kl_beta * ratio * k3` is added to the loss, `ratio` the
+/// importance ratio to the behaviour policy that drew the token, and both
+/// factors are differentiated. With samples from the behaviour policy held
+/// fixed its expectation is `KL(pi || ref)` and its expected gradient that
+/// divergence's gradient, on-policy and off: the penalty descends the divergence
+/// the step reports and the step guard bounds. (The unweighted `kl_beta * k3`
+/// descends `KL(ref || pi)` instead, and a drawn token the policy has pushed
+/// `d` nats below the reference pulls on it with weight `kl_beta * e^d`.)
 ///
 /// The ratio `exp(new_lp - old_lp)` is evaluated by [`bounded_exp`], and so is the
 /// k3 exponent: past [`MAX_LOG_RATIO`] both continue along their tangent, and `weight`
@@ -161,9 +163,14 @@ pub fn token_term_weighted(old_lp: f32, new_lp: f32, advantage: f32, band: ClipB
 
     if kl_beta > 0.0 {
         let ref_lp = ref_lp.expect("token_term: kl_beta > 0.0 requires a reference logprob");
-        let (k3, slope) = k3_with_slope(ref_lp, new_lp);
-        weight += f64::from(kl_beta) * (slope - 1.0);
-        loss += f64::from(kl_beta) * k3;
+        // The behaviour policy drew the token, so k3 enters weighted by the ratio: `E_old[ratio * k3] = KL(pi || ref)`,
+        // differentiated through both factors. Within the caps the weight is `kl_beta * ratio * (ref_lp - new_lp)`:
+        // a token the policy has pushed far below the reference holds little of the divergence and pulls with a
+        // weight near zero, where the unweighted k3 would pull with `kl_beta * ref / pi`.
+        let (k3, k3_slope) = k3_with_slope(ref_lp, new_lp);
+        let beta = f64::from(kl_beta);
+        weight += beta * (ratio * (k3_slope - 1.0) - ratio_slope * k3);
+        loss += beta * ratio * k3;
     }
 
     TokenTerm { weight: weight as f32, loss: loss as f32, clipped: clipped_out, dual_clipped }
@@ -175,10 +182,9 @@ pub fn token_term_weighted(old_lp: f32, new_lp: f32, advantage: f32, band: ClipB
 /// drawn from `pi`, but descending it with the sample held fixed does not
 /// descend that KL: `grad k3 = (1 - ref/pi) grad ln pi`, so
 /// `E_pi[grad k3] = sum_a (pi_a - ref_a) grad ln pi_a = grad KL(ref || pi)`
-/// (using `sum_a grad pi_a = 0`). The penalty therefore pulls `pi` toward
-/// covering `ref` (forward KL), not toward seeking one of its modes. Its gradient weight is `e^u - 1`: with
-/// `d(new_lp)/dz = onehot - softmax` the KL gradient is `(e^u - 1)` more weight
-/// on the ordinary cross-entropy direction. The exponential is continued
+/// (using `sum_a grad pi_a = 0`). The penalty therefore weights it by the
+/// importance ratio ([`token_term_weighted`]), whose derivative supplies the
+/// missing term so the expected gradient is that of `KL(pi || ref)`. The exponential is continued
 /// linearly past [`MAX_LOG_RATIO`] ([`bounded_exp`]) so a reference far more
 /// confident than the policy cannot overflow, and the weight stays this
 /// function's derivative.
@@ -305,10 +311,27 @@ mod tests {
         let ref_lp: f32 = -0.5;
         let new_lp: f32 = -0.2;
         let u = ref_lp - new_lp;
-        let eu = u.exp();
+        let ratio = (new_lp - -0.3f32).exp();
         let t = token_term(-0.3, new_lp, 0.0, 0.2, Some(ref_lp), 0.5);
-        assert!((t.weight - 0.5 * (eu - 1.0)).abs() < 1e-6, "{t:?}");
-        assert!((t.loss - 0.5 * (eu - u - 1.0)).abs() < 1e-6, "{t:?}");
+        assert!((t.weight - 0.5 * ratio * u).abs() < 1e-6, "{t:?}");
+        assert!((t.loss - 0.5 * ratio * (u.exp() - u - 1.0)).abs() < 1e-6, "{t:?}");
+    }
+
+    /// A token the behaviour policy drew with probability 0.1 and the policy has since pushed 17.5 nats below the
+    /// reference holds almost none of `KL(pi || ref)`, so the penalty may cost at most about `kl_beta * ref / old`
+    /// and pull on it with a weight near zero. Unweighted, k3 reads `ref / pi` (4e7) and its weight `kl_beta * ref /
+    /// pi`: one such token in a step is a gradient norm of 1e5 (a guarded on-policy round on agent rollouts diverged on them).
+    #[test]
+    fn a_drawn_token_pushed_far_below_its_reference_costs_at_most_its_share_of_the_divergence() {
+        let (old_lp, ref_lp) = (0.1f32.ln(), 0.1f32.ln());
+        let new_lp = old_lp - 17.5;
+        for advantage in [0.0f32, 1.0, -1.0] {
+            let with_kl = token_term_banded(old_lp, new_lp, advantage, ClipBand::symmetric(0.2).with_dual(3.0), Some(ref_lp), 0.04);
+            let without = token_term_banded(old_lp, new_lp, advantage, ClipBand::symmetric(0.2).with_dual(3.0), None, 0.0);
+            let (weight, loss) = (with_kl.weight - without.weight, with_kl.loss - without.loss);
+            assert!(weight.abs() < 1e-6, "the KL weight of a token pi no longer draws: {weight}");
+            assert!((0.0..=0.04 + 1e-6).contains(&loss), "the KL cost of that token: {loss}");
+        }
     }
 
     /// R9: the k3 estimator against its definition, and its two defining
@@ -356,10 +379,13 @@ mod tests {
             }
         }
         if let (true, Some(ref_lp)) = (kl_beta > 0.0, ref_lp) {
+            // `ratio * k3`, differentiated through both factors.
+            let (r, r_slope) = ext(new_lp - old_lp);
             let u = ref_lp - new_lp;
             let (eu, slope) = ext(u);
-            weight += kl_beta * (slope - 1.0);
-            loss += kl_beta * (eu - u - 1.0);
+            let k3 = eu - u - 1.0;
+            weight += kl_beta * (r * (slope - 1.0) - r_slope * k3);
+            loss += kl_beta * r * k3;
         }
         (weight, loss)
     }
@@ -434,40 +460,35 @@ mod tests {
         }
     }
 
-    /// Which divergence the k3 penalty descends, by exact enumeration. With samples drawn from `pi` and held
-    /// fixed, `E_pi[grad_z kl_beta * k3] = kl_beta * (pi - ref)` for logits `z` (`pi = softmax z`), which is the
-    /// gradient of `KL(ref || pi)`, not of `KL(pi || ref)`, `kl_beta * pi_j * (ln(pi_j / ref_j) - KL(pi || ref))`.
-    /// A token's logit gradient is `weight * (softmax - onehot)` ([`TokenTerm`]).
+    /// Which divergence the penalty descends, by exact enumeration over a behaviour policy `old` that is not the
+    /// policy `pi`: with samples drawn from `old` and held fixed, `E_old[grad_z kl_beta * ratio * k3]` is
+    /// `kl_beta * pi_j * (ln(pi_j / ref_j) - KL(pi || ref))`, the gradient of `KL(pi || ref)` for logits `z`
+    /// (`pi = softmax z`): the divergence the step reports and the step guard bounds. On-policy (`old = pi`) the
+    /// same holds. A token's logit gradient is `weight * (softmax - onehot)` ([`TokenTerm`]).
     #[test]
-    fn k3_penalty_expected_gradient_is_that_of_forward_kl_ref_to_policy() {
+    fn the_penalty_descends_the_reported_divergence_kl_policy_to_reference_on_and_off_policy() {
         let beta = 0.7f32;
         let pi = [0.5f64, 0.3, 0.15, 0.05];
         let reference = [0.1f64, 0.2, 0.3, 0.4];
-        // The kernel sees f32 log-probabilities; the analytic side uses the same rounded values.
-        let pi_lp: Vec<f32> = pi.iter().map(|p| p.ln() as f32).collect();
-        let ref_lp: Vec<f32> = reference.iter().map(|p| p.ln() as f32).collect();
-        let pi: Vec<f64> = pi_lp.iter().map(|l| f64::from(*l).exp()).collect();
-        let reference: Vec<f64> = ref_lp.iter().map(|l| f64::from(*l).exp()).collect();
+        for old in [pi, [0.25f64, 0.25, 0.4, 0.1]] {
+            // The kernel sees f32 log-probabilities; the analytic side uses the same rounded values.
+            let lp = |d: &[f64; 4]| d.iter().map(|p| p.ln() as f32).collect::<Vec<f32>>();
+            let (pi_lp, ref_lp, old_lp) = (lp(&pi), lp(&reference), lp(&old));
+            let back = |l: &[f32]| l.iter().map(|x| f64::from(*x).exp()).collect::<Vec<f64>>();
+            let (pi, reference, old) = (back(&pi_lp), back(&ref_lp), back(&old_lp));
 
-        let mut expected = vec![0.0f64; pi.len()];
-        for a in 0..pi.len() {
-            let t = token_term(0.0, pi_lp[a], 0.0, 0.2, Some(ref_lp[a]), beta);
-            for (j, g) in expected.iter_mut().enumerate() {
-                *g += pi[a] * f64::from(t.weight) * (pi[j] - f64::from(a == j));
+            let mut expected = vec![0.0f64; pi.len()];
+            for a in 0..pi.len() {
+                let t = token_term(old_lp[a], pi_lp[a], 0.0, 0.2, Some(ref_lp[a]), beta);
+                for (j, g) in expected.iter_mut().enumerate() {
+                    *g += old[a] * f64::from(t.weight) * (pi[j] - f64::from(a == j));
+                }
+            }
+            let kl: f64 = pi.iter().zip(&reference).map(|(p, r)| p * (p / r).ln()).sum();
+            let reverse: Vec<f64> = (0..pi.len()).map(|j| f64::from(beta) * pi[j] * ((pi[j] / reference[j]).ln() - kl)).collect();
+            for j in 0..pi.len() {
+                assert!((expected[j] - reverse[j]).abs() <= 1e-5, "z{j}: expected {} vs grad KL(pi||ref) {}", expected[j], reverse[j]);
             }
         }
-
-        let forward: Vec<f64> = (0..pi.len()).map(|j| f64::from(beta) * (pi[j] - reference[j])).collect();
-        let kl_reverse: f64 = pi.iter().zip(&reference).map(|(p, r)| p * (p / r).ln()).sum();
-        let reverse: Vec<f64> = (0..pi.len()).map(|j| f64::from(beta) * pi[j] * ((pi[j] / reference[j]).ln() - kl_reverse)).collect();
-
-        // Error budget: each weight is rounded once to f32 (relative 2^-24) and |weight| <= beta * max(ref/pi) < 10 here;
-        // the sum has 4 terms of magnitude <= 1, so 4 * 10 * beta * 2^-24 < 2e-6, plus the f32 weight's own exp error.
-        let bound = 1e-5;
-        for j in 0..pi.len() {
-            assert!((expected[j] - forward[j]).abs() <= bound, "z{j}: expected {} vs grad KL(ref||pi) {}", expected[j], forward[j]);
-        }
-        let gap = expected.iter().zip(&reverse).map(|(e, r)| (e - r).abs()).fold(0.0, f64::max);
-        assert!(gap > 0.05, "the penalty must differ from grad KL(pi||ref); gap {gap}");
     }
 }
