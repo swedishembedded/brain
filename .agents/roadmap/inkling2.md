@@ -273,6 +273,10 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
     scales.
   - Kernels may instead consume the interleaved layout directly as a declared `GluLayout`;
     decide in I1.3.
+  - Done (2026-11-21): `SlicedReader::with_view` takes scaled and sub-byte sources (whole rows; a per-slab level
+    becomes the view's per-tensor level) and `with_slab_views` cuts a stacked tensor into per-expert matrices in the
+    single-expert encoding (NVFP4 with its own f32 global, MXFP8). Rows stay as stored (interleaved gate/up); no
+    stride-2 view, per the decision below: the model declares the layout.
 - **I0.4** `modelstore::recipe`: make sure `brain pull` lands every file the model needs,
   including `mtp.safetensors` (it is not in the index); check what the pull fetches today. `checkpoint::weightio` opens it as a second, optional source
   with its own unprefixed names.

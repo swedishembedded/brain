@@ -51,6 +51,15 @@ fn a_parameter_groups_release_reads_as_declared_per_tensor() {
     assert_eq!(r.descriptor("model.llm.embed.weight").unwrap().encoding, QuantEncoding::bf16());
     assert_eq!(r.descriptor("model.llm.unembed.weight").unwrap().encoding.element, checkpoint::packed::Element::Float(FloatFormat::Bf16));
 
+    // Each expert of a stacked tensor is a matrix of its own in the single-expert encoding (rows as stored).
+    let views = checkpoint::packed::SlicedReader::new(Box::new(r))
+        .with_slab_views("model.llm.layers.0.mlp.experts.w13_weight", |e| format!("l0.w13.{e}"))
+        .and_then(|v| v.with_slab_views("model.llm.layers.20.mlp.experts.w2_weight", |e| format!("l20.w2.{e}")))
+        .unwrap();
+    let e = views.descriptor("l0.w13.127").unwrap();
+    assert_eq!((e.shape.clone(), e.encoding.clone()), (vec![2304, 2304], QuantEncoding::nvfp4()));
+    let e = views.descriptor("l20.w2.0").unwrap();
+    assert_eq!((e.shape.clone(), e.encoding.clone()), (vec![2304, 1152], QuantEncoding::mxfp8()));
 }
 
 /// Spec: the declarations themselves are parsed from the release's own sidecar: the transform of each group, the
