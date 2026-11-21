@@ -11,7 +11,7 @@
 
 Language models are only part of the picture. brain brings text, embeddings, vision, document understanding, image and speech generation, video, forecasting, decision models, 3D reconstruction and interactive world models into **one extensible engine**, exposed through a CLI, a Rust SDK and interoperable serving APIs.
 
-**[Get started](#quickstart)** · **[Documentation](docs/index.md)** · **[Model catalog](docs/reference/models/index.md)** · **[Capabilities and certification](docs/reference/training-capabilities.md)** · **[Examples](samples/README.md)** · **[Book](docs/book/index.md)**
+**[Get started](#quickstart)** · **[Documentation](docs/index.md)** · **[Model catalog](docs/reference/models/index.md)** · **[Capabilities and certification](docs/reference/training-capabilities.md)** · **[Examples](samples/README.md)** · **[Book](https://www.amazon.com/dp/B0HRWWYHGF?maas=maas_adg_B0EF476BE0ACF3F28B1215EE6A9E234B_afap_abs[Book](docs/book/index.md)ref_=aa_maas[Book](docs/book/index.md)tag=maas)**
 
 ---
 
@@ -216,7 +216,7 @@ These checks establish *specific* contracts, not a blanket claim that every mode
 | [Practical guides](docs/index.md) | Hardware, text, vision, image generation, speech, forecasting, 3D, training, deployment and optimization. |
 | [Samples](samples/README.md) | Complete standalone Rust applications plus Python and shell clients. |
 | [Architecture and kernels](docs/concepts/architecture.md) | Backend design, layers, kernel catalogs and numerical contracts. |
-| [From First Principles to Intelligent Machines](docs/book/index.md) | A sixteen-volume textbook connecting ML mathematics and algorithms to the implementation of a complete engine. |
+| [From First Principles to Intelligent Machines](https://www.amazon.com/dp/B0HRWWYHGF?maas=maas_adg_B0EF476BE0ACF3F28B1215EE6A9E234B_afap_abs[From First Principles to Intelligent Machines](docs/book/index.md)ref_=aa_maas[From First Principles to Intelligent Machines](docs/book/index.md)tag=maas) | A sixteen-volume textbook connecting ML mathematics and algorithms to the implementation of a complete engine. |
 | [Contributing](docs/contributing/index.md) | Building, tests, generated files, documentation and contribution conventions. |
 
 **Source layout:** `crates/` contains the engine, model families, backends, SDK and services; `samples/` demonstrates applications and integrations; `tests/` and `scripts/` hold system and repository gates; `docs/` is the user-facing manual; `brain-py/` contains an optional Python subprocess client; `papers/` contains research work. The core does not depend on the sample applications or an external agent orchestrator.
