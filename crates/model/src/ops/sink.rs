@@ -336,15 +336,18 @@ pub fn rewrite_tile(ops: &dyn DeviceIo, weight: &Weight, dst: &TensorDescriptor,
 
 
 /// A bank of `blocks` same-shape microscaled matrices (the routed experts of one MoE projection) in ONE resident
-/// buffer set: block `b`'s `[n, k]` matrix is rows `b * n .. (b + 1) * n` of the payload and scale planes, and its
-/// per-tensor scale is `global[b]`. One buffer per projection is what lets a single gather kernel serve every expert a
-/// token routes to; the bytes are the checkpoint's own (Preserve), one tile of host staging at a time.
+/// buffer set: block `b`'s `[n, k]` matrix is rows `b * n .. (b + 1) * n` of the payload and scale planes, and (NVFP4)
+/// its per-tensor scale is `global[b]`. One buffer per projection is what lets a single gather kernel serve every expert
+/// a token routes to; the bytes are the checkpoint's own (Preserve), one tile of host staging at a time. NVFP4 and MXFP8
+/// (E4M3) banks exist; [`MicroBank::gather`] and [`MicroBank::grouped`] dispatch the product of either kind.
 pub struct MicroBank {
     /// Element codes of every block, back to back, in the tier's packing.
     pub w: DeviceBuffer,
     /// Scale bytes of every block, back to back, four to a word.
     pub s: DeviceBuffer,
-    /// `[blocks]` f32 per-tensor scale of each block.
+    /// `[blocks]` f32 per-tensor scale of each block: NVFP4's second level (a stacked checkpoint's per-expert
+    /// `amax / denominator` arrives here as each expert view's tensor scale). All ones for MXFP8, which has none and
+    /// whose kernels do not read it.
     pub global: DeviceBuffer,
     pub n: u32,
     pub k: u32,
@@ -360,6 +363,7 @@ struct MicroBankSink<'a> {
     n: u32,
     k: u32,
     block: u32,
+    kind: MicroScaled,
     global: Vec<f32>,
     payload: Option<Stream>,
     scales: Option<Stream>,
@@ -374,8 +378,8 @@ impl MicroBankSink<'_> {
 impl TensorSink for MicroBankSink<'_> {
     fn begin(&mut self, dst: &TensorDescriptor) -> Result<(), String> {
         let tier = tier_of(&dst.encoding).map_err(|e| format!("tensor '{}': {e}", dst.name))?;
-        if tier != Tier::Micro(MicroScaled::Nvfp4) || dst.shape != [self.n as u64, self.k as u64] {
-            return Err(format!("tensor '{}': a bank of NVFP4 [{}, {}] matrices cannot take {:?} of shape {:?}", dst.name, self.n, self.k, dst.encoding, dst.shape));
+        if tier != Tier::Micro(self.kind) || dst.shape != [self.n as u64, self.k as u64] {
+            return Err(format!("tensor '{}': a bank of {:?} [{}, {}] matrices cannot take {} of shape {:?}", dst.name, self.kind, self.n, self.k, dst.encoding, dst.shape));
         }
         let (pb, sb) = self.bytes(dst);
         self.payload = Some(Stream::within(&self.w, self.block as u64 * pb, pb));
@@ -392,10 +396,14 @@ impl TensorSink for MicroBankSink<'_> {
             return Err(format!("tensor '{}': tiles must arrive in order", dst.name));
         }
         payload.push(gpu, tile.payload);
-        let g = tile.scales.first().and_then(|b| b.as_chunks::<4>().0.first().copied()).ok_or("an NVFP4 tile carries the tensor scale")?;
-        self.global[self.block as usize] = f32::from_le_bytes(g);
-        let bytes = tile.scales.get(1).ok_or("an NVFP4 tile carries its block scales")?;
-        let at = self.block as u64 * sb + dst.scale_range(1, &tile.elems).start;
+        // The block-scale level is the last (finest); NVFP4 carries its tensor scale before it.
+        let fine = dst.encoding.scales.len() - 1;
+        if self.kind == MicroScaled::Nvfp4 {
+            let g = tile.scales.first().and_then(|b| b.as_chunks::<4>().0.first().copied()).ok_or("an NVFP4 tile carries the tensor scale")?;
+            self.global[self.block as usize] = f32::from_le_bytes(g);
+        }
+        let bytes = tile.scales.get(fine).ok_or("a microscaled tile carries its block scales")?;
+        let at = self.block as u64 * sb + dst.scale_range(fine, &tile.elems).start;
         if at != scales.position() {
             return Err(format!("tensor '{}': scale tiles must arrive in order", dst.name));
         }
@@ -417,14 +425,23 @@ impl TensorSink for MicroBankSink<'_> {
     }
 }
 
-/// Upload the NVFP4 matrices `names` (each `[n, k]`, in block order) of `src` as one [`MicroBank`], in the encoding
-/// they are stored in. `staging` bounds the host memory a tile may take. An encoding that is not NVFP4, a shape that
-/// differs, or a source without a packed view of a name is an error naming it: nothing is widened.
+/// Upload the NVFP4 or MXFP8 (E4M3) matrices `names` (each `[n, k]`, in block order, all of the first one's kind) of
+/// `src` as one [`MicroBank`], in the encoding they are stored in. `staging` bounds the host memory a tile may take. Any
+/// other encoding, a kind or shape that differs, or a source without a packed view of a name is an error naming it:
+/// nothing is widened. The experts of a stacked checkpoint tensor reach this as per-expert views
+/// (`checkpoint::packed::SlicedReader::with_slab_views`).
 pub fn upload_micro_bank(ops: &Ops, src: &dyn checkpoint::TensorSource, names: &[String], n: usize, k: usize, staging: &checkpoint::packed::BoundedWorkspace) -> Result<MicroBank, String> {
     use checkpoint::packed::{LoadConfig, LoadPolicy, LoadRequest};
     let blocks = names.len() as u32;
     let first = names.first().ok_or("an empty expert bank")?;
     let probe = src.packed_descriptor(first).ok_or_else(|| format!("{first}: the source has no packed view of this tensor"))?;
+    let kind = match tier_of(&probe.encoding) {
+        Ok(Tier::Micro(kind @ (MicroScaled::Nvfp4 | MicroScaled::Mxfp8E4m3))) => kind,
+        _ => return Err(format!("{first}: an expert bank holds NVFP4 or MXFP8 (E4M3) matrices, this one is {}", probe.encoding)),
+    };
+    if kind == MicroScaled::Mxfp8E4m3 && !k.is_multiple_of(128) {
+        return Err(format!("{first}: an MXFP8 bank's rows must hold whole words of scales (k a multiple of 128), k is {k}"));
+    }
     let (pb, sb) = (probe.payload_bytes(), probe.scale_bytes(probe.encoding.scales.len().saturating_sub(1)));
     let gpu = ops.upload_gpu();
     let mut sink = MicroBankSink {
@@ -434,6 +451,7 @@ pub fn upload_micro_bank(ops: &Ops, src: &dyn checkpoint::TensorSource, names: &
         n: n as u32,
         k: k as u32,
         block: 0,
+        kind,
         global: vec![1.0; blocks as usize],
         payload: None,
         scales: None,
@@ -448,5 +466,61 @@ pub fn upload_micro_bank(ops: &Ops, src: &dyn checkpoint::TensorSource, names: &
         }
     }
     let global = gpu.storage_init("micro_bank.global", &sink.global);
-    Ok(MicroBank { w: sink.w, s: sink.s, global, n: n as u32, k: k as u32, blocks, kind: MicroScaled::Nvfp4 })
+    Ok(MicroBank { w: sink.w, s: sink.s, global, n: n as u32, k: k as u32, blocks, kind })
+}
+
+/// The pipelines [`MicroBank::gather`] and [`MicroBank::grouped`] dispatch, for a model's kernel list (with the
+/// routing kernels `moe_route_count` / `moe_route_scan` / `moe_route_emit` that build a grouped product's table).
+pub fn micro_bank_kernels() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("moe_nvfp4_gemv_gather", kernels::MOE_NVFP4_GEMV_GATHER),
+        ("moe_nvfp4_grouped", kernels::MOE_NVFP4_GROUPED),
+        ("moe_mxfp8_gemv_gather", kernels::MOE_MXFP8_GEMV_GATHER),
+        ("moe_mxfp8_grouped", kernels::MOE_MXFP8_GROUPED),
+    ]
+}
+
+/// Slots of an expert a grouped product applies one weight pass to (`MR` of `moe_*_grouped.wgsl`).
+pub const MICRO_GROUPED_SLOTS: u32 = 8;
+/// Weight rows one workgroup of the bank products serves (`COLS` of the kernels).
+const MICRO_BANK_COLS: u32 = 4;
+
+impl MicroBank {
+    fn kernel(&self, gpu: &Gpu, op: &str) -> Result<usize, String> {
+        let fmt = match self.kind {
+            MicroScaled::Nvfp4 => "nvfp4",
+            MicroScaled::Mxfp8E4m3 => "mxfp8",
+            other => return Err(format!("a {other:?} bank has no expert product")),
+        };
+        let name = format!("moe_{fmt}_{op}");
+        gpu.kernel_index(&name).ok_or_else(|| format!("kernel '{name}' is not registered on this Gpu: add model::ops::micro_bank_kernels() to the kernel list"))
+    }
+
+    /// The decode-regime expert product: `out[s, :] = W[ids[s]] @ x[s / xdiv, :]` for `slots` slots, each reading its
+    /// own expert's rows of the bank (`[slots, n]` f32 out, `x` `[rows, k]` f32). Rows come out in the bank's stored
+    /// order (a fused gate/up bank stays in its declared layout for `model::glu`).
+    pub fn gather(&self, gpu: &Gpu, x: &DeviceBuffer, ids: &DeviceBuffer, out: &DeviceBuffer, slots: u32, xdiv: u32) -> Result<gpu_core::Step, String> {
+        let idx = self.kernel(gpu, "gemv_gather")?;
+        let grid = gpu_core::Dispatch::Workgroups(slots * self.n.div_ceil(MICRO_BANK_COLS));
+        let params = [slots, self.k, self.n, xdiv];
+        Ok(match self.kind {
+            MicroScaled::Nvfp4 => gpu.dispatch(idx, &[x, ids, &self.w, &self.s, &self.global, out], &params, grid),
+            _ => gpu.dispatch(idx, &[x, ids, &self.w, &self.s, out], &params, grid),
+        })
+    }
+
+    /// The prefill-regime expert product over slots grouped by expert: `tab` and `perm` as `moe_route_scan` /
+    /// `moe_route_emit` write them for `ne` experts, `tiles` at least the table's tile count
+    /// (`ne + ceil(slots / MICRO_GROUPED_SLOTS)`). The same arithmetic as [`Self::gather`], bit for bit on the WGSL
+    /// tier.
+    #[allow(clippy::too_many_arguments)] // one buffer per binding of the kernel, and its three counts
+    pub fn grouped(&self, gpu: &Gpu, x: &DeviceBuffer, tab: &DeviceBuffer, perm: &DeviceBuffer, out: &DeviceBuffer, tiles: u32, xdiv: u32, ne: u32) -> Result<gpu_core::Step, String> {
+        let idx = self.kernel(gpu, "grouped")?;
+        let grid = gpu_core::Dispatch::Workgroups(tiles * self.n.div_ceil(MICRO_BANK_COLS));
+        let params = [tiles, self.k, self.n, xdiv, ne];
+        Ok(match self.kind {
+            MicroScaled::Nvfp4 => gpu.dispatch(idx, &[x, tab, perm, &self.w, &self.s, &self.global, out], &params, grid),
+            _ => gpu.dispatch(idx, &[x, tab, perm, &self.w, &self.s, out], &params, grid),
+        })
+    }
 }

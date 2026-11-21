@@ -347,7 +347,7 @@ impl Ops {
         !self.gpu.declines_library() && matches!(self.gemm.path(), gpu_core::provider::library::GemmPath::Bf16TensorCore)
     }
 
-    /// The decode-regime product of an FP8 (E4M3, block or tensor scales) or NVFP4 weight against `act`'s few rows by
+    /// The decode-regime product of an FP8 (E4M3, block or tensor scales), NVFP4 or MXFP8 (E4M3) weight against `act`'s few rows by
     /// the kernel that reads the stored bytes directly. `false` when the weight, its shape, the row count or the
     /// registered kernels do not allow it; the caller then takes the tile decode.
     pub(super) fn small_m_gemv(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), act: &Act, y: &DeviceBuffer, yoff: u64) -> bool {
@@ -381,6 +381,14 @@ impl Ops {
                 let Some(idx) = self.gpu.kernel_index(&kernels::template::gemv_kernel_name("matmul_nvfp4_gemv", m)) else { return false };
                 let params = [m, k, count, first, act.xr0, global.to_bits(), rpw, 0];
                 s.push(self.gpu.dispatch_sliced(idx, &[&act.x, wb, sb, y], &[WHOLE, WHOLE, WHOLE, out], &params, grid));
+                true
+            }
+            // MXFP8 has no global scale; a row's E8M0 scales start on a word when `k` is a multiple of 128. One round of
+            // four rows a workgroup (the kernel keeps no decode table to amortise).
+            Weight::Micro { w: wb, s: sb, kind: MicroScaled::Mxfp8E4m3, .. } if k.is_multiple_of(128) && m <= max_rows => {
+                let Some(idx) = self.gpu.kernel_index(&kernels::template::gemv_kernel_name("matmul_mxfp8_gemv", m)) else { return false };
+                let params = [m, k, count, first, act.xr0, 0, 0, 0];
+                s.push(self.gpu.dispatch_sliced(idx, &[&act.x, wb, sb, y], &[WHOLE, WHOLE, WHOLE, out], &params, gpu_core::Dispatch::Workgroups(tiles)));
                 true
             }
             _ => false,

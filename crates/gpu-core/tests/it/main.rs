@@ -94,6 +94,7 @@ mod memory_usage;
 mod moe_i8_grouped;
 mod moe_i8_grouped_native;
 mod moe_i8_pipeline;
+mod moe_mxfp8;
 mod moe_nvfp4;
 mod native_f16_provider;
 mod native_helpers_decline_off_cuda;

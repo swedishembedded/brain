@@ -580,6 +580,11 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (m, k, count) = (p(0)?, p(1)?, p(2)?);
             f(2 * m * k * count, count * k / 2 + count * k / 16 + 4 * (m * k + m * count))
         }
+        // MXFP8: one byte per weight plus an E8M0 byte per 32.
+        "matmul_mxfp8_gemv" => {
+            let (m, k, count) = (p(0)?, p(1)?, p(2)?);
+            f(2 * m * k * count, count * k + count * k / 32 + 4 * (m * k + m * count))
+        }
         // int8 DP4A GEMMs: params [m, kg = K/4, n]. The MACs are INTEGER ops
         // (K = 4·kg of them per output); the per-group dequant (acc·sw·sx) is fp32.
         // `matmul_i8` is the static-scale sibling of the two below and was the

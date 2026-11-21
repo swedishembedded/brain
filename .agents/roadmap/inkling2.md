@@ -362,6 +362,17 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
   - MXFP8 GEMV and MXFP8 MoE gather and grouped kernels.
   - Rows in `tier-gemm.map`. `tier-gemm.allow` only shrinks.
   - The NVFP4 MoE kernels must accept per-expert globals derived from amax.
+  - Done (2026-11-21): `matmul_mxfp8_gemv` (MAXM 1/2/4/8, `Ops::small_m_gemv` MXFP8 arm, tier-gemm row, the
+    `Mxfp8E4m3 gemv` gap removed), `moe_mxfp8_gemv_gather` and `moe_mxfp8_grouped`: one top-level barrier, no
+    workgroup table, so they run on the CPU JIT too (`@cpu yes`); CUDA through the WGSL translation. One order of
+    arithmetic: gather, grouped and dense GEMV agree to the bit (`gpu-core/tests/it/moe_mxfp8.rs`, run on CPU).
+    `MicroBank` holds NVFP4 or MXFP8 E4M3 (`upload_micro_bank` from per-expert views; `MicroBank::gather` /
+    `grouped` dispatch either kind; `micro_bank_kernels()`); a stacked NVFP4 release's `amax / denominator` lands
+    in the bank's `global` (`model/tests/it/micro_bank_stacked.rs`). The kernels are layout-agnostic (a fused
+    gate/up bank is read with `n = 2 * ff`; `model::glu` applies the declared layout and activation).
+  - Left: the NVFP4 bank products and the MXFP8 `Ops` route were not run here (no GPU); `qops_tier_coverage` and
+    `micro_bank_stacked` cover them on a card. MXFP8 has no tensor-core batched path (tier-gemm `fused` gap stays);
+    no native CUDA build; E5M2 MXFP8 has no GEMV.
 - **I1.5** Attention kernels (`flash_attn_causal_gqa*`, `paged_flash_*`, `gqa_mixer`),
   each an optional declared input, off by default:
   - (a) A causal sliding window in the flash prefill, decode and paged kernels, forward

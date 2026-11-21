@@ -24,7 +24,6 @@ KqSym8	tensor_core	dp4a kernels only
 Nvfp4	fused	scratch tile plus vendor library
 Mxfp4	gemv	no MXFP4 GEMV
 Mxfp4	fused	scratch tile plus vendor library
-Mxfp8E4m3	gemv	no MXFP8 GEMV
 Mxfp8E4m3	fused	scratch tile plus vendor library
 Mxfp8E5m2	gemv	no MXFP8 GEMV
 Mxfp8E5m2	fused	scratch tile plus vendor library

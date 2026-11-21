@@ -908,6 +908,8 @@ pub const MATMUL_KQ_DYN: &str = include_str!("../wgsl/matmul_kq_dyn.wgsl");
 pub const MATMUL_KQ_GEMV: &str = include_str!("../wgsl/matmul_kq_gemv.wgsl");
 /// `wgsl/matmul_kq_gemv_reg.wgsl`
 pub const MATMUL_KQ_GEMV_REG: &str = include_str!("../wgsl/matmul_kq_gemv_reg.wgsl");
+/// `wgsl/matmul_mxfp8_gemv.wgsl`
+pub const MATMUL_MXFP8_GEMV: &str = include_str!("../wgsl/matmul_mxfp8_gemv.wgsl");
 /// `wgsl/matmul_nvfp4_gemv.wgsl`
 pub const MATMUL_NVFP4_GEMV: &str = include_str!("../wgsl/matmul_nvfp4_gemv.wgsl");
 /// `wgsl/matmul_q4_dyn.wgsl`
@@ -1198,6 +1200,10 @@ pub const MOE_LINEAR_GATED_I8: &str = include_str!("../wgsl/moe_linear_gated_i8.
 pub const MOE_LINEAR_GATED_KQ: &str = include_str!("../wgsl/moe_linear_gated_kq.wgsl");
 /// `wgsl/moe_linear_gated_q4.wgsl`
 pub const MOE_LINEAR_GATED_Q4: &str = include_str!("../wgsl/moe_linear_gated_q4.wgsl");
+/// `wgsl/moe_mxfp8_gemv_gather.wgsl`
+pub const MOE_MXFP8_GEMV_GATHER: &str = include_str!("../wgsl/moe_mxfp8_gemv_gather.wgsl");
+/// `wgsl/moe_mxfp8_grouped.wgsl`
+pub const MOE_MXFP8_GROUPED: &str = include_str!("../wgsl/moe_mxfp8_grouped.wgsl");
 /// `wgsl/moe_nvfp4_gemv_gather.wgsl`
 pub const MOE_NVFP4_GEMV_GATHER: &str = include_str!("../wgsl/moe_nvfp4_gemv_gather.wgsl");
 /// `wgsl/moe_nvfp4_grouped.wgsl`
@@ -2206,6 +2212,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("matmul_kq_dyn", MATMUL_KQ_DYN),
     ("matmul_kq_gemv", MATMUL_KQ_GEMV),
     ("matmul_kq_gemv_reg", MATMUL_KQ_GEMV_REG),
+    ("matmul_mxfp8_gemv", MATMUL_MXFP8_GEMV),
     ("matmul_nvfp4_gemv", MATMUL_NVFP4_GEMV),
     ("matmul_q4_dyn", MATMUL_Q4_DYN),
     ("matmul_q4_dyn_reg", MATMUL_Q4_DYN_REG),
@@ -2351,6 +2358,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("moe_linear_gated_i8", MOE_LINEAR_GATED_I8),
     ("moe_linear_gated_kq", MOE_LINEAR_GATED_KQ),
     ("moe_linear_gated_q4", MOE_LINEAR_GATED_Q4),
+    ("moe_mxfp8_gemv_gather", MOE_MXFP8_GEMV_GATHER),
+    ("moe_mxfp8_grouped", MOE_MXFP8_GROUPED),
     ("moe_nvfp4_gemv_gather", MOE_NVFP4_GEMV_GATHER),
     ("moe_nvfp4_grouped", MOE_NVFP4_GROUPED),
     ("moe_route_count", MOE_ROUTE_COUNT),

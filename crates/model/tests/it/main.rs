@@ -91,6 +91,7 @@ mod matmul_lut4_gemm;
 mod matmul_q4_gemm;
 mod matmul_q4_speed_bench;
 mod message_gate;
+mod micro_bank_stacked;
 mod moe_compact_parity;
 mod moe_gemv_parity;
 mod moe_grouped_parity;

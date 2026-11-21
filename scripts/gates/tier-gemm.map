@@ -26,7 +26,7 @@ KqAffine8	matmul_kq_gemv	none
 KqSym8	matmul_i8_gemv	none
 Nvfp4	matmul_nvfp4_gemv	library
 Mxfp4	-	library
-Mxfp8E4m3	-	library
+Mxfp8E4m3	matmul_mxfp8_gemv	library
 Mxfp8E5m2	-	library
 Cq2	matmul_cq_gemv	library
 Cq3	matmul_cq_gemv	library
