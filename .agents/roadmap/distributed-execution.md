@@ -585,6 +585,14 @@ Scope: Running one training job as ranks across machines, and serving one model 
   polling and reduction-op creation, measured against NCCL's own small-
   message latency.
 
+- **ZeRO-2 with the state on the card, Qwen3-4B full fine-tune, 4 GH200s
+  (2026-11-21, brain 25e96b41a, same workload as above).** ZeRO-2 210 ms a step
+  (65 ms forward and backward, 22 ms to enqueue the reduce-scatters, 62 ms for
+  the global norm including the wait for them, 61 ms update and gather) at
+  51.5 GB per card, against replicated 275 ms at 64.5 GB; ZeRO-1 255 ms at
+  51.5 GB. Communication plus waiting is at most 84 of 210 ms (40%) for
+  ZeRO-2; the ranks' losses match the replicated run (0.0049 at step 6).
+
 ## Plan: multi-node clusters (2026-11-21)
 
 Target machine class: Slurm allocations of GH200 nodes, 4 cards per node on
@@ -731,24 +739,39 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         into another world size. Open: not yet wired into C7's node-local
         staging; files are whole-shard safetensors (bounded only by the
         shard).
-      - [ ] ZeRO-2's gradient memory: the backward still writes every
-        gradient into the model's own buffers, so gradients are sharded in
-        traffic and on the host, not on the card. Freeing them needs a
-        per-unit gradient-ready hook in the backward (the same one overlap
-        needs).
-      - [ ] Parameter sharding (ZeRO-3) and the 27B gate. Design: the
-        resident full fine-tune's layer window (`resident_ft`: `load_layer`
-        before a layer's forward and backward, `finish_layer` after its
-        backward, bounded slots and gradient lanes) is the per-block seam;
-        the sharded-parameter layer replaces the window's host copy of every
-        stored value and its whole-model `TrainState` with this rank's slice
-        of each layer (all-gather into the slot, reduce-scatter the lane to
-        the owner, the owner's host update), so qwen3/qwen35 need no change.
-        27B arithmetic at 16 ranks: 54 GB bf16 values and 324 GB of master and
-        moments become 3.4 + 20 GB per rank. Not started.
-      - [ ] Overlap: units are reduced, read and gathered one after another;
-        the host update (210 ms for 1.0 G elements a rank) could run while the
-        next unit reduces.
+      - [x] The sharded state on the card (2026-11-21): `StateTier::Device`
+        (default) keeps each rank's master, moments and gradient slice on the
+        card and updates them with the AdamW kernel; `moments=host` keeps the
+        host tier. Device collectives are stream-ordered with one
+        `Collective::settle_device` a step, so unit u's gather overlaps unit
+        u+1's update; two staging buffers overlap packing with reduction.
+        Qwen3-4B on 4 cards: ZeRO-2 is now faster than replicated (Measured).
+      - [ ] ZeRO-2's gradient memory for whole-model trainers: the backward
+        still writes every gradient into the model's own buffers. The
+        layer-streamed resident trainer has the per-unit gradient lanes (below).
+      - [x] Parameter sharding (ZeRO-3) for the layer-streamed resident
+        fine-tune (2026-11-21): `ResidentFtConfig::shard`, `resident_shard`.
+        Every layer and table is a unit, each rank's slice of its f32 master,
+        moments and bf16 value on the card (read from the checkpoint for its own
+        pieces only). `load_layer` all-gathers into the window slots and
+        prefetches the next layer; `finish_layer` reduce-scatters the layer's
+        lanes and updates the owner's slice on the card. No rank holds the
+        whole gradient or a host copy of the model. The remainder (norms) is
+        all-reduced. Clip: none or two-pass; running is refused. The fit loop
+        runs `Sharding::Parameters` through `Model::parameter_shards`. Tests:
+        `resident_shard`, qwen35 `sharded_parameters`. Open: writing the trained
+        model or a resume state of a parameter-sharded run is refused (no
+        collective gather on save yet); the SDK path therefore refuses too.
+      - [ ] The 27B gate. Smoke 2026-11-21 on n442 (4 cards): Qwen3.8-27B-FP8,
+        first 16 layers, block 512, window 2, two-pass clip, 3 steps: 0.99 s a
+        step, 55.6 GB peak per card, loss falling, every rank the same global
+        norm. All 64 layers on 4 cards were refused by the planner (116 GB
+        needed per card against 89 GB free), so the full model needs 8 or more
+        cards. The 8 and 12 card runs (n445+n467, +n442) were not reached in
+        this lane's window. Harness: qwen35 `measure_sharded_parameters_rank`
+        (one process per card under srun).
+      - [ ] Overlap of ZeRO-2's reduce-scatter with the backward (per-unit
+        gradient-ready hook in whole-model backwards).
 - [ ] **C4 serving across nodes.** A router capability in front of several
       `brain serve` endpoints, reusing `residency::affinity` (longest cached
       prefix, then least loaded), with health, drain and model listing merged,
