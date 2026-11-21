@@ -59,6 +59,7 @@ heading and a `Scope: <one sentence>` line under it, then run `make generate/roa
 | [`grpo-corrections`](grpo-corrections.md) | GRPO corrections | Remaining corrections to the GRPO objective (`crates/rl`). |
 | [`horizon`](horizon.md) | horizon | Continuous-time subject-timeline model (`crates/horizon`). |
 | [`huginn`](huginn.md) | huginn | Huginn (Raven), the prelude/recurrent-core/coda decoder (`crates/huginn`). |
+| [`inkling2`](inkling2.md) | inkling2 | Inkling 2 Mini (`Inkling2LoopForConditionalGeneration`): a looped MoE decoder with depth-attention residuals, plus a vision tower, served and trained from the published checkpoint, with every new building block landing as a shared op. |
 | [`januspro`](januspro.md) | januspro | Janus-Pro-7B understanding and text-to-image (`crates/januspro`). |
 | [`kernel-performance`](kernel-performance.md) | kernel-performance | Cross-cutting kernel and execution-architecture work (selection, fusion, providers, precision tiers). |
 | [`kronos`](kronos.md) | kronos | Kronos financial candlestick model (`crates/kronos`). |
