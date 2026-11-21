@@ -269,6 +269,20 @@ Scope: Running one training job as ranks across machines, and serving one model 
   reduction tree independent of NCCL's algorithm choice, for comparisons across
   layouts). Fixing NCCL settings alone does not give the last two; data order,
   RNG streams, kernel choice and accumulation order are part of the contract.
+- Sharded training (C3) shards by **unit**, not by tensor and not by one global
+  flat vector: the trained tensors are packed in backward order into units under
+  a cap (`model::zero::DEFAULT_UNIT_ELEMS`), each unit padded to `world * align`
+  and rank r owning slice r of every unit. One staging buffer of the largest unit
+  serves every reduce-scatter and all-gather, a rank's state is the same size on
+  every rank (within one quantum per unit), and the unit is also the natural
+  block of parameter sharding (a layer's tensors, gathered before use). The
+  sharded optimizer state lives in host memory as f32 master and moments and the
+  update runs there (`optim::Adam::update`, the device kernel's arithmetic):
+  the sharded stages trade device memory for host memory and a host update of
+  `1/world` of the parameters. Sharded checkpoints are one file per rank
+  (`shard-<step>-rank<r>-of<world>`, layout and the trainer's per-rank state in
+  the header, named together by a `CheckpointCommit`); another world size
+  resumes through the logical tensors (`zero::read_logical`).
 
 ## Measured
 
@@ -522,6 +536,28 @@ Scope: Running one training job as ranks across machines, and serving one model 
   transport is read from: `rank.sh` sets `NCCL_DEBUG=INFO` after the site's
   file.
 
+- **Sharded full fine-tune, Qwen3-4B, 4 ranks on one GH200 node (2026-11-21,
+  brain 762dd0e1b plus 9ada6234e, NCCL 2.32.3 over NVLink, `brain finetune` full
+  fp32, chat records of ~60 tokens, batch 1, 6 steps, one process per card bound
+  to its 18 cores, `--kernel-profile` stage times of rank 0, steps 4-6).**
+  Peak live device memory and step time:
+  - replicated (device AdamW): 64.5 GB, 276 ms a step = 65 ms forward and
+    backward + 75 ms gradient all-reduce + the device update.
+  - ZeRO-1: 34.3 GB, 504 ms = 65 + 144 ms all-reduce of each unit and read of
+    the owner's slice + 206 ms norm and host AdamW + 88 ms write of the slice,
+    all-gather and unpack.
+  - ZeRO-2: 34.3 GB, 491 ms = 65 + 112 ms reduce-scatter and read + 227 ms host
+    AdamW + 87 ms gather.
+  The 30 GB saved is the replicated run's device moments (8 bytes a parameter);
+  each rank holds 16 GB of host state instead (gradient slice, master, m, v of
+  1.0 G elements). Collective plus host-device transfer is 41% of the ZeRO-2
+  step (27% of the replicated one); the host update is 46%. Before the
+  gradient slices were kept between steps the same ZeRO-2 step took 3.0 s, 2.6 s
+  of it faulting in fresh host pages under the read. Losses match the
+  replicated run (0.0049 at step 6). At this row length the step is update- and
+  communication-bound; a 4B fp32 full fine-tune fits one card replicated, so
+  this run measures the saving, not the gate.
+
 ## Plan: multi-node clusters (2026-11-21)
 
 Target machine class: Slurm allocations of GH200 nodes, 4 cards per node on
@@ -638,6 +674,54 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
       group (reduce-scatter + all-gather), then parameter sharding; tensor
       parallelism inside a node over NVLink, sharded data parallelism across
       nodes. Gate: a full-parameter 27B fine-tune step that does not fit one card.
+      - [x] ZeRO-1 and ZeRO-2 for every trainer whose parameters a sharded
+        optimizer reaches (2026-11-21). `model::zero`: `ShardLayout` (units in
+        backward order under a cap, word-aligned members, padded to the rank
+        quantum, rank r owns slice r of each unit; see Decisions) and
+        `ZeroOptimizer` (pack a unit, all-reduce and keep the slice or
+        reduce-scatter it, global norm from the slices, f32 AdamW on the host
+        slice, all-gather back, f32 or bf16 parameters). `Collective` gained
+        `reduce_scatter_device`/`all_gather_device` (NCCL in `JobCollective`,
+        payload fallback elsewhere); the rank reduce-scatter takes a
+        pre-multiplied scale. `FitOpts::sharding` / the plan's `sharding`
+        field select it; `Model::device_params` (the parameter store by
+        default) is the capability, and a run without a group, with a
+        parameter or state precision other than f32 AdamW, with a model state
+        of its own (resident full fine-tune) or asking ZeRO-3 is refused by
+        that reason. `brain finetune` (full) and `ChatFullFineTune::data_parallel`
+        train as job ranks. Tests: `model::conformance_zero` run by gpt2 at 2
+        and 4 in-process ranks (within 1% of one AdamW step of the replicated
+        run; ranks, repeat and resume bit-identical), `zero_shard` (reshard
+        4 -> 2 ranks with equal logical master and moments, bf16, skip on a
+        non-finite loss, refusals), `zero_job` (2 and 4 OS processes over NCCL
+        on n442: within 3e-8 of a host reference, ranks and repeat
+        bit-identical). Found and fixed on the way: multi-rank exact resume
+        (knowledge 547).
+      - [x] Sharded checkpoints (2026-11-21): one file per rank with the
+        layout and the trainer's per-rank state, saved beside each rank's
+        resume file (exact resume through the fit loop), `commit_generation`
+        names a step's files in a `CheckpointCommit`, `read_logical` loads
+        into another world size. Open: not yet wired into C7's node-local
+        staging; files are whole-shard safetensors (bounded only by the
+        shard).
+      - [ ] ZeRO-2's gradient memory: the backward still writes every
+        gradient into the model's own buffers, so gradients are sharded in
+        traffic and on the host, not on the card. Freeing them needs a
+        per-unit gradient-ready hook in the backward (the same one overlap
+        needs).
+      - [ ] Parameter sharding (ZeRO-3) and the 27B gate. Design: the
+        resident full fine-tune's layer window (`resident_ft`: `load_layer`
+        before a layer's forward and backward, `finish_layer` after its
+        backward, bounded slots and gradient lanes) is the per-block seam;
+        the sharded-parameter layer replaces the window's host copy of every
+        stored value and its whole-model `TrainState` with this rank's slice
+        of each layer (all-gather into the slot, reduce-scatter the lane to
+        the owner, the owner's host update), so qwen3/qwen35 need no change.
+        27B arithmetic at 16 ranks: 54 GB bf16 values and 324 GB of master and
+        moments become 3.4 + 20 GB per rank. Not started.
+      - [ ] Overlap: units are reduced, read and gathered one after another;
+        the host update (210 ms for 1.0 G elements a rank) could run while the
+        next unit reduces.
 - [ ] **C4 serving across nodes.** A router capability in front of several
       `brain serve` endpoints, reusing `residency::affinity` (longest cached
       prefix, then least loaded), with health, drain and model listing merged,
@@ -735,9 +819,10 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
       overhead, so it ranks transports and decomposes a step's cost, but it
       cannot predict a cluster's absolute step time.
 
-- [ ] Only the GPT trainer and the Qwen3 LoRA fine-tune take a job plan. The
-      GLM trainer, the full-parameter fine-tunes and the other model families
-      still run single-process.
+- [ ] Only the GPT trainer, the SDK chat fine-tunes (LoRA and, since C3, full:
+      `brain finetune --job-plan`) and the Qwen3 LoRA action take a job plan.
+      The GLM trainer and the other model families' own actions still run
+      single-process.
 - [ ] `DdpOptimizer`, `DataParallel` and `federated_average` have no
       production caller; the shipped driver reduces through `reduce_grads` so
       each model keeps its own optimizer and schedule.
