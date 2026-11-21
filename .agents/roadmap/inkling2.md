@@ -619,6 +619,19 @@ The first trainable target needs no streaming: the base is about 19.5 GB.
   - depth queries.
 
   Serving bank overlays for each.
+  - Done (2026-11-22): training through the stacked-expert adapters on the row-compacted path:
+    `model::moe::{ExpertLora { a: [E, r, k], b: [E, n, r], rank, scale }, ExpertLoraGrads, ExpertAdapters { gate_up, up,
+    down }, ExpertAdapterGrads, experts_fwd_train_adapted, moe_layer_bwd_adapted, EXPERT_LORA_KERNELS}`
+    (`crates/model/src/moe/expert_lora.rs`; `experts_fwd_train_set` / `moe_layer_bwd_set` are these with no adapters).
+    Per expert, on its routed rows only, `proj += scale * B_e (A_e x)` after the frozen bank product (gate_up before the
+    activation, down before the scatter); the backward ADDS the routed experts' `dA_e` / `dB_e` (an unrouted expert's
+    range is not written) and the adapters' share of `d_h` and `d_x`. No new kernel: `moe_linear_gated` / `_dx` / `_dw`
+    (element offsets into the stacked factors), `axpy`, `grad_scale`; `A_e x` is recomputed in the backward, nothing
+    saved. Adapters beside a dense (trainable) bank are refused. Gate `crates/model/tests/it/moe_expert_lora.rs`: every
+    A/B entry of gate_up and down adapters over a frozen MXFP8 softcap-sigmoid interleaved bank vs f64 central
+    differences, the idle expert's gradient bits untouched, `d_x` vs f64 central differences with the router
+    differentiated and detached, refusals. CPU backend; NVFP4 skips there (bank forward needs workgroup reductions);
+    CUDA not exercised.
 - **I4.3** `inkling2`:
   - A `ChatTrainer` plus `TokenObjectives`, with `LORA_BASES` naming the native
     NVFP4/MXFP8 base.
