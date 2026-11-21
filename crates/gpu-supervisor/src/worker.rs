@@ -52,7 +52,9 @@
 use std::ffi::OsString;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ExitStatus};
+#[cfg(unix)]
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
@@ -180,6 +182,9 @@ pub struct Exchange<'a> {
     /// long the request may take. A wedged worker sends nothing, so it is
     /// still killed one deadline after its last frame.
     pub renew: bool,
+    /// Keeps `'a` meaningful where descriptors and conversations do not exist.
+    #[cfg(not(unix))]
+    _borrows: std::marker::PhantomData<&'a ()>,
 }
 
 /// A worker's answer to one [`Worker::exchange`].
@@ -513,6 +518,7 @@ fn set_parent_death_signal(command: &mut Command) {
 fn set_parent_death_signal(_command: &mut Command) {}
 
 /// One frame read while a request is in flight.
+#[cfg(unix)]
 enum Frame {
     /// A frame about an earlier request this worker gave up on.
     Stale,
@@ -527,6 +533,7 @@ enum Frame {
 /// The frame `line` is, for the request `want`, and how many descriptors it
 /// declared (`ok+2`): those are taken off the reader whatever the frame is,
 /// so a later frame never takes an earlier one's.
+#[cfg(unix)]
 fn parse_frame(line: &str, want: u64) -> (Frame, usize) {
     let mut parts = line.splitn(3, ' ');
     let Some(id) = parts.next().and_then(|s| s.parse::<u64>().ok()) else {
