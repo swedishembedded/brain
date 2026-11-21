@@ -210,6 +210,14 @@ pub trait Collective: Send + Sync {
     fn all_gather_device<'a>(&'a self, _rank: usize, _gpu: &'a gpu_core::Gpu, _send: &'a gpu_core::DeviceBuffer, _recv: &'a gpu_core::DeviceBuffer, _count: u64, _dtype: gpu_core::CollectiveDtype) -> CollectiveFuture<'a, bool> {
         Box::pin(async { Ok(false) })
     }
+
+    /// Wait until every device op this rank enqueued ([`Collective::reduce_scatter_device`],
+    /// [`Collective::all_gather_device`] are stream-ordered and may return before their bytes moved) has completed; a
+    /// failed or stalled peer is the error. Device work that reads the results is ordered after them anyway: this is
+    /// where a failure surfaces. The default has nothing in flight.
+    fn settle_device<'a>(&'a self, _rank: usize, _gpu: &'a gpu_core::Gpu) -> CollectiveFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
 }
 
 /// A shared group is the group: ranks that are threads of one process hold it behind an `Arc`.
@@ -237,6 +245,9 @@ impl<T: Collective + ?Sized> Collective for std::sync::Arc<T> {
     }
     fn all_gather_device<'a>(&'a self, rank: usize, gpu: &'a gpu_core::Gpu, send: &'a gpu_core::DeviceBuffer, recv: &'a gpu_core::DeviceBuffer, count: u64, dtype: gpu_core::CollectiveDtype) -> CollectiveFuture<'a, bool> {
         (**self).all_gather_device(rank, gpu, send, recv, count, dtype)
+    }
+    fn settle_device<'a>(&'a self, rank: usize, gpu: &'a gpu_core::Gpu) -> CollectiveFuture<'a, ()> {
+        (**self).settle_device(rank, gpu)
     }
 }
 
@@ -729,6 +740,10 @@ impl Collective for TimedCollective<'_> {
             }
             out
         })
+    }
+
+    fn settle_device<'a>(&'a self, rank: usize, gpu: &'a gpu_core::Gpu) -> CollectiveFuture<'a, ()> {
+        self.inner.settle_device(rank, gpu)
     }
 }
 

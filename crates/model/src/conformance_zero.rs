@@ -45,7 +45,7 @@ fn corpus(dir: &Path) -> std::io::Result<()> {
     std::fs::write(dir.join("meta.json"), Meta::vocab_only(16))
 }
 
-fn opts(block: u32, sharding: Sharding, seed: u64) -> FitOpts {
+fn opts(block: u32, sharding: Sharding, host_state: bool, seed: u64) -> FitOpts {
     FitOpts {
         steps: 6,
         batch_size: 1,
@@ -60,6 +60,7 @@ fn opts(block: u32, sharding: Sharding, seed: u64) -> FitOpts {
         eval_batches: 0,
         seed,
         sharding,
+        precision: crate::TrainPrecision { host_moments: host_state, ..Default::default() },
         ..Default::default()
     }
 }
@@ -111,14 +112,15 @@ fn worst(a: &[(String, Vec<f32>)], b: &[(String, Vec<f32>)]) -> (f32, String) {
 
 /// The sharded-training contract (module documentation) at `world` in-process ranks. `build` makes a fresh trainable
 /// model (the same initial weights every call) for a vocabulary of at least 16, a batch of one and a block of `block`
-/// tokens; `scratch` is an empty directory the runs may write.
+/// tokens, on a device that registers [`crate::zero::KERNELS`]; `scratch` is an empty directory the runs may write.
 pub fn check_sharded_training<M: Model>(name: &str, build: impl Fn() -> M + Sync, block: u32, world: usize, scratch: &Path) -> Result<(), String> {
     corpus(scratch).map_err(|e| format!("{name}: {e}"))?;
     let seed = data::rng::random_seed();
-    let replicated = run(name, &build, scratch, world, &opts(block, Sharding::Replicated, seed), None, None)?;
-    // The replicated run is held to the same repeat and resume contract: it is the reference.
-    for sharding in [Sharding::Replicated, Sharding::Optimizer, Sharding::Gradients] {
-        let o = opts(block, sharding, seed);
+    let replicated = run(name, &build, scratch, world, &opts(block, Sharding::Replicated, false, seed), None, None)?;
+    // The replicated run is held to the same repeat and resume contract: it is the reference. The sharded state is
+    // held on the cards, and in host memory (`moments=host`) for ZeRO-2.
+    for (sharding, host_state) in [(Sharding::Replicated, false), (Sharding::Optimizer, false), (Sharding::Gradients, false), (Sharding::Gradients, true)] {
+        let o = opts(block, sharding, host_state, seed);
         let first = run(name, &build, scratch, world, &o, None, None)?;
         for (rank, w) in first.iter().enumerate() {
             if !bits_equal(w, &first[0]) {
@@ -135,7 +137,7 @@ pub fn check_sharded_training<M: Model>(name: &str, build: impl Fn() -> M + Sync
             return Err(format!("{name} {sharding:?}: a repeat of the run on the same layout is not bit-identical"));
         }
         // Stopped after three steps with every rank's state saved, then resumed in fresh models.
-        let state = |rank: usize| scratch.join(format!("{sharding:?}-rank{rank}.state"));
+        let state = |rank: usize| scratch.join(format!("{sharding:?}-{host_state}-rank{rank}.state"));
         run(name, &build, scratch, world, &o, Some(3), Some(&state))?;
         for rank in 0..world {
             if sharding != Sharding::Replicated && !state(rank).with_extension("offdevice").is_dir() {
@@ -147,7 +149,7 @@ pub fn check_sharded_training<M: Model>(name: &str, build: impl Fn() -> M + Sync
             let (diff, t) = worst(&resumed[0], &first[0]);
             return Err(format!("{name} {sharding:?}: the resumed run's weights differ from the uninterrupted run's ({t} by {diff:e})"));
         }
-        eprintln!("{name} {sharding:?} x{world}: at most {rel:.2e} of a step from replicated ({tensor}); ranks, repeat and resume bit-identical");
+        eprintln!("{name} {sharding:?} (host state: {host_state}) x{world}: at most {rel:.2e} of a step from replicated ({tensor}); ranks, repeat and resume bit-identical");
     }
     Ok(())
 }

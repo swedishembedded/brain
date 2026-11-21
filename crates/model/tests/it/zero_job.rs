@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use gpu_core::devgroup::RankGroup;
 use gpu_core::{CollectiveDtype, Gpu};
-use model::zero::{self, Sharding, StepOutcome, ZeroOptimizer};
+use model::zero::{self, Sharding, StateTier, StepOutcome, ZeroOptimizer};
 use model::{CollectivePath, JobContext, JobPlan, JobSecret};
 use serde_json::{json, Value};
 
@@ -52,8 +52,8 @@ fn free_address() -> String {
 }
 
 /// Run `world` ranks of one sharded job and return each rank's result document.
-fn run(world: usize, sharding: Sharding, dtype: &str) -> Vec<Value> {
-    let dir = std::env::temp_dir().join(format!("brain-zero-job-{}-{world}-{sharding:?}-{dtype}", std::process::id()));
+fn run(world: usize, sharding: Sharding, tier: StateTier, dtype: &str) -> Vec<Value> {
+    let dir = std::env::temp_dir().join(format!("brain-zero-job-{}-{world}-{sharding:?}-{tier:?}-{dtype}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let mut plan = JobPlan::new("zero", world, free_address());
@@ -72,6 +72,7 @@ fn run(world: usize, sharding: Sharding, dtype: &str) -> Vec<Value> {
                 .args(["--ignored", "--exact", CHILD, "--test-threads=1", "--nocapture", "--"])
                 .arg(format!("--rank={rank}"))
                 .arg(format!("--dtype={dtype}"))
+                .arg(format!("--tier={}", if tier == StateTier::Host { "host" } else { "device" }))
                 .arg(format!("--plan={}", plan_path.display()))
                 .arg(format!("--secret={}", secret.display()))
                 .arg(format!("--out={}", dir.join(format!("rank-{rank}.json")).display()))
@@ -145,20 +146,22 @@ fn check(world: usize, sharding: Sharding) {
     if !cards_for(world) {
         return;
     }
-    let first = run(world, sharding, "f32");
-    for (rank, doc) in first.iter().enumerate() {
-        assert_eq!(doc["provider"], json!("nccl"), "rank {rank} reduced on {}", doc["provider"]);
-        assert_eq!(doc["values"], first[0]["values"], "rank {rank}'s parameters differ from rank 0's");
-    }
-    assert_eq!(run(world, sharding, "f32")[0]["values"], first[0]["values"], "a repeat of the job is not bit-identical");
     let lr = args(1).lr;
-    let worst = floats(&first[0]).iter().zip(reference(world)).flat_map(|(a, b)| a.iter().zip(b).map(|(x, y)| (x - y).abs()).collect::<Vec<_>>()).fold(0f32, f32::max);
-    assert!(worst <= 1e-2 * lr, "{sharding:?} x{world}: {worst:e} from the host reference, over 1% of a step");
-    let half = run(world, sharding, "bf16");
-    for doc in &half {
-        assert_eq!(doc["values"], half[0]["values"], "bf16 parameters differ between ranks");
+    for tier in [StateTier::Device, StateTier::Host] {
+        let first = run(world, sharding, tier, "f32");
+        for (rank, doc) in first.iter().enumerate() {
+            assert_eq!(doc["provider"], json!("nccl"), "rank {rank} reduced on {}", doc["provider"]);
+            assert_eq!(doc["values"], first[0]["values"], "{tier:?}: rank {rank}'s parameters differ from rank 0's");
+        }
+        assert_eq!(run(world, sharding, tier, "f32")[0]["values"], first[0]["values"], "{tier:?}: a repeat of the job is not bit-identical");
+        let worst = floats(&first[0]).iter().zip(reference(world)).flat_map(|(a, b)| a.iter().zip(b).map(|(x, y)| (x - y).abs()).collect::<Vec<_>>()).fold(0f32, f32::max);
+        assert!(worst <= 1e-2 * lr, "{sharding:?} {tier:?} x{world}: {worst:e} from the host reference, over 1% of a step");
+        let half = run(world, sharding, tier, "bf16");
+        for doc in &half {
+            assert_eq!(doc["values"], half[0]["values"], "{tier:?}: bf16 parameters differ between ranks");
+        }
+        eprintln!("{sharding:?} {tier:?} x{world} over NCCL: worst {worst:e} from the host reference; ranks and repeat bit-identical");
     }
-    eprintln!("{sharding:?} x{world} over NCCL: worst {worst:e} from the host reference; ranks and repeat bit-identical");
 }
 
 #[test]
@@ -183,7 +186,7 @@ fn rank_process() {
     let Some(separator) = args_.iter().position(|arg| arg == "--") else { return };
     let after = &args_[separator + 1..];
     let flag = |name: &str| after.iter().find_map(|arg| arg.strip_prefix(name).map(str::to_string));
-    let (Some(rank), Some(dtype), Some(plan), Some(secret), Some(out)) = (flag("--rank=").and_then(|v| v.parse::<usize>().ok()), flag("--dtype="), flag("--plan="), flag("--secret="), flag("--out=")) else {
+    let (Some(rank), Some(dtype), Some(tier), Some(plan), Some(secret), Some(out)) = (flag("--rank=").and_then(|v| v.parse::<usize>().ok()), flag("--dtype="), flag("--tier="), flag("--plan="), flag("--secret="), flag("--out=")) else {
         return;
     };
     let fail = |e: String| -> ! {
@@ -193,10 +196,12 @@ fn rank_process() {
     let dtype = if dtype == "bf16" { CollectiveDtype::Bf16 } else { CollectiveDtype::F32 };
     let ctx = JobContext::from_plan_file(Path::new(&plan), rank, Path::new(&secret)).unwrap_or_else(|e| fail(e));
     let job = ctx.job_collective().unwrap_or_else(|e| fail(e.to_string()));
+    let tier = if tier == "host" { StateTier::Host } else { StateTier::Device };
+    // A handle without the sharded step's kernels: the optimizer registers them on a handle of its own.
     let gpu = Gpu::new_on(gpu_core::testgpu::card(rank as u32), &[]);
     let p = params(&gpu, SEED, dtype);
     let handles = p.tensors.clone();
-    let mut opt = ZeroOptimizer::new(p, ctx.plan().sharding, &job, rank, UNIT).unwrap_or_else(|e| fail(e));
+    let mut opt = ZeroOptimizer::new(p, ctx.plan().sharding, tier, &job, rank, UNIT).unwrap_or_else(|e| fail(e));
     for t in 1..=STEPS {
         for (i, h) in handles.iter().enumerate() {
             zero::write_elems(&gpu, &h.grad, 0, &grad(t, rank, i, h.numel), dtype);

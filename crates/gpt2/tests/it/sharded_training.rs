@@ -10,13 +10,23 @@
 
 use gpt2::{Gpt, GptConfig};
 
+/// GPT's kernels and the sharded step's, so the sharded state can live on the device.
+fn pipelines() -> &'static [(&'static str, &'static str)] {
+    static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
+    LIST.get_or_init(|| {
+        let mut list = gpt2::model::PIPELINES.to_vec();
+        model::ops::extend_kernel_list(&mut list, model::zero::KERNELS);
+        list
+    })
+}
+
 fn sharded(world: usize) {
     let cfg = GptConfig { vocab: 16, block_size: 8, ..GptConfig::tiny() };
     let init = gpt2::init_weights(&cfg, 13);
     let scratch = std::env::temp_dir().join(format!("brain-gpt2-sharded-{world}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&scratch);
     std::fs::create_dir_all(&scratch).unwrap();
-    let build = || Gpt::new_on(gpu_core::testgpu::dev(gpt2::model::PIPELINES), cfg.clone(), 1, 8, &init);
+    let build = || Gpt::new_on(gpu_core::testgpu::dev(pipelines()), cfg.clone(), 1, 8, &init);
     model::conformance_zero::check_sharded_training("gpt2", build, 8, world, &scratch).unwrap();
     std::fs::remove_dir_all(&scratch).unwrap();
 }

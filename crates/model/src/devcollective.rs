@@ -341,11 +341,20 @@ impl<C: Collective> Collective for JobCollective<C> {
     fn all_gather_device<'a>(&'a self, rank: usize, gpu: &'a Gpu, send: &'a DeviceBuffer, recv: &'a DeviceBuffer, count: u64, dtype: CollectiveDtype) -> CollectiveFuture<'a, bool> {
         Box::pin(async move { self.on_device(rank, gpu, |group| group.all_gather(send, recv, count, dtype)) })
     }
+
+    fn settle_device<'a>(&'a self, _rank: usize, _gpu: &'a Gpu) -> CollectiveFuture<'a, ()> {
+        Box::pin(async move {
+            match &*self.device.lock().unwrap_or_else(|e| e.into_inner()) {
+                DevicePath::Device(group) => group.wait(self.op_timeout).map_err(CollectiveError::Transport),
+                _ => Ok(()),
+            }
+        })
+    }
 }
 
 impl<C: Collective> JobCollective<C> {
-    /// Run `op` on the device group (settling the path on first use) and wait for it within the op timeout; `false`
-    /// when the ranks settled on the host star.
+    /// Enqueue `op` on the device group (settling the path on first use); `false` when the ranks settled on the host
+    /// star. The op is stream-ordered and not waited for: [`Collective::settle_device`] waits, within the op timeout.
     fn on_device(&self, rank: usize, gpu: &Gpu, op: impl FnOnce(&RankGroup) -> Result<(), String>) -> CollectiveResult<bool> {
         let mut path = self.device.lock().unwrap_or_else(|e| e.into_inner());
         if matches!(*path, DevicePath::Undecided) {
@@ -353,7 +362,7 @@ impl<C: Collective> JobCollective<C> {
         }
         match &*path {
             DevicePath::Device(group) => {
-                op(group).and_then(|()| group.wait(self.op_timeout)).map_err(CollectiveError::Transport)?;
+                op(group).map_err(CollectiveError::Transport)?;
                 Ok(true)
             }
             _ => Ok(false),

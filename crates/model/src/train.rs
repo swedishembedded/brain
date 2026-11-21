@@ -1584,7 +1584,9 @@ fn sharded_optimizer<M: Model>(model: &mut M, opts: &FitOpts, grad_sync: Option<
     let sync = grad_sync.ok_or_else(|| refuse("it shards over a data-parallel group, and this run has none".into()))?;
     // What the backward keeps of the forward is the model's business; how parameters and their state are held is the
     // sharded optimizer's, and it holds f32 AdamW state.
-    let parameters = crate::TrainPrecision { activations: None, ..opts.precision.clone() };
+    // (`moments=host` places the sharded state in host memory instead of on the card.)
+    let tier = if opts.precision.host_moments { crate::zero::StateTier::Host } else { crate::zero::StateTier::Device };
+    let parameters = crate::TrainPrecision { activations: None, host_moments: false, ..opts.precision.clone() };
     if !parameters.is_default() {
         return Err(refuse("the sharded optimizer state is f32 AdamW over the parameters as the model holds them; a run asking for another parameter or state precision is not sharded".into()));
     }
@@ -1592,7 +1594,7 @@ fn sharded_optimizer<M: Model>(model: &mut M, opts: &FitOpts, grad_sync: Option<
         return Err(refuse("this model keeps its master copies and optimizer state in a state of its own, which is not sharded".into()));
     }
     let params = model.device_params().map_err(|why| refuse(format!("its parameters are not where a sharded optimizer reaches them: {why}")))?;
-    let zero = crate::zero::ZeroOptimizer::new(params, sharding, sync.collective, sync.rank, crate::zero::DEFAULT_UNIT_ELEMS).map_err(refuse)?;
+    let zero = crate::zero::ZeroOptimizer::new(params, sharding, tier, sync.collective, sync.rank, crate::zero::DEFAULT_UNIT_ELEMS).map_err(refuse)?;
     crate::trainprec::release_device_moments(model);
     Ok(Some(zero))
 }
@@ -1993,7 +1995,9 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
     // A sharded run's optimizer takes the parameters over first: it refuses a parameter precision of its own accord.
     let mut zero = sharded_optimizer(&mut model, opts, grad_sync.as_ref())?;
     // The run's optimizer-state precision reaches every model here, before any step or resume.
-    crate::trainprec::apply_train_precision(&mut model, &opts.precision, std::any::type_name::<M>()).map_err(std::io::Error::other)?;
+    // A sharded run's `moments=host` placed the sharded state already; the model's own optimizer holds none.
+    let precision = if zero.is_some() { crate::TrainPrecision { host_moments: false, ..opts.precision.clone() } } else { opts.precision.clone() };
+    crate::trainprec::apply_train_precision(&mut model, &precision, std::any::type_name::<M>()).map_err(std::io::Error::other)?;
     model.set_exit_entropy(opts.exit_entropy).map_err(|why| std::io::Error::other(format!("{}: {why}", std::any::type_name::<M>())))?;
     if let Some(sparse) = opts.native_sparse {
         model.enable_native_sparse_attention(sparse).map_err(|why| std::io::Error::other(format!("{}: {why}", std::any::type_name::<M>())))?;

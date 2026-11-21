@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpu_core::{CollectiveDtype, Gpu};
-use model::zero::{self, DeviceParam, DeviceParams, Sharding, StepArgs, StepOutcome, ZeroOptimizer};
+use model::zero::{self, DeviceParam, DeviceParams, Sharding, StateTier, StepArgs, StepOutcome, ZeroOptimizer};
 use model::{Batch, HostCollective, Model, ModelConfig};
 
 /// Tensor sizes: odd f32 lengths, one larger than the unit cap below, one empty-ish small one.
@@ -60,17 +60,18 @@ pub(crate) fn grad(t: u32, rank: usize, i: usize, n: u64) -> Vec<f32> {
 /// Run `world` ranks as threads: each builds its tensors from `seed`, takes `steps` sharded steps on rank-specific
 /// gradients (after restoring from `restore` when given) and saves to `save` when given; returns every rank's
 /// parameter values.
-fn ranks(world: usize, sharding: Sharding, dtype: CollectiveDtype, seed: u32, restore: Option<(&Path, u32)>, steps: u32, save: Option<&Path>) -> Vec<Vec<Vec<f32>>> {
+#[allow(clippy::too_many_arguments)] // the run's shape, written out at every call
+fn ranks(world: usize, sharding: Sharding, tier: StateTier, dtype: CollectiveDtype, seed: u32, restore: Option<(&Path, u32)>, steps: u32, save: Option<&Path>) -> Vec<Vec<Vec<f32>>> {
     let coll = HostCollective::new(world);
     std::thread::scope(|s| {
         let handles: Vec<_> = (0..world)
             .map(|rank| {
                 let coll = Arc::clone(&coll);
                 s.spawn(move || {
-                    let gpu = gpu_core::testgpu::dev(&[]);
+                    let gpu = gpu_core::testgpu::dev(zero::KERNELS);
                     let p = params(&gpu, seed, dtype);
                     let handles: Vec<DeviceParam> = p.tensors.clone();
-                    let mut opt = ZeroOptimizer::new(p, sharding, &*coll, rank, UNIT).unwrap();
+                    let mut opt = ZeroOptimizer::new(p, sharding, tier, &*coll, rank, UNIT).unwrap();
                     let first = match restore {
                         Some((dir, step)) => {
                             opt.restore(&*coll, dir, step).unwrap();
@@ -95,13 +96,14 @@ fn ranks(world: usize, sharding: Sharding, dtype: CollectiveDtype, seed: u32, re
     })
 }
 
-/// A run saved at four ranks resumes at two (and at four) from the same logical master and moments; the restored
-/// parameters are the saved master; a save at the new world holds the same logical tensors.
+/// A run saved at four ranks (state on the cards) resumes at two (state in host memory) and at four from the same
+/// logical master and moments; the restored parameters are the saved master; a save at the new world holds the same
+/// logical tensors; and the two tiers train the same steps to the same parameters within the update's arithmetic.
 #[test]
 fn a_checkpoint_saved_at_one_world_loads_into_another() {
     let dir = scratch("reshard");
     let (four, two) = (dir.join("four"), dir.join("two"));
-    let saved = ranks(4, Sharding::Gradients, CollectiveDtype::F32, 3, None, 2, Some(&four));
+    let saved = ranks(4, Sharding::Gradients, StateTier::Device, CollectiveDtype::F32, 3, None, 2, Some(&four));
     let logical = zero::read_logical(&four, 2).unwrap();
     assert_eq!(logical.step, 2);
     assert_eq!(logical.master, saved[0], "the logical master is what every rank's parameters hold");
@@ -109,33 +111,38 @@ fn a_checkpoint_saved_at_one_world_loads_into_another() {
         assert_eq!(w, &saved[0], "rank {rank}'s parameters differ from rank 0's");
     }
     // Built from other initial values, then restored: the checkpoint decides the parameters.
-    let resumed = ranks(2, Sharding::Optimizer, CollectiveDtype::F32, 9, Some((&four, 2)), 0, Some(&two));
+    let resumed = ranks(2, Sharding::Optimizer, StateTier::Host, CollectiveDtype::F32, 9, Some((&four, 2)), 0, Some(&two));
     assert_eq!(resumed[0], logical.master, "restored into two ranks, the parameters are the saved master");
     let again = zero::read_logical(&two, 2).unwrap();
     for (what, a, b) in [("master", &again.master, &logical.master), ("m", &again.m, &logical.m), ("v", &again.v, &logical.v)] {
         assert_eq!(a, b, "the {what} tensors changed across the world-size change");
     }
-    // Training on from the restored state goes the same way at either world size, within the reduction order.
-    let on_four = ranks(4, Sharding::Gradients, CollectiveDtype::F32, 9, Some((&four, 2)), 1, None);
-    let on_four_again = ranks(4, Sharding::Gradients, CollectiveDtype::F32, 9, Some((&four, 2)), 1, None);
+    let on_four = ranks(4, Sharding::Gradients, StateTier::Device, CollectiveDtype::F32, 9, Some((&four, 2)), 1, None);
+    let on_four_again = ranks(4, Sharding::Gradients, StateTier::Device, CollectiveDtype::F32, 9, Some((&four, 2)), 1, None);
     assert_eq!(on_four, on_four_again, "a resume on an unchanged layout is repeatable bit for bit");
+    let on_host = ranks(4, Sharding::Gradients, StateTier::Host, CollectiveDtype::F32, 9, Some((&four, 2)), 1, None);
+    let worst = on_host[0].iter().flatten().zip(on_four[0].iter().flatten()).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+    assert!(worst <= 1e-2 * args(1).lr, "the host and the device update differ by {worst:e}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-/// bf16 parameters and gradients: every rank gathers the same bytes, and they are the master rounded to bf16.
+/// bf16 parameters and gradients, on either tier: every rank gathers the same bytes, and they are the master rounded
+/// to bf16.
 #[test]
 fn bf16_parameters_shard_and_gather_to_the_same_bytes() {
-    let dir = scratch("bf16");
-    let out = ranks(3, Sharding::Gradients, CollectiveDtype::Bf16, 5, None, 2, Some(&dir));
-    for w in &out {
-        assert_eq!(w, &out[0]);
+    for tier in [StateTier::Device, StateTier::Host] {
+        let dir = scratch(&format!("bf16-{tier:?}"));
+        let out = ranks(3, Sharding::Gradients, tier, CollectiveDtype::Bf16, 5, None, 2, Some(&dir));
+        for w in &out {
+            assert_eq!(w, &out[0]);
+        }
+        let logical = zero::read_logical(&dir, 2).unwrap();
+        for (got, master) in out[0].iter().zip(&logical.master) {
+            let rounded: Vec<f32> = model::half::pack_bf16(master).iter().flat_map(|w| [f32::from_bits(w << 16), f32::from_bits(w & 0xFFFF_0000)]).take(master.len()).collect();
+            assert_eq!(got, &rounded, "{tier:?}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
-    let logical = zero::read_logical(&dir, 2).unwrap();
-    for (got, master) in out[0].iter().zip(&logical.master) {
-        let rounded: Vec<f32> = model::half::pack_bf16(master).iter().flat_map(|w| [f32::from_bits(w << 16), f32::from_bits(w & 0xFFFF_0000)]).take(master.len()).collect();
-        assert_eq!(got, &rounded);
-    }
-    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// A non-finite loss on one rank skips the step on every rank and changes nothing.
@@ -147,11 +154,11 @@ fn a_non_finite_loss_on_one_rank_skips_the_step_everywhere() {
             .map(|rank| {
                 let coll = Arc::clone(&coll);
                 s.spawn(move || {
-                    let gpu = gpu_core::testgpu::dev(&[]);
+                    let gpu = gpu_core::testgpu::dev(zero::KERNELS);
                     let p = params(&gpu, 1, CollectiveDtype::F32);
                     let h = p.tensors[0].clone();
                     let before = zero::read_elems(&gpu, &h.value, 0, h.numel, CollectiveDtype::F32);
-                    let mut opt = ZeroOptimizer::new(p, Sharding::Optimizer, &*coll, rank, UNIT).unwrap();
+                    let mut opt = ZeroOptimizer::new(p, Sharding::Optimizer, StateTier::Device, &*coll, rank, UNIT).unwrap();
                     let outcome = opt.step(&*coll, 1.0, rank == 0, &args(1)).unwrap();
                     (outcome, zero::read_elems(&gpu, &h.value, 0, h.numel, CollectiveDtype::F32) == before && opt.step_count() == 0)
                 })
@@ -169,13 +176,20 @@ fn a_non_finite_loss_on_one_rank_skips_the_step_everywhere() {
 #[test]
 fn sharding_is_refused_by_what_is_missing() {
     let coll = HostCollective::new(1);
-    let gpu = gpu_core::testgpu::dev(&[]);
-    let err = |sharding| ZeroOptimizer::new(params(&gpu, 1, CollectiveDtype::F32), sharding, &*coll, 0, UNIT).err().unwrap();
+    let gpu = gpu_core::testgpu::dev(zero::KERNELS);
+    let err = |sharding| ZeroOptimizer::new(params(&gpu, 1, CollectiveDtype::F32), sharding, StateTier::Device, &*coll, 0, UNIT).err().unwrap();
     assert!(err(Sharding::Replicated).contains("no state to shard"));
     assert!(err(Sharding::Parameters).contains("gathers each block's parameters"));
+    // A CPU device without the sharded step's kernels cannot hold the state on the card; the host tier needs none.
+    let bare = gpu_core::testgpu::dev(&[]);
+    if bare.kind() == "cpu" {
+        let why = ZeroOptimizer::new(params(&bare, 1, CollectiveDtype::F32), Sharding::Gradients, StateTier::Device, &*coll, 0, UNIT).err().unwrap();
+        assert!(why.contains("moments=host"), "{why}");
+    }
+    assert!(ZeroOptimizer::new(params(&bare, 1, CollectiveDtype::F32), Sharding::Gradients, StateTier::Host, &*coll, 0, UNIT).is_ok());
     let mut odd = params(&gpu, 1, CollectiveDtype::Bf16);
     odd.tensors[0].numel = 7;
-    let why = ZeroOptimizer::new(odd, Sharding::Optimizer, &*coll, 0, UNIT).err().unwrap();
+    let why = ZeroOptimizer::new(odd, Sharding::Optimizer, StateTier::Host, &*coll, 0, UNIT).err().unwrap();
     assert!(why.contains("whole number of 32-bit words"), "{why}");
 }
 
