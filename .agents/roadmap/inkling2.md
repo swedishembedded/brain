@@ -379,6 +379,18 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
   single-token decode form with ring state. Make the static conv's residual-and-scale
   `(conv(x)+x)*s` one fused parameter of the step and prefill kernels. Document-boundary
   masking via a segment-id input.
+  Done (2026-11-21): one kernel family for static and dynamic short convolutions over token-major rows:
+  `dyn_group_conv1d` (extended in place: params `flags, res_scale`, bindings `seg`, `hist`; `flags == 0` is the previous
+  kernel exactly, its one caller, dflash2, passes 0), `dyn_group_conv1d_dx` / `_dbase` / `_ddyn`, `dyn_group_conv1d_step`
+  (ring state per sequence) and `conv_state_tail` (the state a prefill chunk leaves), with the typed wrapper
+  `model::short_conv` (`ShortConvShape`, `short_conv_fwd/_bwd/_step`, `conv_state_tail_step`). Options: fused
+  `(conv(x) + x) * s`, document `seg` ids, carried history, purely static taps, and a base read in the published
+  depthwise-weight layout `[c, taps]` (last tap current). The static prefill/step kernels `conv1d` and
+  `causal_conv1d_step` are not extended: their params are an ABI with native twins and a fixed call contract
+  (`gdn_causal_conv1d_step`, the cost model), so the static case is the same family with `FLAG_NO_DYN` (tested equal
+  to `causal_conv1d_step` to rounding, state bit-equal). Spec `crates/model/tests/it/short_conv.rs`: f64 oracle over the
+  option matrix, finite-difference backward, step == block, chunked prefill == whole, no cross-document or
+  cross-block reads. A carried history has no gradient (inference input). CPU backend verified; CUDA not exercised.
 - **I1.7** `model` (new module `depth_attn`): softmax-over-depth mixing of a retained
   stack `[D, rows, dim]` (RMS-normed) with `Q` learned queries.
   - Backward fans gradients into every retained state.

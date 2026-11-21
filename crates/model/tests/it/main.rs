@@ -161,6 +161,7 @@ mod serve_sampling;
 mod serve_speculative;
 mod serve_state_blocks;
 mod norm_clip_ops;
+mod short_conv;
 mod softcap;
 mod split_cols;
 mod tensor_parallel;

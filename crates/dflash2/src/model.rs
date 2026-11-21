@@ -433,7 +433,10 @@ impl Dflash2 {
         let c = &self.cfg;
         let (d, taps, groups) = (c.d_model, c.conv_kernel, c.groups());
         let out = self.gpu.storage(u64::from(n) * u64::from(d));
-        s.push(self.gpu.step(self.k.dyn_conv, &[x, dynamic, base, &out], &[n, d, taps, c.conv_group, groups, c.dyn_width(), half * taps * groups, half * taps * d, block], n * d));
+        // Flags 0: neither the residual and scale, nor segments, nor a carried history; the `seg` and `hist` bindings are
+        // never read, so any read-only buffer fills them.
+        let params = [n, d, taps, c.conv_group, groups, c.dyn_width(), half * taps * groups, half * taps * d, block, 0, 0];
+        s.push(self.gpu.step(self.k.dyn_conv, &[x, dynamic, base, &out, x, x], &params, n * d));
         out
     }
 

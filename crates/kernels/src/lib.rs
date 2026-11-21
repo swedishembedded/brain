@@ -386,6 +386,8 @@ pub const CONV_BIAS: &str = include_str!("../wgsl/conv_bias.wgsl");
 pub const CONV_BIAS_REG: &str = include_str!("../wgsl/conv_bias_reg.wgsl");
 /// `wgsl/conv_epilogue.wgsl`
 pub const CONV_EPILOGUE: &str = include_str!("../wgsl/conv_epilogue.wgsl");
+/// `wgsl/conv_state_tail.wgsl`
+pub const CONV_STATE_TAIL: &str = include_str!("../wgsl/conv_state_tail.wgsl");
 /// `wgsl/convex_upsample.wgsl`
 pub const CONVEX_UPSAMPLE: &str = include_str!("../wgsl/convex_upsample.wgsl");
 /// `wgsl/convex_upsample_dd.wgsl`
@@ -468,6 +470,14 @@ pub const DWCONV3D_DW: &str = include_str!("../wgsl/dwconv3d_dw.wgsl");
 pub const DWCONV3D_DX: &str = include_str!("../wgsl/dwconv3d_dx.wgsl");
 /// `wgsl/dyn_group_conv1d.wgsl`
 pub const DYN_GROUP_CONV1D: &str = include_str!("../wgsl/dyn_group_conv1d.wgsl");
+/// `wgsl/dyn_group_conv1d_dbase.wgsl`
+pub const DYN_GROUP_CONV1D_DBASE: &str = include_str!("../wgsl/dyn_group_conv1d_dbase.wgsl");
+/// `wgsl/dyn_group_conv1d_ddyn.wgsl`
+pub const DYN_GROUP_CONV1D_DDYN: &str = include_str!("../wgsl/dyn_group_conv1d_ddyn.wgsl");
+/// `wgsl/dyn_group_conv1d_dx.wgsl`
+pub const DYN_GROUP_CONV1D_DX: &str = include_str!("../wgsl/dyn_group_conv1d_dx.wgsl");
+/// `wgsl/dyn_group_conv1d_step.wgsl`
+pub const DYN_GROUP_CONV1D_STEP: &str = include_str!("../wgsl/dyn_group_conv1d_step.wgsl");
 /// `wgsl/edm_mix.wgsl`
 pub const EDM_MIX: &str = include_str!("../wgsl/edm_mix.wgsl");
 /// `wgsl/edm_wrap.wgsl`
@@ -1931,6 +1941,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("conv_bias", CONV_BIAS),
     ("conv_bias_reg", CONV_BIAS_REG),
     ("conv_epilogue", CONV_EPILOGUE),
+    ("conv_state_tail", CONV_STATE_TAIL),
     ("convex_upsample", CONVEX_UPSAMPLE),
     ("convex_upsample_dd", CONVEX_UPSAMPLE_DD),
     ("convex_upsample_dmask", CONVEX_UPSAMPLE_DMASK),
@@ -1972,6 +1983,10 @@ pub const ALL: &[(&str, &str)] = &[
     ("dwconv3d_dw", DWCONV3D_DW),
     ("dwconv3d_dx", DWCONV3D_DX),
     ("dyn_group_conv1d", DYN_GROUP_CONV1D),
+    ("dyn_group_conv1d_dbase", DYN_GROUP_CONV1D_DBASE),
+    ("dyn_group_conv1d_ddyn", DYN_GROUP_CONV1D_DDYN),
+    ("dyn_group_conv1d_dx", DYN_GROUP_CONV1D_DX),
+    ("dyn_group_conv1d_step", DYN_GROUP_CONV1D_STEP),
     ("edm_mix", EDM_MIX),
     ("edm_wrap", EDM_WRAP),
     ("elu", ELU),

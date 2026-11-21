@@ -119,6 +119,7 @@ pub mod saved;
 pub mod segmented;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod shard;
+pub mod short_conv;
 pub mod streamed;
 pub mod stepgate;
 pub mod train;
