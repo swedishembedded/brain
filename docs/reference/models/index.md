@@ -86,7 +86,7 @@ named on the model's own page (see
 | Architecture | Solves | Infer | LoRA |
 |---|---|:---:|:---:|
 | [`wan`](wan.md) ⤓ | text-to-video (image-to-video not implemented) | [x] | library only |
-| [`ltxv`](ltxv.md) | text-to-video+audio (two-stream A/V DiT); the pipeline runs end to end as a **smoke test** only - the real 22B transformer and the Gemma-4 text encoder are not yet imported, so it does not generate usable video | [ ] | [ ] |
+| [`ltxv`](ltxv.md) | text-to-video+audio (two-stream A/V DiT); with the real 22B checkpoint in the model store it generates video, sound, or both from text, stills, a soundtrack or a clip; without it, only a random-weight smoke test (see the page) | [ ] | [ ] |
 | [`minimaxh3`](minimaxh3.md) | text/first-last-frame/reference -> synchronized video+audio (one packed DiT stack over video, audio and condition rows) | [ ] | [ ] |
 
 ## Vision and 3D
