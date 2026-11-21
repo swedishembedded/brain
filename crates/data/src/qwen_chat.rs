@@ -903,6 +903,16 @@ pub struct ChatScanner {
     cur_name: String,
     cur_args: String,
     anomalies: Vec<ScanAnomaly>,
+    /// Bytes pushed so far: `pushed - pending.len()` is where `pending` starts in the generated text.
+    pushed: usize,
+    /// Where the reasoning of each think block lies in the generated text (byte ranges between the opening tag,
+    /// or the start of a scan that began inside a block, and the closing tag, the opener of a call that ended the
+    /// block, or the end of the output), the framing newlines included.
+    think_spans: Vec<std::ops::Range<usize>>,
+    /// The start of the block open now.
+    think_from: Option<usize>,
+    /// The scan began inside an open think block.
+    began_in_think: bool,
 }
 
 const MARKERS_CONTENT: [&str; 2] = ["<think>", "<tool_call>"];
@@ -950,6 +960,10 @@ impl ChatScanner {
             cur_name: String::new(),
             cur_args: String::new(),
             anomalies: Vec::new(),
+            pushed: 0,
+            think_spans: Vec::new(),
+            think_from: thinking_open.then_some(0),
+            began_in_think: thinking_open,
         }
     }
 
@@ -962,6 +976,7 @@ impl ChatScanner {
     /// Feed the next chunk of generated text (a token, several tokens, or the
     /// whole output at once — chunking must not change the resulting events).
     pub fn push(&mut self, delta: &str, out: &mut Vec<ChatEvent>) {
+        self.pushed += delta.len();
         self.pending.push_str(delta);
         self.drain(out);
     }
@@ -977,6 +992,7 @@ impl ChatScanner {
             St::Content => self.flush_pending_as(out, false),
             // A call still open inside the reasoning when the output ends is incomplete: it stays reasoning.
             St::Think | St::ThinkCall { .. } => {
+                self.end_think_span(self.pushed);
                 self.flush_pending_as(out, true);
                 self.note(ScanAnomaly::EndedInsideThink);
             }
@@ -1057,6 +1073,46 @@ impl ChatScanner {
     }
     pub fn tool_calls(&self) -> &[ToolCallMsg] {
         &self.tool_calls
+    }
+
+    /// The finished scan of `text` alone under this scanner's settings (flavor, raw or chat, whether it began inside
+    /// a think block, and its call ids): what this scanner would report had it been given exactly `text`. For a
+    /// caller that has to cut the output short of text it already pushed (a stop string completed over several
+    /// pushes).
+    pub fn rescan(&self, text: &str) -> ChatScanner {
+        let mut fresh = ChatScanner::blank(self.began_in_think, self.flavor, self.id_prefix.clone());
+        if matches!(self.state, St::Raw) {
+            fresh.state = St::Raw;
+            fresh.think_from = None;
+        }
+        let mut events = Vec::new();
+        fresh.push(text, &mut events);
+        fresh.finish(&mut events);
+        fresh
+    }
+
+    /// Where the reasoning lies in the text pushed so far, one byte range per think block, in order: what the parse
+    /// counts as reasoning (a call that ended a block is not in it; one that stayed reasoning is), the tags
+    /// excluded and the framing newlines included. Complete after [`Self::finish`]. A caller that knows where each
+    /// generated token starts in that text counts the reasoning tokens with [`tokens_in_spans`].
+    pub fn reasoning_spans(&self) -> &[std::ops::Range<usize>] {
+        &self.think_spans
+    }
+
+    /// How many bytes of text have been pushed.
+    pub fn pushed_len(&self) -> usize {
+        self.pushed
+    }
+
+    /// Where `pending[at]` lies in the generated text.
+    fn offset(&self, at: usize) -> usize {
+        self.pushed - self.pending.len() + at
+    }
+
+    fn end_think_span(&mut self, end: usize) {
+        if let Some(start) = self.think_from.take() {
+            self.think_spans.push(start..end);
+        }
     }
 
     fn flush_pending_as(&mut self, out: &mut Vec<ChatEvent>, reasoning: bool) {
@@ -1176,6 +1232,7 @@ impl ChatScanner {
                                 // The reference parser's implicit reasoning end: the newline before the call is
                                 // the template's framing, and the call is read as any call after `</think>` is.
                                 self.note(ScanAnomaly::ToolCallRescuedFromThink);
+                                self.end_think_span(self.offset(lead));
                                 self.pending.drain(..lead);
                                 self.think_lead_nl = false;
                                 self.state = St::Content;
@@ -1382,9 +1439,11 @@ impl ChatScanner {
                 }
                 if marker == "<think>" {
                     self.think_lead_nl = true;
+                    self.think_from = Some(self.offset(marker.len()));
                 }
                 if marker == "</think>" {
                     self.close_newline_due = self.flavor == TemplateFlavor::JsonFramed;
+                    self.end_think_span(self.offset(0));
                 }
                 self.pending.drain(..marker.len());
                 self.state = if marker == "<think>" {
@@ -1772,6 +1831,21 @@ pub(crate) fn first_tool_call(text: &str) -> Option<ToolCall> {
     let call = calls.into_iter().next()?;
     let arguments = serde_json::from_str(&call.arguments).ok()?;
     Some(ToolCall { name: call.name, arguments })
+}
+
+/// How many of a generation's tokens start inside `spans` (sorted, disjoint byte ranges of its text), given where
+/// each token starts in that text (`token_starts`, non-decreasing): with [`ChatScanner::reasoning_spans`], the
+/// generation's reasoning tokens, exactly as the parse reads the reasoning. A token starts where the text it
+/// completes begins, so the tags (which start at a span's end or just before its start) are never counted.
+pub fn tokens_in_spans(token_starts: &[usize], spans: &[std::ops::Range<usize>]) -> usize {
+    let mut spans = spans.iter().peekable();
+    token_starts
+        .iter()
+        .filter(|&&at| {
+            while spans.next_if(|span| span.end <= at).is_some() {}
+            spans.peek().is_some_and(|span| span.contains(&at))
+        })
+        .count()
 }
 
 #[cfg(test)]
@@ -2435,6 +2509,43 @@ mod tests {
         let (_, _, _, calls, anomalies) = scan_every_way(&format!("<think>\nr\n{call}{call}"), false, TemplateFlavor::Qwen3);
         assert_eq!(calls.len(), 2);
         assert_eq!(anomalies, [ScanAnomaly::ToolCallRescuedFromThink]);
+    }
+
+    /// The reasoning spans say where the parse's reasoning lies in the generated text, block by block: from the
+    /// opening tag (or the start of a scan that began inside a block) to the closing tag, to the opener of a call
+    /// that ended the block, or to the end of the output; a call that stayed reasoning is inside its span. Where the
+    /// chunks fell does not move them.
+    #[test]
+    fn the_reasoning_spans_cover_what_the_parse_reads_as_reasoning() {
+        let call = "<tool_call>\n{\"name\": \"f\", \"arguments\": {}}\n</tool_call>";
+        let bad = "<tool_call>\nnot a call\n</tool_call>";
+        // (output, scan began inside a block, the reasoning spans as (start, end))
+        type Case = (String, bool, Vec<(usize, usize)>);
+        let cases: [Case; 6] = [
+            ("<think>\nab\n</think>\n\nhi".into(), false, vec![(7, 11)]),
+            ("ab</think>x".into(), true, vec![(0, 2)]),
+            (format!("ab\n{call}"), true, vec![(0, 3)]),
+            (format!("ab{bad}cd</think>x"), true, vec![(0, 4 + bad.len())]),
+            ("<think>a</think>b<think>cd".into(), false, vec![(7, 8), (24, 26)]),
+            ("plain answer".into(), false, vec![]),
+        ];
+        for (text, open, want) in cases {
+            let want: Vec<std::ops::Range<usize>> = want.into_iter().map(|(start, end)| start..end).collect();
+            for chunk in [1, 2, 3, 7, usize::MAX] {
+                let scanner = scan_all(&text, open, TemplateFlavor::Qwen3, chunk.min(text.len().max(1)));
+                assert_eq!(scanner.reasoning_spans(), want.as_slice(), "{text:?} in chunks of {chunk}");
+            }
+        }
+    }
+
+    /// A token is counted when it starts inside a span; the tags around a span, and everything outside, are not.
+    #[test]
+    fn tokens_are_counted_by_where_they_start() {
+        // `<think>` `\n` `ab` `</think>` `x` `<think>` `c` over "<think>\nab</think>x<think>c" with spans 7..10 and 26..27.
+        let starts = [0, 7, 8, 10, 18, 19, 26];
+        assert_eq!(tokens_in_spans(&starts, &[7..10, 26..27]), 3);
+        assert_eq!(tokens_in_spans(&starts, &[]), 0);
+        assert_eq!(tokens_in_spans(&[3, 3, 4], std::slice::from_ref(&(3..4))), 2, "a token that completes no text of its own starts where the next text does");
     }
 
     /// The Qwen3.8 XML call shares the path: a complete `<tool_call><function=…>` inside the prefilled think block

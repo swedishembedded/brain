@@ -24,6 +24,15 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 - DAPO's truncated-rollout handling as a setting: `PolicyGradientConfig::truncated` (`brain/train` and `check_dataset` `truncated`, `brain finetune --truncated`) is `mask` (the default and the behaviour so far: a truncated rollout never trains and takes no part in its group) or `keep` (it trains, its reward counted in its group). `check_records` and `group_members` take the handling.
 - Dr. GRPO's aggregation for the policy gradient: `LossAgg::ConstantLength(n)` divides every sequence's token sum by one constant and averages over the sequences, so neither a sequence's length nor its step's token count rescales a token's gradient (`brain/train` `loss_agg: constant-length` with `loss_agg_length`, default `max_block`; `brain finetune --loss-agg constant-length [--loss-agg-length N]`). A policy-gradient setting the trainer would refuse is now refused when the job is submitted.
 
+### Changed
+
+- `thinking_budget` is the turn's: it bounds the model's own tokens inside every think block of the reply together, and a block reopened after the budget is spent is closed at once. A tool call written inside the block is neither counted nor cut, and a budget that runs out after it ends the turn. `model::serve::ThinkingBudget::with_call_fence` names the call tokens.
+- `usage.completion_tokens_details.reasoning_tokens` counts exactly the tokens the reply's parse reads as reasoning: a call that ended the reasoning, and text a stop string cut, are not reasoning.
+
+### Fixed
+
+- A stop string completed over several steps inside a think block no longer leaves its first part in `reasoning_content`.
+
 ## [6.0.0] - 2026-11-16
 
 ### Breaking Changes

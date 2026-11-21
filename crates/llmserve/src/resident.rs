@@ -58,7 +58,7 @@ pub fn generate_spec(summary: &str, chat: bool) -> ActionSpec {
 pub fn frontend_params() -> [ParamSpec; 10] {
     [
         ParamSpec::new("ignore_eos", ParamType::Bool, "generate to max_new past the model's end-of-sequence tokens (stop strings still apply)").default(json!(false)),
-        ParamSpec::new("thinking_budget", ParamType::Int, "tokens the think block may take; after that the closing tag is forced and the model answers (default: unbounded)").min(0.0).max(capability::bounds::TOKENS),
+        ParamSpec::new("thinking_budget", ParamType::Int, "tokens the reply may spend inside think blocks, over every block it opens; when spent the closing tag is forced and the model answers, and after a tool call written inside the block the reply ends instead (default: unbounded)").min(0.0).max(capability::bounds::TOKENS),
         ParamSpec::new("min_p", ParamType::Float, "drop tokens below this fraction of the best token's probability (0 = off)"),
         ParamSpec::new("presence_penalty", ParamType::Float, "subtracted from the logit of every token already generated (0 = off)"),
         ParamSpec::new("frequency_penalty", ParamType::Float, "subtracted from a token's logit once per time it was generated (0 = off)"),

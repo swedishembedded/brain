@@ -222,3 +222,147 @@ fn a_zero_budget_closes_the_block_at_the_first_token() {
     let params = SampleParams { thinking: Some(ThinkingBudget::new(0, 9, &[1], true)), ..SampleParams::greedy() };
     assert_eq!(generate(params, vec![1, 2, 3], 3), vec![1, 5, 5]);
 }
+
+/// A decoder whose greedy choice at each generated position is read from a script (position `n` of the generation
+/// gets `script[n]`), except right after [`ANSWER_CUE`], which it always answers with [`ANSWER`], with an on-device
+/// window of `window` tokens: what a sequence emits beyond the script is the scheduler's doing, a window rolled
+/// back wrongly shifts every later token, and a window that runs on past a token the scheduler replaced shows the
+/// draw that followed the model's own token instead of the replacement.
+struct Scripted {
+    alloc: BlockAllocator,
+    prompt_len: usize,
+    script: Vec<u32>,
+    window: usize,
+    /// The window sizes the scheduler asked for, in order.
+    windows: Vec<usize>,
+}
+
+/// The token [`Scripted`] always follows with [`ANSWER`] (the closing tag of the tests below).
+const ANSWER_CUE: u32 = 1;
+const ANSWER: u32 = 13;
+
+impl Scripted {
+    fn at(&self, generated: usize) -> u32 {
+        self.script.get(generated).copied().unwrap_or(0)
+    }
+}
+
+impl PagedDecoder for Scripted {
+    fn alloc_mut(&mut self) -> &mut BlockAllocator {
+        &mut self.alloc
+    }
+    fn max_prefill_tokens(&self) -> u32 {
+        64
+    }
+    fn free_blocks(&self) -> u32 {
+        self.alloc.free_blocks()
+    }
+    fn max_seq_len(&self) -> usize {
+        1024
+    }
+    fn vocab(&self) -> usize {
+        VOCAB * 8
+    }
+    fn blocks_for(&self, tokens: u32) -> u32 {
+        tokens.div_ceil(8)
+    }
+    fn reclaim_prefix(&mut self, _want: u32) -> u32 {
+        0
+    }
+    fn release_table(&mut self, t: &mut BlockTable) {
+        t.release(&mut self.alloc);
+    }
+    fn prefill(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32> {
+        table.reserve(prompt.len() as u32, &mut self.alloc).unwrap();
+        vec![0.0]
+    }
+    fn logits(&self, _hidden: &[f32]) -> Vec<f32> {
+        let mut row = vec![0.0; self.vocab()];
+        row[self.at(0) as usize] = 1.0;
+        row
+    }
+    fn forward_batched_greedy(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32]) -> Vec<u32> {
+        self.forward_batched_greedy_window(tables, inputs, 1).into_iter().map(|w| w[0]).collect()
+    }
+    fn forward_batched_greedy_window(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], k: usize) -> Vec<Vec<u32>> {
+        self.windows.push(k);
+        tables
+            .iter_mut()
+            .zip(inputs)
+            .map(|(t, &input)| {
+                // The cache holds the prompt and every generated token but the input: the input is token `n - 1`.
+                let n = t.len() as usize - self.prompt_len + 1;
+                for _ in 0..k {
+                    t.append(&mut self.alloc).unwrap();
+                }
+                let mut prev = input;
+                (n..n + k)
+                    .map(|i| {
+                        prev = if prev == ANSWER_CUE { ANSWER } else { self.at(i) };
+                        prev
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+    fn prefix_stats(&self) -> (u64, u64, usize) {
+        (0, 0, 0)
+    }
+    fn device_stats(&self) -> Option<gpu_core::DeviceStats> {
+        None
+    }
+    fn kv_pool_bytes(&self) -> u64 {
+        0
+    }
+    fn kv_pool_capacity_tokens(&self) -> u64 {
+        4096
+    }
+    fn decode_window_capacity(&self) -> usize {
+        self.window
+    }
+    fn forward_batched_topk(&mut self, _: &mut [&mut BlockTable], _: &[u32], _: usize) -> Vec<Vec<(u32, f32)>> {
+        unreachable!("greedy only")
+    }
+    fn topk_capacity(&self) -> usize {
+        1
+    }
+}
+
+/// Runs the script greedily under `budget` with `stop` as the end-of-turn tokens; returns what the sequence
+/// emitted and the window sizes the scheduler took.
+fn scripted(script: &[u32], budget: ThinkingBudget, stop: Vec<u32>, max_new: usize) -> (Vec<u32>, Vec<usize>) {
+    let prompt = vec![1, 2, 3];
+    let dec = Scripted { alloc: BlockAllocator::new(256, 8), prompt_len: prompt.len(), script: script.to_vec(), window: 8, windows: Vec::new() };
+    let mut sched = Scheduler::new(dec, 4);
+    let params = SampleParams { thinking: Some(budget), ..SampleParams::greedy() };
+    let id = sched.submit_sampled(Request { prompt, max_new, stop }, params, 1);
+    let out = sched.run().remove(&id).expect("the request completes");
+    (out, sched.decoder().windows.clone())
+}
+
+/// The budget is the turn's, and a block the model reopens outside a watched stretch is still held to it: in a
+/// decode window that reopens the block and spends the rest of the budget, the closing tag replaces the next token
+/// and ends the window, so what follows is the model's answer to the closing tag, not to the token it replaced.
+#[test]
+fn a_block_reopened_inside_a_decode_window_is_closed_when_the_turn_budget_runs_out() {
+    let (open, close) = (9u32, ANSWER_CUE);
+    let script = [open, 10, close, 0, open, 12, 12, 12, 12, 12];
+    let (out, windows) = scripted(&script, ThinkingBudget::new(2, open, &[close], false), Vec::new(), 10);
+    // Block one spends 1 token; the window [13, 9, 12, 12, ...] reopens and spends the second, so the tag replaces
+    // the next 12 and the model answers it.
+    assert_eq!(out, vec![open, 10, close, ANSWER, open, 12, close, ANSWER, 12, 12]);
+    assert!(windows.iter().any(|&k| k > 1), "outside a block the scheduler takes decode windows: {windows:?}");
+}
+
+/// A tool call written inside the block is never cut by the budget, and reasoning after it that runs out of the
+/// budget ends the turn with the request's end-of-turn token.
+#[test]
+fn a_call_inside_the_block_is_whole_and_running_out_after_it_ends_the_turn() {
+    let (open, close, call, end_call, eot) = (9u32, 1u32, 20u32, 21u32, 99u32);
+    let script = [10, call, 30, 30, 30, end_call, 10, 10, 10, 10];
+    let budget = ThinkingBudget::new(2, open, &[close], true).with_call_fence(call, end_call);
+    let (out, _) = scripted(&script, budget, vec![eot], 10);
+    assert_eq!(out, vec![10, call, 30, 30, 30, end_call, 10], "the turn ends at the budget after the call");
+    let (out, _) = scripted(&script, budget, Vec::new(), 10);
+    assert_eq!(out, vec![10, call, 30, 30, 30, end_call, 10], "a request with no end-of-turn token just ends");
+}

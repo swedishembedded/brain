@@ -264,10 +264,21 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   decoder that cannot read its row back refuses such a request with 400 rather
   than draw from a truncated distribution. `thinking_budget` (also accepted as
   `thinking_token_budget` and `max_thinking_tokens`; Anthropic's
-  `thinking.budget_tokens` sets it too) limits the tokens inside a think block:
-  when it is spent the closing tag and the blank line after it are forced and
-  the model answers. A reply reports the tokens spent thinking in
-  `usage.completion_tokens_details.reasoning_tokens`.
+  `thinking.budget_tokens` sets it too) limits the tokens the reply (one turn)
+  may spend inside think blocks, summed over every block it opens. When it is
+  spent inside a block, the model's thinking-budget lead-in (Qwen's "Considering
+  the limited time..." sentence, once a reply), the closing tag and the blank
+  line after it are forced and the model answers; a block it opens again after
+  the budget is spent is closed at once. A tool call the model writes inside
+  the block (`<tool_call>` ... `</tool_call>`) is neither counted nor cut, and
+  if the budget runs out after such a call the reply ends there, as if the
+  model had ended its turn. The model's own tokens inside think blocks, outside
+  such calls, never exceed the budget. A reply reports the tokens spent thinking
+  in `usage.completion_tokens_details.reasoning_tokens` (absent when there were
+  none): exactly the generated tokens the reply's parse reads as reasoning (the
+  tags excluded, a call that ended the reasoning excluded, a call that stayed
+  reasoning included), with or without a budget; `usage.completion_tokens` is
+  every generated token.
 - **Prompt cache.** `usage.prompt_tokens_details.cached_tokens` (Anthropic:
   `usage.cache_read_input_tokens`) is how many of the prompt tokens the model's
   prefix cache served instead of computing (0 for a cold prompt); a model that

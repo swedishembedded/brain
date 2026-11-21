@@ -969,6 +969,17 @@ impl<D: PagedDecoder> Scheduler<D> {
                 self.spec_stats.accepted += v.accepted as u64;
             }
             for (j, &tok) in props[bi][..v.accepted].iter().chain(std::iter::once(&v.next)).enumerate() {
+                // A thinking budget that ran out on an accepted token (a block reopened outside a watched stretch)
+                // forces this one in place of the verified choice; the verified tokens after it followed the model's
+                // choice, so they are dropped with their cache rows.
+                if let Some(forced) = r.think.and_then(|t| t.forced_next()) {
+                    r.table.truncate(before[bi] + j as u32 + 1, self.dec.alloc_mut());
+                    match forced_token(forced, &r.stop) {
+                        Some(token) => accept_token(r, token, 0.0),
+                        None => r.done = true,
+                    }
+                    break;
+                }
                 // Row `j` scored the position `tok` was emitted at.
                 accept_token(r, tok, scored[bi][j].logprob(tok, r.sample));
                 if r.done {

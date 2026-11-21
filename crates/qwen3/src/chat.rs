@@ -357,29 +357,6 @@ impl ParsedRequest {
     }
 }
 
-/// How many of `generated`'s tokens were spent inside think blocks, the tags
-/// themselves excluded: what `usage.completion_tokens_details.reasoning_tokens`
-/// reports. `open_at_start` says the prompt already ended inside a block.
-pub fn reasoning_tokens(tok: &QwenBpe, generated: &[u32], open_at_start: bool) -> usize {
-    let (Some(open), Some(close)) = (tok.special_id("<think>"), tok.special_id("</think>")) else { return 0 };
-    reasoning_token_count(generated, open, close, open_at_start)
-}
-
-fn reasoning_token_count(generated: &[u32], open: u32, close: u32, open_at_start: bool) -> usize {
-    let mut inside = open_at_start;
-    let mut n = 0;
-    for &t in generated {
-        if t == open {
-            inside = true;
-        } else if t == close {
-            inside = false;
-        } else if inside {
-            n += 1;
-        }
-    }
-    n
-}
-
 /// A request's sampler when it names nothing beyond temperature, top-k and top-p.
 pub fn plain_sampler(temp: f32, top_k: usize, top_p: f32) -> SampleParams {
     SampleParams { temp, top_k, top_p, ..SampleParams::greedy() }
@@ -398,7 +375,8 @@ const DEFAULT_DRY_BREAKERS: [&str; 4] = ["\n", ":", "\"", "*"];
 /// optional `min_p`, `presence_penalty`, `frequency_penalty`, `repetition_penalty`,
 /// DRY (`dry_multiplier`, `dry_base`, `dry_allowed_length`,
 /// `dry_sequence_breakers`, a JSON array of strings, each reduced to its first
-/// token) and `thinking_budget` (tokens allowed inside the think block).
+/// token) and `thinking_budget` (tokens the turn may spend inside think blocks;
+/// see [`ThinkingBudget`]).
 /// Everything the request does not name is off.
 fn sampler_params(tok: &QwenBpe, inv: &Invocation, temp: f32, top_k: usize, top_p: f32, thinking_open: bool, chat: bool) -> Result<SampleParams, String> {
     let mut p = SampleParams { temp, top_k, top_p, ..SampleParams::greedy() };
@@ -425,7 +403,13 @@ fn sampler_params(tok: &QwenBpe, inv: &Invocation, temp: f32, top_k: usize, top_
         let mut closing = vec![close];
         closing.extend(tok.encode("\n\n"));
         let lead = tok.encode(THINKING_BUDGET_LEAD_IN);
-        p.thinking = Some(ThinkingBudget::new(budget.max(0) as u32, open, &closing, thinking_open).with_lead_in(&lead));
+        let mut thinking = ThinkingBudget::new(budget.max(0) as u32, open, &closing, thinking_open).with_lead_in(&lead);
+        // A call the model writes inside the block is its action (the scanner reads a complete one as the end of
+        // the reasoning): the budget neither counts nor cuts it, when the vocabulary has the call's tags.
+        if let (Some(call), Some(end_call)) = (tok.special_id("<tool_call>"), tok.special_id("</tool_call>")) {
+            thinking = thinking.with_call_fence(call, end_call);
+        }
+        p.thinking = Some(thinking);
     }
     Ok(p)
 }
@@ -767,8 +751,9 @@ pub fn parse_reply_as(format: &ChatFormat, inv: &Invocation, text: &str) -> Resu
         prompt_tokens: None,
         tool_choice: prompt.tool_choice,
         seed: None,
-        thinking_open: prompt.thinking_open,
         raw: prompt.raw,
+        token_starts: Vec::new(),
+        count_reasoning: false,
     };
     seq.finish_text(text, None, &mut |_| {})
 }
@@ -794,10 +779,13 @@ pub struct SeqState {
     /// caller can reproduce a decode it did not seed; `None` for
     /// [`parse_reply`], which samples nothing.
     seed: Option<u64>,
-    /// The prompt ended inside an open think block / the request is a raw
-    /// completion: what counting the reply's reasoning tokens needs.
-    thinking_open: bool,
+    /// Where each generated token starts in `printed`'s text: with the scanner's reasoning spans, the reply's
+    /// reasoning tokens ([`data::qwen_chat::tokens_in_spans`]).
+    token_starts: Vec<usize>,
+    /// A raw completion: no reasoning to count.
     raw: bool,
+    /// The tokens were counted ([`SeqState::finish`]), so the outcome reports `reasoning_tokens`.
+    count_reasoning: bool,
 }
 
 impl SeqState {
@@ -821,8 +809,9 @@ impl SeqState {
             prompt_tokens: Some(req.ids.len()),
             tool_choice: req.tool_choice.clone(),
             seed: Some(req.seed),
-            thinking_open: req.thinking_open,
             raw: req.raw,
+            token_starts: Vec::new(),
+            count_reasoning: false,
         }
     }
 
@@ -840,7 +829,7 @@ impl SeqState {
     /// tokens costs O(G) here, not O(G^2).
     pub fn advance(&mut self, tok: &QwenBpe, all_tokens: &[u32], progress: &mut dyn FnMut(Progress)) -> bool {
         let mut appended = String::new();
-        self.detok.feed(tok, all_tokens, &mut appended);
+        self.detok.feed_marked(tok, all_tokens, &mut appended, self.printed.len(), &mut self.token_starts);
         let (delta, stop_at) = visible_append(&mut self.printed, &appended, &self.stops);
         if !delta.is_empty() {
             let mut evs = Vec::new();
@@ -872,14 +861,17 @@ impl SeqState {
     /// answer, so it fails with [`capability::failure::CANCELLED`]; one
     /// cancelled after it streamed text completes with that text and
     /// `finish_reason: "cancelled"`.
-    pub fn finish(self, tok: &QwenBpe, all_tokens: &[u32], progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    ///
+    /// `reasoning_tokens` counts the generated tokens that start inside the reasoning the scanner read, block by
+    /// block (the tags excluded): a call that ended a block is not reasoning, and neither is text a stop string
+    /// cut. A raw completion has no reasoning and reports none.
+    pub fn finish(mut self, tok: &QwenBpe, all_tokens: &[u32], progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let full = tok.decode(all_tokens);
-        let reasoning = (!self.raw).then(|| reasoning_tokens(tok, all_tokens, self.thinking_open));
-        let outcome = self.finish_text(&full, Some(all_tokens.len()), progress)?;
-        Ok(match reasoning {
-            Some(n) => outcome.set("reasoning_tokens", json!(n)),
-            None => outcome,
-        })
+        // Where the tokens `advance` has not seen start; their text reaches the scanner from `full` below.
+        let mut rest = String::new();
+        self.detok.feed_marked(tok, all_tokens, &mut rest, self.printed.len(), &mut self.token_starts);
+        self.count_reasoning = !self.raw;
+        self.finish_text(&full, Some(all_tokens.len()), progress)
     }
 
     /// [`SeqState::finish`] over already-decoded text. `generated` is how many
@@ -910,6 +902,12 @@ impl SeqState {
             let mut evs = Vec::new();
             self.scan.finish(&mut evs);
             emit_chat_events(&evs, progress, step, self.max_new as u32);
+            // A stop string completed over several steps had its first part scanned already (as reasoning, inside
+            // a think block): the outcome is the scan of the text before the stop alone. Only this rare path pays
+            // the second scan.
+            if self.scan.pushed_len() > idx {
+                self.scan = self.scan.rescan(&self.printed[..idx]);
+            }
             (self.printed[..idx].to_string(), "stop_sequence")
         } else {
             if full.len() > self.printed.len() {
@@ -962,6 +960,9 @@ impl SeqState {
             out = out.set("seed", json!(seed));
         }
         out = out.set("finish_reason", json!(finish)).set("reasoning_content", json!(self.scan.reasoning()));
+        if self.count_reasoning {
+            out = out.set("reasoning_tokens", json!(data::qwen_chat::tokens_in_spans(&self.token_starts, self.scan.reasoning_spans())));
+        }
         if !self.scan.anomalies().is_empty() {
             let names: Vec<&str> = self.scan.anomalies().iter().map(|a| a.name()).collect();
             out = out.set("scan_anomalies", json!(names));
@@ -977,16 +978,6 @@ impl SeqState {
 
 #[cfg(test)]
 mod tests {
-    /// Reasoning tokens are those between the tags, whichever side of the prompt the block opened on.
-    #[test]
-    fn reasoning_tokens_count_what_is_inside_think_blocks() {
-        let (open, close) = (100u32, 101u32);
-        assert_eq!(super::reasoning_token_count(&[open, 1, 2, 3, close, 4, 5], open, close, false), 3);
-        assert_eq!(super::reasoning_token_count(&[1, 2, close, 4], open, close, true), 2, "the prompt opened the block");
-        assert_eq!(super::reasoning_token_count(&[4, 5], open, close, false), 0);
-        assert_eq!(super::reasoning_token_count(&[open, 1, 2], open, close, false), 2, "cut off by max_tokens inside the block");
-    }
-
     use super::*;
 
     /// A checkpoint template that teaches XML tool calls gets the XML
@@ -1524,6 +1515,35 @@ mod tests {
         assert_eq!(out.outputs.get("finish_reason"), Some(&json!("stop")));
         assert_eq!(out.outputs.get("scan_anomalies"), Some(&json!(["ended_inside_think", "tool_call_inside_think"])));
         assert!(out.outputs["reasoning_content"].as_str().unwrap().contains("get_weather"));
+    }
+
+    /// The reply's `reasoning_tokens` are the generated tokens the parse reads as reasoning, exactly (every byte is
+    /// a token here): those before `</think>`, those before a call that ended the reasoning (the call is the action,
+    /// not reasoning), a call that stayed reasoning included, and none of a stop string's text; however the tokens
+    /// were streamed.
+    #[test]
+    fn reasoning_tokens_are_the_tokens_the_parse_reads_as_reasoning() {
+        let (tok, req) = chatml_request(&[]);
+        let cut = &WEATHER_CALL[..WEATHER_CALL.len() - "</tool_call>".len()];
+        let cases = [
+            ("abc</think>\n\nhi".to_string(), 3),
+            ("é</think>x".to_string(), 2),
+            (format!("I should check.\n{WEATHER_CALL}"), "I should check.\n".len()),
+            (format!("I should check.\n{cut}"), "I should check.\n".len() + cut.len()),
+            ("no close at all".to_string(), "no close at all".len()),
+            ("a</think>b<think>cd</think>e".to_string(), 3),
+        ];
+        for (text, want) in cases {
+            let streamed = finished(&tok, &req, &text);
+            assert_eq!(streamed.outputs.get("reasoning_tokens"), Some(&json!(want)), "{text:?}");
+            let ids = tok.encode(&text);
+            let whole = SeqState::new(&req, CancelToken::default()).finish(&tok, &ids, &mut |_| {}).unwrap();
+            assert_eq!(whole.outputs.get("reasoning_tokens"), Some(&json!(want)), "{text:?} unstreamed");
+        }
+        let (tok, req) = chatml_request(&["HALT"]);
+        let stopped = finished(&tok, &req, "abHALT more");
+        assert_eq!(stopped.outputs.get("reasoning_content"), Some(&json!("ab")), "a stop string is not reasoning");
+        assert_eq!(stopped.outputs.get("reasoning_tokens"), Some(&json!(2)), "a stop string is not reasoning");
     }
 
     /// A generation that read cleanly has no anomaly field at all.

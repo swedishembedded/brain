@@ -1620,6 +1620,15 @@ fn accept_token(r: &mut Running, next: u32, logprob: f32) {
     }
 }
 
+/// The token a thinking budget forces: its own, or for an end of turn the request's first end-of-turn token
+/// (`None` when the request has none, and the sequence then simply ends).
+fn forced_token(forced: sampler::Forced, stop: &[u32]) -> Option<u32> {
+    match forced {
+        sampler::Forced::Token(token) => Some(token),
+        sampler::Forced::EndTurn => stop.first().copied(),
+    }
+}
+
 /// How many times a scoring pass asks whether its adapter is resident yet (a millisecond apart) before it gives up.
 const ADAPTER_LOAD_POLLS: u32 = 10_000;
 
@@ -2546,7 +2555,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         // the host for this one-time-per-request first token, matching
         // the steady-state per-token decode loop.
         let think = sample.thinking.map(sampler::ThinkState::new);
-        let (first, first_logprob, first_whole) = if let Some(forced) = think.and_then(|t| t.forced_next()) {
+        let (first, first_logprob, first_whole) = if let Some(forced) = think.and_then(|t| t.forced_next()).and_then(|f| forced_token(f, &stop)) {
             // A prompt that ends inside a think block whose budget is zero: the closing tag comes first.
             (forced, 0.0, None)
         } else if !sample.needs_candidates() {
@@ -3176,10 +3185,20 @@ impl<D: PagedDecoder> Scheduler<D> {
             let r = &mut self.running[si];
             let mut used = 0usize;
             for &(next, logprob) in &window[bi] {
-                // The budget ran out: the closing sequence replaces the model's choice.
-                let (next, logprob) = match r.think.and_then(|t| t.forced_next()) {
-                    Some(forced) => (forced, 0.0),
+                // The budget ran out: the forced token replaces the model's choice. The window's later draws
+                // followed the model's own choice, so a forced token ends the window; the cache rows kept are
+                // those of the inputs up to its slot, which are the tokens the sequence holds.
+                let forced = r.think.and_then(|t| t.forced_next());
+                let (next, logprob) = match forced {
                     None => (next, logprob),
+                    Some(f) => match forced_token(f, &r.stop) {
+                        Some(token) => (token, 0.0),
+                        // An end of turn on a request with no end-of-turn token: the sequence just ends.
+                        None => {
+                            r.done = true;
+                            break;
+                        }
+                    },
                 };
                 // `used` counts consumed window slots (a real decode step
                 // happened and wrote a KV-cache entry) regardless of
@@ -3187,7 +3206,7 @@ impl<D: PagedDecoder> Scheduler<D> {
                 // occupies a real slot, it just isn't output text.
                 used += 1;
                 accept_token(r, next, logprob);
-                if r.done {
+                if r.done || forced.is_some() {
                     break;
                 }
             }

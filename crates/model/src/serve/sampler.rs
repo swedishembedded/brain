@@ -159,16 +159,28 @@ pub fn ngram_followers(generated: &[u32], ngram_size: usize, window: usize) -> V
     out
 }
 
-/// A thinking budget: once `max_tokens` tokens have been generated inside an
-/// open think block the scheduler forces an optional lead-in (a last thought
-/// that tells the model to answer from what it has, still inside the block)
-/// and then the closing sequence (`</think>` and whatever separates it from the
-/// answer) in place of the model's own choices, and then lets the model
-/// continue with its answer. The token ids belong to the model's tokenizer, so
+/// A thinking budget for one turn (one generation): the model may spend at most
+/// `max_tokens` tokens of its own inside think blocks, summed over every block it
+/// opens in the turn. When the count reaches the budget inside a block, the
+/// scheduler forces, in place of the model's choices, the optional lead-in (a
+/// last thought that tells the model to answer from what it has, still inside
+/// the block; forced at most once a turn) and then the closing sequence (the
+/// closing tag and whatever separates it from the answer), and the model
+/// continues with its answer. A block the model opens again after the budget is
+/// spent is closed at once. The token ids belong to the model's tokenizer, so
 /// the frontend supplies them.
+///
+/// A call fence ([`Self::with_call_fence`]) is the pair of tokens around a tool
+/// call. A call the model writes inside an open think block is its action, not
+/// its reasoning: the fence's tokens are not counted and nothing is forced
+/// inside it. Once such a call has closed, the block's remaining reasoning is
+/// still counted, but a budget that runs out then ends the turn (the request's
+/// end-of-turn token) instead of closing the block, so the call stays the last
+/// thing the turn says. Whatever the model writes, the turn's think-block tokens
+/// outside fences never exceed `max_tokens`: the budget always terminates.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThinkingBudget {
-    /// Tokens the model may spend inside the think block (the tags excluded).
+    /// Tokens the model may spend inside think blocks over the turn (the tags excluded).
     pub max_tokens: u32,
     /// The id of the opening tag.
     pub open: u32,
@@ -176,6 +188,8 @@ pub struct ThinkingBudget {
     n_close: u8,
     lead: [u32; MAX_THINK_LEAD],
     n_lead: u8,
+    /// The tokens that open and close a tool call, when the model has them.
+    fence: Option<(u32, u32)>,
     /// The prompt already ended inside an open think block.
     pub open_at_start: bool,
 }
@@ -195,7 +209,7 @@ impl ThinkingBudget {
         let mut set = [0u32; MAX_THINK_CLOSE];
         let n = close.len().min(MAX_THINK_CLOSE);
         set[..n].copy_from_slice(&close[..n]);
-        ThinkingBudget { max_tokens, open, close: set, n_close: n as u8, lead: [0; MAX_THINK_LEAD], n_lead: 0, open_at_start }
+        ThinkingBudget { max_tokens, open, close: set, n_close: n as u8, lead: [0; MAX_THINK_LEAD], n_lead: 0, fence: None, open_at_start }
     }
 
     /// The same budget with `lead` forced before the closing sequence. Panics on
@@ -208,6 +222,12 @@ impl ThinkingBudget {
         self
     }
 
+    /// The same budget aware of the tokens that open and close a tool call (see the type's documentation).
+    pub fn with_call_fence(mut self, open: u32, close: u32) -> ThinkingBudget {
+        self.fence = Some((open, close));
+        self
+    }
+
     pub fn close(&self) -> &[u32] {
         &self.close[..self.n_close as usize]
     }
@@ -216,72 +236,114 @@ impl ThinkingBudget {
         &self.lead[..self.n_lead as usize]
     }
 
-    /// The `i`-th token forced when the budget runs out: the lead-in, then the closing sequence.
-    fn forced_at(&self, i: usize) -> u32 {
-        let lead = self.lead_in();
-        if i < lead.len() { lead[i] } else { self.close()[i - lead.len()] }
-    }
-
-    fn forced_len(&self) -> usize {
-        self.n_lead as usize + self.n_close as usize
+    pub fn call_fence(&self) -> Option<(u32, u32)> {
+        self.fence
     }
 }
 
-/// Where a sequence is in its think block, advanced by every accepted token.
+/// What the scheduler emits next in place of the model's choice while a thinking budget is being enforced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Forced {
+    /// This token (of the lead-in or the closing sequence).
+    Token(u32),
+    /// The end of the turn: the request's end-of-turn token, as if the model had chosen it.
+    EndTurn,
+}
+
+/// What a running budget is forcing, and how far it got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Forcing {
+    /// The lead-in then the closing sequence: `at` tokens of the two emitted.
+    LeadAndClose { at: usize },
+    /// The closing sequence alone.
+    Close { at: usize },
+    EndTurn,
+}
+
+/// Where a sequence is in its think blocks, advanced by every accepted token.
 #[derive(Clone, Copy, Debug)]
 pub(super) struct ThinkState {
     budget: ThinkingBudget,
     in_think: bool,
+    /// Inside a call fence that opened inside the current block.
+    in_call: bool,
+    /// A call fence closed inside the current block: running out now ends the turn.
+    acted: bool,
+    /// The model's own tokens inside think blocks this turn, outside call fences.
     count: u32,
-    /// The budget ran out: the lead-in and closing sequence are being forced, `forced` tokens of them so far.
-    closing: bool,
-    forced: usize,
-    /// The block was closed (by the model or by force): nothing left to watch.
-    done: bool,
+    lead_forced: bool,
+    forcing: Option<Forcing>,
 }
 
 impl ThinkState {
     pub(super) fn new(budget: ThinkingBudget) -> ThinkState {
-        let mut s = ThinkState { budget, in_think: budget.open_at_start, count: 0, closing: false, forced: 0, done: false };
+        let mut s = ThinkState { budget, in_think: budget.open_at_start, in_call: false, acted: false, count: 0, lead_forced: false, forcing: None };
         s.check_budget();
         s
     }
 
     fn check_budget(&mut self) {
-        if self.in_think && !self.closing && self.count >= self.budget.max_tokens {
-            self.closing = true;
-            self.forced = 0;
+        if !self.in_think || self.in_call || self.forcing.is_some() || self.count < self.budget.max_tokens {
+            return;
         }
+        self.forcing = Some(if self.acted {
+            Forcing::EndTurn
+        } else if !self.lead_forced && self.budget.n_lead > 0 {
+            self.lead_forced = true;
+            Forcing::LeadAndClose { at: 0 }
+        } else {
+            Forcing::Close { at: 0 }
+        });
     }
 
-    /// The token the scheduler must emit next instead of the model's choice, while the closing sequence is being forced.
-    pub(super) fn forced_next(&self) -> Option<u32> {
-        self.closing.then(|| self.budget.forced_at(self.forced))
+    /// What the scheduler must emit next instead of the model's choice, while the budget is being enforced.
+    pub(super) fn forced_next(&self) -> Option<Forced> {
+        let lead = self.budget.lead_in();
+        Some(match self.forcing? {
+            Forcing::LeadAndClose { at } if at < lead.len() => Forced::Token(lead[at]),
+            Forcing::LeadAndClose { at } => Forced::Token(self.budget.close()[at - lead.len()]),
+            Forcing::Close { at } => Forced::Token(self.budget.close()[at]),
+            Forcing::EndTurn => Forced::EndTurn,
+        })
     }
 
-    /// Whether the sequence still has to be decoded one host-checked token at a
-    /// time (a multi-token on-device window would step over the budget).
+    /// Whether the sequence has to be decoded one host-checked token at a time: inside a block (or while a
+    /// sequence is forced) a multi-token on-device window would step over the budget. Outside a block the
+    /// scheduler may take a window; it hands every token of it to [`Self::accept`] and stops the window at a
+    /// token the budget forces.
     pub(super) fn watching(&self) -> bool {
-        !self.done
+        self.in_think || self.forcing.is_some()
     }
 
     pub(super) fn accept(&mut self, token: u32) {
-        if self.closing {
-            self.forced += 1;
-            if self.forced == self.budget.forced_len() {
-                self.closing = false;
-                self.in_think = false;
-                self.done = true;
-            }
+        if let Some(forcing) = self.forcing {
+            let close_len = self.budget.close().len();
+            self.forcing = match forcing {
+                Forcing::LeadAndClose { at } if at + 1 < self.budget.lead_in().len() + close_len => Some(Forcing::LeadAndClose { at: at + 1 }),
+                Forcing::Close { at } if at + 1 < close_len => Some(Forcing::Close { at: at + 1 }),
+                Forcing::EndTurn => Some(Forcing::EndTurn),
+                _ => {
+                    self.in_think = false;
+                    self.acted = false;
+                    None
+                }
+            };
             return;
         }
-        if token == self.budget.open {
-            self.in_think = true;
-            self.count = 0;
-        } else if self.in_think && token == self.budget.close()[0] {
+        let fence = self.budget.fence;
+        if !self.in_think {
+            self.in_think = token == self.budget.open;
+        } else if self.in_call {
+            if fence.is_some_and(|(_, close)| token == close) {
+                self.in_call = false;
+                self.acted = true;
+            }
+        } else if token == self.budget.close()[0] {
             self.in_think = false;
-            self.done = true;
-        } else if self.in_think {
+            self.acted = false;
+        } else if fence.is_some_and(|(open, _)| token == open) {
+            self.in_call = true;
+        } else {
             self.count += 1;
         }
         self.check_budget();
@@ -653,22 +715,46 @@ mod tests {
         assert_eq!(c, vec![(3, 5.0)]);
     }
 
+    /// Drives `s` with the model's `choices`, letting the budget replace a choice whenever it forces one;
+    /// returns what the sequence emitted. Stops after an end of turn.
+    fn drive(s: &mut ThinkState, choices: &[u32]) -> Vec<Option<u32>> {
+        let mut out = Vec::new();
+        let mut choices = choices.iter();
+        loop {
+            match s.forced_next() {
+                Some(Forced::EndTurn) => {
+                    out.push(None);
+                    return out;
+                }
+                Some(Forced::Token(t)) => {
+                    s.accept(t);
+                    out.push(Some(t));
+                }
+                None => {
+                    let Some(&t) = choices.next() else { return out };
+                    s.accept(t);
+                    out.push(Some(t));
+                }
+            }
+        }
+    }
+
+    fn emitted(ids: &[u32]) -> Vec<Option<u32>> {
+        ids.iter().map(|&t| Some(t)).collect()
+    }
+
+    const OPEN: u32 = 100;
+    const CLOSE: u32 = 101;
+    const NL: u32 = 102;
+    const CALL: u32 = 110;
+    const END_CALL: u32 = 111;
+
     /// The budget counts tokens inside the block, forces the closing sequence token by token when it
     /// runs out, and then lets the model go on.
     #[test]
     fn a_thinking_budget_forces_the_closing_sequence_after_its_tokens() {
-        let (open, close_tag, nl) = (100u32, 101u32, 102u32);
-        let mut s = ThinkState::new(ThinkingBudget::new(3, open, &[close_tag, nl], true));
-        assert_eq!(s.forced_next(), None);
-        for t in [1, 2, 3] {
-            assert_eq!(s.forced_next(), None);
-            s.accept(t);
-        }
-        assert_eq!(s.forced_next(), Some(close_tag), "three tokens inside the block: the tag is next");
-        s.accept(close_tag);
-        assert_eq!(s.forced_next(), Some(nl));
-        s.accept(nl);
-        assert_eq!(s.forced_next(), None, "after the forced sequence the model answers");
+        let mut s = ThinkState::new(ThinkingBudget::new(3, OPEN, &[CLOSE, NL], true));
+        assert_eq!(drive(&mut s, &[1, 2, 3, 4, 5]), emitted(&[1, 2, 3, CLOSE, NL, 4, 5]), "three tokens inside the block, the tag and its separator, then the answer");
         assert!(!s.watching());
     }
 
@@ -676,41 +762,78 @@ mod tests {
     /// the model reads it as its own last thought); a model that closes in time never sees it.
     #[test]
     fn a_thinking_budget_forces_its_lead_in_then_the_closing_sequence() {
-        let (open, close_tag, nl, a, b) = (100u32, 101u32, 102u32, 200u32, 201u32);
-        let budget = ThinkingBudget::new(1, open, &[close_tag, nl], true).with_lead_in(&[a, b]);
-        let mut s = ThinkState::new(budget);
-        s.accept(7);
-        let mut forced = Vec::new();
-        while let Some(t) = s.forced_next() {
-            forced.push(t);
-            s.accept(t);
-        }
-        assert_eq!(forced, vec![a, b, close_tag, nl], "lead-in, then the tag and its separator");
-        assert!(!s.watching());
-        let mut early = ThinkState::new(budget);
-        early.accept(close_tag);
-        assert_eq!(early.forced_next(), None, "a block the model closes itself gets no lead-in");
+        let budget = ThinkingBudget::new(1, OPEN, &[CLOSE, NL], true).with_lead_in(&[200, 201]);
+        assert_eq!(drive(&mut ThinkState::new(budget), &[7, 8]), emitted(&[7, 200, 201, CLOSE, NL, 8]));
+        assert_eq!(drive(&mut ThinkState::new(budget), &[CLOSE, 8]), emitted(&[CLOSE, 8]), "a block the model closes itself gets no lead-in");
     }
 
     /// A model that opens its own block is counted from the tag; one that closes in time is left alone.
     #[test]
     fn a_thinking_budget_starts_at_the_opening_tag_and_yields_to_a_model_that_closes_in_time() {
-        let mut s = ThinkState::new(ThinkingBudget::new(2, 100, &[101], false));
-        for t in [7, 8, 9, 10] {
-            s.accept(t); // before the block opens nothing is counted
-            assert_eq!(s.forced_next(), None);
-        }
-        s.accept(100);
-        s.accept(5);
-        s.accept(101); // closed after one token, under the budget of two
+        let budget = ThinkingBudget::new(2, OPEN, &[CLOSE], false);
+        let mut s = ThinkState::new(budget);
+        assert!(!s.watching(), "outside a block there is nothing to check token by token");
+        assert_eq!(drive(&mut s, &[7, 8, 9, 10, OPEN, 5, CLOSE, 6]), emitted(&[7, 8, 9, 10, OPEN, 5, CLOSE, 6]));
         assert!(!s.watching());
-        assert_eq!(s.forced_next(), None);
-        // A budget of zero closes the block as soon as it opens.
-        let mut z = ThinkState::new(ThinkingBudget::new(0, 100, &[101], false));
-        z.accept(100);
-        assert_eq!(z.forced_next(), Some(101));
-        let at_start = ThinkState::new(ThinkingBudget::new(0, 100, &[101], true));
-        assert_eq!(at_start.forced_next(), Some(101), "a prompt that ends inside the block is already out of budget");
+        assert_eq!(drive(&mut ThinkState::new(ThinkingBudget::new(0, OPEN, &[CLOSE], false)), &[OPEN, 5]), emitted(&[OPEN, CLOSE, 5]), "a budget of zero closes the block as soon as it opens");
+        let at_start = ThinkState::new(ThinkingBudget::new(0, OPEN, &[CLOSE], true));
+        assert_eq!(at_start.forced_next(), Some(Forced::Token(CLOSE)), "a prompt that ends inside the block is already out of budget");
+    }
+
+    /// The budget is the turn's: a second block spends what the first left, and a block opened after the budget is
+    /// spent is closed at once, with the closing sequence alone (the lead-in is said once a turn).
+    #[test]
+    fn a_thinking_budget_is_shared_by_every_block_of_the_turn() {
+        let budget = ThinkingBudget::new(3, OPEN, &[CLOSE, NL], false).with_lead_in(&[200]);
+        let mut s = ThinkState::new(budget);
+        let out = drive(&mut s, &[OPEN, 1, 2, CLOSE, 9, OPEN, 3, 4, 5, 9, OPEN, 6, 7]);
+        assert_eq!(out, emitted(&[OPEN, 1, 2, CLOSE, 9, OPEN, 3, 200, CLOSE, NL, 4, 5, 9, OPEN, CLOSE, NL, 6, 7]));
+        assert!(!s.watching());
+    }
+
+    /// A tool call written inside the block is the model's action: its tokens are not reasoning, nothing is forced
+    /// into it, and once it has closed a budget that runs out ends the turn rather than closing the block behind
+    /// the call.
+    #[test]
+    fn a_call_inside_the_block_is_never_cut_and_running_out_after_it_ends_the_turn() {
+        let budget = ThinkingBudget::new(2, OPEN, &[CLOSE, NL], true).with_lead_in(&[200]).with_call_fence(CALL, END_CALL);
+        let out = drive(&mut ThinkState::new(budget), &[1, CALL, 30, 31, 32, 33, END_CALL, 2, 3]);
+        assert_eq!(out, vec![Some(1), Some(CALL), Some(30), Some(31), Some(32), Some(33), Some(END_CALL), Some(2), None], "a long call is whole; the reasoning after it ends the turn at the budget");
+        // A model that ends its turn after the call is left alone, and one that closes the block in time answers.
+        let out = drive(&mut ThinkState::new(budget), &[1, CALL, 30, END_CALL, CLOSE, 5, 6, 7]);
+        assert_eq!(out, emitted(&[1, CALL, 30, END_CALL, CLOSE, 5, 6, 7]));
+        // A fence outside a block is an ordinary call, and the budget is not involved.
+        let mut after = ThinkState::new(ThinkingBudget::new(1, OPEN, &[CLOSE], false).with_call_fence(CALL, END_CALL));
+        assert_eq!(drive(&mut after, &[CALL, 30, 31, END_CALL]), emitted(&[CALL, 30, 31, END_CALL]));
+        assert!(!after.watching());
+    }
+
+    /// Whatever the model writes, the turn's think-block tokens outside call fences stay within the budget and every
+    /// block it opens is closed or the turn ended: the budget always terminates.
+    #[test]
+    fn a_thinking_budget_always_terminates() {
+        let vocab = [1u32, 2, OPEN, CLOSE, CALL, END_CALL];
+        let mut rng = data::rng::Lcg::new(0x5eed);
+        for _ in 0..2000 {
+            let max = rng.next_u32() % 6;
+            let at_start = rng.next_u32().is_multiple_of(2);
+            let budget = ThinkingBudget::new(max, OPEN, &[CLOSE, NL], at_start).with_lead_in(&[200]).with_call_fence(CALL, END_CALL);
+            let choices: Vec<u32> = (0..40).map(|_| vocab[(rng.next_u32() as usize) % vocab.len()]).collect();
+            let mut s = ThinkState::new(budget);
+            let out = drive(&mut s, &choices);
+            // Replay what was emitted through the model-side rule, counting reasoning outside fences.
+            let (mut inside, mut in_call, mut spent) = (at_start, false, 0u32);
+            for t in out.iter().flatten().copied() {
+                match (inside, in_call) {
+                    (false, _) => inside = t == OPEN,
+                    (true, true) => in_call = t != END_CALL,
+                    (true, false) if t == CLOSE => inside = false,
+                    (true, false) if t == CALL => in_call = true,
+                    (true, false) => spent += u32::from(t != 200 && t != NL),
+                }
+            }
+            assert!(spent <= max, "{spent} model tokens of reasoning past a budget of {max}: {out:?}");
+        }
     }
 
     #[test]

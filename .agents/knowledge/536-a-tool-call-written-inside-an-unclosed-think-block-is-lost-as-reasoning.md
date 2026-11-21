@@ -84,7 +84,6 @@ form, with `</think>`.
   policy-gradient changes, dual clip, a step-parity harness), CPU-backend fan-out (the servers ran on CUDA) and CLI help
   text. Pass rates hold per serving build, so this pair isolates the parser.
 
-## Open
+## Follow-up
 
-- The thinking budget and the reasoning-token count are token-level and still count a rescued call's tokens as
-  reasoning, since only `</think>` ends the block for them.
+- The thinking budget and the reasoning-token count now treat a call inside the block as the action it is: #540.

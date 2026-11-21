@@ -568,37 +568,52 @@ impl Utf8Decoder {
             tok.push_token_bytes(id, &mut bytes);
         }
         self.fed = ids.len();
-        let mut rest = bytes.as_slice();
-        loop {
-            match std::str::from_utf8(rest) {
-                Ok(valid) => {
-                    out.push_str(valid);
-                    rest = &[];
-                    break;
-                }
-                Err(e) => {
-                    let (valid, tail) = rest.split_at(e.valid_up_to());
-                    out.push_str(std::str::from_utf8(valid).expect("validated prefix"));
-                    match e.error_len() {
-                        Some(n) => {
-                            out.push('\u{FFFD}');
-                            rest = &tail[n..];
-                        }
-                        None => {
-                            rest = tail;
-                            break;
-                        }
-                    }
-                }
-            }
+        self.pending = append_valid(&bytes, out);
+    }
+
+    /// [`Self::feed`], also recording where each fed token starts in the decoded text: `base` plus the length of
+    /// `out` before the text the token completes. A token that completes no text of its own (part of a character
+    /// split across tokens) starts where that character does.
+    pub fn feed_marked(&mut self, tok: &QwenBpe, ids: &[u32], out: &mut String, base: usize, starts: &mut Vec<usize>) {
+        let mut bytes = std::mem::take(&mut self.pending);
+        for &id in &ids[self.fed.min(ids.len())..] {
+            starts.push(base + out.len());
+            tok.push_token_bytes(id, &mut bytes);
+            bytes = append_valid(&bytes, out);
         }
-        self.pending = rest.to_vec();
+        self.fed = ids.len();
+        self.pending = bytes;
     }
 
     /// The held-back tail as lossy text (U+FFFD for an incomplete sequence):
     /// what is still missing from `decode` once the sequence has ended.
     pub fn flush(&mut self) -> String {
         String::from_utf8_lossy(&std::mem::take(&mut self.pending)).into_owned()
+    }
+}
+
+/// Append the text `bytes` completes to `out` (an invalid byte as U+FFFD, as `from_utf8_lossy` writes it) and
+/// return the possibly-incomplete tail.
+fn append_valid(bytes: &[u8], out: &mut String) -> Vec<u8> {
+    let mut rest = bytes;
+    loop {
+        match std::str::from_utf8(rest) {
+            Ok(valid) => {
+                out.push_str(valid);
+                return Vec::new();
+            }
+            Err(e) => {
+                let (valid, tail) = rest.split_at(e.valid_up_to());
+                out.push_str(std::str::from_utf8(valid).expect("validated prefix"));
+                match e.error_len() {
+                    Some(n) => {
+                        out.push('\u{FFFD}');
+                        rest = &tail[n..];
+                    }
+                    None => return tail.to_vec(),
+                }
+            }
+        }
     }
 }
 
@@ -807,6 +822,20 @@ mod tests {
         dec.feed(&t, &ids, &mut out);
         assert_eq!(out, "Hi€");
         assert_eq!(dec.flush(), "");
+    }
+
+    /// Marked feeding writes the same text as plain feeding, and says where each token starts in it: a token
+    /// whose bytes only begin a character starts where that character is written.
+    #[test]
+    fn utf8_decoder_marks_where_each_token_starts() {
+        let t = byte_tok();
+        let ids: Vec<u32> = [b"Hi".as_slice(), "€".as_bytes(), b"!", &[0xFF], b"x"].concat().iter().map(|&b| b as u32).collect();
+        let (mut dec, mut out, mut starts) = (Utf8Decoder::default(), String::new(), Vec::new());
+        dec.feed_marked(&t, &ids[..3], &mut out, 10, &mut starts);
+        dec.feed_marked(&t, &ids, &mut out, 10, &mut starts);
+        assert_eq!(out, t.decode(&ids));
+        // H i [€ three bytes] ! [invalid] x
+        assert_eq!(starts, vec![10, 11, 12, 12, 12, 15, 16, 19]);
     }
 
     /// Specials are cut leftmost, longest first, wherever they sit in the text.
