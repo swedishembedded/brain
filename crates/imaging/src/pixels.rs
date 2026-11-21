@@ -56,6 +56,27 @@ impl Rgb8 {
     }
 }
 
+/// An interleaved 8-bit RGBA image, straight (non-premultiplied) alpha: what a decoder produces for a source that
+/// carries transparency, kept apart from [`Rgb8`] so a caller that must composite it cannot forget to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rgba8 {
+    pub w: u32,
+    pub h: u32,
+    /// `w * h * 4` bytes, row-major, R,G,B,A interleaved.
+    pub px: Vec<u8>,
+}
+
+impl Rgba8 {
+    /// Wrap `px`, checking it is exactly `w * h * 4` bytes.
+    pub fn new(w: u32, h: u32, px: Vec<u8>) -> Result<Rgba8, String> {
+        let need = w as usize * h as usize * 4;
+        if px.len() != need {
+            return Err(format!("Rgba8: {w}x{h} needs {need} bytes, got {}", px.len()));
+        }
+        Ok(Rgba8 { w, h, px })
+    }
+}
+
 /// An axis-aligned pixel rectangle, `x`/`y` = top-left, in pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rect {

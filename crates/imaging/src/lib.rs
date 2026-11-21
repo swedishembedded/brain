@@ -143,18 +143,20 @@ pub mod maskseq;
 pub mod nms;
 pub mod photo;
 pub mod pixels;
+pub mod regions;
 pub mod tiling;
 pub mod video;
 pub mod views;
 pub mod viz;
 
-pub use codec::{decode, decode_gray16, dimensions, load, save, save_gray16_png, save_jpeg, save_png, save_ppm, Gray16, JPEG_QUALITY};
+pub use codec::{decode, decode_alpha_bounded, decode_gray16, Decoded, dimensions, load, save, save_gray16_png, save_jpeg, save_png, save_ppm, Gray16, JPEG_QUALITY};
 pub use color::{Normalization, IMAGENET_MEAN, IMAGENET_STD};
 pub use device::{AlignCorners, Border, Ctx, Fill, Filter, ImagingKernelIds, PIPELINES};
 pub use host::resize_bilinear_hwc;
 pub use letterbox::{letterbox_rgb, nearest_tap, Letterbox};
 pub use photo::{load_photo, Exif, Photo};
-pub use pixels::{ChannelPolicy, Rect, Rgb8};
+pub use pixels::{ChannelPolicy, Rect, Rgb8, Rgba8};
+pub use regions::{composite_over_checkerboard, Checkerboard, RegionImage, RegionTiling};
 pub use tiling::{BlendPlan, BlendSpec, BlendTile, Tile, TilePlan, TileSpec};
 
 /// The workspace's NCHW shape type, re-exported so callers need not also depend

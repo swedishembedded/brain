@@ -35,3 +35,4 @@ tools/goldens/lsa_dump_reference.py	main:manual_seed=20261030	python-rng	frozen:
 tools/goldens/ripple_serve_fixture.py	scripted:random.Random=7	python-rng	test-double: the scripted tiny model is a fixed fixture, so every run serves the same weights and the same reply
 tools/goldens/ripple_serve_fixture.py	scripted_draft:random.Random=11	python-rng	test-double: the fixture's tiny random draft model is fixed, so every run serves the same weights and the same proposals
 tools/goldens/inkling2_dump_reference.py	-:SEED=20261121	python-const	frozen: the seed fixes the tiny reference checkpoint initialization, so the dumped per-visit states, router choices, conv states and logits are reproducible
+tools/goldens/inkling2_vision_dump.py	-:SEED=20261122	python-const	frozen: the seed fixes the test images and the tiny reference tower initialization, so the dumped pixel values and per-layer activations are reproducible

@@ -43,7 +43,7 @@
 
 use std::path::Path;
 
-use crate::pixels::Rgb8;
+use crate::pixels::{Rgb8, Rgba8};
 
 pub use events::ppm::{decode_p6, encode_p6};
 
@@ -60,13 +60,65 @@ pub fn decode(bytes: &[u8]) -> Result<Rgb8, String> {
 /// header, before a pixel is decoded (a PNG a few kilobytes long can declare billions of them), and the decoder's own
 /// allocation is bounded to the same figure.
 pub fn decode_bounded(bytes: &[u8], max_pixels: u64) -> Result<Rgb8, String> {
+    match decode_raw(bytes, max_pixels)? {
+        Raw::P6(img) => Ok(img),
+        Raw::Dynamic(img) => {
+            let img = img.to_rgb8();
+            let (w, h) = (img.width(), img.height());
+            Rgb8::new(w, h, img.into_raw())
+        }
+    }
+}
+
+/// A decoded image with its transparency kept: [`Decoded::Rgba`] for a source whose colour type has an alpha channel
+/// (PNG RGBA, grey+alpha, palette with transparency), [`Decoded::Rgb`] for every other. 8-bit sources are exact; a
+/// 16-bit source goes through `image`'s 16-to-8-bit conversion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Decoded {
+    Rgb(Rgb8),
+    Rgba(Rgba8),
+}
+
+impl Decoded {
+    pub fn size(&self) -> (u32, u32) {
+        match self {
+            Decoded::Rgb(i) => (i.w, i.h),
+            Decoded::Rgba(i) => (i.w, i.h),
+        }
+    }
+}
+
+/// [`decode_bounded`] that does not throw the alpha channel away: the form a preprocessor that composites onto a
+/// background needs. The same pixel bound applies, checked from the header before any pixel is decoded.
+pub fn decode_alpha_bounded(bytes: &[u8], max_pixels: u64) -> Result<Decoded, String> {
+    match decode_raw(bytes, max_pixels)? {
+        Raw::P6(img) => Ok(Decoded::Rgb(img)),
+        Raw::Dynamic(img) if img.color().has_alpha() => {
+            let img = img.to_rgba8();
+            let (w, h) = (img.width(), img.height());
+            Ok(Decoded::Rgba(Rgba8::new(w, h, img.into_raw())?))
+        }
+        Raw::Dynamic(img) => {
+            let img = img.to_rgb8();
+            let (w, h) = (img.width(), img.height());
+            Ok(Decoded::Rgb(Rgb8::new(w, h, img.into_raw())?))
+        }
+    }
+}
+
+enum Raw {
+    P6(Rgb8),
+    Dynamic(image::DynamicImage),
+}
+
+fn decode_raw(bytes: &[u8], max_pixels: u64) -> Result<Raw, String> {
     let too_big = |w: u64, h: u64| format!("image of {w}x{h} pixels is over the limit of {max_pixels} pixels");
     if bytes.starts_with(b"P6") {
         let (px, w, h) = decode_p6(bytes)?;
         if u64::from(w) * u64::from(h) > max_pixels {
             return Err(too_big(w.into(), h.into()));
         }
-        return Rgb8::new(w, h, px);
+        return Rgb8::new(w, h, px).map(Raw::P6);
     }
     let fmt = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
         image::ImageFormat::Png
@@ -88,9 +140,7 @@ pub fn decode_bounded(bytes: &[u8], max_pixels: u64) -> Result<Rgb8, String> {
     // The decoded image and its working copies: 8 bytes a pixel covers an RGBA16 source.
     limits.max_alloc = Some(max_pixels.saturating_mul(8).max(1 << 20));
     decoder.limits(limits);
-    let img = decoder.decode().map_err(|e| format!("decoding {fmt:?}: {e}"))?.to_rgb8();
-    let (w, h) = (img.width(), img.height());
-    Rgb8::new(w, h, img.into_raw())
+    decoder.decode().map(Raw::Dynamic).map_err(|e| format!("decoding {fmt:?}: {e}"))
 }
 
 /// A single-channel 16-bit image: the format depth sensors and depth datasets store a map in (a count per pixel,
