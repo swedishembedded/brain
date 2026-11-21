@@ -228,8 +228,11 @@ impl Connector {
 
 impl Connection {
     /// Send one request. `body` is sent whole with its length; only the headers set here reach the upstream.
-    pub(crate) async fn send(mut self, method: Method, path: &str, key: Option<&str>, accept: Option<&HeaderValue>, body: bytes::Bytes) -> Result<(Response<Incoming>, ConnectionTask), String> {
+    pub(crate) async fn send(mut self, method: Method, path: &str, key: Option<&str>, accept: Option<&HeaderValue>, request_id: Option<&str>, body: bytes::Bytes) -> Result<(Response<Incoming>, ConnectionTask), String> {
         let mut req = Request::builder().method(method).uri(path).header(header::HOST, self.authority.as_str());
+        if let Some(id) = request_id {
+            req = req.header("x-request-id", id);
+        }
         if !body.is_empty() {
             req = req.header(header::CONTENT_TYPE, "application/json").header(header::CONTENT_LENGTH, body.len());
         }
@@ -249,7 +252,7 @@ impl Connection {
 pub(crate) async fn get_json(connector: &Connector, url: &UpstreamUrl, path: &str, key: Option<&str>, limit: usize, timeout: Duration) -> Result<serde_json::Value, String> {
     let fetch = async {
         let conn = connector.open(url).await.map_err(|e| e.0)?;
-        let (response, _task) = conn.send(Method::GET, path, key, None, bytes::Bytes::new()).await?;
+        let (response, _task) = conn.send(Method::GET, path, key, None, None, bytes::Bytes::new()).await?;
         if response.status() != StatusCode::OK {
             return Err(format!("{path}: HTTP {}", response.status()));
         }

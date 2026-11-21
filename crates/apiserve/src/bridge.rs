@@ -520,6 +520,7 @@ pub async fn submit(state: &AppState, call: Admitted) -> Result<Outcome, ApiErro
     match res {
         Ok(Ok(outcome)) => {
             log_request_tokens(&state.exec, model, &outcome);
+            crate::health::count_served(&outcome);
             pending.settle(CallResult::Done(&outcome))?;
             Ok(outcome)
         }
@@ -757,6 +758,7 @@ impl StreamedJob<'_> {
                 let msg = match r {
                     Ok(outcome) => {
                         log_request_tokens(&exec_for_log, &model, &outcome);
+                        crate::health::count_served(&outcome);
                         match pending.settle(CallResult::Done(&outcome)) {
                             Ok(()) => StreamMsg::Done(outcome),
                             Err(refusal) => StreamMsg::Err(refusal),

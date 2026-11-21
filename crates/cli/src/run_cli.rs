@@ -140,11 +140,18 @@ ROUTING ACROSS SERVERS  (one URL for every card of a cluster)
                          the one with the least load for its slots. An upstream
                          is in rotation while its /health and /models answer; a
                          request is retried elsewhere only if its connection never
-                         opened; when every upstream is full it is refused with
-                         503 and Retry-After. GET /v1/models lists every upstream's
-                         models once; POST /v1/upstreams/N/drain and .../resume take
-                         upstream N (0-based) out of rotation and back (an admin
-                         caller only, with --caller).
+                         opened. Requests carrying the same prompt_cache_key stay
+                         on one upstream. An upstream is sent at most its decode
+                         slots at once; past every upstream's, a request waits in
+                         the router (FIFO per model) for at most
+                         --admit-deadline-ms (then 429), and past --route-queue
+                         waiting requests it is refused with 503. GET /v1/models
+                         lists every upstream's models and adapters once; GET
+                         /v1/metrics (or /v1/health) reports per upstream in-flight,
+                         capacity, queue depth, recent tok/s and prefix-hit rate,
+                         and the fleet totals; POST /v1/upstreams/N/drain and
+                         .../resume take upstream N (0-based) out of rotation and
+                         back (an admin caller only, with --caller).
   --upstreams-file FILE  upstream URLs, one per line (# comments)
   --upstream-key-file FILE  the key the router presents to every upstream (start
                          the upstreams with --api-key-file holding the same key).
@@ -155,6 +162,8 @@ ROUTING ACROSS SERVERS  (one URL for every card of a cluster)
   --upstream-timeout-ms N  how long an upstream may take to start answering a
                          request (default 1860000)
   --upstream-health-ms N how often every upstream is probed (default 2000)
+  --route-queue N        requests that may wait in the router for a free slot
+                         (default 1024)
 
 D-BUS CONTROL SURFACE
   --dbus                 serve com.swedishembedded.Brain1 on the session bus
@@ -1062,6 +1071,7 @@ pub fn run_serve(args: &[String]) {
             "--upstream-key-file" => upstream.key_file = Some(PathBuf::from(val(args, &mut i, "--upstream-key-file"))),
             "--upstream-ca" => upstream.ca = Some(PathBuf::from(val(args, &mut i, "--upstream-ca"))),
             "--upstream-timeout-ms" => upstream.timeout_ms = Some(positive_ms(args, &mut i, "--upstream-timeout-ms").as_millis() as u64),
+            "--route-queue" => upstream.queue = Some(parsed(args, &mut i, "--route-queue")),
             "--upstream-health-ms" => upstream.health_ms = Some(positive_ms(args, &mut i, "--upstream-health-ms").as_millis() as u64),
             "--tokenizer" => qwen_cfg.tokenizer = Some(val(args, &mut i, "--tokenizer")),
             "--ready-file" => ready_file = Some(val(args, &mut i, "--ready-file")),
@@ -1153,7 +1163,7 @@ pub fn run_serve(args: &[String]) {
             eprintln!("brain serve: {flag} serves models in this process; a router (--upstream) serves its upstreams' models over the OpenAI dialect only");
             std::process::exit(2);
         }
-        let fleet = upstream.fleet(insecure_plaintext).unwrap_or_else(|e| {
+        let fleet = upstream.fleet(insecure_plaintext, deadlines.admit).unwrap_or_else(|e| {
             eprintln!("brain serve: {e}");
             std::process::exit(2);
         });

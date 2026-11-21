@@ -195,11 +195,13 @@ on the command line instead.
   its history returns to the server that holds it; otherwise to the upstream
   with the least load for its decode slots. It is the same policy as for
   [replicas on several cards](#serving-on-several-cards), with each server as a
-  replica. Embeddings, images and speech go by load alone.
-- **Health.** Every upstream's `/v1/health` (its decode slots and the requests
-  it admits at once) and `/v1/models` are read every `--upstream-health-ms`
-  (default 2000). An upstream is in rotation while both answer; one that a
-  request cannot connect to is taken out at once.
+  replica. Requests that carry the same `prompt_cache_key` (OpenAI's routing
+  hint for a conversation) stay on one upstream while it has a free slot.
+  Embeddings, images and speech go by load alone.
+- **Health.** Every upstream's `/v1/health` (its decode slots, its own queue
+  and what it has served) and `/v1/models` are read every
+  `--upstream-health-ms` (default 2000). An upstream is in rotation while both
+  answer; one that a request cannot connect to is taken out at once.
 - **Models.** `GET /v1/models` lists every model any upstream in rotation
   serves, once; a request goes only to upstreams that list its `model`
   (adapters included, since a served adapter is listed as a model). A model no
@@ -213,10 +215,19 @@ on the command line instead.
   connection could not be opened, so nothing of it was sent. A failure after it
   was sent is answered with 502 and no `Retry-After`: the request may have
   run, and only the client knows whether sending it again is safe.
-- **Backpressure.** An upstream is sent at most the requests its own edge
-  admits; when every upstream serving the model is full, the request is refused
-  at once with 503 and `Retry-After`, never queued in the router. A server's own
-  429 and 503 pass through with their `Retry-After`.
+- **Admission.** An upstream is sent at most as many requests as it decodes at
+  once, so the fleet's edge is the sum of its decode slots. Past that, a
+  request waits in the router, first come first served per model, for at most
+  `--admit-deadline-ms` (then 429); a client that hangs up leaves the queue.
+  Past `--route-queue` waiting requests (default 1024) it is refused at once
+  with 503. Both carry `Retry-After`, and a server's own 429 and 503 pass
+  through with theirs.
+- **Metrics.** `GET /v1/metrics` (the same report as `/v1/health`) gives, per
+  upstream, `in_flight`, `capacity`, `queue_depth`, `tokens_per_s` and
+  `prefix_hit_rate` (cached prompt tokens over prompt tokens between the last
+  two probes), and the fleet's `capacity`, `in_flight`, `queued` and
+  `tokens_per_s`: a client keeps `capacity` requests in flight to saturate the
+  fleet. Every response carries the `X-Request-Id` the upstream was sent.
 - **Streaming.** Responses stream through unbuffered; a client that hangs up
   closes its upstream connection, which cancels the generation there.
 

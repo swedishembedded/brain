@@ -719,7 +719,7 @@ train_body() { # train_body <extra params json fragment, with a leading comma or
   [ "$st" -eq 401 ]
   get_url openai /v1/health
   [ "$STATUS" -eq 200 ]
-  jq -e '.status == "ok" and .decode_slots >= 1 and .edge_concurrency >= .decode_slots and (keys | sort == ["decode_slots","edge_concurrency","status"])' "$RESP"
+  jq -e '.status == "ok" and .decode_slots >= 1 and .edge_concurrency >= .decode_slots and .queue_depth >= 0 and (.served | keys | sort == ["cached_prompt_tokens","completion_tokens","prompt_tokens","requests"]) and (keys | sort == ["decode_slots","edge_concurrency","queue_depth","served","status"])' "$RESP"
 }
 
 @test "training: it is offered like any model, with no param that names a path" {

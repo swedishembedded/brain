@@ -30,16 +30,21 @@
 //! - **A request is sent at most once.** It moves to another upstream only when the connection to the chosen one could
 //!   not be opened, so no byte of it was sent. Once sent, a failure is the client's answer (502), because the
 //!   generation may have run.
-//! - **Load is bounded, not queued.** An upstream takes at most the requests its own edge admits (`edge_concurrency`
-//!   in its `/health`); past that on every upstream the request is refused at once with 503 and `Retry-After`.
+//! - **The fleet's edge is the sum of its decode slots.** An upstream is sent at most as many requests as it decodes at
+//!   once (`decode_slots` in its `/health`). Past that on every upstream serving the model a request waits in the
+//!   router, in arrival order per model, for at most [`FleetConfig::queue_deadline`] (then 429); a request whose client
+//!   goes away leaves the queue. Past [`FleetConfig::queue_bound`] waiting requests it is refused at once with 503. Both
+//!   carry `Retry-After`.
+//! - **Conversations stay together.** Requests carrying the same `prompt_cache_key` (OpenAI's routing hint) go to
+//!   the same upstream while it has a free slot; without one, the prefix decides.
 //! - **Only what is known is forwarded.** The JSON body is forwarded byte for byte after its top level is checked; the
-//!   upstream sees only `Host`, `Content-Type`, `Content-Length`, `Accept` and the router's own upstream key, never the
-//!   client's key or any other header. The client sees only the upstream's status, `Content-Type`, `Cache-Control`,
-//!   `Retry-After` and body.
+//!   upstream sees only `Host`, `Content-Type`, `Content-Length`, `Accept`, the router's `X-Request-Id` for the request
+//!   and the router's own upstream key, never the client's key or any other header. The client sees only the
+//!   upstream's status, `Content-Type`, `Cache-Control`, `Retry-After` and body, and the same `X-Request-Id`.
 
 mod upstream;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -108,11 +113,16 @@ pub struct FleetConfig {
     /// Prompts remembered per upstream for prefix affinity: the bound of the router's record of each upstream's
     /// prefix cache.
     pub cached_prompts: usize,
+    /// Requests that may wait in the router for a free decode slot; one more is refused with 503.
+    pub queue_bound: usize,
+    /// How long a request may wait in the router for a slot before it is refused with 429.
+    pub queue_deadline: Duration,
 }
 
 impl FleetConfig {
-    /// `upstreams` with the default timeouts: 5 s to connect, 31 min for an answer (an upstream may queue a request up
-    /// to its own admit deadline before it starts), health every 2 s, 256 prompts remembered per upstream.
+    /// `upstreams` with the defaults: 5 s to connect, 31 min for an answer to start (a long prefill on a busy
+    /// upstream), health every 2 s, 256 prompts remembered per upstream, 1024 requests waiting at most, each for at most
+    /// the serving surfaces' admit deadline.
     pub fn new(upstreams: Vec<UpstreamUrl>) -> FleetConfig {
         FleetConfig {
             upstreams,
@@ -122,7 +132,14 @@ impl FleetConfig {
             response_timeout: Duration::from_secs(31 * 60),
             health_interval: Duration::from_secs(2),
             cached_prompts: 256,
+            queue_bound: 1024,
+            queue_deadline: crate::DEFAULT_ADMIT_DEADLINE,
         }
+    }
+    pub fn with_queue(mut self, bound: usize, deadline: Duration) -> FleetConfig {
+        self.queue_bound = bound;
+        self.queue_deadline = deadline;
+        self
     }
     pub fn with_upstream_key(mut self, key: Option<String>) -> FleetConfig {
         self.upstream_key = key;
@@ -149,10 +166,10 @@ impl FleetConfig {
 /// What the last good probe of an upstream said.
 #[derive(Default)]
 struct Advertised {
-    /// Requests it decodes at once.
+    /// Requests it decodes at once: the most the router sends it at once.
     slots: usize,
-    /// Requests it admits at once before shedding.
-    ceiling: usize,
+    /// Jobs waiting for a lane on the upstream itself.
+    queue_depth: usize,
     /// The model cards it lists, and their ids.
     cards: Vec<Value>,
     ids: HashSet<String>,
@@ -167,6 +184,24 @@ pub struct Member {
     draining: AtomicBool,
     in_flight: AtomicUsize,
     advertised: RwLock<Advertised>,
+    /// The upstream's cumulative served counters at the last two good probes, for its recent rates.
+    readings: Mutex<Readings>,
+}
+
+/// Two readings of an upstream's served counters, the rates between them.
+#[derive(Default)]
+struct Readings {
+    last: Option<(std::time::Instant, Served)>,
+    tokens_per_s: f64,
+    prefix_hit_rate: Option<f64>,
+}
+
+/// An upstream's cumulative served counters (`/v1/health`'s `served`).
+#[derive(Clone, Copy, Default)]
+struct Served {
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    cached_prompt_tokens: u64,
 }
 
 impl Member {
@@ -175,12 +210,14 @@ impl Member {
     }
 }
 
-/// One request held by an upstream: its load, given back when the response ends or is dropped.
-struct InFlight(Arc<Member>);
+/// One request held by an upstream: its load, given back when the response ends or is dropped, which wakes the
+/// requests waiting for a slot.
+struct InFlight(Arc<Member>, Arc<tokio::sync::Notify>);
 
 impl Drop for InFlight {
     fn drop(&mut self) {
         self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
+        self.1.notify_waiters();
     }
 }
 
@@ -191,8 +228,68 @@ enum Pick {
     UnknownModel,
     /// Upstreams list the model, but none is in rotation now.
     NoneAvailable,
-    /// Every upstream that could take it holds all it admits.
+    /// Every upstream that could take it holds as many requests as it decodes at once.
     Saturated,
+}
+
+/// Why a request did not get an upstream.
+enum Refusal {
+    UnknownModel,
+    NoneAvailable,
+    /// The router's queue holds [`FleetConfig::queue_bound`] requests already.
+    QueueFull,
+    /// It waited [`FleetConfig::queue_deadline`] without a slot.
+    Deadline,
+}
+
+/// The requests waiting for a slot, in arrival order, each with the model it asks for.
+#[derive(Default)]
+struct Waiting {
+    next: u64,
+    queue: std::collections::BTreeMap<u64, String>,
+}
+
+/// The longest session key (`prompt_cache_key`) a request may carry, and how many sessions are remembered.
+const MAX_SESSION_KEY_BYTES: usize = 256;
+const MAX_SESSIONS: usize = 65536;
+
+/// Which upstream each recent session went to, oldest forgotten first.
+#[derive(Default)]
+struct Sessions {
+    upstream: HashMap<String, (usize, u64)>,
+    order: std::collections::BTreeMap<u64, String>,
+    clock: u64,
+}
+
+impl Sessions {
+    fn get(&self, key: &str) -> Option<usize> {
+        self.upstream.get(key).map(|&(i, _)| i)
+    }
+    fn record(&mut self, key: &str, index: usize) {
+        self.clock += 1;
+        if let Some((_, stamp)) = self.upstream.insert(key.to_string(), (index, self.clock)) {
+            self.order.remove(&stamp);
+        }
+        self.order.insert(self.clock, key.to_string());
+        while self.upstream.len() > MAX_SESSIONS {
+            let Some((_, oldest)) = self.order.pop_first() else { break };
+            self.upstream.remove(&oldest);
+        }
+    }
+}
+
+/// A request's place in the router's queue, given up when it gets a slot, gives up, or its client goes away.
+struct Ticket<'a> {
+    fleet: &'a Fleet,
+    id: u64,
+}
+
+impl Drop for Ticket<'_> {
+    fn drop(&mut self) {
+        self.fleet.waiting.lock().unwrap_or_else(std::sync::PoisonError::into_inner).queue.remove(&self.id);
+        // The next request for the same models may now be first.
+        self.fleet.changed.notify_waiters();
+    }
 }
 
 /// The upstreams one router fronts, their state, and the record of which prompts went where.
@@ -204,6 +301,12 @@ pub struct Fleet {
     key: Option<String>,
     response_timeout: Duration,
     health_interval: Duration,
+    /// Requests waiting for a slot, and the signal that one may have freed (a response ended, a probe answered).
+    waiting: Mutex<Waiting>,
+    changed: Arc<tokio::sync::Notify>,
+    queue_bound: usize,
+    queue_deadline: Duration,
+    sessions: Mutex<Sessions>,
 }
 
 impl std::fmt::Debug for Fleet {
@@ -232,13 +335,13 @@ impl Fleet {
         if config.upstream_key.as_deref().is_some_and(|k| k.is_empty() || k.chars().any(|c| c.is_control() || c.is_whitespace())) {
             return Err("the upstream key is empty or holds whitespace".into());
         }
-        if config.connect_timeout.is_zero() || config.response_timeout.is_zero() || config.health_interval.is_zero() {
+        if config.connect_timeout.is_zero() || config.response_timeout.is_zero() || config.health_interval.is_zero() || config.queue_deadline.is_zero() {
             return Err("timeouts and the health interval are positive".into());
         }
         let members: Vec<Arc<Member>> = config
             .upstreams
             .into_iter()
-            .map(|url| Arc::new(Member { url, healthy: AtomicBool::new(false), probed: AtomicBool::new(false), draining: AtomicBool::new(false), in_flight: AtomicUsize::new(0), advertised: RwLock::default() }))
+            .map(|url| Arc::new(Member { url, healthy: AtomicBool::new(false), probed: AtomicBool::new(false), draining: AtomicBool::new(false), in_flight: AtomicUsize::new(0), advertised: RwLock::default(), readings: Mutex::default() }))
             .collect();
         let directories = Mutex::new(members.iter().map(|_| PrefixDirectory::new(config.cached_prompts)).collect());
         Ok(Arc::new(Fleet {
@@ -248,6 +351,11 @@ impl Fleet {
             key: config.upstream_key,
             response_timeout: config.response_timeout,
             health_interval: config.health_interval,
+            waiting: Mutex::default(),
+            changed: Arc::new(tokio::sync::Notify::new()),
+            queue_bound: config.queue_bound,
+            queue_deadline: config.queue_deadline,
+            sessions: Mutex::default(),
         }))
     }
 
@@ -258,7 +366,9 @@ impl Fleet {
 
     /// Put a drained upstream `index` back in rotation. `false` when there is no such upstream.
     pub fn resume(&self, index: usize) -> bool {
-        self.members.get(index).map(|m| m.draining.store(false, Ordering::SeqCst)).is_some()
+        let found = self.members.get(index).map(|m| m.draining.store(false, Ordering::SeqCst)).is_some();
+        self.changed.notify_waiters();
+        found
     }
 
     /// Whether some upstream is in rotation.
@@ -266,30 +376,54 @@ impl Fleet {
         self.members.iter().any(|m| m.healthy.load(Ordering::SeqCst) && !m.draining.load(Ordering::SeqCst))
     }
 
-    /// The fleet as `GET /health` reports it: per upstream (by index; addresses stay with the operator) whether it is
-    /// healthy or draining, what it holds and what it takes.
+    /// The fleet as `GET /health` reports it, for a harness sizing its concurrency: per upstream (by index; addresses
+    /// stay with the operator) whether it is healthy or draining, the requests it holds (`in_flight`), the most it is
+    /// sent at once (`capacity`, its decode slots), the jobs waiting on it (`queue_depth`), and its recent completion
+    /// token rate and prefix-cache hit rate between the last two probes; then the fleet's totals and the requests
+    /// waiting in the router (`queued`).
     pub fn status(&self) -> Value {
+        let routable = |m: &Member| m.healthy.load(Ordering::SeqCst) && !m.draining.load(Ordering::SeqCst);
+        let (mut capacity, mut in_flight, mut upstream_queued, mut rate) = (0usize, 0usize, 0usize, 0f64);
         let upstreams: Vec<Value> = self
             .members
             .iter()
             .enumerate()
             .map(|(index, m)| {
                 let adv = m.advertised();
+                let readings = m.readings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let held = m.in_flight.load(Ordering::SeqCst);
+                in_flight += held;
+                if routable(m) {
+                    capacity += adv.slots;
+                    upstream_queued += adv.queue_depth;
+                    rate += readings.tokens_per_s;
+                }
                 json!({
                     "index": index,
                     "healthy": m.healthy.load(Ordering::SeqCst),
                     "draining": m.draining.load(Ordering::SeqCst),
-                    "in_flight": m.in_flight.load(Ordering::SeqCst),
-                    "decode_slots": adv.slots,
+                    "in_flight": held,
+                    "capacity": adv.slots,
+                    "queue_depth": adv.queue_depth,
+                    "tokens_per_s": readings.tokens_per_s,
+                    "prefix_hit_rate": readings.prefix_hit_rate,
                     "models": adv.ids.len(),
                 })
             })
             .collect();
-        let routable = |m: &&Arc<Member>| m.healthy.load(Ordering::SeqCst) && !m.draining.load(Ordering::SeqCst);
-        let slots: usize = self.members.iter().filter(routable).map(|m| m.advertised().slots).sum();
-        let ceiling: usize = self.members.iter().filter(routable).map(|m| m.advertised().ceiling).sum();
+        let queued = self.waiting.lock().unwrap_or_else(std::sync::PoisonError::into_inner).queue.len();
         let status = if self.available() { "ok" } else { "unavailable" };
-        json!({"status": status, "decode_slots": slots, "edge_concurrency": ceiling, "upstreams": upstreams})
+        json!({
+            "status": status,
+            "decode_slots": capacity,
+            "capacity": capacity,
+            "in_flight": in_flight,
+            "queued": queued,
+            "queue_bound": self.queue_bound,
+            "upstream_queue_depth": upstream_queued,
+            "tokens_per_s": rate,
+            "upstreams": upstreams,
+        })
     }
 
     /// Read every upstream's health and model listing once, concurrently, and put each in or out of rotation by the
@@ -307,8 +441,10 @@ impl Fleet {
             parse_advertised(&health, &listing)
         };
         match read.await {
-            Ok(advertised) => {
+            Ok((advertised, served)) => {
                 *member.advertised.write().unwrap_or_else(std::sync::PoisonError::into_inner) = advertised;
+                member.readings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).read(served);
+                self.changed.notify_waiters();
                 member.probed.store(true, Ordering::SeqCst);
                 if !member.healthy.swap(true, Ordering::SeqCst) {
                     eprintln!("brain route: upstream {index} ({}) is in rotation", member.url);
@@ -344,7 +480,7 @@ impl Fleet {
 
     /// The upstream that runs a request for `model` keyed by `chain` (see the module doc), with one of its slots
     /// taken. `excluded` upstreams failed to connect for this request.
-    fn pick(&self, model: &str, chain: &PrefixChain, excluded: &[bool]) -> Pick {
+    fn pick(&self, model: &str, chain: &PrefixChain, session: Option<&str>, excluded: &[bool]) -> Pick {
         let mut directories = self.directories.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let (mut known, mut open, mut candidates) = (false, Vec::new(), 0usize);
         for (i, m) in self.members.iter().enumerate() {
@@ -356,7 +492,7 @@ impl Fleet {
             }
             candidates += 1;
             let load = m.in_flight.load(Ordering::SeqCst);
-            if load < adv.ceiling {
+            if load < adv.slots {
                 open.push((i, ReplicaView { load, slots: adv.slots, active: true, can_run: true, matched: directories[i].matched(chain) }));
             }
         }
@@ -366,26 +502,77 @@ impl Fleet {
         if open.is_empty() {
             return Pick::Saturated;
         }
-        let views: Vec<ReplicaView> = open.iter().map(|&(_, v)| v).collect();
-        let chosen = open[choose_replica(&views)].0;
+        let mut sessions = self.sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A session goes back to its upstream while that one has a free slot; otherwise the policy chooses, and the
+        // session follows.
+        let sticky = session.and_then(|key| sessions.get(key)).filter(|i| open.iter().any(|(o, _)| o == i));
+        let chosen = sticky.unwrap_or_else(|| {
+            let views: Vec<ReplicaView> = open.iter().map(|&(_, v)| v).collect();
+            open[choose_replica(&views)].0
+        });
+        if let Some(key) = session {
+            sessions.record(key, chosen);
+        }
         directories[chosen].record(chain);
         let member = self.members[chosen].clone();
         member.in_flight.fetch_add(1, Ordering::SeqCst);
-        Pick::Chosen(chosen, InFlight(member))
+        Pick::Chosen(chosen, InFlight(member, self.changed.clone()))
+    }
+
+    /// An upstream for a request, waiting in the router's queue while every upstream that serves its model holds as
+    /// many requests as it decodes at once. Requests for one model get slots in arrival order; a request whose client
+    /// goes away leaves the queue with it (this future is dropped).
+    async fn admit(&self, model: &str, chain: &PrefixChain, session: Option<&str>, excluded: &[bool]) -> Result<(usize, InFlight), Refusal> {
+        let deadline = tokio::time::Instant::now() + self.queue_deadline;
+        let mut ticket: Option<Ticket<'_>> = None;
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            let first = {
+                let waiting = self.waiting.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mine = ticket.as_ref().map_or(u64::MAX, |t| t.id);
+                !waiting.queue.iter().any(|(&id, m)| id < mine && m == model)
+            };
+            if first {
+                match self.pick(model, chain, session, excluded) {
+                    Pick::Chosen(index, held) => return Ok((index, held)),
+                    Pick::UnknownModel => return Err(Refusal::UnknownModel),
+                    Pick::NoneAvailable => return Err(Refusal::NoneAvailable),
+                    Pick::Saturated => {}
+                }
+            }
+            if ticket.is_none() {
+                let mut waiting = self.waiting.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if waiting.queue.len() >= self.queue_bound {
+                    return Err(Refusal::QueueFull);
+                }
+                waiting.next += 1;
+                let id = waiting.next;
+                waiting.queue.insert(id, model.to_string());
+                ticket = Some(Ticket { fleet: self, id });
+                continue;
+            }
+            tokio::select! {
+                _ = &mut changed => {}
+                _ = tokio::time::sleep_until(deadline) => return Err(Refusal::Deadline),
+            }
+        }
     }
 }
 
 /// The upstream's answers to `/v1/health` and `/v1/models`, checked: they come from another process and bound what
 /// this one allocates.
-fn parse_advertised(health: &Value, listing: &Value) -> Result<Advertised, String> {
-    let count = |field: &str| health.get(field).and_then(Value::as_u64).filter(|&n| (1..=MAX_ADVERTISED_SLOTS).contains(&n)).map(|n| n as usize);
-    let slots = count("decode_slots").ok_or("its /v1/health names no decode_slots in range")?;
-    let ceiling = count("edge_concurrency").unwrap_or(slots.saturating_mul(2)).max(1);
+fn parse_advertised(health: &Value, listing: &Value) -> Result<(Advertised, Served), String> {
+    let slots = health.get("decode_slots").and_then(Value::as_u64).filter(|&n| (1..=MAX_ADVERTISED_SLOTS).contains(&n)).ok_or("its /v1/health names no decode_slots in range")? as usize;
+    let queue_depth = health.get("queue_depth").and_then(Value::as_u64).unwrap_or(0).min(MAX_ADVERTISED_SLOTS) as usize;
+    let counter = |name: &str| health.get("served").and_then(|s| s.get(name)).and_then(Value::as_u64).unwrap_or(0);
+    let served = Served { prompt_tokens: counter("prompt_tokens"), completion_tokens: counter("completion_tokens"), cached_prompt_tokens: counter("cached_prompt_tokens") };
     let data = listing.get("data").and_then(Value::as_array).ok_or("its /v1/models has no data list")?;
     if data.len() > MAX_LISTED_MODELS {
         return Err(format!("it lists more than {MAX_LISTED_MODELS} models"));
     }
-    let mut adv = Advertised { slots, ceiling, ..Advertised::default() };
+    let mut adv = Advertised { slots, queue_depth, ..Advertised::default() };
     for card in data {
         let Some(id) = card.get("id").and_then(Value::as_str).filter(|id| valid_model_id(id)) else {
             return Err("it lists a model whose id is not a plain string".into());
@@ -394,7 +581,30 @@ fn parse_advertised(health: &Value, listing: &Value) -> Result<Advertised, Strin
             adv.cards.push(card.clone());
         }
     }
-    Ok(adv)
+    Ok((adv, served))
+}
+
+impl Readings {
+    /// Take a new reading: the rates are over the time since the last one. A counter that went back (the upstream
+    /// restarted) starts the rates over.
+    fn read(&mut self, now: Served) {
+        let at = std::time::Instant::now();
+        if let Some((then, before)) = self.last {
+            let secs = at.duration_since(then).as_secs_f64();
+            let completion = now.completion_tokens.checked_sub(before.completion_tokens);
+            let prompt = now.prompt_tokens.checked_sub(before.prompt_tokens);
+            let cached = now.cached_prompt_tokens.checked_sub(before.cached_prompt_tokens);
+            if let (Some(completion), Some(prompt), Some(cached)) = (completion, prompt, cached) {
+                if secs > 0.0 {
+                    self.tokens_per_s = completion as f64 / secs;
+                }
+                if prompt > 0 {
+                    self.prefix_hit_rate = Some(cached as f64 / prompt as f64);
+                }
+            }
+        }
+        self.last = Some((at, now));
+    }
 }
 
 fn valid_model_id(id: &str) -> bool {
@@ -478,6 +688,8 @@ pub fn router(fleet: Arc<Fleet>, authenticator: Arc<dyn Authenticator>) -> Route
         .route("/v1/models/{id}", get(one_model))
         .route("/health", get(health))
         .route("/v1/health", get(health))
+        .route("/metrics", get(health))
+        .route("/v1/metrics", get(health))
         .route("/v1/upstreams/{index}/drain", post(drain))
         .route("/v1/upstreams/{index}/resume", post(resume));
     for (path, keyed) in FORWARDED {
@@ -572,6 +784,12 @@ async fn forward(State(state): State<RouteState>, Extension(principal): Extensio
         Err(e) => return e.into_response(),
     };
     let chain = request_chain(&head, &model, keyed);
+    // OpenAI's routing hint for a conversation: requests that carry the same key go to the same upstream.
+    let session = match head.get("prompt_cache_key").map(|raw| serde_json::from_str::<String>(raw.get())) {
+        None => None,
+        Some(Ok(key)) if !key.is_empty() && key.len() <= MAX_SESSION_KEY_BYTES => Some(format!("{model}\u{1f}{key}")),
+        Some(_) => return ApiError::invalid_request(PROVIDER, format!("prompt_cache_key must be a string of 1 to {MAX_SESSION_KEY_BYTES} bytes")).into_response(),
+    };
     drop(head);
     // A named caller holds at most its own share in flight, as on a serving surface.
     let caller_slot = match Caller::of(Some(&principal)) {
@@ -582,14 +800,17 @@ async fn forward(State(state): State<RouteState>, Extension(principal): Extensio
         None => None,
     };
     let accept = headers.get(header::ACCEPT).filter(|v| v.to_str().is_ok_and(|s| s.len() <= 256)).cloned();
+    // One id per request, of the router's making: the upstream sees it (its logs, a later dedup) and so does the client.
+    let request_id = format!("route-{}", uuid::Uuid::new_v4().simple());
     let fleet = &state.fleet;
     let mut excluded = vec![false; fleet.members.len()];
     loop {
-        let (index, in_flight) = match fleet.pick(&model, &chain, &excluded) {
-            Pick::Chosen(index, in_flight) => (index, in_flight),
-            Pick::UnknownModel => return ApiError::model_not_found(PROVIDER, &model).into_response(),
-            Pick::NoneAvailable => return ApiError::saturated(PROVIDER, "no upstream serving this model is available").into_response(),
-            Pick::Saturated => return ApiError::saturated(PROVIDER, "every upstream serving this model is at capacity").into_response(),
+        let (index, in_flight) = match fleet.admit(&model, &chain, session.as_deref(), &excluded).await {
+            Ok(chosen) => chosen,
+            Err(Refusal::UnknownModel) => return ApiError::model_not_found(PROVIDER, &model).into_response(),
+            Err(Refusal::NoneAvailable) => return ApiError::saturated(PROVIDER, "no upstream serving this model is available").into_response(),
+            Err(Refusal::QueueFull) => return ApiError::saturated(PROVIDER, "every upstream serving this model is at capacity and the router's queue is full").into_response(),
+            Err(Refusal::Deadline) => return ApiError::overloaded(PROVIDER, "no upstream slot freed within the admit deadline").into_response(),
         };
         let member = &fleet.members[index];
         let conn = match fleet.connector.open(&member.url).await {
@@ -601,9 +822,15 @@ async fn forward(State(state): State<RouteState>, Extension(principal): Extensio
                 continue;
             }
         };
-        let sent = tokio::time::timeout(fleet.response_timeout, conn.send(Method::POST, path, fleet.key.as_deref(), accept.as_ref(), body.clone())).await;
+        let sent = tokio::time::timeout(fleet.response_timeout, conn.send(Method::POST, path, fleet.key.as_deref(), accept.as_ref(), Some(&request_id), body.clone())).await;
         return match sent {
-            Ok(Ok((response, task))) => relay(response, (task, in_flight, caller_slot)),
+            Ok(Ok((response, task))) => {
+                let mut out = relay(response, (task, in_flight, caller_slot));
+                if let Ok(id) = axum::http::HeaderValue::from_str(&request_id) {
+                    out.headers_mut().insert("x-request-id", id);
+                }
+                out
+            }
             Ok(Err(why)) => {
                 eprintln!("brain route: upstream {index} ({}) failed a sent request: {why}", member.url);
                 ApiError::bad_gateway(PROVIDER, "the upstream failed after the request was sent; it may have run").into_response()

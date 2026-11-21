@@ -26,6 +26,8 @@ pub(crate) struct UpstreamFlags {
     pub ca: Option<PathBuf>,
     pub timeout_ms: Option<u64>,
     pub health_ms: Option<u64>,
+    /// `--route-queue N`: the requests that may wait in the router for a slot.
+    pub queue: Option<usize>,
 }
 
 impl UpstreamFlags {
@@ -36,15 +38,15 @@ impl UpstreamFlags {
 
     /// Whether a flag that only a router reads was given.
     pub fn any_given(&self) -> bool {
-        self.routing() || self.key_file.is_some() || self.ca.is_some() || self.timeout_ms.is_some() || self.health_ms.is_some()
+        self.routing() || self.key_file.is_some() || self.ca.is_some() || self.timeout_ms.is_some() || self.health_ms.is_some() || self.queue.is_some()
     }
 
-    /// The fleet these flags name.
+    /// The fleet these flags name; a request waits in the router's queue for at most `queue_deadline`.
     ///
     /// # Errors
     /// A malformed URL or upstreams file, an unreadable key or CA file, a plaintext upstream off this machine without
     /// `insecure_plaintext`, or a fleet [`Fleet::new`] refuses.
-    pub fn fleet(&self, insecure_plaintext: bool) -> Result<Arc<Fleet>, String> {
+    pub fn fleet(&self, insecure_plaintext: bool, queue_deadline: Duration) -> Result<Arc<Fleet>, String> {
         let mut upstreams = Vec::new();
         for url in &self.urls {
             upstreams.extend(url.split(',').filter(|u| !u.trim().is_empty()).map(UpstreamUrl::parse).collect::<Result<Vec<_>, _>>()?);
@@ -57,6 +59,8 @@ impl UpstreamFlags {
         let key = self.key_file.as_deref().map(|f| apiserve::surface::read_key_file(f).map_err(|e| format!("--upstream-key-file {e}"))).transpose()?;
         let tls = self.ca.as_deref().map(UpstreamTls::from_pem_file).transpose()?;
         let mut config = FleetConfig::new(upstreams).with_upstream_key(key).with_upstream_tls(tls);
+        let bound = self.queue.unwrap_or(config.queue_bound);
+        config = config.with_queue(bound, queue_deadline);
         if let Some(ms) = self.timeout_ms {
             config = config.with_response_timeout(Duration::from_millis(ms));
         }
@@ -122,13 +126,13 @@ mod tests {
         std::fs::write(&file, "# fleet\nhttp://127.0.0.1:9002\n\nhttp://127.0.0.1:9003\n").unwrap();
         let flags = UpstreamFlags { urls: vec!["http://127.0.0.1:9000,http://127.0.0.1:9001".into()], files: vec![file.clone()], ..UpstreamFlags::default() };
         assert!(flags.routing());
-        let fleet = flags.fleet(false).expect("four loopback upstreams");
+        let fleet = flags.fleet(false, Duration::from_secs(1)).expect("four loopback upstreams");
         assert_eq!(fleet.status()["upstreams"].as_array().unwrap().len(), 4);
         let far = UpstreamFlags { urls: vec!["http://10.0.0.1:9000".into()], ..UpstreamFlags::default() };
-        assert!(far.fleet(false).unwrap_err().contains("--insecure-plaintext"));
-        assert!(far.fleet(true).is_ok());
+        assert!(far.fleet(false, Duration::from_secs(1)).unwrap_err().contains("--insecure-plaintext"));
+        assert!(far.fleet(true, Duration::from_secs(1)).is_ok());
         std::fs::write(&file, "http://127.0.0.1:9002/v1\n").unwrap();
         let bad = UpstreamFlags { files: vec![file], ..UpstreamFlags::default() };
-        assert!(bad.fleet(false).unwrap_err().contains("line 1"));
+        assert!(bad.fleet(false, Duration::from_secs(1)).unwrap_err().contains("line 1"));
     }
 }

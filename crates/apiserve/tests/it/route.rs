@@ -92,7 +92,9 @@ async fn mock_health(State(m): State<Arc<Mock>>, headers: HeaderMap) -> Response
     if !m.healthy.load(Ordering::SeqCst) {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
-    Json(json!({"status": "ok", "decode_slots": m.slots, "edge_concurrency": m.edge})).into_response()
+    let completion = 10 * m.count() as u64;
+    let served = json!({"requests": m.count(), "prompt_tokens": 2 * completion, "completion_tokens": completion, "cached_prompt_tokens": completion});
+    Json(json!({"status": "ok", "decode_slots": m.slots, "edge_concurrency": m.edge, "queue_depth": 0, "served": served})).into_response()
 }
 
 async fn mock_models(State(m): State<Arc<Mock>>) -> Json<Value> {
@@ -189,10 +191,19 @@ async fn black_hole(models: &[&str]) -> (Arc<AtomicUsize>, String) {
     (posts, format!("http://{addr}"))
 }
 
+/// The test fleet's configuration over `upstreams`: probed only when a test says so.
+fn config(upstreams: &[String]) -> FleetConfig {
+    let urls = upstreams.iter().map(|u| UpstreamUrl::parse(u).unwrap()).collect();
+    FleetConfig::new(urls).with_upstream_key(Some(UPSTREAM_KEY.into())).with_health_interval(Duration::from_secs(3600)).with_connect_timeout(Duration::from_secs(2))
+}
+
 /// A router over `upstreams`, probed once, serving on loopback.
 async fn router_with(upstreams: &[String], auth: Arc<dyn Authenticator>) -> (SocketAddr, Arc<Fleet>, brain_shutdown::Trigger) {
-    let urls = upstreams.iter().map(|u| UpstreamUrl::parse(u).unwrap()).collect();
-    let fleet = Fleet::new(FleetConfig::new(urls).with_upstream_key(Some(UPSTREAM_KEY.into())).with_health_interval(Duration::from_secs(3600)).with_connect_timeout(Duration::from_secs(2))).unwrap();
+    router_over(config(upstreams), auth).await
+}
+
+async fn router_over(config: FleetConfig, auth: Arc<dyn Authenticator>) -> (SocketAddr, Arc<Fleet>, brain_shutdown::Trigger) {
+    let fleet = Fleet::new(config).unwrap();
     fleet.probe().await;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -437,28 +448,117 @@ async fn the_listing_merges_every_upstream_and_a_model_goes_only_where_it_is_ser
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_full_fleet_refuses_at_once_with_retry_after() {
-    let (a, ua) = mock("a", 1, 2, &["m"]).await;
-    let (addr, _fleet, _stop) = router(&[ua]).await;
-    let mut held = Vec::new();
-    for n in 1..=2 {
+async fn past_the_fleets_slots_requests_wait_in_order_and_past_the_queue_bound_are_refused() {
+    let (a, ua) = mock("a", 1, 256, &["m"]).await;
+    let (addr, fleet, _stop) = router_over(config(&[ua]).with_queue(2, Duration::from_secs(30)), Arc::new(StaticKey::new(CLIENT_KEY))).await;
+    let held_body = |n: usize| {
         let mut body = conversation("m", "s", 1);
         body["hold"] = json!(true);
-        held.push(tokio::spawn(chat(addr, body)));
-        until("the request to land", || a.count() == n).await;
-    }
+        body["n"] = json!(n);
+        body
+    };
+    // One slot: the first runs, the next two wait in the router (the upstream sees only one).
+    let first = tokio::spawn(chat(addr, held_body(1)));
+    until("the first request to land", || a.count() == 1).await;
+    let second = tokio::spawn(chat(addr, held_body(2)));
+    until("the second to queue", || fleet.status()["queued"] == json!(1)).await;
+    let third = tokio::spawn(chat(addr, held_body(3)));
+    until("the third to queue", || fleet.status()["queued"] == json!(2)).await;
+    assert_eq!(a.count(), 1, "the upstream is sent no more than its decode slots");
+    let status = fleet.status();
+    assert_eq!((status["capacity"].clone(), status["in_flight"].clone(), status["upstreams"][0]["capacity"].clone()), (json!(1), json!(1), json!(1)));
+
+    // The queue is full: refused at once.
     let started = std::time::Instant::now();
     let (code, headers, body) = chat(addr, conversation("m", "s", 1)).await;
     assert_eq!(code, StatusCode::SERVICE_UNAVAILABLE);
     assert!(headers.contains_key("retry-after"));
-    assert!(body["error"]["message"].as_str().unwrap().contains("capacity"));
+    assert!(body["error"]["message"].as_str().unwrap().contains("queue"));
     assert!(started.elapsed() < Duration::from_secs(2), "refused, not queued");
-    assert_eq!(a.count(), 2, "the upstream never saw the refused request");
+
+    // Slots free one at a time, and the waiting requests take them in arrival order.
+    a.release.add_permits(1);
+    assert_eq!(first.await.unwrap().0, StatusCode::OK);
+    until("the second to be sent", || a.count() == 2).await;
+    assert_eq!(a.hits()[1].body["n"], 2, "first come, first served");
     a.release.add_permits(2);
-    for h in held {
-        assert_eq!(h.await.unwrap().0, StatusCode::OK);
+    assert_eq!(second.await.unwrap().0, StatusCode::OK);
+    assert_eq!(third.await.unwrap().0, StatusCode::OK);
+    assert_eq!(a.hits()[2].body["n"], 3);
+    assert_eq!(fleet.status()["queued"], json!(0));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_queued_request_leaves_at_its_deadline_or_when_its_client_goes_away() {
+    let (a, ua) = mock("a", 1, 256, &["m"]).await;
+    let (addr, fleet, _stop) = router_over(config(&[ua]).with_queue(8, Duration::from_millis(300)), Arc::new(StaticKey::new(CLIENT_KEY))).await;
+    let mut held = conversation("m", "s", 1);
+    held["hold"] = json!(true);
+    let first = tokio::spawn(chat(addr, held));
+    until("the first request to land", || a.count() == 1).await;
+    let (code, headers, _) = chat(addr, conversation("m", "s", 1)).await;
+    assert_eq!(code, StatusCode::TOO_MANY_REQUESTS, "no slot within the deadline");
+    assert!(headers.contains_key("retry-after"));
+    assert_eq!(fleet.status()["queued"], json!(0));
+
+    // A client that hangs up while queued leaves the queue and is never sent.
+    let gone = tokio::spawn(chat(addr, conversation("m", "s", 1)));
+    until("it to queue", || fleet.status()["queued"] == json!(1)).await;
+    gone.abort();
+    until("it to leave the queue", || fleet.status()["queued"] == json!(0)).await;
+    a.release.add_permits(1);
+    assert_eq!(first.await.unwrap().0, StatusCode::OK);
+    assert_eq!(a.count(), 1, "the abandoned request was never sent");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_key_keeps_a_conversation_on_one_upstream() {
+    let (a, ua) = mock("a", 8, 16, &["m"]).await;
+    let (b, ub) = mock("b", 8, 16, &["m"]).await;
+    let (addr, _fleet, _stop) = router(&[ua, ub]).await;
+    // Short prompts share no useful prefix, so without a key every idle request goes to the first upstream on a tie.
+    let mut held = conversation("m", "s", 1);
+    held["hold"] = json!(true);
+    let busy = tokio::spawn(chat(addr, held));
+    until("a to be busy", || a.count() == 1).await;
+    let mut keyed = conversation("m", "s", 1);
+    keyed["prompt_cache_key"] = json!("session-7");
+    assert_eq!(chat(addr, keyed.clone()).await.2["upstream"], "b", "least loaded");
+    a.release.add_permits(1);
+    busy.await.unwrap();
+    for _ in 0..3 {
+        assert_eq!(chat(addr, keyed.clone()).await.2["upstream"], "b", "the session stays where it started");
+        assert_eq!(chat(addr, conversation("m", "s", 1)).await.2["upstream"], "a");
     }
-    assert_eq!(chat(addr, conversation("m", "s", 1)).await.0, StatusCode::OK, "capacity is given back when a response ends");
+    keyed["prompt_cache_key"] = json!(7);
+    assert_eq!(chat(addr, keyed).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(b.hits().iter().filter(|h| h.body["prompt_cache_key"] == "session-7").count(), 4, "the key is forwarded");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_adapter_is_routed_only_to_the_upstreams_serving_it_and_the_status_reports_rates() {
+    let (a, ua) = mock("a", 8, 16, &["base", "base:tuned-a"]).await;
+    let (b, ub) = mock("b", 8, 16, &["base", "base:tuned-b", "base:tuned-a"]).await;
+    let (addr, fleet, _stop) = router(&[ua, ub]).await;
+    for _ in 0..3 {
+        assert_eq!(chat(addr, conversation("base:tuned-b", "s", 1)).await.2["upstream"], "b");
+        assert!(chat(addr, conversation("base:tuned-a", "s", 1)).await.2["upstream"].is_string());
+    }
+    let ids: Vec<String> = call(addr, Method::GET, "/v1/models", Some(CLIENT_KEY), "").await.2["data"].as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap().to_string()).collect();
+    assert_eq!(ids, ["base", "base:tuned-a", "base:tuned-b"]);
+    assert_eq!(a.hits().iter().filter(|h| h.body["model"] == "base:tuned-b").count(), 0);
+
+    // Two probes apart, the status carries each upstream's completion rate and prefix hit rate from its counters.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    fleet.probe().await;
+    let (code, _, status) = call(addr, Method::GET, "/v1/metrics", Some(CLIENT_KEY), "").await;
+    assert_eq!(code, StatusCode::OK);
+    let busiest = &status["upstreams"][1];
+    assert!(busiest["tokens_per_s"].as_f64().unwrap() > 0.0, "{status}");
+    assert_eq!(busiest["prefix_hit_rate"], json!(0.5), "the mock serves half of every prompt from cache");
+    assert!(status["tokens_per_s"].as_f64().unwrap() >= busiest["tokens_per_s"].as_f64().unwrap());
+    assert_eq!((status["capacity"].clone(), status["queued"].clone(), status["in_flight"].clone()), (json!(16), json!(0), json!(0)));
+    let _ = b;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -504,11 +604,14 @@ async fn the_router_is_attack_surface_keys_bodies_and_headers_are_checked() {
     let resp = send(addr, Method::POST, "/v1/chat/completions", key, &body, &[("x-forwarded-for", "10.9.9.9"), ("cookie", "c=1"), ("x-custom", "1"), ("accept", "application/json")]).await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(resp.headers().get("set-cookie").is_none() && resp.headers().get("x-internal").is_none());
+    let client_id = resp.headers().get("x-request-id").expect("the client sees the request id").to_str().unwrap().to_string();
     let hit = a.hits().pop().unwrap();
     let names: Vec<&str> = hit.headers.keys().map(|k| k.as_str()).collect();
     for name in &names {
-        assert!(["host", "content-type", "content-length", "authorization", "accept"].contains(name), "the upstream was sent {name}");
+        assert!(["host", "content-type", "content-length", "authorization", "accept", "x-request-id"].contains(name), "the upstream was sent {name}");
     }
+    let id = hit.headers.get("x-request-id").expect("the router's request id").to_str().unwrap().to_string();
+    assert!(id.starts_with("route-") && id == client_id, "one id for the request on both sides");
     assert_eq!(hit.headers.get("authorization").unwrap(), &format!("Bearer {UPSTREAM_KEY}"));
     assert_eq!(hit.body, serde_json::from_str::<Value>(&body).unwrap(), "the body is forwarded as sent");
 

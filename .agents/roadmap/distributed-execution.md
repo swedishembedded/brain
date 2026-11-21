@@ -203,8 +203,14 @@ Scope: Running one training job as ranks across machines, and serving one model 
       upstream's new `GET /v1/health` (decode slots, edge concurrency) and its
       `/v1/models`; drain and resume are admin routes; the listing is merged;
       a request is retried elsewhere only when its connection never opened;
-      past every upstream's own edge ceiling the router refuses with 503 and
-      `Retry-After`. Tests: `crates/apiserve/tests/it/route.rs` (mock
+      an upstream is sent at most its decode slots, past the fleet's sum a
+      request waits in a bounded FIFO-per-model queue under the admit deadline
+      (429 at the deadline, 503 past `--route-queue`); `prompt_cache_key`
+      keeps a conversation on one upstream; `/v1/metrics` reports per
+      upstream in-flight, capacity, queue depth, recent tok/s and prefix-hit
+      rate (from the upstream's cumulative served counters in `/v1/health`)
+      and fleet totals; every request carries a router `X-Request-Id` to the
+      upstream and back. Tests: `crates/apiserve/tests/it/route.rs` (mock
       upstreams on loopback: affinity, load per slot, health, drain,
       streaming and cancel-on-disconnect, at-most-once, model merge,
       overload, the security boundary), `tests/e2e/route.bats` (two real
@@ -446,7 +452,16 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
       measurement on real servers across nodes is pending. Open: tensor-parallel serving
       inside a node for a model that does not fit one card; a cross-node layer
       split only for one that does not fit a node; multipart uploads
-      (`/audio/transcriptions`) and job routes are not routed.
+      (`/audio/transcriptions`) and job routes are not routed. Router policy
+      gaps (2026-11-21 review): the prefix key is request text, not the
+      model's token ids, and carries the model id but not the weights or
+      adapter digest, so affinity can cross a hot-swapped release (a stale
+      hint costs one prefill, never a wrong answer); upstreams report no
+      cached-prefix or eviction events, so the index is advisory; the choice
+      is longest prefix among replicas with a free slot, then load per slot,
+      not a predicted cost (uncached prefill + queue wait + free KV, which
+      needs upstream-reported KV headroom); drain does not bound how long
+      in-flight requests may take; one TCP connection per request.
 - [ ] **C5 cluster launch sample and gates.** `samples/` gains a Slurm launch
       sample (job plan and secret written once, scheduler rank mapped onto
       `--job-rank`, rank bound to its card's NUMA node, NCCL network plugin
