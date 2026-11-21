@@ -328,6 +328,8 @@ navigation:
         path: examples/reconstruction/splat.md
       - source: samples/shell/api/claude-with-brain/README.md
         path: examples/shell/api/claude-with-brain.md
+      - source: samples/shell/cluster/slurm/README.md
+        path: examples/shell/cluster/slurm.md
       - source: samples/shell/dbus/busctl-smoke/README.md
         path: examples/shell/dbus/busctl-smoke.md
       - source: samples/shell/forecast/cooling-loop/README.md
