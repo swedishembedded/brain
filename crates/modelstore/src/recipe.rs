@@ -1032,6 +1032,9 @@ impl ArtifactRecipe for GgufRecipe {
 /// this becoming pluggable.
 pub struct TransformersRecipe;
 
+/// The file a release's optional multi-token-prediction drafter is shipped in, beside (not in) the shard index.
+pub const MTP_WEIGHTS: &str = "mtp.safetensors";
+
 impl TransformersRecipe {
     /// Families whose loader reads one fixed file layout out of the checkpoint
     /// directory, which the upstream release does not ship. llava reads a
@@ -1096,7 +1099,19 @@ impl ArtifactRecipe for TransformersRecipe {
         let mut artifacts = vec![artifact("config.json", "config.json")];
         // `chat_template.jinja` / `chat_template.json` hold a template that outranks the one inline in
         // `tokenizer_config.json` (a release may leave an older one there).
-        for f in ["generation_config.json", "tokenizer.json", "tokenizer_config.json", "chat_template.jinja", "chat_template.json"] {
+        // `hf_quant_config.json` declares how the weights are quantized (per layer or per tensor); without it a
+        // loader would read `config.json`'s coarser `quantization_config` alone. `processor_config.json` /
+        // `preprocessor_config.json` hold an image or audio front end's preprocessing.
+        for f in [
+            "generation_config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "chat_template.jinja",
+            "chat_template.json",
+            "hf_quant_config.json",
+            "processor_config.json",
+            "preprocessor_config.json",
+        ] {
             if listing.iter().any(|l| l == f) {
                 artifacts.push(artifact(f, f));
             }
@@ -1124,6 +1139,11 @@ impl ArtifactRecipe for TransformersRecipe {
             artifacts.extend(shards.into_iter().map(|s| artifact(s.clone(), s)));
         } else {
             return Err(Box::new(PlanError::NoUpstreamArtifact(reference.clone(), "no weights found (safetensors or pytorch_model.bin, single file or shard set)".to_string())));
+        }
+        // A multi-token-prediction drafter some releases ship beside the shard set, outside its index: optional
+        // weights of their own (unprefixed names), fetched so speculative decoding can use them.
+        if has(MTP_WEIGHTS) {
+            artifacts.push(artifact(MTP_WEIGHTS, MTP_WEIGHTS));
         }
 
         Ok(artifacts)

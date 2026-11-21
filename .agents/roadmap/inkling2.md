@@ -280,6 +280,13 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
 - **I0.4** `modelstore::recipe`: make sure `brain pull` lands every file the model needs,
   including `mtp.safetensors` (it is not in the index); check what the pull fetches today. `checkpoint::weightio` opens it as a second, optional source
   with its own unprefixed names.
+  - Done (2026-11-21): the transformers recipe missed `hf_quant_config.json` (a pull would have
+    read every tensor through `config.json`'s wrong global NVFP4), `processor_config.json` and
+    `mtp.safetensors`; it now fetches them when listed (`MTP_WEIGHTS`, plan test
+    `a_release_lands_its_quantization_declaration_processor_and_drafter`). `mtp.safetensors` opens as its own
+    `WeightReader` with unprefixed names and reads under the `mtp` section of the same declaration.
+  - Left: `brain pull` still refuses the architecture until I2.2's arch row; then check that it accepts the
+    existing store entry as is and writes its checksums.
 - **I0.5** `tools/goldens/inkling2_dump_reference.py`: a tiny random-config golden
   (2 prelude, 2 core x 3 passes, 2 coda, block size 2, 8 experts top-2, d 64), recording:
   - the hidden state at every logical visit;

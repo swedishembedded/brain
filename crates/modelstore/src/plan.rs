@@ -779,6 +779,51 @@ mod tests {
         assert_eq!(downloads(&p), vec!["config.json", "pytorch_model.bin"]);
     }
 
+    /// Spec: a release whose quantization is declared in `hf_quant_config.json`, which ships its preprocessor in
+    /// `processor_config.json` and an optional drafter in `mtp.safetensors` outside its shard index, is fetched
+    /// with all three (the listing is `thinkingmachines/Inkling-2-Mini` at its pinned revision; its architecture is
+    /// any supported one here, so the test pins the file selection alone).
+    #[test]
+    fn a_release_lands_its_quantization_declaration_processor_and_drafter() {
+        let st = test_store("modelstore-plan-test-companions");
+        let mut hub = FakeHub::new();
+        let (v, r) = ("thinkingmachines", "Inkling-2-Mini");
+        hub.add_file(v, r, "main", "config.json", br#"{"architectures":["LlamaForCausalLM"]}"#.to_vec());
+        for f in [
+            ".gitattributes",
+            "README.md",
+            "chat_template.jinja",
+            "generation_config.json",
+            "hf_quant_config.json",
+            "model.safetensors.index.json",
+            "model-00001-of-00001.safetensors",
+            "mtp.safetensors",
+            "processor_config.json",
+            "special_tokens_map.json",
+            "tiktoken/tokenizer.model",
+            "tokenizer.json",
+            "tokenizer_config.json",
+        ] {
+            hub.add_file(v, r, "main", f, b"{}".to_vec());
+        }
+        let p = plan(&ModelRef::new(v, r, None), &st, &hub).unwrap();
+        assert_eq!(
+            downloads(&p),
+            vec![
+                "config.json",
+                "generation_config.json",
+                "tokenizer.json",
+                "tokenizer_config.json",
+                "chat_template.jinja",
+                "hf_quant_config.json",
+                "processor_config.json",
+                "model.safetensors.index.json",
+                "model-00001-of-00001.safetensors",
+                "mtp.safetensors",
+            ]
+        );
+    }
+
     /// A repo that ships both formats is fetched once, as safetensors.
     #[test]
     fn safetensors_wins_over_bin() {

@@ -77,6 +77,13 @@ nothing downloaded is removed, and each tensor is converted in memory only as
 far as the device needs (bf16 or fp16 to fp32 on a GPU without half-precision
 compute, int8 packing where a model is served quantized).
 
+Beside the weights, a pull lands the files a release ships to describe them
+when they are present: `hf_quant_config.json` (how each layer or tensor is
+quantized, which overrides `config.json`'s coarser `quantization_config`),
+`processor_config.json` / `preprocessor_config.json`, the chat template, and
+an `mtp.safetensors` multi-token-prediction drafter kept outside the shard
+index.
+
 `<models-dir>` defaults to `$XDG_DATA_HOME/brain/models` (in practice, absent
 `XDG_DATA_HOME`, `$HOME/.local/share/brain/models` - **not**
 `~/.local/brain/models`) and is overridden by `--models-dir`, the global

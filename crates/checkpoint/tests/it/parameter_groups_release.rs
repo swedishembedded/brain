@@ -121,3 +121,22 @@ fn a_decoded_expert_slab_equals_the_reference_dequantization_bit_for_bit() {
     seen.dedup();
     assert_eq!(seen, ["mxfp8", "nvfp4"], "the golden covers both expert formats");
 }
+
+/// Spec: the release's optional drafter (`mtp.safetensors`, outside the shard index) opens as a source of its own,
+/// with its unprefixed tensor names, and reads under the same declaration (its `mtp` section) as the main weights.
+#[test]
+fn the_drafter_weights_open_as_a_second_source_under_the_same_declaration() {
+    use checkpoint::packed::HfQuant;
+    use checkpoint::weightio::WeightReader;
+    let Some(dir) = published() else { return };
+    let mtp = dir.join("mtp.safetensors");
+    let main = WeightReader::open_hf_dir(&dir).unwrap();
+    assert!(main.names().all(|n| n.starts_with("model.")), "the shard index does not reach the drafter");
+    let r = PackedReader::new(WeightReader::open(mtp.to_str().unwrap()).unwrap()).with_declaration(HfQuant::from_dir(&dir).unwrap());
+    let names = r.names();
+    assert!(names.contains(&"fuse_weight".to_string()) && names.contains(&"layers.0.self_attn.k_proj_ctx.weight".to_string()), "{names:?}");
+    for n in &names {
+        assert_eq!(r.descriptor(n).unwrap_or_else(|e| panic!("{n}: {e}")).encoding, QuantEncoding::bf16(), "{n}");
+    }
+    assert_eq!(names.len(), 54);
+}
