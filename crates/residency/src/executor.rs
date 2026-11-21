@@ -1300,10 +1300,10 @@ impl ReplicaRoutes {
                 if !active {
                     directories[i].clear();
                 }
-                ReplicaView { load, active, can_run: mgr.replica_can_run(&k, model), matched: directories[i].matched(&chain) }
+                ReplicaView { load, slots: routing.slots, active, can_run: mgr.replica_can_run(&k, model), matched: directories[i].matched(&chain) }
             })
             .collect();
-        let chosen = choose_replica(&views, routing.slots);
+        let chosen = choose_replica(&views);
         directories[chosen].record(&chain);
         base.replica(chosen)
     }

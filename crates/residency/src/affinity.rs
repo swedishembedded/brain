@@ -9,6 +9,13 @@
 
 //! Choosing which replica of a model runs a request.
 //!
+//! A replica is whatever holds its own prefix cache and runs requests: an
+//! instance on one card of this process, or a whole `brain serve` endpoint behind
+//! a router (`apiserve::route`). Both choose with [`choose_replica`] over
+//! [`ReplicaView`]s and remember what they sent where in a [`PrefixDirectory`],
+//! and both key a text request with [`text_request_chain`], so the policy exists
+//! once whatever transport carries the request.
+//!
 //! A model that can run on several cards ([`ResidentModel::replicas`](crate::ResidentModel::replicas))
 //! keeps one instance per card, and each instance has its own prefix cache. A
 //! conversation that resends a growing history every turn pays its whole
@@ -19,7 +26,8 @@
 //!    with a free slot: the one holding the longest.
 //! 2. **The least-loaded active replica** with a free slot (one that is built or
 //!    already has work), so a light load is served by as few cards as possible
-//!    and shares one batch.
+//!    and shares one batch. Load is relative to the replica's own slots, so a
+//!    replica with twice the slots takes twice the requests.
 //! 3. **The next replica that is not built yet**, when every active replica's
 //!    slots are taken: the instance is built on its card because demand needs it.
 //! 4. **The best-matching or least-loaded replica** when every replica is full:
@@ -36,6 +44,7 @@
 //! a [`PrefixChain`] of cumulative digests, one per segment of the prompt, so a
 //! lookup is one pass over the chain and a prompt is never hashed again.
 
+use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap};
 use std::hash::Hasher;
@@ -188,6 +197,8 @@ impl PrefixDirectory {
 pub struct ReplicaView {
     /// Jobs queued or running on the replica.
     pub load: usize,
+    /// Requests the replica runs at once: it has a free slot while `load` is below this.
+    pub slots: usize,
     /// Built, or has work: running on its card now.
     pub active: bool,
     /// Its devices have the budget for it.
@@ -198,13 +209,18 @@ pub struct ReplicaView {
 
 /// The replica that runs the next request (see the module doc for the order). Replicas that cannot run are passed over
 /// unless none can, so the refusal is the budget's own.
-pub fn choose_replica(views: &[ReplicaView], slots: usize) -> usize {
+pub fn choose_replica(views: &[ReplicaView]) -> usize {
     let usable: Vec<usize> = match (0..views.len()).filter(|&i| views[i].can_run).collect::<Vec<_>>() {
         none if none.is_empty() => (0..views.len()).collect(),
         some => some,
     };
-    let least_loaded = |of: &mut dyn Iterator<Item = usize>| of.min_by_key(|&i| (views[i].load, i));
-    let free: Vec<usize> = usable.iter().copied().filter(|&i| views[i].load < slots).collect();
+    // Load as a share of the replica's slots, compared without division; the lower index on a tie.
+    let lighter = |&a: &usize, &b: &usize| {
+        let (va, vb) = (views[a], views[b]);
+        ((va.load as u128) * (vb.slots.max(1) as u128)).cmp(&((vb.load as u128) * (va.slots.max(1) as u128))).then(a.cmp(&b))
+    };
+    let least_loaded = |of: &mut dyn Iterator<Item = usize>| of.min_by(lighter);
+    let free: Vec<usize> = usable.iter().copied().filter(|&i| views[i].load < views[i].slots).collect();
     let best_match = free.iter().map(|&i| views[i].matched).max().unwrap_or(0);
     if best_match >= MIN_USEFUL_PREFIX {
         return least_loaded(&mut free.iter().copied().filter(|&i| views[i].matched == best_match)).unwrap_or(0);
@@ -219,6 +235,88 @@ pub fn choose_replica(views: &[ReplicaView], slots: usize) -> usize {
     let best_match = usable.iter().map(|&i| views[i].matched).max().unwrap_or(0);
     let pool: Vec<usize> = usable.into_iter().filter(|&i| best_match < MIN_USEFUL_PREFIX || views[i].matched == best_match).collect();
     least_loaded(&mut pool.into_iter()).unwrap_or(0)
+}
+
+/// The request parameters that shape the start of a rendered chat prompt, before the first message: everything a
+/// request of one conversation repeats ahead of its history.
+pub const PROMPT_SHAPING: [&str; 8] = ["chat", "tools", "tool_choice", "system", "enable_thinking", "reasoning_effort", "preserve_thinking", "template_flavor"];
+
+/// A raw prompt (no message boundaries) is cut into links of this many bytes.
+pub const RAW_PROMPT_LINK_BYTES: usize = 1024;
+
+/// The prompt of a text request, as its transport carries it.
+#[derive(Clone, Copy, Debug)]
+pub enum TextPrompt<'a> {
+    /// A chat: the messages as the text of one JSON array.
+    Messages(&'a str),
+    /// A raw prompt to continue.
+    Raw(&'a str),
+}
+
+/// A text request's prompt as a [`PrefixChain`]: one link for everything that shapes the start of the rendered prompt
+/// (`namespace`, then each `(key, value)` of `shaping` in [`PROMPT_SHAPING`] order as the transport spells it), then one
+/// link per chat message, or [`RAW_PROMPT_LINK_BYTES`] chunks of a raw prompt. Turn `n + 1` of a conversation shares
+/// `n + 1` links with turn `n`. `namespace` separates prompts whose cached state is not interchangeable (another model,
+/// another adapter). The text is hashed once, in one pass: nothing is rendered or tokenized.
+pub fn text_request_chain<'a>(namespace: &str, shaping: impl IntoIterator<Item = (&'a str, Cow<'a, str>)>, prompt: TextPrompt<'_>) -> PrefixChain {
+    let mut root = String::from(namespace);
+    for (key, value) in shaping {
+        root.push('\u{1f}');
+        root.push_str(key);
+        root.push('=');
+        root.push_str(&value);
+    }
+    let mut chain = PrefixChain::rooted(root.as_bytes());
+    match prompt {
+        TextPrompt::Messages(messages) => json_array_elements(messages).into_iter().for_each(|message| chain.push(message.as_bytes())),
+        TextPrompt::Raw(text) => chain.push_chunked(text.as_bytes(), RAW_PROMPT_LINK_BYTES),
+    }
+    chain
+}
+
+/// The top-level elements of the JSON array `text`, as slices of it, found in one scan without building a value. Text
+/// that is not an array, or is cut short, yields what the scan found: a routing hint never refuses a request (whatever
+/// admits it reports the parse error).
+pub fn json_array_elements(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut elements = Vec::new();
+    let (mut depth, mut in_string, mut escaped, mut start) = (0usize, false, false, None::<usize>);
+    for (i, &b) in bytes.iter().enumerate() {
+        if in_string {
+            match (escaped, b) {
+                (true, _) => escaped = false,
+                (false, b'\\') => escaped = true,
+                (false, b'"') => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match b {
+            b'"' => {
+                in_string = true;
+                start.get_or_insert(i);
+            }
+            b'[' | b'{' => {
+                depth += 1;
+                if depth > 1 {
+                    start.get_or_insert(i);
+                }
+            }
+            b']' | b'}' => {
+                if depth == 1 {
+                    elements.extend(start.take().map(|s| text[s..i].trim_end()));
+                    break;
+                }
+                depth = depth.saturating_sub(1);
+            }
+            b',' if depth == 1 => elements.extend(start.take().map(|s| text[s..i].trim_end())),
+            b if depth >= 1 && !b.is_ascii_whitespace() => {
+                start.get_or_insert(i);
+            }
+            _ => {}
+        }
+    }
+    elements
 }
 
 #[cfg(test)]
@@ -239,7 +337,7 @@ mod tests {
     }
 
     fn view(load: usize, active: bool, matched: u64) -> ReplicaView {
-        ReplicaView { load, active, can_run: true, matched }
+        ReplicaView { load, slots: 8, active, can_run: true, matched }
     }
 
     #[test]
@@ -285,62 +383,62 @@ mod tests {
     #[test]
     fn a_light_load_fills_the_active_replica_before_building_another() {
         let views = [view(3, true, 0), view(0, false, 0), view(0, false, 0)];
-        assert_eq!(choose_replica(&views, 8), 0);
+        assert_eq!(choose_replica(&views), 0);
     }
 
     #[test]
     fn the_next_replica_is_built_once_the_active_ones_are_full() {
         let views = [view(8, true, 0), view(0, false, 0), view(0, false, 0)];
-        assert_eq!(choose_replica(&views, 8), 1, "demand exceeds the slots of replica 0");
+        assert_eq!(choose_replica(&views), 1, "demand exceeds the slots of replica 0");
         let views = [view(8, true, 0), view(8, true, 0), view(0, false, 0)];
-        assert_eq!(choose_replica(&views, 8), 2);
+        assert_eq!(choose_replica(&views), 2);
     }
 
     #[test]
     fn active_replicas_with_room_are_balanced_by_load() {
         let views = [view(5, true, 0), view(2, true, 0), view(0, false, 0)];
-        assert_eq!(choose_replica(&views, 8), 1);
+        assert_eq!(choose_replica(&views), 1);
     }
 
     #[test]
     fn a_cached_prefix_beats_the_least_loaded_replica() {
         let hit = MIN_USEFUL_PREFIX * 4;
         let views = [view(1, true, 0), view(6, true, hit)];
-        assert_eq!(choose_replica(&views, 8), 1, "the replica holding the conversation, however busy, while it has a slot");
+        assert_eq!(choose_replica(&views), 1, "the replica holding the conversation, however busy, while it has a slot");
         let views = [view(1, true, hit / 2), view(6, true, hit), view(0, true, 0)];
-        assert_eq!(choose_replica(&views, 8), 1, "the longest prefix wins");
+        assert_eq!(choose_replica(&views), 1, "the longest prefix wins");
     }
 
     #[test]
     fn a_prefix_too_short_to_matter_does_not_override_balance() {
         let views = [view(6, true, 16), view(1, true, 0)];
-        assert_eq!(choose_replica(&views, 8), 1);
+        assert_eq!(choose_replica(&views), 1);
     }
 
     #[test]
     fn a_full_replica_holding_the_prefix_gives_way_to_one_with_room() {
         let hit = MIN_USEFUL_PREFIX * 4;
         let views = [view(8, true, hit), view(0, false, 0)];
-        assert_eq!(choose_replica(&views, 8), 1, "a shared system prompt must not pin every conversation to one card");
+        assert_eq!(choose_replica(&views), 1, "a shared system prompt must not pin every conversation to one card");
     }
 
     #[test]
     fn when_every_replica_is_full_the_request_waits_where_its_prompt_is_cached() {
         let hit = MIN_USEFUL_PREFIX * 4;
         let views = [view(9, true, 0), view(12, true, hit)];
-        assert_eq!(choose_replica(&views, 8), 1);
+        assert_eq!(choose_replica(&views), 1);
         let views = [view(12, true, 0), view(9, true, 0)];
-        assert_eq!(choose_replica(&views, 8), 1, "no useful prefix: the shortest queue");
+        assert_eq!(choose_replica(&views), 1, "no useful prefix: the shortest queue");
     }
 
     #[test]
     fn a_replica_that_cannot_run_is_passed_over_unless_none_can() {
         let mut held = view(0, true, 0);
         held.can_run = false;
-        assert_eq!(choose_replica(&[held, view(5, true, 0)], 8), 1);
+        assert_eq!(choose_replica(&[held, view(5, true, 0)]), 1);
         let mut other = view(1, true, 0);
         other.can_run = false;
-        assert_eq!(choose_replica(&[held, other], 8), 0, "none can run: the first, so the refusal is the budget's");
+        assert_eq!(choose_replica(&[held, other]), 0, "none can run: the first, so the refusal is the budget's");
     }
 
     #[test]
@@ -349,5 +447,45 @@ mod tests {
         let mut dir = PrefixDirectory::new(4);
         dir.record(&chain(&[&sys, "question one"]));
         assert!(dir.matched(&chain(&[&sys, "question two"])) >= MIN_USEFUL_PREFIX);
+    }
+
+    #[test]
+    fn load_is_weighed_against_each_replicas_own_slots() {
+        let small = ReplicaView { load: 4, slots: 8, active: true, can_run: true, matched: 0 };
+        let large = ReplicaView { load: 8, slots: 32, active: true, can_run: true, matched: 0 };
+        assert_eq!(choose_replica(&[small, large]), 1, "a quarter of 32 slots is lighter than half of 8");
+        let full_small = ReplicaView { load: 8, ..small };
+        let full_large = ReplicaView { load: 32, ..large };
+        let over_small = ReplicaView { load: 12, ..small };
+        assert_eq!(choose_replica(&[over_small, full_large]), 1, "every replica full: the shortest queue relative to its slots");
+        assert_eq!(choose_replica(&[full_small, ReplicaView { load: 31, ..large }]), 1, "the one with a free slot");
+    }
+
+    fn chat_chain(namespace: &str, system: &str, messages: &[(&str, &str)]) -> PrefixChain {
+        let array = format!("[{}]", messages.iter().map(|(r, c)| format!(r#"{{"role":"{r}","content":"{c}"}}"#)).collect::<Vec<_>>().join(","));
+        text_request_chain(namespace, [("system", Cow::Borrowed(system))], TextPrompt::Messages(&array))
+    }
+
+    #[test]
+    fn a_text_chain_shares_the_turns_two_requests_share() {
+        let mut dir = PrefixDirectory::new(4);
+        let turn1 = chat_chain("m", "sys", &[("user", "a")]);
+        dir.record(&turn1);
+        let turn2 = chat_chain("m", "sys", &[("user", "a"), ("assistant", "b"), ("user", "c")]);
+        assert_eq!(dir.matched(&turn2), dir.matched(&turn1), "every link of turn one is shared by turn two");
+        assert_eq!(dir.matched(&chat_chain("other", "sys", &[("user", "a")])), 0, "another namespace shares nothing");
+        assert_eq!(dir.matched(&chat_chain("m", "other", &[("user", "a")])), 0, "another prompt start shares nothing");
+        let raw = "x".repeat(3 * RAW_PROMPT_LINK_BYTES);
+        let held = text_request_chain("m", [], TextPrompt::Raw(&raw));
+        assert_eq!(held.len(), 1 + 3, "the root and three chunks");
+    }
+
+    #[test]
+    fn the_array_scan_splits_only_at_the_top_level_and_survives_hostile_text() {
+        assert_eq!(json_array_elements(r#" [ {"a":[1,2]} , "x,]" , 3 ] "#), vec![r#"{"a":[1,2]}"#, r#""x,]""#, "3"]);
+        assert!(json_array_elements("[]").is_empty() && json_array_elements("").is_empty());
+        let _ = json_array_elements(r#"[{"a": "unterminated"#);
+        let _ = json_array_elements("]]]}}}[[[{{{");
+        let _ = json_array_elements(r#"["\"#);
     }
 }
