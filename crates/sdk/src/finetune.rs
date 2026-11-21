@@ -138,6 +138,8 @@ pub struct ChatFineTune {
     activations: Option<model::saved::SavedPolicy>,
     /// Train with the clipped policy-gradient objective on rollout records ([`ChatFineTune::policy_gradient`]).
     policy_gradient: Option<PolicyGradientConfig>,
+    /// This run as one rank of a data-parallel group.
+    parallel: Option<crate::DataParallel>,
     /// Pipeline stages ([`ChatFineTune::stages`]).
     stages: u32,
     /// Native sparse attention training ([`ChatFineTune::native_sparse_attention`]).
@@ -647,7 +649,17 @@ impl ChatFineTune {
             pack_answers: false,
             activations: None,
             policy_gradient: None,
+            parallel: None,
         }
+    }
+
+    /// Train as one rank of a data-parallel group ([`crate::DataParallel`]): every rank runs this fine-tune with the
+    /// same settings and the same [`Self::seed`], each on its own card ([`Self::device`]), trains on its own shard of
+    /// the records, and every step's gradients are reduced over the group before the optimizer step, so the ranks'
+    /// adapters stay byte-identical. Rank 0 alone scores held-out records and broadcasts the result.
+    pub fn data_parallel(mut self, rank: crate::DataParallel) -> Self {
+        self.parallel = Some(rank);
+        self
     }
 
     /// The architecture of the base (a `brain_arch` id). Unnamed, it is the one
@@ -1256,6 +1268,9 @@ impl ChatFineTune {
             return Err(Error::Backend("ChatFineTune: grad_accum must be at least 1".to_string()));
         }
         let state_path = self.resume_state.clone().unwrap_or_else(|| out_dir.join(STATE_FILE));
+        if self.parallel.is_some() && self.seed.is_none() {
+            return Err(Error::MissingArgument("ChatFineTune: a data-parallel rank needs the seed every rank shares; call .seed(n) with the same n on every rank".to_string()));
+        }
         let seed = resolve_seed(self.seed, Some(&state_path))?;
         let requested = model::FitOpts {
             grad_accum: self.grad_accum,
@@ -1336,7 +1351,7 @@ impl ChatFineTune {
             }
             None => None,
         };
-        let control = model::FitControl { on_step: Some(&mut on_step), state: Some(&state_path), state_every: self.checkpoint_every, identity, snapshots, grad_sync: None };
+        let control = model::FitControl { on_step: Some(&mut on_step), state: Some(&state_path), state_every: self.checkpoint_every, identity, snapshots, grad_sync: self.parallel.as_ref().map(crate::DataParallel::grad_sync) };
         let held_out_refs: Vec<&Path> = held_out_dirs.iter().map(PathBuf::as_path).collect();
         let (report, trained, scored, policy_gradient) = match self.policy_gradient {
             Some(config) => {

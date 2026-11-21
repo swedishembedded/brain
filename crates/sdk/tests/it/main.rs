@@ -29,6 +29,7 @@ mod chat_finetune_ricursive;
 mod text_ricursive;
 mod toy_training;
 mod training_records;
+mod chat_finetune_data_parallel;
 mod chat_full_finetune;
 mod chat_full_finetune_ouro;
 mod from_scratch;
