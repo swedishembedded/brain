@@ -72,3 +72,53 @@ fn inkling2_chat_template_renders_as_transformers_does() {
     }
     assert!(compared > 60, "compared only {compared} cases");
 }
+
+/// What the template writes for an assistant turn reads back as the same reasoning, text and calls,
+/// through the reader the template's own markers select.
+#[test]
+fn a_rendered_assistant_turn_scans_back_to_what_it_was() {
+    use data::qwen_chat::{ChatScanner, TemplateFlavor};
+
+    let Some(dir) = brain_testutil::model_dir("thinkingmachines/Inkling-2-Mini") else {
+        brain_testutil::skip("Inkling-2-Mini: no models directory");
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    if !dir.join("chat_template.jinja").exists() {
+        brain_testutil::skip("Inkling-2-Mini: needs the checkpoint's template");
+        return;
+    }
+    let template = ChatTemplate::from_model_dir(&dir).unwrap();
+    assert_eq!(template.reply_flavor(), Some(TemplateFlavor::TypedMessages), "the template's markers select the typed-message reader");
+
+    let turns = [
+        r#"{"role":"assistant","reasoning_content":"Need the tool.","content":"Let me check.","tool_calls":[{"id":"a","type":"function","function":{"name":"get_weather","arguments":{"units":"c","city":"Malmö","days":[1,2.5,null,true],"nested":{"b":1,"a":"å"}}}},{"id":"b","type":"function","function":{"name":"no_args"}}]}"#,
+        r#"{"role":"assistant","content":"Just text with <|not_a_marker|> and a \"quote\"."}"#,
+        r#"{"role":"assistant","reasoning_content":"only thoughts","content":""}"#,
+    ];
+    let user = r#"{"role":"user","content":"go"}"#;
+    for turn in turns {
+        let render = |conversation: &str| template.render(parse_json_ordered(&format!("[{conversation}]")).unwrap(), None, false, &BTreeMap::new()).unwrap();
+        let prompt = render(user);
+        let full = render(&format!("{user},{turn}"));
+        let reply = full.strip_prefix(prompt.as_str()).expect("the assistant turn extends the prompt");
+
+        let mut scanner = ChatScanner::with_flavor(false, TemplateFlavor::TypedMessages);
+        let mut events = Vec::new();
+        scanner.push(reply, &mut events);
+        scanner.finish(&mut events);
+        assert_eq!(scanner.anomalies(), [], "{turn}");
+
+        let want: serde_json::Value = serde_json::from_str(turn).unwrap();
+        assert_eq!(scanner.reasoning(), want["reasoning_content"].as_str().unwrap_or(""), "{turn}");
+        assert_eq!(scanner.content(), want["content"].as_str().unwrap_or(""), "{turn}");
+        let calls = want["tool_calls"].as_array().cloned().unwrap_or_default();
+        assert_eq!(scanner.tool_calls().len(), calls.len(), "{turn}");
+        for (got, want) in scanner.tool_calls().iter().zip(calls) {
+            assert_eq!(got.name, want["function"]["name"].as_str().unwrap());
+            let args: serde_json::Value = serde_json::from_str(&got.arguments).unwrap();
+            let sent = want["function"].get("arguments").cloned().unwrap_or(serde_json::json!({}));
+            assert_eq!(args, sent, "{turn}");
+        }
+    }
+}

@@ -139,10 +139,11 @@ fn tokenizer_config_eos(dir: &Path) -> Option<String> {
 
 /// The ids that end a generation from the checkpoint in `dir`: its
 /// `generation_config.json` eos ids, else its `tokenizer_config.json` eos
-/// token, plus `end_of_turn` (the rendered chat format's marker) when the
-/// vocabulary has it. `dir` is `None` for a checkpoint with no sibling files
-/// (a GGUF), whose own declared eos is `gguf_eos`.
-pub fn stop_ids(dir: Option<&Path>, tok: &QwenBpe, gguf_eos: Option<u32>, end_of_turn: Option<&str>) -> Result<Vec<u32>, String> {
+/// token, plus `end_of_turn` (the markers the rendered chat format ends a turn
+/// or a message with: none, one, or several, each kept when the vocabulary has
+/// it) in the order given. `dir` is `None` for a checkpoint with no sibling
+/// files (a GGUF), whose own declared eos is `gguf_eos`.
+pub fn stop_ids<S: AsRef<str>>(dir: Option<&Path>, tok: &QwenBpe, gguf_eos: Option<u32>, end_of_turn: impl IntoIterator<Item = S>) -> Result<Vec<u32>, String> {
     let mut ids: Vec<u32> = gguf_eos.into_iter().collect();
     if let Some(dir) = dir {
         match GenerationConfig::read(dir)? {
@@ -150,7 +151,7 @@ pub fn stop_ids(dir: Option<&Path>, tok: &QwenBpe, gguf_eos: Option<u32>, end_of
             _ => ids.extend(tokenizer_config_eos(dir).and_then(|t| tok.special_id(&t))),
         }
     }
-    ids.extend(end_of_turn.and_then(|t| tok.special_id(t)));
+    ids.extend(end_of_turn.into_iter().filter_map(|t| tok.special_id(t.as_ref())));
     let mut seen = std::collections::HashSet::new();
     ids.retain(|id| seen.insert(*id));
     Ok(ids)
@@ -218,7 +219,7 @@ mod tests {
         std::fs::write(d.join("generation_config.json"), r#"{"bos_token_id": 1, "eos_token_id": [2, 3]}"#).unwrap();
         assert_eq!(GenerationConfig::read(&d).unwrap().unwrap(), GenerationConfig { eos_token_ids: vec![2, 3], bos_token_id: Some(1) });
         std::fs::write(d.join("generation_config.json"), r#"{"eos_token_id": 4}"#).unwrap();
-        assert_eq!(stop_ids(Some(&d), &tok(), None, None).unwrap(), vec![4]);
+        assert_eq!(stop_ids(Some(&d), &tok(), None, None::<&str>).unwrap(), vec![4]);
         assert!(GenerationConfig::read(&scratch("absent")).unwrap().is_none());
     }
 
@@ -233,6 +234,16 @@ mod tests {
         assert_eq!(stop_ids(None, &tok(), None, Some("<|missing|>")).unwrap(), Vec::<u32>::new());
     }
 
+    /// A format that ends a turn with several markers (a sampling eos and a message boundary) contributes
+    /// each one the vocabulary has, after the checkpoint's own eos, without repeating one.
+    #[test]
+    fn a_format_may_end_a_turn_with_several_markers() {
+        let d = scratch("several");
+        std::fs::write(d.join("generation_config.json"), r#"{"eos_token_id": 3}"#).unwrap();
+        assert_eq!(stop_ids(Some(&d), &tok(), None, ["<|im_end|>", "<|missing|>", "<|EOT|>", "<|im_end|>"]).unwrap(), vec![3, 4]);
+        assert_eq!(stop_ids(Some(&d), &tok(), None, vec!["<|EOT|>".to_string()]).unwrap(), vec![3, 4]);
+    }
+
     /// The real checkpoints, when present: coder-instruct ends on `<|EOT|>`,
     /// R1-Distill-Llama on `<｜end▁of▁sentence｜>`.
     #[test]
@@ -241,7 +252,25 @@ mod tests {
             let Some(dir) = brain_testutil::model_dir(&format!("deepseek-ai/{repo}")) else { continue };
             let dir = Path::new(&dir);
             let Ok(t) = QwenBpe::from_file(dir.join("tokenizer.json").to_str().unwrap()) else { continue };
-            assert!(stop_ids(Some(dir), &t, None, None).unwrap().contains(&want), "{repo}");
+            assert!(stop_ids(Some(dir), &t, None, None::<&str>).unwrap().contains(&want), "{repo}");
         }
+    }
+
+    /// Inkling 2 Mini, when present: generation_config names the sampling eos 200006, and its template's
+    /// message boundary 200010 follows it.
+    #[test]
+    fn inkling2_stops_on_the_sampling_eos_and_the_message_boundary() {
+        let Some(dir) = brain_testutil::model_dir("thinkingmachines/Inkling-2-Mini") else {
+            brain_testutil::skip("Inkling-2-Mini: no models directory");
+            return;
+        };
+        let dir = Path::new(&dir);
+        let Ok(t) = QwenBpe::from_file(dir.join("tokenizer.json").to_str().unwrap()) else {
+            brain_testutil::skip("Inkling-2-Mini: no tokenizer.json");
+            return;
+        };
+        let template = crate::chat_template::ChatTemplate::from_model_dir(dir).unwrap();
+        assert_eq!(stop_ids(Some(dir), &t, None, template.end_of_turn_markers()).unwrap(), vec![200006, 200010]);
+        assert_eq!(stop_ids(Some(dir), &t, None, None::<&str>).unwrap(), vec![200006], "the checkpoint's own eos alone");
     }
 }

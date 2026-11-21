@@ -125,6 +125,11 @@ pub enum TemplateFlavor {
     /// back to the tokens that were generated instead of gaining a newline per turn. Only a prompt rendered by such
     /// a template selects it (`ChatTemplate::frames_replies_with_newlines`); the scanner does not sniff for it.
     JsonFramed,
+    /// A reply written as typed messages (`<|content_thinking|>` ... `<|end_message|>`, calls as
+    /// `<|content_invoke_tool_json|>` JSON), read by [`crate::message_scan::MessageScanner`]. Only a template
+    /// that writes these markers selects it (`ChatTemplate::reply_flavor`); this port has no hand-written
+    /// renderer for it, the checkpoint's own template is the renderer.
+    TypedMessages,
 }
 
 /// Rendering knobs the Jinja template reads from the caller's generation
@@ -479,6 +484,9 @@ mod json_py {
 /// 5. **Generation prompt**: `<|im_start|>assistant\n`, plus an empty
 ///    `<think>\n\n</think>\n\n` block when thinking is explicitly disabled.
 pub fn render(msgs: &[ChatMessage], tools: &[String], opts: TemplateOpts) -> Result<String, String> {
+    if opts.flavor == TemplateFlavor::TypedMessages {
+        return Err("the typed-message wire form has no built-in renderer: render with the checkpoint's own chat template".to_string());
+    }
     let mut out = String::new();
     let has_tools = !tools.is_empty();
     let first_is_system = msgs.first().map(|m| m.role) == Some(Role::System);
@@ -497,7 +505,7 @@ pub fn render(msgs: &[ChatMessage], tools: &[String], opts: TemplateOpts) -> Res
             other => return Err(format!("Unexpected reasoning effort '{other}'. Supported types are xhigh (default), medium, and low.")),
         },
         TemplateFlavor::Qwen38 => None, // thinking disabled: the template ignores reasoning_effort
-        TemplateFlavor::Qwen3 | TemplateFlavor::JsonFramed => match opts.reasoning_effort.as_deref() {
+        TemplateFlavor::Qwen3 | TemplateFlavor::JsonFramed | TemplateFlavor::TypedMessages => match opts.reasoning_effort.as_deref() {
             None => None,
             Some(effort) => {
                 return Err(format!("reasoning_effort '{effort}': the Qwen3 chat template does not read reasoning_effort (only the Qwen3.8 template does); leave it out"))
@@ -804,6 +812,10 @@ pub enum ScanAnomaly {
     DiscardedToolCallTail,
     /// The generation ended inside the reasoning, so there is no answer after it.
     EndedInsideThink,
+    /// Typed-message form: text outside any message (no content-kind token opened it): kept as content.
+    UnframedText,
+    /// Typed-message form: a message of a content kind the reply grammar does not read (an image, XML): kept as content.
+    UnexpectedContentKind,
 }
 
 impl ScanAnomaly {
@@ -818,6 +830,8 @@ impl ScanAnomaly {
             ScanAnomaly::StrayTextInToolCall => "stray_text_in_tool_call",
             ScanAnomaly::DiscardedToolCallTail => "discarded_tool_call_tail",
             ScanAnomaly::EndedInsideThink => "ended_inside_think",
+            ScanAnomaly::UnframedText => "unframed_text",
+            ScanAnomaly::UnexpectedContentKind => "unexpected_content_kind",
         }
     }
 }
@@ -913,6 +927,8 @@ pub struct ChatScanner {
     think_from: Option<usize>,
     /// The scan began inside an open think block.
     began_in_think: bool,
+    /// The reader of [`TemplateFlavor::TypedMessages`], which has its own grammar; every other flavor scans here.
+    typed: Option<crate::message_scan::MessageScanner>,
 }
 
 const MARKERS_CONTENT: [&str; 2] = ["<think>", "<tool_call>"];
@@ -964,6 +980,7 @@ impl ChatScanner {
             think_spans: Vec::new(),
             think_from: thinking_open.then_some(0),
             began_in_think: thinking_open,
+            typed: (flavor == TemplateFlavor::TypedMessages).then(|| crate::message_scan::MessageScanner::new(thinking_open)),
         }
     }
 
@@ -977,6 +994,12 @@ impl ChatScanner {
     /// whole output at once — chunking must not change the resulting events).
     pub fn push(&mut self, delta: &str, out: &mut Vec<ChatEvent>) {
         self.pushed += delta.len();
+        if let Some(typed) = &mut self.typed {
+            let mut pieces = Vec::new();
+            typed.push(delta, &mut pieces);
+            self.apply_pieces(pieces, out);
+            return;
+        }
         self.pending.push_str(delta);
         self.drain(out);
     }
@@ -987,6 +1010,12 @@ impl ChatScanner {
     /// so the caller gets a (possibly invalid-JSON) result rather than a
     /// silently dropped call.
     pub fn finish(&mut self, out: &mut Vec<ChatEvent>) {
+        if let Some(typed) = &mut self.typed {
+            let mut pieces = Vec::new();
+            typed.finish(&mut pieces);
+            self.apply_pieces(pieces, out);
+            return;
+        }
         match self.state {
             St::Raw => return,
             St::Content => self.flush_pending_as(out, false),
@@ -1057,6 +1086,36 @@ impl ChatScanner {
     /// order found. Complete after [`Self::finish`].
     pub fn anomalies(&self) -> &[ScanAnomaly] {
         &self.anomalies
+    }
+
+    /// Turn what the typed-message reader found into events and the accumulated reply.
+    fn apply_pieces(&mut self, pieces: Vec<crate::message_scan::Piece>, out: &mut Vec<ChatEvent>) {
+        use crate::message_scan::Piece;
+        for piece in pieces {
+            match piece {
+                Piece::Reasoning { text, at } => {
+                    match self.think_spans.last_mut() {
+                        Some(span) if span.end == at => span.end += text.len(),
+                        _ => self.think_spans.push(at..at + text.len()),
+                    }
+                    self.reasoning.push_str(&text);
+                    out.push(ChatEvent::Reasoning(text));
+                }
+                Piece::Content(text) => {
+                    self.content.push_str(&text);
+                    out.push(ChatEvent::Content(text));
+                }
+                Piece::Call { name, arguments } => {
+                    let index = self.next_index;
+                    out.push(ChatEvent::ToolCallStart { index, id: self.call_id(), name: name.clone() });
+                    out.push(ChatEvent::ToolCallArgs { index, fragment: arguments.clone() });
+                    self.cur_name = name;
+                    self.cur_args = arguments;
+                    self.close_call(out);
+                }
+                Piece::Anomaly(anomaly) => self.note(anomaly),
+            }
+        }
     }
 
     fn note(&mut self, anomaly: ScanAnomaly) {
@@ -1263,6 +1322,7 @@ impl ChatScanner {
                     let outcome = match self.flavor {
                         TemplateFlavor::Qwen3 | TemplateFlavor::JsonFramed => parse_header(&chars),
                         TemplateFlavor::Qwen38 => parse_xml_header(&chars),
+                        TemplateFlavor::TypedMessages => unreachable!("typed messages are read by message_scan, never by the tag scanner"),
                     };
                     match outcome {
                         HeaderOutcome::Incomplete => return,
@@ -1283,6 +1343,7 @@ impl ChatScanner {
                             self.state = match self.flavor {
                                 TemplateFlavor::Qwen3 | TemplateFlavor::JsonFramed => St::CallArgs { in_string: false, escape: false, depth: 0, started: false },
                                 TemplateFlavor::Qwen38 => St::XmlBetween,
+                                TemplateFlavor::TypedMessages => unreachable!("typed messages are read by message_scan, never by the tag scanner"),
                             };
                         }
                     }

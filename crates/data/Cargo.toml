@@ -19,7 +19,7 @@ hex.workspace = true
 # crates that cannot depend on `brain-data` can draw a seed the same way.
 brain-seed.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
 # captions.yaml is parsed by a real YAML implementation into a typed schema
 # (imageset::CaptionFile), never by an ad-hoc line scanner: the caption
 # file is hand-edited, so it meets every corner of the grammar eventually.

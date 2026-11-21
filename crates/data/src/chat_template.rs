@@ -545,19 +545,32 @@ impl ChatTemplate {
     }
 
     /// The reply format this template writes an assistant turn in, when brain reads that format back
-    /// ([`crate::qwen_chat::ChatScanner`]): a `<function=` call (Qwen3.8), else a JSON `<tool_call>` or a think block
+    /// ([`crate::qwen_chat::ChatScanner`]): typed messages ([`crate::message_scan`]), a `<function=` call (Qwen3.8), else a JSON `<tool_call>` or a think block
     /// (Qwen3, or [`crate::qwen_chat::TemplateFlavor::JsonFramed`] when [`Self::frames_replies_with_newlines`]).
     /// `None` for a template that writes neither.
     #[must_use]
     pub fn reply_flavor(&self) -> Option<crate::qwen_chat::TemplateFlavor> {
         use crate::qwen_chat::TemplateFlavor;
         let src = &self.source;
-        if src.contains("<function=") {
+        if crate::message_scan::is_written_by(src) {
+            Some(TemplateFlavor::TypedMessages)
+        } else if src.contains("<function=") {
             Some(TemplateFlavor::Qwen38)
         } else if src.contains("<tool_call>") || src.contains("<think>") {
             Some(if self.frames_replies_with_newlines() { TemplateFlavor::JsonFramed } else { TemplateFlavor::Qwen3 })
         } else {
             None
+        }
+    }
+
+    /// The tokens that end a generation under this template beyond the checkpoint's own eos. A template that
+    /// writes typed messages ends the reply with its sampling eos and each message with a boundary token; both
+    /// stop a generation ([`crate::message_scan`]). Empty for a template whose turn the checkpoint's eos ends.
+    #[must_use]
+    pub fn end_of_turn_markers(&self) -> Vec<&'static str> {
+        match self.reply_flavor() {
+            Some(crate::qwen_chat::TemplateFlavor::TypedMessages) => vec![crate::message_scan::END_SAMPLING, crate::message_scan::END_MESSAGE],
+            _ => Vec::new(),
         }
     }
 

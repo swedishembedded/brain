@@ -528,6 +528,19 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
   which needs a format-level stop API in place of the Qwen-only `end_of_turn()`.
   - Verify that `QwenBpe` (or the generic HF BPE) reproduces `tokenizer.json` on a corpus
     of special-token and multilingual goldens.
+  - Done (2026-11-22):
+    - `QwenBpe::from_file` reproduces the `tokenizers` ids and decode of the checkpoint on 96
+      hostile strings (every special token inline), unchanged.
+    - The checkpoint's own template renders 72 reference conversations byte for byte, refusals
+      included. `tojson` now takes the `transformers` keywords (#550).
+    - `ReasoningEffort` (named or a validated level) is applied through the render `extra` map.
+    - `TemplateFlavor::TypedMessages`, read by `data::message_scan::MessageScanner` behind
+      `ChatScanner`, is selected from the template's markers (`ChatTemplate::reply_flavor`).
+    - `ChatFormat::end_of_turn()` returns the format's stop tokens (`ChatTemplate::end_of_turn_markers`);
+      `stop_ids` takes any list, and a real-checkpoint test pins `[200006, 200010]`.
+  - Left: stopping on 200010 ends a generation after the first message, so a reply that thinks
+    and then answers needs the serving lane to continue past a message boundary (or to stop on
+    200006 alone for one-shot replies).
 - **I3.4** `catalog::resident_inkling2` and the registrations (arch, catalog, serving
   model_dir, modelstore family, cli alias):
   - the `generate` action, cancellable, with host-resolved weights;

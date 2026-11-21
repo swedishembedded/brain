@@ -423,6 +423,10 @@ fn sampler_params(tok: &QwenBpe, inv: &Invocation, temp: f32, top_k: usize, top_
 /// action does not declare) and fill an omitted one with the model's default.
 pub fn template_params(flavor: qwen_chat::TemplateFlavor) -> Vec<capability::ParamSpec> {
     use capability::{ParamSpec, ParamType};
+    if flavor == qwen_chat::TemplateFlavor::TypedMessages {
+        // The checkpoint's own template renders it, so the Qwen kwargs have no meaning; only the effort does.
+        return vec![ParamSpec::new("reasoning_effort", ParamType::Str, "reasoning effort the chat template writes as an instruction: a name the template maps (low, high, ...) or a number from 0 to 0.99; left out, the template's own default applies")];
+    }
     let reads_effort = flavor == qwen_chat::TemplateFlavor::Qwen38;
     let flavor = match flavor {
         qwen_chat::TemplateFlavor::Qwen38 => "qwen3.8",
@@ -585,12 +589,15 @@ impl ChatFormat {
         data::chat_template::ChatTemplate::from_model_dir(dir).map(|t| ChatFormat::Template(Box::new(t))).map_err(|e| format!("{}: {e}", dir.display()))
     }
 
-    /// The token this format closes an assistant turn with, when that is not
-    /// the checkpoint's own eos: ChatML's `<|im_end|>`.
-    pub fn end_of_turn(&self) -> Option<&'static str> {
+    /// The tokens this format ends a generation with, when they are not the checkpoint's own eos, for
+    /// `data::generation::stop_ids`: ChatML's `<|im_end|>`; for a template that writes typed messages, its
+    /// sampling eos and the message boundary ([`data::chat_template::ChatTemplate::end_of_turn_markers`]);
+    /// none for any other template or no template, where the checkpoint's own eos ends a turn.
+    pub fn end_of_turn(&self) -> Vec<&'static str> {
         match self {
-            ChatFormat::Qwen => Some("<|im_end|>"),
-            ChatFormat::Template(_) | ChatFormat::None => None,
+            ChatFormat::Qwen => vec!["<|im_end|>"],
+            ChatFormat::Template(t) => t.end_of_turn_markers(),
+            ChatFormat::None => Vec::new(),
         }
     }
 }
@@ -613,11 +620,7 @@ pub fn render_prompt_as(format: &ChatFormat, inv: &Invocation) -> Result<Rendere
     // model: Qwen3.8's `<function=...>` XML when the template writes it,
     // otherwise the JSON `<tool_call>` payload, and drops the framing newlines
     // a template that writes its reply parts on separate lines puts there.
-    let flavor = match template {
-        Some(t) if t.source().contains("<function=") => qwen_chat::TemplateFlavor::Qwen38,
-        Some(t) if t.frames_replies_with_newlines() => qwen_chat::TemplateFlavor::JsonFramed,
-        _ => qwen_chat::TemplateFlavor::Qwen3,
-    };
+    let flavor = template.and_then(data::chat_template::ChatTemplate::reply_flavor).unwrap_or(qwen_chat::TemplateFlavor::Qwen3);
     if !chat {
         return Ok(RenderedPrompt { text: inv.get_str("prompt").unwrap_or_default(), tool_choice, flavor, thinking_open: false, raw: true });
     }
@@ -644,6 +647,12 @@ pub fn render_prompt_as(format: &ChatFormat, inv: &Invocation) -> Result<Rendere
         _ => None,
     };
     let mut extra = template_kwargs(inv)?;
+    if let Some(effort) = inv.get_str("reasoning_effort").filter(|e| !e.is_empty()) {
+        if !t.source().contains(data::chat_template::ReasoningEffort::KWARG) {
+            return Err("this checkpoint's chat template does not read reasoning_effort".to_string());
+        }
+        data::chat_template::ReasoningEffort::parse(&effort).map_err(|e| e.to_string())?.apply(&mut extra);
+    }
     let text = if inv.get_bool("enable_thinking") == Some(false) {
         // However this model's template reaches no-think mode (see
         // `ChatTemplate::render_no_think`), the caller only says so.
@@ -1598,13 +1607,44 @@ mod tests {
         let tok = byte_tok(&["<s>", "<｜User｜>", "<｜Assistant｜>"]);
         let format = ChatFormat::for_checkpoint(Some(&template_dir("r1", R1_LIKE)), &tok);
         assert!(matches!(format, ChatFormat::Template(_)));
-        assert_eq!(format.end_of_turn(), None, "the checkpoint's own eos ends a turn");
+        assert!(format.end_of_turn().is_empty(), "the checkpoint's own eos ends a turn");
         let inv = Invocation::new().set("messages", json!(r#"[{"role":"user","content":"hi"}]"#));
         let p = render_prompt_as(&format, &inv).unwrap();
         assert_eq!(p.text, "<s><｜User｜>hi<｜Assistant｜><think>\n");
         assert!(p.thinking_open);
         let with_tools = inv.clone().set("tools", json!(r#"[{"type":"function","function":{"name":"f","parameters":{}}}]"#));
         assert!(render_prompt_as(&format, &with_tools).unwrap_err().contains("tools"));
+    }
+
+    const TYPED_LIKE: &str = "<|message_system|><|content_text|>effort {{ reasoning_effort }}<|end_message|>{% for m in messages %}{% if m.role == 'user' %}<|message_user|><|content_text|>{{ m.content }}<|end_message|>{% else %}{% if m.reasoning_content %}<|message_model|><|content_thinking|>{{ m.reasoning_content }}<|end_message|>{% endif %}<|message_model|><|content_text|>{{ m.content }}<|end_message|><|content_model_end_sampling|>{% endif %}{% endfor %}";
+
+    /// A template that writes typed messages selects the typed-message reader, stops a generation on the
+    /// sampling eos and the message boundary, and takes `reasoning_effort` as a typed template variable (named or
+    /// numeric, refused out of range); a template that does not read it refuses it by name.
+    #[test]
+    fn a_typed_message_template_selects_its_reader_stops_and_effort() {
+        let tok = byte_tok(&["<|content_model_end_sampling|>", "<|end_message|>"]);
+        let format = ChatFormat::for_checkpoint(Some(&template_dir("typed", TYPED_LIKE)), &tok);
+        assert!(matches!(format, ChatFormat::Template(_)));
+        assert_eq!(format.end_of_turn(), ["<|content_model_end_sampling|>", "<|end_message|>"]);
+        assert_eq!(data::generation::stop_ids(None, &tok, None, format.end_of_turn()).unwrap(), [256, 257]);
+
+        let inv = Invocation::new().set("messages", json!(r#"[{"role":"user","content":"hi"}]"#));
+        let rendered = render_prompt_as(&format, &inv).unwrap();
+        assert_eq!(rendered.flavor, qwen_chat::TemplateFlavor::TypedMessages);
+        assert!(!rendered.thinking_open);
+        for (effort, written) in [("high", "high"), ("0.25", "0.25")] {
+            let p = render_prompt_as(&format, &inv.clone().set("reasoning_effort", json!(effort))).unwrap();
+            assert!(p.text.starts_with(&format!("<|message_system|><|content_text|>effort {written}<|end_message|>")), "{}", p.text);
+        }
+        let e = render_prompt_as(&format, &inv.clone().set("reasoning_effort", json!("1.5"))).unwrap_err();
+        assert!(e.contains("reasoning_effort"), "{e}");
+
+        let r1 = ChatFormat::for_checkpoint(Some(&template_dir("typed-r1", R1_LIKE)), &byte_tok(&["<s>"]));
+        let e = render_prompt_as(&r1, &inv.set("reasoning_effort", json!("high"))).unwrap_err();
+        assert!(e.contains("does not read reasoning_effort"), "{e}");
+        let names: Vec<String> = template_params(qwen_chat::TemplateFlavor::TypedMessages).iter().map(|p| p.name.clone()).collect();
+        assert_eq!(names, ["reasoning_effort"]);
     }
 
     /// Thinking switched off answers right away for a template that opens a
@@ -1634,7 +1674,7 @@ mod tests {
         let dir = template_dir("chatml", "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n{% endfor %}");
         assert!(matches!(ChatFormat::for_checkpoint(Some(&dir), &chatml), ChatFormat::Qwen));
         assert!(matches!(ChatFormat::for_checkpoint(None, &chatml), ChatFormat::Qwen));
-        assert_eq!(ChatFormat::Qwen.end_of_turn(), Some("<|im_end|>"));
+        assert_eq!(ChatFormat::Qwen.end_of_turn(), ["<|im_end|>"]);
 
         let base = byte_tok(&["<s>"]);
         let format = ChatFormat::for_checkpoint(None, &base);
