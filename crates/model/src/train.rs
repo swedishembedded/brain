@@ -1762,8 +1762,8 @@ fn agreed_eval<M: Model, O: Objective<M>>(obj: &mut O, model: &M, rng: &Rng, bat
 /// already named by [`FitControl::grad_sync`] is the same request; naming a
 /// different one is refused, not overridden.
 ///
-/// Exact resume with a sync needs the world size in the run identity: the
-/// state is one rank's, and a resume with a different group is refused.
+/// Exact resume with a sync records the group's world size in the state's
+/// identity, so a resume with a different group is refused.
 pub fn fit_controlled_sync<M: Model, O: Objective<M>>(model: M, obj: O, opts: &FitOpts, out: Option<&Path>, control: FitControl<'_>, grad_sync: Option<GradSync<'_>>) -> std::io::Result<(FitReport, M)> {
     fit_controlled_sharded(model, obj, opts, out, control, grad_sync, None)
 }
@@ -1825,6 +1825,25 @@ fn verify_resume(identity: CheckpointIdentity<'_>, out: &Path, world: usize) -> 
     Ok(())
 }
 
+/// `identity` with the gradient group's `world` size in it, as a distributed run's exact-resume state records it. A
+/// caller that already names a world size must name this one; an identity that is not an object is kept under `run`.
+fn identity_with_world(identity: &serde_json::Value, world: usize) -> std::io::Result<serde_json::Value> {
+    let mut object = match identity {
+        serde_json::Value::Object(map) => map.clone(),
+        other => serde_json::Map::from_iter([("run".to_string(), other.clone())]),
+    };
+    match object.get("world_size").map(serde_json::Value::as_u64) {
+        None => {
+            object.insert("world_size".into(), serde_json::json!(world));
+        }
+        Some(Some(named)) if named == world as u64 => {}
+        Some(named) => {
+            return Err(std::io::Error::other(format!("the run identity names world size {named:?}, but the gradient group has {world} ranks")));
+        }
+    }
+    Ok(serde_json::Value::Object(object))
+}
+
 pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
     mut model: M,
     mut obj: O,
@@ -1869,17 +1888,12 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
             None => Ok(()),
         }
     };
-    if let (Some(sync), Some(_)) = (&grad_sync, control.state) {
-        let world = sync.collective.world_size();
-        // A resumed group must be the same group. The caller's identity is what
-        // the state loader compares, so the world size has to be in it, not
-        // inferred from whatever the resume happens to run with.
-        if control.identity.get("world_size").and_then(serde_json::Value::as_u64) != Some(world as u64) {
-            return Err(std::io::Error::other(format!(
-                "a distributed run that keeps exact resume state must name its world size ({world}) in the run identity"
-            )));
-        }
-    }
+    // A resumed group must be the same group: the state's identity carries the world size, recorded here, so a state
+    // saved by one layout is refused by another instead of continuing as a different run.
+    let identity = match &grad_sync {
+        Some(sync) => identity_with_world(&control.identity, sync.collective.world_size())?,
+        None => control.identity.clone(),
+    };
     if let Some((rank, world)) = shard {
         if world == 0 || rank >= world {
             return Err(std::io::Error::other(format!("shard rank {rank} is not one of a world of {world}")));
@@ -1918,7 +1932,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
                 verify_resume(identity, path, sync.collective.world_size())?;
             }
         }
-        let saved = load_train_state(&model, state, opts, &control.identity)?;
+        let saved = load_train_state(&model, state, opts, &identity)?;
         let step = saved.step;
         eprintln!("resuming at step {step} from {}", state.display());
         // The objective's stream position comes back before `begin`, which positions the loop's own shuffle.
@@ -2164,7 +2178,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
             if !keep_going || periodic {
                 // The selection record holds the evaluations too: saved whether or not the run selects, so a resumed run
                 // reports every evaluation of the whole run, those before the resume included.
-                save_train_state(&model, state, completed, applied, &rng, opts, &control.identity, Some(&selection), obj.cursor())?;
+                save_train_state(&model, state, completed, applied, &rng, opts, &identity, Some(&selection), obj.cursor())?;
             }
         }
         if !keep_going {
@@ -3909,17 +3923,48 @@ mod tests {
     }
 
     #[test]
-    fn a_distributed_resume_must_name_its_world_in_the_identity() {
+    fn a_distributed_state_carries_its_world_and_resumes_only_in_the_same_world() {
         let dir = tmp("world-identity");
-        let state = dir.join("train.state");
+        let identity = serde_json::json!({ "run": 1 });
+        let opts = FitOpts { steps: 4, eval_interval: 0, ..Default::default() };
+        // One `world`-rank run over `steps` of `opts`, rank r keeping its state in `state<r>`; the AdamW step indices
+        // each rank applied, or the first rank's error.
+        let run = |world: usize, stop_after: u32| -> Result<Vec<Vec<u32>>, String> {
+            let coll = crate::HostCollective::new(world);
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..world)
+                    .map(|rank| {
+                        let (coll, dir, identity, opts) = (Arc::clone(&coll), &dir, identity.clone(), &opts);
+                        scope.spawn(move || {
+                            let state = dir.join(format!("state{rank}"));
+                            let model = Recorder::new(RecorderCfg, 1, 1, &HashMap::new());
+                            let indices = std::rc::Rc::clone(&model.indices);
+                            let mut stop = |s: &StepReport| s.step < stop_after;
+                            let control = FitControl { on_step: Some(&mut stop), state: Some(&state), identity, ..Default::default() };
+                            let sync = GradSync { collective: &*coll, rank, checkpoint: None };
+                            fit_controlled_sharded(model, Verdicts(Default::default()), opts, None, control, Some(sync), None).map_err(|e| e.to_string())?;
+                            let applied = indices.borrow().clone();
+                            Ok(applied)
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().expect("a rank's thread")).collect()
+            })
+        };
+        // The caller names no world size: the run records it itself.
+        assert_eq!(run(2, 2).expect("first half"), vec![vec![1, 2]; 2]);
+        assert_eq!(run(2, 4).expect("the same world resumes"), vec![vec![3, 4]; 2]);
+        // A state written by a two-rank job is not resumed by a one-rank one.
+        std::fs::remove_file(dir.join("state0")).ok();
+        std::fs::rename(dir.join("state1"), dir.join("state0")).unwrap();
+        let err = run(1, 4).expect_err("a different world must be refused");
+        assert!(err.contains("different data or a different starting point") || err.contains("world"), "{err}");
+        // A caller that names a world size must name the group's.
         let coll = crate::HostCollective::new(1);
         let sync = GradSync { collective: &*coll, rank: 0, checkpoint: None };
-        let opts = FitOpts { steps: 1, eval_interval: 0, ..Default::default() };
-        let control = FitControl { state: Some(&state), identity: serde_json::json!({ "run": 1 }), ..Default::default() };
-        let err = match fit_controlled_sharded(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Verdicts(Default::default()), &opts, None, control, Some(sync), None) {
-            Ok(_) => panic!("a distributed resume without a world size must be refused"),
-            Err(error) => error,
-        };
+        let state = dir.join("named");
+        let control = FitControl { state: Some(&state), identity: serde_json::json!({ "run": 1, "world_size": 3 }), ..Default::default() };
+        let err = fit_controlled_sharded(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Verdicts(Default::default()), &opts, None, control, Some(sync), None).err().expect("a contradictory world size");
         assert!(err.to_string().contains("world size"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
     }

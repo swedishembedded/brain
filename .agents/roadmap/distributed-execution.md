@@ -462,6 +462,12 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
       are reduced in buckets overlapped with backward; exact resume carries the
       world size. Gates: replicas bit-identical across 2 nodes; scaling
       efficiency at 4, 8 and 16 cards on Qwen3-0.6B LoRA and 27B LoRA.
+      - [x] Exact resume carries the world size (2026-11-21): the fit loop
+        writes the gradient group's world size into the state's identity
+        itself, so every distributed caller keeps exact-resume state, a state
+        from another world is refused, and a caller naming a contradictory
+        world size is refused. Test:
+        `a_distributed_state_carries_its_world_and_resumes_only_in_the_same_world`.
 - [ ] **C3 sharded training.** Optimizer state and gradient sharding over the dp
       group (reduce-scatter + all-gather), then parameter sharding; tensor
       parallelism inside a node over NVLink, sharded data parallelism across
@@ -537,9 +543,6 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
 - [ ] Only the GPT trainer and the Qwen3 LoRA fine-tune take a job plan. The
       GLM trainer, the full-parameter fine-tunes and the other model families
       still run single-process.
-- [ ] Exact resume is still refused for a distributed run: the training state
-      names one rank's step and options but not the world size, so a resumed
-      job could change its group without being refused.
 - [ ] `DdpOptimizer`, `DataParallel` and `federated_average` have no
       production caller; the shipped driver reduces through `reduce_grads` so
       each model keeps its own optimizer and schedule.
