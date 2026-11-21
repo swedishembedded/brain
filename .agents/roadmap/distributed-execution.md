@@ -402,6 +402,10 @@ Scope: Running one training job as ranks across machines, and serving one model 
     -> 117.1 ms with it on the device group (2.8 ms); 12 cards (n424+n442+
     n467) 129.9 -> 129.3 ms, scalar 15.2 -> 13.3 ms. Adapters byte-identical
     before and after (`sha256:a533c71c...` at 8, `271dc7d1...` at 12).
+  - 16 cards (n424+n442+n445+n467, four nodes): 140.8 ms per step, 78%
+    efficiency, 14,545 128-token rows per second; device reduction 11.9 ms,
+    scalar 22.9 ms (ranks waiting for the shared node); adapters
+    byte-identical across all 16 ranks (`sha256:68c8053f...`).
   - 27B base (Qwen3.8-27B FP8, about 27 GB) time to a finished 1-step run,
     8 ranks on n442+n467, slowest rank: from the shared filesystem 124.7 s;
     staged into `/scratch/local` (copy and verify 15-18 s per node) 92.3 s;
@@ -700,8 +704,10 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         one rank (sft and policy gradient; the paired objectives are refused).
       - [x] Gate: replicas bit-identical across nodes (2026-11-21: 8 ranks
         on two nodes and 12 on three, Qwen3-4B and 27B LoRA; see Measured).
-      - [ ] Gate: the scaling table at 16 cards (measured to 12: 85% for the
-        4B LoRA, 90% for the 27B LoRA).
+      - [x] Gate: the scaling table to 16 cards (2026-11-21): Qwen3-4B LoRA
+        93% / 92% / 86% / 85% / 78% at 2 / 4 / 8 / 12 / 16 cards, 27B LoRA
+        98% / 94% / 90% at 4 / 8 / 12 (Measured). The 16-card point includes
+        the shared node whose straggling the 12-card run showed.
       - [x] A step's scalars ride the device group (2026-11-21): once the
         ranks formed one, `JobCollective`'s all-reduce and broadcast of up to
         62 values (the step's token count, an evaluation's result) are one
