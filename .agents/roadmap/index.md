@@ -41,6 +41,7 @@ heading and a `Scope: <one sentence>` line under it, then run `make generate/roa
 | [`dtype`](dtype.md) | dtype | Keeping measured numbers out of `docs/` and attached to the tests that assert them. |
 | [`edgerock`](edgerock.md) | edgerock | EdgeRock-4B windowed hybrid decoder with a bounded anchor memory (`crates/qwen35` config variant, `model::anchor_memory`). |
 | [`embeddings`](embeddings.md) | embeddings | Text embedding, retrieval, RAG and contrastive fine-tuning through the SDK. |
+| [`engineering-cleanup`](engineering-cleanup.md) | engineering-cleanup | parameters declared once across the RL objectives, the training-job API, the SDK and the CLI; one max-batch policy for every served language model; the environment reads still left; the published training-records contract; and the test-binary layout. |
 | [`fincast`](fincast.md) | fincast | FinCast forecaster (`crates/fincast`). |
 | [`fishtank`](fishtank.md) | fishtank - head-coupled perspective | Webcam head tracking to a calibrated eye position and the off-axis view through the display (`crates/headpose`, `crates/openseeface`, `samples/vision/fishtank`). |
 | [`florence2`](florence2.md) | florence2 | Florence-2 vision-language model (`crates/florence2`). |
