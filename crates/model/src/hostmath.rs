@@ -241,6 +241,37 @@ pub fn softcap_grad(x: f32, cap: f32) -> f32 {
     1.0 - t * t
 }
 
+/// Gamma-free RMSNorm over `rows` rows of width `d`, `x * rsqrt(mean(x^2) + eps)`: the reference of
+/// `kernels::RMSNORM_NOGAIN`.
+pub fn rmsnorm_nogain_rows(x: &[f32], rows: usize, d: usize, eps: f32) -> Vec<f32> {
+    assert_eq!(x.len(), rows * d, "rmsnorm_nogain_rows: x is not rows x d");
+    let mut out = Vec::with_capacity(x.len());
+    for row in x.chunks_exact(d) {
+        let ms = row.iter().map(|v| v * v).sum::<f32>() / d as f32;
+        let r = 1.0 / (ms + eps).sqrt();
+        out.extend(row.iter().map(|v| v * r));
+    }
+    out
+}
+
+/// Per-vector L2 clip of `x * scale` (`scale: [heads, d]`, optional), `a * min(1, thr / (|a| + eps))`: the reference of
+/// `kernels::L2CLIP_SCALE`. `x` is `[n_vec, d]` with vector `v` belonging to head `v % heads`.
+pub fn l2clip_scale_rows(x: &[f32], scale: Option<&[f32]>, heads: usize, d: usize, thr: f32, eps: f32) -> Vec<f32> {
+    assert_eq!(x.len() % d, 0, "l2clip_scale_rows: x is not a whole number of vectors");
+    if let Some(s) = scale {
+        assert_eq!(s.len(), heads * d, "l2clip_scale_rows: scale is not heads x d");
+    }
+    let mut out = Vec::with_capacity(x.len());
+    for (v, row) in x.chunks_exact(d).enumerate() {
+        let head = v % heads;
+        let a: Vec<f32> = (0..d).map(|c| row[c] * scale.map_or(1.0, |s| s[head * d + c])).collect();
+        let norm = a.iter().map(|t| t * t).sum::<f32>().sqrt();
+        let k = (thr / (norm + eps)).min(1.0);
+        out.extend(a.iter().map(|t| t * k));
+    }
+    out
+}
+
 /// Classifier-free guidance: `unconditional + (conditional - unconditional) *
 /// scale`, element-wise. Scale 1 is the conditional branch alone, 0 the
 /// unconditional one; the diffusion samplers apply it to the predicted

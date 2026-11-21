@@ -736,6 +736,12 @@ pub const L1SSIM_MAP_V: &str = include_str!("../wgsl/l1ssim_map_v.wgsl");
 pub const L1SSIM_MOMENTS_H: &str = include_str!("../wgsl/l1ssim_moments_h.wgsl");
 /// `wgsl/l1ssim_partials_h.wgsl`
 pub const L1SSIM_PARTIALS_H: &str = include_str!("../wgsl/l1ssim_partials_h.wgsl");
+/// `wgsl/l2clip_scale.wgsl`
+pub const L2CLIP_SCALE: &str = include_str!("../wgsl/l2clip_scale.wgsl");
+/// `wgsl/l2clip_scale_ds.wgsl`
+pub const L2CLIP_SCALE_DS: &str = include_str!("../wgsl/l2clip_scale_ds.wgsl");
+/// `wgsl/l2clip_scale_dx.wgsl`
+pub const L2CLIP_SCALE_DX: &str = include_str!("../wgsl/l2clip_scale_dx.wgsl");
 /// `wgsl/l2norm_scale.wgsl`
 pub const L2NORM_SCALE: &str = include_str!("../wgsl/l2norm_scale.wgsl");
 /// `wgsl/l2norm_scale2d.wgsl`
@@ -1403,6 +1409,10 @@ pub const RMSNORM_DW_SUM: &str = include_str!("../wgsl/rmsnorm_dw_sum.wgsl");
 pub const RMSNORM_DX: &str = include_str!("../wgsl/rmsnorm_dx.wgsl");
 /// `wgsl/rmsnorm_dx_rows.wgsl`
 pub const RMSNORM_DX_ROWS: &str = include_str!("../wgsl/rmsnorm_dx_rows.wgsl");
+/// `wgsl/rmsnorm_nogain.wgsl`
+pub const RMSNORM_NOGAIN: &str = include_str!("../wgsl/rmsnorm_nogain.wgsl");
+/// `wgsl/rmsnorm_nogain_dx.wgsl`
+pub const RMSNORM_NOGAIN_DX: &str = include_str!("../wgsl/rmsnorm_nogain_dx.wgsl");
 /// `wgsl/rmsnorm_quant_fused.wgsl`
 pub const RMSNORM_QUANT_FUSED: &str = include_str!("../wgsl/rmsnorm_quant_fused.wgsl");
 /// `wgsl/rmsnorm_rows.wgsl`
@@ -2078,6 +2088,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("l1ssim_map_v", L1SSIM_MAP_V),
     ("l1ssim_moments_h", L1SSIM_MOMENTS_H),
     ("l1ssim_partials_h", L1SSIM_PARTIALS_H),
+    ("l2clip_scale", L2CLIP_SCALE),
+    ("l2clip_scale_ds", L2CLIP_SCALE_DS),
+    ("l2clip_scale_dx", L2CLIP_SCALE_DX),
     ("l2norm_scale", L2NORM_SCALE),
     ("l2norm_scale2d", L2NORM_SCALE2D),
     ("l2norm_scale_dg", L2NORM_SCALE_DG),
@@ -2400,6 +2413,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("rmsnorm_dw_sum", RMSNORM_DW_SUM),
     ("rmsnorm_dx", RMSNORM_DX),
     ("rmsnorm_dx_rows", RMSNORM_DX_ROWS),
+    ("rmsnorm_nogain", RMSNORM_NOGAIN),
+    ("rmsnorm_nogain_dx", RMSNORM_NOGAIN_DX),
     ("rmsnorm_quant_fused", RMSNORM_QUANT_FUSED),
     ("rmsnorm_rows", RMSNORM_ROWS),
     ("rmsnorm_rows_wg", RMSNORM_ROWS_WG),

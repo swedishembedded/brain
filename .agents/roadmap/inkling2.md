@@ -283,8 +283,17 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
 
 - **I1.1** `kernels` + `model::hostmath`: `softcap` / `softcap_bwd`, `y = c tanh(x/c)`.
   Used for the logit cap (30) and the expert caps (4, 25).
+  Done (2026-11-21): kernels `softcap` / `softcap_bwd` (params `total, cap` as f32 bits; the backward takes the
+  forward input), `model::hostmath::{softcap, softcap_grad}`, spec `crates/model/tests/it/softcap.rs`
+  (host reference + f64 finite differences, saturation without NaN). CPU backend verified; CUDA via the generated seam, not exercised.
 - **I1.2** `kernels`: `rmsnorm_nogain` (+dx) and `l2clip_scale` (+dx, d-scale), with an
   optional scale and a threshold. This generalises `l2norm_scale`.
+  Done (2026-11-21): kernels `rmsnorm_nogain` / `rmsnorm_nogain_dx` and `l2clip_scale` / `l2clip_scale_dx` /
+  `l2clip_scale_ds` (workgroup per vector, dispatched with `Dispatch::Workgroups`; the dx kernel also writes the
+  per-element scale partials that `_ds` reduces over vectors, so the norm is computed once), hostmath references
+  `rmsnorm_nogain_rows` / `l2clip_scale_rows`, spec `crates/model/tests/it/norm_clip_ops.rs`. `l2norm_scale` is
+  kept: it normalises (eps under the root), the clip only removes the excess (eps added to the norm), so they are
+  different operators, not one with options. CPU backend verified; CUDA not exercised.
 - **I1.3** `model::moe` + `moe_linear_gated*`, `moe_nvfp4_*`:
   - A declared `GatedAct` (SwiGLU, clamped SwiGLU, softcap-sigmoid with two caps) with
     backward, plus a declared gate/up layout (concat or interleaved).
