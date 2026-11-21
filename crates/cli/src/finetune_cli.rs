@@ -115,12 +115,21 @@ brain finetune BASE --dataset FILE --out DIR [options]
                      device (the rest streamed from the host), `clip=two-pass|running`. An architecture that does not
                      run a choice refuses it by name.
   --no-thinking      render records without the reasoning block.
+  --job-plan FILE --job-rank N --job-secret FILE
+                     with --lora: train as rank N of the distributed job the plan names (the same three on every rank,
+                     a different N): each rank trains on its own shard of the records and every step's gradients are
+                     reduced over the job, on the cards when every rank can. Without --seed every rank uses the
+                     plan's digest.
 
 Run on a device with `--device` (default: every device brain finds).
 ";
 
 #[derive(Debug, Default)]
 struct Args {
+    /// `--job-plan`, `--job-rank`, `--job-secret`: this run as one rank of a distributed job.
+    job_plan: Option<String>,
+    job_rank: Option<usize>,
+    job_secret: Option<String>,
     base: String,
     dataset: Option<String>,
     out: Option<String>,
@@ -225,6 +234,9 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--base-format" => a.base_format = Some(need(&mut i, &flag)?),
             "--activations" => a.activations = Some(crate::args::parse_activations(&need(&mut i, &flag)?).map_err(|e| format!("brain finetune: {e}"))?),
             "--no-thinking" => a.no_thinking = true,
+            "--job-plan" => a.job_plan = Some(need(&mut i, &flag)?),
+            "--job-rank" => a.job_rank = Some(number(&need(&mut i, &flag)?, &flag)?),
+            "--job-secret" => a.job_secret = Some(need(&mut i, &flag)?),
             "--train-precision" => {
                 let spec = need(&mut i, &flag)?;
                 a.train_precision = Some(model::TrainPrecision::parse(&spec).map_err(|e| format!("brain finetune: --train-precision {spec:?}: {e}"))?);
@@ -318,11 +330,14 @@ fn parse(argv: &[String]) -> Result<Args, String> {
     }
     if a.lora.is_none() {
         // Each of these shapes an adapter; a full fine-tune that was given one would silently ignore it.
-        for (flag, given) in [("--alpha", a.alpha.is_some()), ("--continue", a.continue_from.is_some()), ("--adapter-id", a.adapter_id.is_some()), ("--base-format", a.base_format.is_some()), ("--held-out", a.held_out.is_some()), ("--policy-gradient", a.policy_gradient), ("--modules-to-save", !a.modules_to_save.is_empty())] {
+        for (flag, given) in [("--job-plan", a.job_plan.is_some()), ("--alpha", a.alpha.is_some()), ("--continue", a.continue_from.is_some()), ("--adapter-id", a.adapter_id.is_some()), ("--base-format", a.base_format.is_some()), ("--held-out", a.held_out.is_some()), ("--policy-gradient", a.policy_gradient), ("--modules-to-save", !a.modules_to_save.is_empty())] {
             if given {
                 return Err(format!("brain finetune: {flag} applies to an adapter; give --lora RANK"));
             }
         }
+    }
+    if job(&a)?.is_some() && a.objective.is_paired() {
+        return Err("brain finetune: a distributed run (--job-plan) trains the sft and policy-gradient objectives; the paired objectives run in one process".to_string());
     }
     Ok(a)
 }
@@ -505,9 +520,16 @@ pub fn run_finetune(argv: &[String]) -> ! {
     };
     let code = match args.lora {
         Some(_) if args.objective.is_paired() => objectives::run(&args),
-        Some(rank) => match lora(&args, rank).run_with(&brain::CancelToken::default(), |p| eprintln!("step {}: loss {:.4}", p.step, p.loss)) {
+        Some(rank) => match lora(&args, rank).and_then_job(&args).run_with(&brain::CancelToken::default(), |p| eprintln!("step {}: loss {:.4}", p.step, p.loss)) {
             Ok(o) => {
                 println!("status: {:?}, {} steps, {}", o.status, o.steps_completed, losses(o.initial_loss, o.final_loss));
+                // The run's report, the document the served train job answers with; one writer per job.
+                if let (Some(out), true, brain::FineTuneStatus::Completed) = (&args.out, args.job_rank.unwrap_or(0) == 0, o.status) {
+                    let path = std::path::Path::new(out).join("report.json");
+                    if let Err(e) = std::fs::write(&path, serde_json::to_vec_pretty(&o.report()).unwrap_or_default()) {
+                        eprintln!("brain finetune: writing {}: {e}", path.display());
+                    }
+                }
                 if let (Some(base), Some(tuned)) = (&o.base_score, &o.tuned_score) {
                     let show = |v: Option<f32>| v.map_or("-".to_string(), |v| format!("{v:.4}"));
                     println!("held-out: {} records, {} positions, loss {} -> {}", base.records, base.positions, show(base.loss), show(tuned.loss));
@@ -557,12 +579,56 @@ pub fn run_finetune(argv: &[String]) -> ! {
     crate::drain_before_exit(code)
 }
 
+/// The job a `--job-plan`/`--job-rank`/`--job-secret` run joins, or `None`; part of the three is a usage error.
+fn job(a: &Args) -> Result<Option<model::job_params::JobRequest>, String> {
+    match (&a.job_plan, a.job_rank, &a.job_secret) {
+        (None, None, None) => Ok(None),
+        (Some(plan), Some(rank), Some(secret)) => Ok(Some(model::job_params::JobRequest { plan: plan.into(), rank, secret: secret.into(), profile: None })),
+        _ => Err("brain finetune: --job-plan, --job-rank and --job-secret go together: the plan every rank shares, this rank's place in it, and the secret that proves it belongs".into()),
+    }
+}
+
+/// A fine-tune with the rank of the job `a` names joined, if it names one.
+trait JoinJob: Sized {
+    fn and_then_job(self, a: &Args) -> Self;
+}
+
+impl JoinJob for brain::ChatFineTune {
+    fn and_then_job(self, a: &Args) -> Self {
+        let fail = |e: String| -> ! {
+            eprintln!("{e}");
+            std::process::exit(2)
+        };
+        // `parse` refused part of the three already.
+        let Some(job) = job(a).unwrap_or_else(|e| fail(e)) else { return self };
+        let seeded = match a.seed {
+            Some(_) => self,
+            None => self.seed(job.plan_seed().unwrap_or_else(|e| fail(format!("brain finetune: {e}")))),
+        };
+        let rank = brain::DataParallel::join_job(&job.plan, job.rank, &job.secret).unwrap_or_else(|e| fail(format!("brain finetune: {e}")));
+        seeded.data_parallel(rank)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn argv(s: &str) -> Vec<String> {
         s.split_whitespace().map(String::from).collect()
+    }
+
+    /// A distributed run names its plan, rank and secret together, and trains an adapter.
+    #[test]
+    fn a_job_is_all_three_flags_and_an_adapter() {
+        let err = parse(&argv("base --dataset d --out o --lora 4 --job-plan p.json")).unwrap_err();
+        assert!(err.contains("go together"), "{err}");
+        let err = parse(&argv("base --dataset d --out o --job-plan p.json --job-rank 1 --job-secret s")).unwrap_err();
+        assert!(err.contains("--lora"), "{err}");
+        let a = parse(&argv("base --dataset d --out o --lora 4 --job-plan p.json --job-rank 1 --job-secret s")).unwrap();
+        assert_eq!(job(&a).unwrap().map(|j| j.rank), Some(1));
+        let err = parse(&argv("base --dataset d --out o --lora 4 --objective feedback --job-plan p.json --job-rank 1 --job-secret s")).unwrap_err();
+        assert!(err.contains("one process"), "{err}");
     }
 
     #[test]

@@ -1678,6 +1678,60 @@ impl PolicyGradientOutcome {
 }
 
 impl ChatFineTuneOutcome {
+    /// The run's report: the one document every front end returns for a finished chat fine-tune (the served `train`
+    /// job's result, `brain finetune`'s `report.json`): the totals, held-out scores before and after, the training
+    /// curve and the selected step. The per-step series stay in the training record.
+    pub fn report(&self) -> serde_json::Value {
+        let score = |score: Option<HeldOutScore>| match score {
+            Some(s) => serde_json::json!({"loss": s.loss, "token_accuracy": s.token_accuracy, "positions": s.positions, "records": s.records, "skipped": s.skipped}),
+            None => serde_json::Value::Null,
+        };
+        let policy_gradient = self.policy_gradient.as_ref().map(|pg| {
+            let mut stats = serde_json::to_value(&pg.stats).unwrap_or(serde_json::Value::Null);
+            if let Some(fields) = stats.as_object_mut() {
+                fields.remove("steps");
+                fields.insert("steps_taken".into(), serde_json::json!(pg.stats.steps.len()));
+                // Every setting the run trained with, a named algorithm expanded and the request's own settings over it.
+                fields.insert("settings".into(), pg.settings_json());
+            }
+            stats
+        });
+        serde_json::json!({
+            "adapter_sha256": self.adapter_digest,
+            "base_digest": self.base_digest,
+            "trained_from": self.trained_from,
+            "records": self.train_records,
+            "replay_records": self.replay_records,
+            "monitor_records": self.monitor_records,
+            "block": self.block,
+            "seed": self.seed,
+            "steps": self.steps,
+            "steps_completed": self.steps_completed,
+            "resumed_at": self.resumed_at,
+            "rank": self.rank,
+            "alpha": self.alpha,
+            "lr": self.lr,
+            "weight_decay": self.weight_decay,
+            "initial_loss": self.initial_loss,
+            "final_loss": self.final_loss,
+            "base_tier": self.base_tier,
+            "base_tier_reason": self.base_tier_reason,
+            "base_score": score(self.base_score),
+            "tuned_score": score(self.tuned_score),
+            "base_text_score": score(self.base_text_score),
+            "tuned_text_score": score(self.tuned_text_score),
+            "held_out_repeats": self.held_out_repeats,
+            "held_out_text_repeats": self.held_out_text_repeats,
+            "eval_every": self.eval_every,
+            "patience": self.patience,
+            "curve": self.curve.iter().map(|p| serde_json::json!({"step": p.step, "train_loss": p.train_loss, "monitor_loss": p.monitor_loss})).collect::<Vec<_>>(),
+            "selected_step": self.selected_step,
+            "selection": self.selection,
+            "stopped_early": self.stopped_early,
+            "policy_gradient": policy_gradient,
+        })
+    }
+
     fn record_json(&self, base_id: &str, dataset_id: &str) -> serde_json::Value {
         let score = |s: &Option<HeldOutScore>| {
             s.as_ref().map(|s| serde_json::json!({ "loss": s.loss, "token_accuracy": s.token_accuracy, "positions": s.positions, "records": s.records, "skipped": s.skipped }))

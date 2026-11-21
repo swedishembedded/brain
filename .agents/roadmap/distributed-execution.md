@@ -529,6 +529,13 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         of the layout a repeatable run fixes. Default 0 (no packing): measured
         slower with per-tensor copies (see Measured). The layout is the one a
         reduce-scatter (C3) shards.
+      - [x] One report for every front end (2026-11-21):
+        `ChatFineTuneOutcome::report` is the document the served `train` job
+        answers with (totals, held-out scores, curve, selected step); the
+        trainjob crate builds its result from it, and `brain finetune` writes
+        it as `DIR/report.json` (rank 0 of a job). `brain finetune --lora`
+        takes `--job-plan/--job-rank/--job-secret` and runs the SDK fine-tune as
+        one rank (sft and policy gradient; the paired objectives are refused).
       - [ ] Overlap with backward. Not done: on the measured LoRA step the
         whole exposed reduction is 3.0 ms of 118 ms, so overlap could gain at
         most about 2.5%; it needs a per-layer gradient-ready hook in each backward and

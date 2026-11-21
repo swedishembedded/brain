@@ -595,13 +595,6 @@ pub fn step_frame(progress: &brain::FineTuneProgress, seconds: f64) -> Value {
     frame
 }
 
-fn score_json(score: Option<brain::HeldOutScore>) -> Value {
-    match score {
-        Some(s) => json!({"loss": s.loss, "token_accuracy": s.token_accuracy, "positions": s.positions, "records": s.records, "skipped": s.skipped}),
-        None => Value::Null,
-    }
-}
-
 /// What a finished run produced, before anything is published: the files the trainer wrote and the objective's own
 /// summary of the run (which rides one frame, a D-Bus datagram that is lost when it does not fit the socket, so it holds
 /// totals and short lists, every one bounded by the request: see [`crate::request::MAX_EVALUATIONS`]; the per-step
@@ -616,54 +609,6 @@ struct Trained {
     /// The step this job continued a resumable run's saved state at.
     resumed_at: Option<u32>,
     summary: Value,
-}
-
-fn chat_summary(outcome: &brain::ChatFineTuneOutcome) -> Value {
-    // The per-step series is in the frames and in the record blob; the report keeps the run's totals.
-    let policy_gradient = outcome.policy_gradient.as_ref().map(|pg| {
-        let mut stats = serde_json::to_value(&pg.stats).unwrap_or(Value::Null);
-        if let Some(fields) = stats.as_object_mut() {
-            fields.remove("steps");
-            fields.insert("steps_taken".into(), json!(pg.stats.steps.len()));
-            // Every setting the run trained with, a named algorithm expanded and the request's own settings over it.
-            fields.insert("settings".into(), pg.settings_json());
-        }
-        stats
-    });
-    json!({
-        "adapter_sha256": outcome.adapter_digest,
-        "base_digest": outcome.base_digest,
-        "trained_from": outcome.trained_from,
-        "records": outcome.train_records,
-        "replay_records": outcome.replay_records,
-        "monitor_records": outcome.monitor_records,
-        "block": outcome.block,
-        "seed": outcome.seed,
-        "steps": outcome.steps,
-        "steps_completed": outcome.steps_completed,
-        "resumed_at": outcome.resumed_at,
-        "rank": outcome.rank,
-        "alpha": outcome.alpha,
-        "lr": outcome.lr,
-        "weight_decay": outcome.weight_decay,
-        "initial_loss": outcome.initial_loss,
-        "final_loss": outcome.final_loss,
-        "base_tier": outcome.base_tier,
-        "base_tier_reason": outcome.base_tier_reason,
-        "base_score": score_json(outcome.base_score),
-        "tuned_score": score_json(outcome.tuned_score),
-        "base_text_score": score_json(outcome.base_text_score),
-        "tuned_text_score": score_json(outcome.tuned_text_score),
-        "held_out_repeats": outcome.held_out_repeats,
-        "held_out_text_repeats": outcome.held_out_text_repeats,
-        "eval_every": outcome.eval_every,
-        "patience": outcome.patience,
-        "curve": outcome.curve.iter().map(|p| json!({"step": p.step, "train_loss": p.train_loss, "monitor_loss": p.monitor_loss})).collect::<Vec<_>>(),
-        "selected_step": outcome.selected_step,
-        "selection": outcome.selection,
-        "stopped_early": outcome.stopped_early,
-        "policy_gradient": policy_gradient,
-    })
 }
 
 fn preference_score_json(score: Option<brain::PreferenceScore>) -> Value {
@@ -765,7 +710,7 @@ fn train_chat(request: &Request, base_dir: &Path, staged: &Staged, files: &RunFi
     }
     let adapter = outcome.adapter.clone().ok_or("train: the run completed with no adapter")?;
     let evaluations = if request.params.keep_evaluations { outcome.curve.iter().map(|p| (p.step, files.evaluations.join(format!("step-{}.safetensors", p.step)))).collect() } else { Vec::new() };
-    Ok(Trained { adapter, record: outcome.record.clone(), adapter_sha256: outcome.adapter_digest.clone().unwrap_or_default(), evaluations, resumed_at: outcome.resumed_at, summary: chat_summary(&outcome) })
+    Ok(Trained { adapter, record: outcome.record.clone(), adapter_sha256: outcome.adapter_digest.clone().unwrap_or_default(), evaluations, resumed_at: outcome.resumed_at, summary: outcome.report() })
 }
 
 fn train_preference(request: &Request, base_dir: &Path, staged: &Staged, files: &RunFiles, cancel: &capability::CancelToken, began: Instant, progress: &mut dyn FnMut(Progress)) -> Result<Trained, String> {

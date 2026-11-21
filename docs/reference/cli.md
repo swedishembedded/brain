@@ -167,6 +167,13 @@ HTTP API (`brain::ChatFineTune`, `PreferenceFineTune`, `FeedbackFineTune`, `Dist
 | `feedback` (KTO) | `generic-feedback-v1` desirable and undesirable completions | `--desirable-weight X`, `--undesirable-weight X`, `--beta X`, `--keep-reasoning` |
 | `distill` | chat records; the teacher scores their supervised turns | `--teacher base\|start\|adapter:FILE`, `--top-k N` |
 
+With `--job-plan FILE --job-rank N --job-secret FILE` an `sft` or `policy-gradient` adapter run is one rank of a
+distributed job: every rank is started with the same plan and secret and its own rank and card (`--device gpuN`),
+trains on its own shard of the records, and reduces every step's gradients over the job (on the cards over NCCL when
+every rank can). Rank 0 alone scores held-out records. Every completed adapter run writes `DIR/report.json` (rank 0
+of a job), the same report the HTTP API's training job answers with: totals, held-out scores before and after, the
+training curve and the selected step.
+
 `preference`, `feedback` and `distill` train an adapter, so they need `--lora RANK`. `--teacher start` is the adapter
 of `--continue FILE`; `adapter:FILE` is another adapter on the same base. A setting that an objective does not read
 (`--loss` beside `feedback`, `--weight-decay` beside `distill`) is a usage error that names it, never ignored.
