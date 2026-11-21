@@ -596,9 +596,11 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
       - [x] Gate: replicas bit-identical across nodes (2026-11-21: 8 ranks
         on two nodes and 12 on three, Qwen3-4B and 27B LoRA; see Measured).
       - [ ] Gate: the scaling table at 16 cards (measured to 12: 85% for the
-        4B LoRA, 90% for the 27B LoRA); the cross-node step-weight scalar
-        (13-14 ms, a host-star round that also absorbs straggling) is the
-        next cost to remove, by reducing it on the device with the gradients.
+        4B LoRA, 90% for the 27B LoRA). Across nodes the step-weight scalar
+        over the host star takes 13-14 ms; it is the first point where ranks
+        wait for each other, so how much of it is the round trip and how much
+        is ranks arriving at different times is not yet separated (measure
+        before moving it onto the device).
       - [ ] Overlap with backward. Not done: on the measured LoRA step the
         whole exposed reduction is 3.0 ms of 118 ms, so overlap could gain at
         most about 2.5%; it needs a per-layer gradient-ready hook in each backward and
