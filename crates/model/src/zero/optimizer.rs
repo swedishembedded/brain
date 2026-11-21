@@ -101,6 +101,24 @@ pub enum StepOutcome {
     Skipped(String),
 }
 
+/// The first half of a sharded step: every rank's gradient reduced to its owner and the global norm known, nothing
+/// updated yet. [`ZeroOptimizer::apply`] takes it once every rank has reduced (the job's vote between the two).
+#[derive(Clone, Debug)]
+pub enum Reduction {
+    /// Ready to update with these values.
+    Ready(ReducedStep),
+    /// No rank's parameters or state change, for the reason given (the same on every rank).
+    Skipped(String),
+}
+
+/// A reduced step's update values, valid for the optimizer that reduced it and its step `t`.
+#[derive(Clone, Debug)]
+pub struct ReducedStep {
+    args: StepArgs,
+    multiplier: f32,
+    grad_norm: f32,
+}
+
 /// Elements of `dtype` per 32-bit word: a member starts on one.
 pub(super) fn align_of(dtype: CollectiveDtype) -> u64 {
     4 / dtype.bytes()
@@ -700,11 +718,20 @@ impl ZeroOptimizer {
         self.settle(coll)
     }
 
-    /// One sharded step after this rank's backward: `local_weight` is how many items this rank's gradient averages
-    /// over (as [`crate::reduce_grads_weighted`] takes it) and `loss_finite` whether its loss was. A collective
-    /// failure leaves this rank's state as it was before the update began (other ranks may have moved on: restart
-    /// from the last commit). Not for parameter sharding, whose trainer drives the units itself.
+    /// One sharded step after this rank's backward: [`Self::reduce`], then [`Self::apply`] when it is ready. A job
+    /// that must not let some ranks update while others failed puts a vote between the two (as the trainer does).
     pub fn step(&mut self, coll: &dyn Collective, local_weight: f32, loss_finite: bool, args: &StepArgs) -> CollectiveResult<StepOutcome> {
+        match self.reduce(coll, local_weight, loss_finite, args)? {
+            Reduction::Ready(reduced) => self.apply(coll, &reduced),
+            Reduction::Skipped(why) => Ok(StepOutcome::Skipped(why)),
+        }
+    }
+
+    /// Reduce this step's gradients to their owners and agree on the global norm: `local_weight` is how many items
+    /// this rank's gradient averages over (as [`crate::reduce_grads_weighted`] takes it) and `loss_finite` whether its
+    /// loss was. Changes no parameter and no optimizer state, so a failure here, or a vote after it that some rank
+    /// lost, leaves every rank at the step before. Not for parameter sharding, whose trainer drives the units itself.
+    pub fn reduce(&mut self, coll: &dyn Collective, local_weight: f32, loss_finite: bool, args: &StepArgs) -> CollectiveResult<Reduction> {
         let rank = self.rank;
         if self.sharding == Sharding::Parameters {
             return Err(CollectiveError::Transport("a parameter-sharded optimizer is driven unit by unit by its trainer".into()));
@@ -717,7 +744,7 @@ impl ZeroOptimizer {
             return Err(CollectiveError::Transport(format!("the step's weight reduction returned {} values", totals.len())));
         }
         if totals[1] > 0.0 {
-            return Ok(StepOutcome::Skipped(format!("non-finite loss on {} rank(s)", totals[1] as u32)));
+            return Ok(Reduction::Skipped(format!("non-finite loss on {} rank(s)", totals[1] as u32)));
         }
         let clock = std::time::Instant::now();
         let scale = local_weight / totals[0].max(1e-12);
@@ -732,9 +759,21 @@ impl ZeroOptimizer {
         let sum_sq = f64::from(*global.first().ok_or_else(|| CollectiveError::Transport("the norm reduction returned nothing".into()))?);
         gpu_core::profile::stage_time("sharded step: the global gradient norm", clock);
         if !sum_sq.is_finite() {
-            return Ok(StepOutcome::Skipped("non-finite gradient".into()));
+            return Ok(Reduction::Skipped("non-finite gradient".into()));
         }
-        let multiplier = optim::grad_multiplier(sum_sq, args.clip, args.extra_scale);
+        // The reductions above are complete on this rank: a device collective that failed reports it here, not after
+        // the update began.
+        self.settle(coll)?;
+        Ok(Reduction::Ready(ReducedStep { args: *args, multiplier: optim::grad_multiplier(sum_sq, args.clip, args.extra_scale), grad_norm: sum_sq.sqrt() as f32 }))
+    }
+
+    /// Update this rank's slices from the step [`Self::reduce`] made ready and gather the new parameters. A failure
+    /// here (a rank lost in the gather) leaves the job's ranks at different steps: restart from the last commit.
+    pub fn apply(&mut self, coll: &dyn Collective, reduced: &ReducedStep) -> CollectiveResult<StepOutcome> {
+        let ReducedStep { args, multiplier, grad_norm } = reduced.clone();
+        if args.t != self.step + 1 {
+            return Err(CollectiveError::Transport(format!("applying sharded step {} after {} applied steps", args.t, self.step)));
+        }
         let clock = std::time::Instant::now();
         match &self.kernels {
             Some(k) => {
@@ -764,6 +803,6 @@ impl ZeroOptimizer {
         self.settle(coll)?;
         gpu_core::profile::stage_time("sharded step: update and gather the parameters", clock);
         self.step = args.t;
-        Ok(StepOutcome::Applied { grad_norm: sum_sq.sqrt() as f32 })
+        Ok(StepOutcome::Applied { grad_norm })
     }
 }

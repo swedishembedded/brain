@@ -105,7 +105,7 @@ mod optimizer;
 #[cfg(not(target_arch = "wasm32"))]
 pub use checkpoint::{commit_generation, read_logical, LogicalState};
 #[cfg(not(target_arch = "wasm32"))]
-pub use optimizer::{read_elems, write_elems, DeviceParam, DeviceParams, StateTier, StepArgs, StepOutcome, UnitUpdate, ZeroOptimizer, KERNELS};
+pub use optimizer::{read_elems, write_elems, DeviceParam, DeviceParams, ReducedStep, Reduction, StateTier, StepArgs, StepOutcome, UnitUpdate, ZeroOptimizer, KERNELS};
 
 /// The group a parameter-sharded model gathers and reduces its units over: shared, because the model holds it for
 /// its whole life (its forward gathers layers too), and this rank's place in it.

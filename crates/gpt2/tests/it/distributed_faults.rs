@@ -12,7 +12,9 @@
 //! Two OS processes (this test binary re-executed) train one plan over loopback, committing their exact-resume
 //! state every step. In each case one rank fails at step [`FAULT_STEP`]: it is killed during the gradient
 //! all-reduce, killed after the ranks agreed to apply the step (during the optimizer step), killed while the step's
-//! state is being committed, or stalled inside the all-reduce. Then:
+//! state is being committed, or stalled inside the all-reduce. A job that shards its gradients and optimizer state
+//! (ZeRO-2) loses a rank in the gradient reduce-scatter (killed or stalled) and in the parameter all-gather after
+//! the vote. Then:
 //!
 //! - every surviving rank exits with the restart status, having applied no step its peers did not agree to;
 //! - the newest committed generation holds every rank's state of the same step, with identical weights;
@@ -30,6 +32,7 @@ use gpt2::train::TrainOpts;
 use gpt2::GptConfig;
 use model::collective::{Collective, CollectiveFuture, Payload};
 use model::jobfault::{StepPhase, RESTART_STATUS};
+use model::zero::Sharding;
 use model::{CheckpointIdentity, GradSync, JobContext, JobPlan, JobSecret, Model};
 
 const CHILD: &str = "distributed_faults::rank_process";
@@ -43,8 +46,12 @@ fn config() -> GptConfig {
     GptConfig { vocab: 0, block_size: BLOCK, n_layers: 1, d_model: 32, n_heads: 2, d_ff: 64 }
 }
 
-fn opts() -> TrainOpts {
+/// The run's options; a sharded run on the host keeps its optimizer slices in host memory (the CPU device registers
+/// no sharded-step kernels).
+fn opts(sharding: Sharding, device: bool) -> TrainOpts {
     TrainOpts {
+        sharding,
+        precision: model::TrainPrecision { host_moments: !sharding.is_replicated() && !device, ..Default::default() },
         steps: STEPS,
         batch_size: BATCH,
         block_size: BLOCK,
@@ -80,10 +87,12 @@ struct Job {
     device: bool,
     /// The plan's op timeout.
     op_timeout_ms: u64,
+    /// What the ranks shard.
+    sharding: Sharding,
 }
 
 impl Job {
-    fn new(name: &str, data: &Path, device: bool) -> Job {
+    fn new(name: &str, data: &Path, device: bool, sharding: Sharding) -> Job {
         let dir = scratch(name);
         let mut plan = JobPlan::new(format!("gpt2-faults-{name}"), 2, free_address());
         plan.handshake_timeout_ms = 120_000;
@@ -96,7 +105,7 @@ impl Job {
             plan.collectives = model::CollectivePath::Device;
             plan.write(&dir.join("plan.json")).unwrap();
         }
-        Job { dir, data: data.to_path_buf(), device, op_timeout_ms: plan.op_timeout_ms }
+        Job { dir, data: data.to_path_buf(), device, op_timeout_ms: plan.op_timeout_ms, sharding }
     }
 
     fn spawn(&self, rank: usize, attempt: u32, fault: Option<&str>) -> Child {
@@ -112,6 +121,9 @@ impl Job {
         }
         if self.device {
             command.arg("--device-collective");
+        }
+        if !self.sharding.is_replicated() {
+            command.arg(format!("--sharding={}", self.sharding.stage()));
         }
         // One file for both streams: two handles opened on one path would write over each other.
         let file = std::fs::File::create(&log).unwrap();
@@ -202,8 +214,9 @@ fn dataset() -> PathBuf {
 }
 
 /// Lose a rank to `fault`, check what the failure left, restart the job and compare it with `reference`.
-fn lose_and_restart(name: &str, data: &Path, device: bool, faulty_rank: usize, fault: &str, reference: &[(String, Vec<f32>)], survivor_may_apply: bool) {
-    let job = Job::new(name, data, device);
+#[allow(clippy::too_many_arguments)] // the case: its job, where and how it fails, and what it is compared with
+fn lose_and_restart(name: &str, data: &Path, device: bool, sharding: Sharding, faulty_rank: usize, fault: &str, reference: &[(String, Vec<f32>)], survivor_may_apply: bool) {
+    let job = Job::new(name, data, device, sharding);
     let mut faults = [None, None];
     faults[faulty_rank] = Some(fault);
     let status = job.run(0, faults);
@@ -214,6 +227,9 @@ fn lose_and_restart(name: &str, data: &Path, device: bool, faulty_rank: usize, f
     let applied = format!("applied {FAULT_STEP}\n");
     if !survivor_may_apply {
         assert!(!job.phases(survivor).contains(&applied), "{name}: the survivor applied step {FAULT_STEP} although a peer was lost before agreeing to it");
+    } else {
+        // A fault the step may survive into its update comes after the vote: the survivor took part in it.
+        assert!(job.phases(survivor).contains(&format!("reduced {FAULT_STEP}\n")), "{name}: the step's vote preceded its update; phases:\n{}", job.phases(survivor));
     }
     let (step, states) = committed_generation(&job);
     assert_eq!(step, FAULT_STEP - 1, "{name}: the newest commit is the last step every rank made durable");
@@ -232,18 +248,30 @@ fn lose_and_restart(name: &str, data: &Path, device: bool, faulty_rank: usize, f
 /// Every fault, then a restart, against the uninterrupted run; `device` reduces over NCCL on the cards.
 fn every_fault(device: bool) {
     let data = dataset();
-    let reference_job = Job::new("reference", &data, device);
-    assert_eq!(reference_job.run(0, [None, None]), [Some(0), Some(0)], "the uninterrupted run; logs:\n{}\n{}", reference_job.log(0, 0), reference_job.log(1, 0));
-    let reference = weights(&reference_job.replica(0));
-    assert_eq!(weights(&reference_job.replica(1)), reference, "the replicas agree");
-    assert!(reference_job.phases(0).contains(&format!("committed {STEPS}\n")), "every step was committed");
+    let reference = |sharding: Sharding| {
+        let job = Job::new(&format!("reference-{}", sharding.stage()), &data, device, sharding);
+        assert_eq!(job.run(0, [None, None]), [Some(0), Some(0)], "the uninterrupted run ({sharding:?}); logs:\n{}\n{}", job.log(0, 0), job.log(1, 0));
+        let weights0 = weights(&job.replica(0));
+        assert_eq!(weights(&job.replica(1)), weights0, "the replicas agree ({sharding:?})");
+        assert!(job.phases(0).contains(&format!("committed {STEPS}\n")), "every step was committed ({sharding:?})");
+        std::fs::remove_dir_all(&job.dir).ok();
+        weights0
+    };
 
-    lose_and_restart("killed-in-all-reduce", &data, device, 1, "kill-in-reduce", &reference, false);
-    lose_and_restart("killed-in-optimizer-step", &data, device, 1, "kill-after-agreement", &reference, true);
-    lose_and_restart("killed-in-commit", &data, device, 1, "kill-after-state-saved", &reference, true);
-    lose_and_restart("stalled-in-all-reduce", &data, device, 1, "stall-in-reduce", &reference, false);
-    lose_and_restart("coordinator-killed-in-all-reduce", &data, device, 0, "kill-in-reduce", &reference, false);
-    std::fs::remove_dir_all(reference_job.dir).ok();
+    let replicated = reference(Sharding::Replicated);
+    let r = Sharding::Replicated;
+    lose_and_restart("killed-in-all-reduce", &data, device, r, 1, "kill-in-reduce", &replicated, false);
+    lose_and_restart("killed-in-optimizer-step", &data, device, r, 1, "kill-after-agreement", &replicated, true);
+    lose_and_restart("killed-in-commit", &data, device, r, 1, "kill-after-state-saved", &replicated, true);
+    lose_and_restart("stalled-in-all-reduce", &data, device, r, 1, "stall-in-reduce", &replicated, false);
+    lose_and_restart("coordinator-killed-in-all-reduce", &data, device, r, 0, "kill-in-reduce", &replicated, false);
+
+    // The sharded step is the same transaction: reduce-scatter, vote, then update and all-gather.
+    let sharded = reference(Sharding::Gradients);
+    let g = Sharding::Gradients;
+    lose_and_restart("sharded-killed-in-reduce-scatter", &data, device, g, 1, "kill-in-reduce-scatter", &sharded, false);
+    lose_and_restart("sharded-stalled-in-reduce-scatter", &data, device, g, 1, "stall-in-reduce-scatter", &sharded, false);
+    lose_and_restart("sharded-killed-in-all-gather", &data, device, g, 1, "kill-in-all-gather", &sharded, true);
     std::fs::remove_dir_all(data.parent().unwrap()).ok();
 }
 
@@ -276,8 +304,9 @@ fn a_job_reducing_on_the_cards_survives_the_same_faults() {
     every_fault(true);
 }
 
-/// The job's collective as this rank sees it, with a fault armed at the first all-reduce of [`FAULT_STEP`] (the
-/// gradient reduction: the step before it has committed).
+/// The job's collective as this rank sees it, with a fault armed in [`FAULT_STEP`] (the step before it has committed):
+/// at its first all-reduce (the gradient reduction, or a sharded step's weights), its first reduce-scatter (a sharded
+/// step's gradients) or its first all-gather (a sharded step's new parameters, after the vote).
 struct Faulty<'a> {
     inner: &'a dyn Collective,
     /// The last step this rank committed.
@@ -286,14 +315,17 @@ struct Faulty<'a> {
 }
 
 impl Faulty<'_> {
-    fn trip(&self) {
+    /// Fail now if the armed fault is `kill-in-<op>` or `stall-in-<op>`.
+    fn trip(&self, op: &str) {
         if self.committed.load(Ordering::SeqCst) + 1 != FAULT_STEP {
             return;
         }
-        match self.fault.as_deref() {
-            Some("kill-in-reduce") => std::process::abort(),
-            Some("stall-in-reduce") => std::thread::sleep(Duration::from_secs(3600)),
-            _ => {}
+        let Some(fault) = self.fault.as_deref() else { return };
+        if fault.strip_prefix("kill-in-") == Some(op) {
+            std::process::abort();
+        }
+        if fault.strip_prefix("stall-in-") == Some(op) {
+            std::thread::sleep(Duration::from_secs(3600));
         }
     }
 }
@@ -303,21 +335,34 @@ impl Collective for Faulty<'_> {
         self.inner.world_size()
     }
     fn all_reduce<'a>(&'a self, rank: usize, local: Payload) -> CollectiveFuture<'a, Payload> {
-        self.trip();
+        self.trip("reduce");
         self.inner.all_reduce(rank, local)
     }
     fn all_gather<'a>(&'a self, rank: usize, local: Payload) -> CollectiveFuture<'a, Payload> {
+        self.trip("all-gather");
         self.inner.all_gather(rank, local)
     }
     fn reduce_scatter<'a>(&'a self, rank: usize, local: Payload) -> CollectiveFuture<'a, Payload> {
+        self.trip("reduce-scatter");
         self.inner.reduce_scatter(rank, local)
     }
     fn broadcast<'a>(&'a self, rank: usize, local: Payload, root: usize) -> CollectiveFuture<'a, Payload> {
         self.inner.broadcast(rank, local, root)
     }
     fn all_reduce_device<'a>(&'a self, rank: usize, gpu: &'a gpu_core::Gpu, bufs: &'a [(&'a gpu_core::DeviceBuffer, u64)], dtype: gpu_core::CollectiveDtype, scale: f32) -> CollectiveFuture<'a, bool> {
-        self.trip();
+        self.trip("reduce");
         self.inner.all_reduce_device(rank, gpu, bufs, dtype, scale)
+    }
+    fn reduce_scatter_device<'a>(&'a self, rank: usize, gpu: &'a gpu_core::Gpu, send: &'a gpu_core::DeviceBuffer, recv: &'a gpu_core::DeviceBuffer, count: u64, dtype: gpu_core::CollectiveDtype, scale: f32) -> CollectiveFuture<'a, bool> {
+        self.trip("reduce-scatter");
+        self.inner.reduce_scatter_device(rank, gpu, send, recv, count, dtype, scale)
+    }
+    fn all_gather_device<'a>(&'a self, rank: usize, gpu: &'a gpu_core::Gpu, send: &'a gpu_core::DeviceBuffer, recv: &'a gpu_core::DeviceBuffer, count: u64, dtype: gpu_core::CollectiveDtype) -> CollectiveFuture<'a, bool> {
+        self.trip("all-gather");
+        self.inner.all_gather_device(rank, gpu, send, recv, count, dtype)
+    }
+    fn settle_device<'a>(&'a self, rank: usize, gpu: &'a gpu_core::Gpu) -> CollectiveFuture<'a, ()> {
+        self.inner.settle_device(rank, gpu)
     }
 }
 
@@ -331,6 +376,7 @@ fn rank_process() {
     let flag = |name: &str| after.iter().find_map(|arg| arg.strip_prefix(name).map(str::to_string));
     let (Some(rank), Some(dir), Some(data)) = (flag("--rank=").and_then(|v| v.parse::<usize>().ok()), flag("--dir="), flag("--data=")) else { return };
     let fault = flag("--fault=");
+    let sharding: Sharding = flag("--sharding=").map_or(Sharding::Replicated, |s| Sharding::parse(&s).expect("a sharding"));
     let dir = PathBuf::from(dir);
     let context = JobContext::from_plan_file(&dir.join("plan.json"), rank, &dir.join("job.secret")).unwrap_or_else(|e| {
         eprintln!("rank {rank}: {e}");
@@ -378,7 +424,7 @@ fn rank_process() {
     let sync = GradSync { collective: &faulty, rank, checkpoint: Some(CheckpointIdentity { job: &context.plan().job, plan: &identity }), observer: Some(&observe) };
     let out = dir.join(format!("replica-{rank}.safetensors"));
     let state = dir.join("state.safetensors");
-    let train = || gpt2::train::train_distributed_resumable(Path::new(&data), config(), &opts(), None, sync, &state, 1);
+    let train = || gpt2::train::train_distributed_resumable(Path::new(&data), config(), &opts(sharding, device), None, sync, &state, 1);
     let trained = if device { gpu_core::devices::with_gpu(gpu_core::testgpu::cards()[rank].index, train).unwrap_or_else(|e| Err(std::io::Error::other(e))) } else { train() };
     match trained {
         Ok((_report, replica)) => replica.save(out.to_str().expect("a UTF-8 path")),

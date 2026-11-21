@@ -2172,17 +2172,30 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
                 // reports no count is weighted equally.
                 let weight = if work.supervised_positions > 0 { work.supervised_positions as f32 } else { 1.0 };
                 if let (Some(zero), Some(sync)) = (zero.as_mut(), &grad_sync) {
-                    // A sharded step reduces, gates and updates in one: the ranks agree on skipping it.
+                    // A sharded step is a transaction like the replicated one: every rank reduces (and the ranks agree on
+                    // skipping it), then votes that its reduction completed, and only then updates. A failure is the
+                    // job's (a lost or stalled rank): stop, and restart from the last commit.
                     let args = crate::zero::StepArgs { t: applied + 1, lr, wd: opts.weight_decay, adam: opts.adam, clip, extra_scale: scale };
-                    // A failure here is the job's (a lost or stalled rank): stop, and restart from the last commit.
-                    let outcome = health.guarded(step + 1, "sharded step", || zero.step(sync.collective, weight, step_loss.is_finite(), &args))?;
-                    let why = match outcome {
-                        crate::zero::StepOutcome::Applied { grad_norm } => {
-                            applied += 1;
-                            sharded_norm = clip.map(|_| grad_norm * scale);
-                            None
+                    let reduction = health.guarded(step + 1, "sharded gradient reduction", || zero.reduce(sync.collective, weight, step_loss.is_finite(), &args))?;
+                    let why = match reduction {
+                        crate::zero::Reduction::Ready(reduced) => {
+                            crate::jobfault::agree(sync.collective, sync.rank, &mut health, step + 1, "agreement that every rank's reduction completed")?;
+                            if let Some(observe) = sync.observer {
+                                observe(crate::jobfault::StepPhase::Reduced, step + 1);
+                            }
+                            match health.guarded(step + 1, "sharded update and gather", || zero.apply(sync.collective, &reduced))? {
+                                crate::zero::StepOutcome::Applied { grad_norm } => {
+                                    applied += 1;
+                                    sharded_norm = clip.map(|_| grad_norm * scale);
+                                    if let Some(observe) = sync.observer {
+                                        observe(crate::jobfault::StepPhase::Applied, step + 1);
+                                    }
+                                    None
+                                }
+                                crate::zero::StepOutcome::Skipped(why) => Some(why),
+                            }
                         }
-                        crate::zero::StepOutcome::Skipped(why) => Some(why),
+                        crate::zero::Reduction::Skipped(why) => Some(why),
                     };
                     if let Some(why) = gate.verdict(why)? {
                         eprintln!("step {:>6}: no optimiser step taken: {why}", step + 1);

@@ -984,11 +984,14 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
       weights on both ranks, and the restarted job ends bit-identical to the
       uninterrupted run (host transport, CPU; the NCCL variant, run on n442
       with two cards, passes all five). Validated across nodes (Measured).
-      The sharded (ZeRO) step is guarded too (a failure is a JobFailure and a
-      restart), but it reduces and updates in one call, so the agreement
-      before applying is not yet inside it: open, with fault tests for its
-      reduce-scatter and all-gather, weight publication faults (C6), and
-      shrink/regrow.
+      The sharded (ZeRO-1/2) step is the same transaction since 2026-11-21:
+      `ZeroOptimizer::reduce` (weights, reduce-scatter or all-reduce, global
+      norm; no state changes) and `ZeroOptimizer::apply` (update, all-gather)
+      with the vote between them. The fault test runs a ZeRO-2 job too and
+      kills a rank in the reduce-scatter, stalls one there, and kills one in
+      the all-gather after the vote, with the same guarantees (host and NCCL).
+      Open: the parameter-sharded (ZeRO-3) step, which reduces inside the
+      model's own step, weight publication faults (C6), and shrink/regrow.
 - [ ] **C9 qualification suite and traces.** Communication part delivered
       2026-11-21: `brain bench collectives` (`crates/bench/src/collectives.rs`,
       `make bench/collectives`) joins a job plan as one rank, forms the device
