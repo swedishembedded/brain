@@ -711,7 +711,7 @@ pub enum Weight {
     /// The OCP microscaling family, preserved: NVFP4 (E2M1 codes, an E4M3 scale byte per 16 weights, `global`
     /// per tensor), MXFP4 (E2M1, an E8M0 byte per 32) and MXFP8 (E4M3/E5M2, an E8M0 byte per 32). `w` the
     /// element codes in the tier's packing (`[n, k/8]` words of nibbles, or `[n, k/4]` words of bytes), `s` the
-    /// scale bytes in row-major block order, four to a word. A value is `element * global * scale`, in that
+    /// scale bytes in row-major block order, four to a word. A value is `element * scale * global`, in that
     /// order, as the checkpoint codec decodes it. Float-read through the tile decode like [`Weight::FP8`].
     Micro { w: DeviceBuffer, s: DeviceBuffer, n: u32, k: u32, kind: MicroScaled, global: f32 },
     /// Rotated-codebook weights (`crate::cq`, `Dtype::Cq2/Cq3/Cq4`): `w` the index rows `[n, kpad * bits / 32]`

@@ -148,7 +148,7 @@ extern "C" __global__ void __launch_bounds__(BRAIN_WD_THREADS) brain_weight_dequ
         const float g = fmt == 10u ? __uint_as_float(params[8]) : 1.0f;
         const float sc = fmt == 10u ? brain_wd_e4m3(sb) : brain_wd_e8m0(sb);
         #pragma unroll
-        for (int i = 0; i < 8; ++i) { v[i] = brain_wd_e2m1((word >> (4 * i)) & 15u) * g * sc; }
+        for (int i = 0; i < 8; ++i) { v[i] = brain_wd_e2m1((word >> (4 * i)) & 15u) * sc * g; }
     } else if (fmt == 12u || fmt == 13u) {
         const uint2 r = *reinterpret_cast<const uint2*>(w + (wi >> 2));
         const float sc = brain_wd_e8m0(brain_wd_plane_byte(s, wi >> 5));

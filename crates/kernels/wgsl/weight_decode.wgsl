@@ -40,7 +40,7 @@
 //   FMT 10 nvfp4   w: [n, k/8] E2M1 codes; s: one E4M3 byte per 16 weights (four to a word); global f32 in `pad`
 //   FMT 11 mxfp4   w: [n, k/8] E2M1 codes; s: one E8M0 byte per 32 weights
 //   FMT 12/13 mxfp8 e4m3/e5m2  w: [n, k/4] bytes; s: one E8M0 byte per 32 weights
-//                  (value = element * global * scale, in that order, as the checkpoint codec decodes)
+//                  (value = element * scale * global, in that order, as the checkpoint codec decodes)
 //
 //   FMT 14/15/16 cq2/cq3/cq4  rotated-codebook weights (`model::cq`): w: [n, kpad*bits/32] LSB-first indices; s: fp16 group norms
 //                  [n, kpad/128] two to a word (bound as f32 words); wsm: the 2^bits codebook levels as f32 bits; params.block = bits.
@@ -138,7 +138,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     } else if (FMT == 9u) {
         v = sext8((w[wi >> 2u] >> ((wi & 3u) * 8u)) & 0xFFu) * s[wi >> 4u];
     } else if (FMT == 10u) {
-        v = e2m1((w[wi >> 3u] >> ((wi & 7u) * 4u)) & 0xFu) * bitcast<f32>(p.pad) * fp8_e4m3(plane_byte(wi >> 4u));
+        v = e2m1((w[wi >> 3u] >> ((wi & 7u) * 4u)) & 0xFu) * fp8_e4m3(plane_byte(wi >> 4u)) * bitcast<f32>(p.pad);
     } else if (FMT == 11u) {
         v = e2m1((w[wi >> 3u] >> ((wi & 7u) * 4u)) & 0xFu) * e8m0(plane_byte(wi >> 5u));
     } else if (FMT == 12u) {
