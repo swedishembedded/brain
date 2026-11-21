@@ -9,7 +9,8 @@
 //! in-process ranks, every layer gathered from the ranks' slices where the forward and the backward reach it,
 //! reduce-scattered and updated by its owners once its gradient is complete, follows the single-rank layer-streamed
 //! run (every rank given the same batch, so the group's mean gradient is that batch's) within the rounding of the
-//! sharded update, with and without the two-pass global clip, and every rank sees the same losses bit for bit. What
+//! sharded update, with and without the two-pass global clip and with a window of one or two layers (the second
+//! prefetches), and every rank sees the same losses bit for bit. What
 //! the sharded build does not run is refused by name.
 
 use std::collections::HashMap;
@@ -142,7 +143,7 @@ fn step(ops: &Ops, ft: &mut ResidentFullFt, task: &Task, clip: Option<f32>) -> f
 }
 
 /// Every rank of `world` trains the task for `steps` steps; each rank's losses.
-fn sharded(world: usize, task: &Task, clip: Option<f32>, steps: usize) -> Vec<Vec<f64>> {
+fn sharded(world: usize, window: u32, task: &Task, clip: Option<f32>, steps: usize) -> Vec<Vec<f64>> {
     let coll = HostCollective::new(world);
     std::thread::scope(|s| {
         let handles: Vec<_> = (0..world)
@@ -151,7 +152,7 @@ fn sharded(world: usize, task: &Task, clip: Option<f32>, steps: usize) -> Vec<Ve
                 s.spawn(move || {
                     let ops = ops();
                     let group = ShardGroup { collective: coll, rank };
-                    let mut ft = ResidentFullFt::new(&ops, config(Some(group), 1), specs(), &task.init, &roomy()).unwrap();
+                    let mut ft = ResidentFullFt::new(&ops, config(Some(group), window), specs(), &task.init, &roomy()).unwrap();
                     ft.set_shard_weight(1.0 / world as f32).unwrap();
                     (0..steps).map(|_| step(&ops, &mut ft, task, clip)).collect::<Vec<f64>>()
                 })
@@ -168,8 +169,9 @@ fn a_parameter_sharded_step_follows_the_layer_streamed_step() {
         let ops = ops();
         let mut single = ResidentFullFt::new(&ops, config(None, 1), specs(), &task.init, &roomy()).unwrap();
         let want: Vec<f64> = (0..5).map(|_| step(&ops, &mut single, &task, clip)).collect();
-        for world in [2, 3] {
-            let got = sharded(world, &task, clip, 5);
+        // A window of two layers prefetches the next layer while one computes.
+        for (world, window) in [(2, 1), (3, 2)] {
+            let got = sharded(world, window, &task, clip, 5);
             for (rank, losses) in got.iter().enumerate() {
                 assert_eq!(losses.iter().map(|l| l.to_bits()).collect::<Vec<_>>(), got[0].iter().map(|l| l.to_bits()).collect::<Vec<_>>(), "clip {clip:?} world {world}: rank {rank}'s losses differ from rank 0's");
             }

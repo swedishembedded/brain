@@ -79,6 +79,8 @@ pub(crate) struct ShardedLayers {
     pub(crate) scale: f32,
     /// Units reduced in the open pass.
     reduced: Vec<bool>,
+    /// The layer loaded last: the direction a prefetch follows.
+    last_layer: Option<u32>,
 }
 
 impl ShardedLayers {
@@ -99,7 +101,7 @@ impl ShardedLayers {
         let zero = ZeroOptimizer::new_parameter_shards(DeviceParams { gpu: gpu.share(), tensors }, &groups, &*group.collective, group.rank, &mut read)?;
         gpu_core::profile::stage_time("parameter sharding: read this rank's slices and build the state on the card", clock);
         let units = zero.unit_count();
-        Ok(ShardedLayers { group, zero, step: 0, scale: 1.0, reduced: vec![false; units] })
+        Ok(ShardedLayers { group, zero, step: 0, scale: 1.0, reduced: vec![false; units], last_layer: None })
     }
 
     pub(crate) fn report(&self) -> String {
@@ -124,8 +126,28 @@ impl ShardedLayers {
         }
     }
 
-    /// Gather the units of `tensors` whose slots do not hold their current values into those slots.
-    pub(crate) fn load(&mut self, ops: &dyn DeviceIo, tensors: &[usize], slot_holds: &mut [Option<(usize, u64)>], slot_of: &[usize], versions: &[u64], _by_layer: &BTreeMap<u32, Vec<usize>>) -> io::Result<()> {
+    /// Gather the units of `tensors` whose slots do not hold their current values into those slots. When `tensors`
+    /// is a layer and the previous load was its neighbour, the next layer in the same direction is gathered too
+    /// (prefetched) where its slots are not this layer's: its collective then runs while this layer computes.
+    pub(crate) fn load(&mut self, ops: &dyn DeviceIo, tensors: &[usize], slot_holds: &mut [Option<(usize, u64)>], slot_of: &[usize], versions: &[u64], by_layer: &BTreeMap<u32, Vec<usize>>) -> io::Result<()> {
+        let layer = by_layer.iter().find(|(_, t)| t.as_slice() == tensors).map(|(l, _)| *l);
+        self.gather_missing(ops, tensors, slot_holds, slot_of, versions)?;
+        if let (Some(l), Some(last)) = (layer, self.last_layer) {
+            let next = if last + 1 == l { l.checked_add(1) } else if l + 1 == last { l.checked_sub(1) } else { None };
+            if let Some(next) = next.and_then(|n| by_layer.get(&n)) {
+                let busy: Vec<usize> = tensors.iter().map(|&t| slot_of[t]).collect();
+                if next.iter().all(|&t| !busy.contains(&slot_of[t])) {
+                    self.gather_missing(ops, next, slot_holds, slot_of, versions)?;
+                }
+            }
+        }
+        if layer.is_some() {
+            self.last_layer = layer;
+        }
+        Ok(())
+    }
+
+    fn gather_missing(&mut self, ops: &dyn DeviceIo, tensors: &[usize], slot_holds: &mut [Option<(usize, u64)>], slot_of: &[usize], versions: &[u64]) -> io::Result<()> {
         let mut units: Vec<usize> = tensors.iter().filter(|&&ti| slot_holds[slot_of[ti]] != Some((ti, versions[ti]))).map(|&ti| self.zero.unit_of(ti)).collect();
         units.dedup();
         if units.is_empty() {
