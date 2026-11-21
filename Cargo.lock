@@ -1949,6 +1949,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "brain-inkling2"
+version = "6.0.0"
+dependencies = [
+ "brain-checkpoint",
+ "brain-testutil",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "brain-instantid"
 version = "6.0.0"
 dependencies = [

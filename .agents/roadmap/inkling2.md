@@ -495,6 +495,17 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
     non-loop family row.
   - The name map from the published names, with two-way coverage.
   - Strict per-tensor dtype and shape checks.
+  - Done (2026-11-22): `crates/inkling2` with `config` (`CheckpointConfig` strict at every level, `Inkling2Config`
+    validated: family from `model_type`, layer kinds from `local_layer_ids` and refused when `layer_types` or, without
+    it, the reference's `(i + 1) % 6` rule disagrees, the loop as whole blocks, valid vocab, caps) and `names` (the
+    published-name manifest and `check`: every parameter present once with its shape and an encoding its role
+    admits, nothing left over; vision tower included, `mtp.safetensors` is a separate source). One `arch` row
+    `inkling2` covers both classes and both `model_type`s (the plain family is a config, not a crate). Gate:
+    `tests/it/layout.rs` - the real header is consumed exactly once (1116 parameters, 26,388,641,280 elements, the
+    decoder 26,070,385,152), the tiny reference checkpoint likewise, wrong configs refused by name. `brain pull
+    thinkingmachines/Inkling-2-Mini` now plans the existing store entry as complete (no network, no file touched);
+    no pull path writes per-file checksums for an entry already on disk (a download verifies the hub's sha256), so
+    there is nothing more for I0.4 to write.
 - **I2.3** `inkling2`: the forward recipe over I1 ops in reference order, including:
   - the block-boundary residual restart;
   - the q/k/v depth queries of the full layers;

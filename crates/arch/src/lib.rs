@@ -404,6 +404,20 @@ pub const ARCHS: &[Arch] = &[
     // (`--speculative dflash`), so a pull fetches it and the model scan leaves it for the target to find.
     arch!("dflash2", "DFlash2 block-diffusion draft model for speculative decoding (sliding, full and NoPE layers, dynamic convolutions, candidate selector)", Text, Brain, "brain-dflash2", hf: &["DFlash2DraftModel"]),
     // -- Multimodal (VLM / omni / ASR) -----------------------------------
+    // Inkling 2: a mixture-of-experts decoder whose sublayers read their input
+    // through depth attention over the model's own block states, with a vision
+    // tower. One crate serves the family: the looped release
+    // (`Inkling2LoopForConditionalGeneration`, a core of whole blocks run three
+    // times with messages between passes) and the plain one
+    // (`Inkling2ForConditionalGeneration`) are the same recipe, the plain one
+    // with an empty loop, told apart by `config.json` alone. llama.cpp has no
+    // entry for it. The `model_type` spellings are listed for configs without
+    // `architectures`.
+    arch!("inkling2", "Inkling 2 MoE decoder with depth-attention residuals, looped or plain", Multimodal, Brain, "brain-inkling2",
+        hf: &["Inkling2LoopForConditionalGeneration", "inkling2_loop", "Inkling2ForConditionalGeneration", "inkling2"],
+        variants: &[
+            Variant { reference: "thinkingmachines/Inkling-2-Mini", params: 26_388_641_280, quants: &[], license: Some("apache-2.0") },
+        ]),
     arch!("qwen3omnimoe", "Qwen3-Omni-30B-A3B (Thinker+Talker+Code2Wav)", Multimodal, Brain, "brain-qwen3omnimoe", hf: &["Qwen3OmniMoeForConditionalGeneration"]),
     // DENSE Qwen3-VL only - the 30B-A3B release is a DIFFERENT real HF class
     // (`Qwen3VLMoeForConditionalGeneration`, `model_type: "qwen3_vl_moe"`) over
@@ -901,6 +915,14 @@ mod tests {
     /// An HF class names one architecture, unless the rows sharing it each
     /// probe the same config key with a different expectation - so that
     /// `by_hf_config` always resolves it to exactly one.
+    #[test]
+    fn both_inkling2_releases_resolve_to_the_one_family_crate() {
+        for class in ["Inkling2LoopForConditionalGeneration", "inkling2_loop", "Inkling2ForConditionalGeneration", "inkling2"] {
+            let a = by_hf(class).unwrap_or_else(|| panic!("{class} resolves to no architecture"));
+            assert_eq!((a.id, a.package), ("inkling2", "brain-inkling2"), "{class}");
+        }
+    }
+
     #[test]
     fn hf_class_names_resolve_to_one_arch() {
         let mut sharing: std::collections::BTreeMap<&str, Vec<&Arch>> = Default::default();

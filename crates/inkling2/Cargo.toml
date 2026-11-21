@@ -1,0 +1,24 @@
+[package]
+name = "brain-inkling2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+description = "Inkling 2: a mixture-of-experts decoder with depth-attention residuals, optionally looped with messages between passes."
+
+[lib]
+name = "inkling2"
+path = "src/lib.rs"
+
+[dependencies]
+brain-checkpoint.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+# `testutil::skip` / `skip_unavailable` - an absent fixture can be made fatal
+# and absent hardware cannot.
+brain-testutil.workspace = true
+
