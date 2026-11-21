@@ -86,6 +86,8 @@ mod serve_conformance;
 mod served_prompt_template;
 mod shard_microbatch;
 mod shard_parity;
+mod sft_golden;
+mod sft_learning;
 mod slice;
 mod split_encode;
 mod step_parity;
