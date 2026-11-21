@@ -338,9 +338,9 @@ Scope: Running one training job as ranks across machines, and serving one model 
   or `host`:
   - 2 ranks: 108 ms/step on the device vs 719 ms through the host star (6.7x).
   - 4 ranks: 154 ms/step vs 1128 ms (7.3x).
-  - The host star spends about 530 ms (2 ranks) and 1130 ms (4 ranks) of a
-    step in 1009 per-tensor reductions; the device path one grouped
-    reduction. Forming the device group (rendezvous and NCCL init) is a
+  - The host star spends about 530 ms (2 ranks) and 900 ms (4 ranks) of a
+    step on rank 0 in 504 per-tensor reductions; the device path makes one
+    grouped reduction. Forming the device group (rendezvous and NCCL init) is a
     one-off 2.0 s (2 ranks) and 3.1 s (4 ranks) on the first step.
   - Every run's adapters were byte-identical across its ranks, device and
     host alike.
