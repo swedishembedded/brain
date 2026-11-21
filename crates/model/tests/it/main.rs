@@ -156,6 +156,7 @@ mod serve_keyed_draw;
 mod serve_sampling;
 mod serve_speculative;
 mod serve_state_blocks;
+mod softcap;
 mod split_cols;
 mod tensor_parallel;
 mod tier_policy;

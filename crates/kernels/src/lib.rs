@@ -1515,6 +1515,10 @@ pub const SNAKE1D_BWD_DALPHA: &str = include_str!("../wgsl/snake1d_bwd_dalpha.wg
 pub const SNAKE1D_BWD_DX: &str = include_str!("../wgsl/snake1d_bwd_dx.wgsl");
 /// `wgsl/snake_beta.wgsl`
 pub const SNAKE_BETA: &str = include_str!("../wgsl/snake_beta.wgsl");
+/// `wgsl/softcap.wgsl`
+pub const SOFTCAP: &str = include_str!("../wgsl/softcap.wgsl");
+/// `wgsl/softcap_bwd.wgsl`
+pub const SOFTCAP_BWD: &str = include_str!("../wgsl/softcap_bwd.wgsl");
 /// `wgsl/softmax_k.wgsl`
 pub const SOFTMAX_K: &str = include_str!("../wgsl/softmax_k.wgsl");
 /// `wgsl/softmax_k_dx.wgsl`
@@ -2452,6 +2456,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("snake1d_bwd_dalpha", SNAKE1D_BWD_DALPHA),
     ("snake1d_bwd_dx", SNAKE1D_BWD_DX),
     ("snake_beta", SNAKE_BETA),
+    ("softcap", SOFTCAP),
+    ("softcap_bwd", SOFTCAP_BWD),
     ("softmax_k", SOFTMAX_K),
     ("softmax_k_dx", SOFTMAX_K_DX),
     ("softmax_rows", SOFTMAX_ROWS),

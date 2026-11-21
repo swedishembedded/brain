@@ -228,6 +228,19 @@ pub fn silu(x: f32) -> f32 {
     x / (1.0 + (-x).exp())
 }
 
+/// Soft cap `c * tanh(x / c)`: the reference of `kernels::SOFTCAP`. `cap` must be positive.
+#[inline]
+pub fn softcap(x: f32, cap: f32) -> f32 {
+    cap * (x / cap).tanh()
+}
+
+/// `d/dx` of [`softcap`], `1 - tanh(x / c)^2`: the reference of `kernels::SOFTCAP_BWD`.
+#[inline]
+pub fn softcap_grad(x: f32, cap: f32) -> f32 {
+    let t = (x / cap).tanh();
+    1.0 - t * t
+}
+
 /// Classifier-free guidance: `unconditional + (conditional - unconditional) *
 /// scale`, element-wise. Scale 1 is the conditional branch alone, 0 the
 /// unconditional one; the diffusion samplers apply it to the predicted

@@ -775,6 +775,8 @@ load of it must already be bare-identifier-indexed.
 | [`snake1d_bwd_dalpha`](../../../crates/kernels/wgsl/snake1d_bwd_dalpha.wgsl) | Snake activation backward - per-channel alpha gradient | one thread per channel, serial reduction over rows*inner | 2/5 | ✓ | ✓ | - | - | f32 |
 | [`snake1d_bwd_dx`](../../../crates/kernels/wgsl/snake1d_bwd_dx.wgsl) | Snake activation backward - input gradient | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`snake_beta`](../../../crates/kernels/wgsl/snake_beta.wgsl) | SnakeBeta activation (forward) - the periodic activation in the codec SEANet decoder / BigVGAN-style vocoder | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
+| [`softcap`](../../../crates/kernels/wgsl/softcap.wgsl) | Soft cap forward: y = c * tanh(x / c), a smooth saturation to (-c, c) | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
+| [`softcap_bwd`](../../../crates/kernels/wgsl/softcap_bwd.wgsl) | Soft cap backward: dx = dy * (1 - tanh(x / c)^2) | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`softmax_k`](../../../crates/kernels/wgsl/softmax_k.wgsl) | Softmax over a STRIDED axis of length K, NCHW-flattened | one thread per output element, 3 nested serial reductions | 1/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`softmax_k_dx`](../../../crates/kernels/wgsl/softmax_k_dx.wgsl) | Softmax-over-strided-K backward | one thread per output element, serial inner reduction | 2/5 | ✓ | ✓ | ✓ | - | f32 |
 | [`softmax_rows`](../../../crates/kernels/wgsl/softmax_rows.wgsl) | Row softmax, one WORKGROUP per row - the long-context attention variant | 64-thread workgroup tile, 3 barriers | 4/5 | ✗ | ✓ | ✓ | - | f32 |
