@@ -333,6 +333,32 @@ impl<C: Collective> Collective for JobCollective<C> {
             }
         })
     }
+
+    fn reduce_scatter_device<'a>(&'a self, rank: usize, gpu: &'a Gpu, send: &'a DeviceBuffer, recv: &'a DeviceBuffer, count: u64, dtype: CollectiveDtype, scale: f32) -> CollectiveFuture<'a, bool> {
+        Box::pin(async move { self.on_device(rank, gpu, |group| group.reduce_scatter(send, recv, count, dtype, scale)) })
+    }
+
+    fn all_gather_device<'a>(&'a self, rank: usize, gpu: &'a Gpu, send: &'a DeviceBuffer, recv: &'a DeviceBuffer, count: u64, dtype: CollectiveDtype) -> CollectiveFuture<'a, bool> {
+        Box::pin(async move { self.on_device(rank, gpu, |group| group.all_gather(send, recv, count, dtype)) })
+    }
+}
+
+impl<C: Collective> JobCollective<C> {
+    /// Run `op` on the device group (settling the path on first use) and wait for it within the op timeout; `false`
+    /// when the ranks settled on the host star.
+    fn on_device(&self, rank: usize, gpu: &Gpu, op: impl FnOnce(&RankGroup) -> Result<(), String>) -> CollectiveResult<bool> {
+        let mut path = self.device.lock().unwrap_or_else(|e| e.into_inner());
+        if matches!(*path, DevicePath::Undecided) {
+            *path = self.decide(rank, gpu)?;
+        }
+        match &*path {
+            DevicePath::Device(group) => {
+                op(group).and_then(|()| group.wait(self.op_timeout)).map_err(CollectiveError::Transport)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
 }
 
 #[cfg(test)]

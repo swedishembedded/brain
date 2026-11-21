@@ -163,11 +163,11 @@ impl RankGroup {
         self.comm.all_gather(send, recv, count, dtype)
     }
 
-    /// `recv` (`count` elements) becomes this rank's slice of the element-wise sum of every rank's `send`
-    /// (`world * count` elements).
-    pub fn reduce_scatter(&self, send: &DeviceBuffer, recv: &DeviceBuffer, count: u64, dtype: CollectiveDtype) -> Result<(), String> {
+    /// `recv` (`count` elements) becomes this rank's slice of the element-wise sum over the ranks of `scale * send`
+    /// (`world * count` elements; each rank's own `scale`).
+    pub fn reduce_scatter(&self, send: &DeviceBuffer, recv: &DeviceBuffer, count: u64, dtype: CollectiveDtype, scale: f32) -> Result<(), String> {
         self.gpu.release_held_work();
-        self.comm.reduce_scatter(send, recv, count, dtype)
+        self.comm.reduce_scatter(send, recv, count, dtype, scale)
     }
 
     /// `buf`'s first `count` elements become `root`'s.

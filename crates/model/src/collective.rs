@@ -190,6 +190,26 @@ pub trait Collective: Send + Sync {
     fn all_reduce_device<'a>(&'a self, _rank: usize, _gpu: &'a gpu_core::Gpu, _bufs: &'a [(&'a gpu_core::DeviceBuffer, u64)], _dtype: gpu_core::CollectiveDtype, _scale: f32) -> CollectiveFuture<'a, bool> {
         Box::pin(async { Ok(false) })
     }
+
+    /// Reduce-scatter on the device: `recv` (`count` elements of `dtype`) becomes this rank's slice
+    /// `[rank * count, (rank + 1) * count)` of the sum over the ranks of `scale * send` (`world * count` elements,
+    /// each rank's own `scale`). Resolves to `false`, having moved nothing, when this transport has no device path
+    /// for `gpu`; the caller then goes through [`Collective::reduce_scatter`]. Every rank makes the same call.
+    ///
+    /// The default has no device path.
+    #[allow(clippy::too_many_arguments)] // the NCCL shape: rank, card, two buffers, count, type, scale
+    fn reduce_scatter_device<'a>(&'a self, _rank: usize, _gpu: &'a gpu_core::Gpu, _send: &'a gpu_core::DeviceBuffer, _recv: &'a gpu_core::DeviceBuffer, _count: u64, _dtype: gpu_core::CollectiveDtype, _scale: f32) -> CollectiveFuture<'a, bool> {
+        Box::pin(async { Ok(false) })
+    }
+
+    /// All-gather on the device: `recv` (`world * count` elements of `dtype`) becomes every rank's first `count`
+    /// elements of `send`, in rank order. Resolves to `false`, having moved nothing, when this transport has no device
+    /// path for `gpu`. Every rank makes the same call.
+    ///
+    /// The default has no device path.
+    fn all_gather_device<'a>(&'a self, _rank: usize, _gpu: &'a gpu_core::Gpu, _send: &'a gpu_core::DeviceBuffer, _recv: &'a gpu_core::DeviceBuffer, _count: u64, _dtype: gpu_core::CollectiveDtype) -> CollectiveFuture<'a, bool> {
+        Box::pin(async { Ok(false) })
+    }
 }
 
 /// A shared group is the group: ranks that are threads of one process hold it behind an `Arc`.
@@ -211,6 +231,12 @@ impl<T: Collective + ?Sized> Collective for std::sync::Arc<T> {
     }
     fn all_reduce_device<'a>(&'a self, rank: usize, gpu: &'a gpu_core::Gpu, bufs: &'a [(&'a gpu_core::DeviceBuffer, u64)], dtype: gpu_core::CollectiveDtype, scale: f32) -> CollectiveFuture<'a, bool> {
         (**self).all_reduce_device(rank, gpu, bufs, dtype, scale)
+    }
+    fn reduce_scatter_device<'a>(&'a self, rank: usize, gpu: &'a gpu_core::Gpu, send: &'a gpu_core::DeviceBuffer, recv: &'a gpu_core::DeviceBuffer, count: u64, dtype: gpu_core::CollectiveDtype, scale: f32) -> CollectiveFuture<'a, bool> {
+        (**self).reduce_scatter_device(rank, gpu, send, recv, count, dtype, scale)
+    }
+    fn all_gather_device<'a>(&'a self, rank: usize, gpu: &'a gpu_core::Gpu, send: &'a gpu_core::DeviceBuffer, recv: &'a gpu_core::DeviceBuffer, count: u64, dtype: gpu_core::CollectiveDtype) -> CollectiveFuture<'a, bool> {
+        (**self).all_gather_device(rank, gpu, send, recv, count, dtype)
     }
 }
 
@@ -674,6 +700,32 @@ impl Collective for TimedCollective<'_> {
             let out = self.inner.all_reduce_device(rank, gpu, bufs, dtype, scale).await;
             if matches!(out, Ok(true) | Err(_)) {
                 self.record(OpKind::AllReduce, bytes, started.elapsed());
+            }
+            out
+        })
+    }
+
+    /// Timed as a reduce-scatter of the send buffer's bytes when the inner transport takes the device path.
+    fn reduce_scatter_device<'a>(&'a self, rank: usize, gpu: &'a gpu_core::Gpu, send: &'a gpu_core::DeviceBuffer, recv: &'a gpu_core::DeviceBuffer, count: u64, dtype: gpu_core::CollectiveDtype, scale: f32) -> CollectiveFuture<'a, bool> {
+        Box::pin(async move {
+            let bytes = count.saturating_mul(self.inner.world_size() as u64).saturating_mul(dtype.bytes());
+            let started = Instant::now();
+            let out = self.inner.reduce_scatter_device(rank, gpu, send, recv, count, dtype, scale).await;
+            if matches!(out, Ok(true) | Err(_)) {
+                self.record(OpKind::ReduceScatter, bytes, started.elapsed());
+            }
+            out
+        })
+    }
+
+    /// Timed as an all-gather of the gathered bytes when the inner transport takes the device path.
+    fn all_gather_device<'a>(&'a self, rank: usize, gpu: &'a gpu_core::Gpu, send: &'a gpu_core::DeviceBuffer, recv: &'a gpu_core::DeviceBuffer, count: u64, dtype: gpu_core::CollectiveDtype) -> CollectiveFuture<'a, bool> {
+        Box::pin(async move {
+            let bytes = count.saturating_mul(self.inner.world_size() as u64).saturating_mul(dtype.bytes());
+            let started = Instant::now();
+            let out = self.inner.all_gather_device(rank, gpu, send, recv, count, dtype).await;
+            if matches!(out, Ok(true) | Err(_)) {
+                self.record(OpKind::AllGather, bytes, started.elapsed());
             }
             out
         })

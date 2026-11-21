@@ -589,12 +589,30 @@ impl RankCollective for NcclRank {
         })
     }
 
-    fn reduce_scatter(&self, send: &DeviceBuffer, recv: &DeviceBuffer, count: u64, dtype: CollectiveDtype) -> Result<(), String> {
+    fn reduce_scatter(&self, send: &DeviceBuffer, recv: &DeviceBuffer, count: u64, dtype: CollectiveDtype, scale: f32) -> Result<(), String> {
         let from = bounded_elems(send, count * self.world as u64, dtype, "reduce_scatter send")?;
         let to = bounded_elems(recv, count, dtype, "reduce_scatter recv")?;
+        if !scale.is_finite() {
+            return Err(format!("reduce_scatter: a scale of {scale} is not a number to multiply by"));
+        }
         self.enqueue(&[send, recv], "ncclReduceScatter", |comm, stream| {
-            // SAFETY: both ranges are on this rank's device and hold what the op reads and writes (checked above).
-            unsafe { (self.fns.reduce_scatter)(from as *const c_void, to as *mut c_void, count as usize, nccl_type(dtype), SUM, comm, stream) }
+            let op = if scale == 1.0 {
+                SUM
+            } else {
+                match self.premul_sum(comm, dtype, scale) {
+                    Ok(op) => op,
+                    Err(rc) => return rc,
+                }
+            };
+            // SAFETY: both ranges are on this rank's device and hold what the op reads and writes (checked above);
+            // the custom op is destroyed only after the operation that uses it has been enqueued.
+            unsafe {
+                let rc = (self.fns.reduce_scatter)(from as *const c_void, to as *mut c_void, count as usize, nccl_type(dtype), op, comm, stream);
+                if op != SUM {
+                    (self.fns.red_op_destroy)(op, comm);
+                }
+                rc
+            }
         })
     }
 

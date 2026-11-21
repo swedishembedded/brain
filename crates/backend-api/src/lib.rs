@@ -2354,8 +2354,8 @@ pub trait RankCollective: Send + Sync {
     /// `recv` (`world * count` elements) becomes every rank's first `count` elements of `send`, in rank order.
     fn all_gather(&self, send: &DeviceBuffer, recv: &DeviceBuffer, count: u64, dtype: CollectiveDtype) -> Result<(), String>;
     /// `recv` (`count` elements) becomes this rank's slice `[rank * count, (rank + 1) * count)` of the element-wise
-    /// sum of every rank's `send` (`world * count` elements).
-    fn reduce_scatter(&self, send: &DeviceBuffer, recv: &DeviceBuffer, count: u64, dtype: CollectiveDtype) -> Result<(), String>;
+    /// sum over the ranks of `scale * send` (`world * count` elements; each rank's own `scale`, `1.0` for a plain sum).
+    fn reduce_scatter(&self, send: &DeviceBuffer, recv: &DeviceBuffer, count: u64, dtype: CollectiveDtype, scale: f32) -> Result<(), String>;
     /// `buf`'s first `count` elements become `root`'s.
     fn broadcast(&self, buf: &DeviceBuffer, count: u64, dtype: CollectiveDtype, root: usize) -> Result<(), String>;
     /// Split into sub-communicators: the ranks that pass the same `color` form one, ordered by `key` (then by rank);

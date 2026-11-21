@@ -401,7 +401,7 @@ fn ops(rank: usize, ctx: &JobContext, gpu: &Gpu) -> Value {
     done(group.all_gather(&up(&exact_input(rank, N)), &gathered, N as u64, CollectiveDtype::F32));
 
     let scattered = gpu.storage(N as u64);
-    done(group.reduce_scatter(&up(&exact_input(rank, N * world)), &scattered, N as u64, CollectiveDtype::F32));
+    done(group.reduce_scatter(&up(&exact_input(rank, N * world)), &scattered, N as u64, CollectiveDtype::F32, 1.0));
 
     let cast = up(&exact_input(rank, N));
     done(group.broadcast(&cast, N as u64, CollectiveDtype::F32, world - 1));

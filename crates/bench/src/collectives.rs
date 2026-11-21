@@ -222,7 +222,7 @@ fn run_op(group: &RankGroup, op: Op, dtype: CollectiveDtype, s: &Shape, send: &D
     let enqueued = match op {
         Op::AllReduce => group.all_reduce_sum(&[(send, s.send)], dtype, 1.0),
         Op::AllGather => group.all_gather(send, recv, s.send, dtype),
-        Op::ReduceScatter => group.reduce_scatter(send, recv, s.recv, dtype),
+        Op::ReduceScatter => group.reduce_scatter(send, recv, s.recv, dtype, 1.0),
         Op::Broadcast => group.broadcast(send, s.send, dtype, 0),
     };
     enqueued.and_then(|()| group.wait(timeout)).map_err(|e| format!("{} {}: {e}", op.name(), dtype_name(dtype)))
