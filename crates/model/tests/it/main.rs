@@ -98,6 +98,7 @@ mod moe_gemv_parity;
 mod moe_grouped_parity;
 mod moe_i8_slots;
 mod moe_linear_gated_kq;
+mod moe_micro_bwd;
 mod moe_shared_expert;
 mod moe_shared_expert_gradcheck;
 mod moe_shared_expert_i8;

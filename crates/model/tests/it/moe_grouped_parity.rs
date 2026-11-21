@@ -39,7 +39,8 @@
 use data::rng::Lcg;
 use gpu_core::{DeviceBuffer, Gpu};
 use model::block::pick_gemm;
-use model::moe::{expert_fwd_grouped, router_fwd, GroupedExpertFwdIds, GroupedExpertScratch, MoeIds, MoeShape};
+use model::glu::{GatedAct, GluIds, GluLayout, GluSpec};
+use model::moe::{expert_fwd_grouped, expert_fwd_grouped_glu, router_fwd, GroupedExpertFwdIds, GroupedExpertScratch, MoeIds, MoeShape};
 
 const PIPES: &[(&str, &str)] = &[
     ("matmul", kernels::MATMUL),
@@ -55,6 +56,7 @@ const PIPES: &[(&str, &str)] = &[
     ("scan_block", kernels::SCAN_BLOCK),
     ("scan_add", kernels::SCAN_ADD),
     ("embed", kernels::EMBED),
+    ("glu_act", kernels::GLU_ACT),
 ];
 
 fn idx(g: &Gpu, name: &str) -> usize {
@@ -298,4 +300,47 @@ fn undersized_grouped_scratch_panics_loudly() {
         &s.g, &s.grouped_ids, &s.shape, &s.x, &s.gate,
         &s.gate_w_all, &s.up_w_all, &s.down_w_all, &scratch, &acc,
     );
+}
+
+/// The grouped path under a declared activation and layout: SwiGLU over a row-interleaved fused bank computes what the
+/// SwiGLU grouped path over separate banks computes, and a softcap-sigmoid expert gives the same output from the
+/// separate banks and from their interleaved fusion (the layout is applied where gate and up meet, nowhere else).
+#[test]
+fn grouped_declared_activation_reads_an_interleaved_bank_as_its_separate_banks() {
+    let s = build(MoeShape { rows: 20, d_model: 128, moe_ff: 128, n_experts: 6, top_k: 2 }, 4243);
+    let (m, d, ff, e) = (s.shape.rows as usize, s.shape.d_model as usize, s.shape.moe_ff as usize, s.shape.n_experts as usize);
+    let glu = GluIds { act: idx(&s.g, "glu_act"), act_bwd: usize::MAX };
+    let (gate_all, up_all) = (s.g.read(&s.gate_w_all, e * ff * d), s.g.read(&s.up_w_all, e * ff * d));
+    let mut fused = vec![0.0f32; 2 * e * ff * d];
+    for x in 0..e {
+        for j in 0..ff {
+            let src = (x * ff + j) * d;
+            fused[(x * 2 * ff + 2 * j) * d..][..d].copy_from_slice(&gate_all[src..src + d]);
+            fused[(x * 2 * ff + 2 * j + 1) * d..][..d].copy_from_slice(&up_all[src..src + d]);
+        }
+    }
+    let fused = s.g.storage_init("fused", &fused);
+    let run = |spec: GluSpec| {
+        let scratch = GroupedExpertScratch::new_for(&s.g, &s.shape, &spec);
+        let out = s.g.storage((m * d) as u64);
+        let (gate_up, up) = if spec.is_fused() { (&fused, None) } else { (&s.gate_w_all, Some(&s.up_w_all)) };
+        let steps = expert_fwd_grouped_glu(&s.g, &s.grouped_ids, (&spec, &glu), &s.shape, &s.x, &s.gate, gate_up, up, &s.down_w_all, &scratch, &out);
+        s.g.submit(&[], &steps);
+        s.g.read(&out, m * d)
+    };
+    let legacy = {
+        let scratch = GroupedExpertScratch::new(&s.g, &s.shape);
+        let out = s.g.storage((m * d) as u64);
+        s.g.submit(&[], &expert_fwd_grouped(&s.g, &s.grouped_ids, &s.shape, &s.x, &s.gate, &s.gate_w_all, &s.up_w_all, &s.down_w_all, &scratch, &out));
+        s.g.read(&out, m * d)
+    };
+    let close = |label: &str, a: &[f32], b: &[f32]| {
+        let worst = a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0f32, f32::max);
+        assert!(worst < TOLERANCE, "{label}: max abs difference {worst}");
+    };
+    close("swiglu interleaved vs legacy", &run(GluSpec { act: GatedAct::SwiGlu, layout: GluLayout::Interleaved }), &legacy);
+    let softcap = GatedAct::SoftcapSigmoid { gate_cap: 4.0, up_cap: 25.0 };
+    let (sep, inter) = (run(GluSpec { act: softcap, layout: GluLayout::Separate }), run(GluSpec { act: softcap, layout: GluLayout::Interleaved }));
+    close("softcap-sigmoid interleaved vs separate", &inter, &sep);
+    assert!(sep.iter().zip(&legacy).any(|(a, b)| (a - b).abs() > 1e-3), "the declared activation is applied");
 }

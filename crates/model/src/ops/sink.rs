@@ -469,14 +469,19 @@ pub fn upload_micro_bank(ops: &Ops, src: &dyn checkpoint::TensorSource, names: &
     Ok(MicroBank { w: sink.w, s: sink.s, global, n: n as u32, k: k as u32, blocks, kind })
 }
 
-/// The pipelines [`MicroBank::gather`] and [`MicroBank::grouped`] dispatch, for a model's kernel list (with the
-/// routing kernels `moe_route_count` / `moe_route_scan` / `moe_route_emit` that build a grouped product's table).
+/// The pipelines [`MicroBank::gather`], [`MicroBank::grouped`] and their input gradients [`MicroBank::gather_dx`] /
+/// [`MicroBank::grouped_dx`] dispatch, for a model's kernel list (with the routing kernels `moe_route_count` /
+/// `moe_route_scan` / `moe_route_emit` that build a grouped product's table).
 pub fn micro_bank_kernels() -> Vec<(&'static str, &'static str)> {
     vec![
         ("moe_nvfp4_gemv_gather", kernels::MOE_NVFP4_GEMV_GATHER),
         ("moe_nvfp4_grouped", kernels::MOE_NVFP4_GROUPED),
         ("moe_mxfp8_gemv_gather", kernels::MOE_MXFP8_GEMV_GATHER),
         ("moe_mxfp8_grouped", kernels::MOE_MXFP8_GROUPED),
+        ("moe_nvfp4_dx_gather", kernels::MOE_NVFP4_DX_GATHER),
+        ("moe_nvfp4_dx_grouped", kernels::MOE_NVFP4_DX_GROUPED),
+        ("moe_mxfp8_dx_gather", kernels::MOE_MXFP8_DX_GATHER),
+        ("moe_mxfp8_dx_grouped", kernels::MOE_MXFP8_DX_GROUPED),
     ]
 }
 
@@ -484,6 +489,8 @@ pub fn micro_bank_kernels() -> Vec<(&'static str, &'static str)> {
 pub const MICRO_GROUPED_SLOTS: u32 = 8;
 /// Weight rows one workgroup of the bank products serves (`COLS` of the kernels).
 const MICRO_BANK_COLS: u32 = 4;
+/// A whole-buffer binding in a sliced dispatch.
+const WHOLE: (u64, u64) = (0, 0);
 
 impl MicroBank {
     fn kernel(&self, gpu: &Gpu, op: &str) -> Result<usize, String> {
@@ -500,12 +507,19 @@ impl MicroBank {
     /// own expert's rows of the bank (`[slots, n]` f32 out, `x` `[rows, k]` f32). Rows come out in the bank's stored
     /// order (a fused gate/up bank stays in its declared layout for `model::glu`).
     pub fn gather(&self, gpu: &Gpu, x: &DeviceBuffer, ids: &DeviceBuffer, out: &DeviceBuffer, slots: u32, xdiv: u32) -> Result<gpu_core::Step, String> {
+        self.gather_at(gpu, x, (ids, WHOLE), out, slots, xdiv)
+    }
+
+    /// [`Self::gather`] reading the slots' expert ids from the word range `ids.1` (`(offset, len)`, `(0, 0)` the whole
+    /// buffer) of `ids.0`: one index upload can then hold the ids of several dispatches. An offset must meet the
+    /// device's storage-binding alignment (a multiple of 64 words always does).
+    pub fn gather_at(&self, gpu: &Gpu, x: &DeviceBuffer, ids: (&DeviceBuffer, (u64, u64)), out: &DeviceBuffer, slots: u32, xdiv: u32) -> Result<gpu_core::Step, String> {
         let idx = self.kernel(gpu, "gemv_gather")?;
         let grid = gpu_core::Dispatch::Workgroups(slots * self.n.div_ceil(MICRO_BANK_COLS));
         let params = [slots, self.k, self.n, xdiv];
         Ok(match self.kind {
-            MicroScaled::Nvfp4 => gpu.dispatch(idx, &[x, ids, &self.w, &self.s, &self.global, out], &params, grid),
-            _ => gpu.dispatch(idx, &[x, ids, &self.w, &self.s, out], &params, grid),
+            MicroScaled::Nvfp4 => gpu.dispatch_sliced(idx, &[x, ids.0, &self.w, &self.s, &self.global, out], &[WHOLE, ids.1, WHOLE, WHOLE, WHOLE, WHOLE], &params, grid),
+            _ => gpu.dispatch_sliced(idx, &[x, ids.0, &self.w, &self.s, out], &[WHOLE, ids.1, WHOLE, WHOLE, WHOLE], &params, grid),
         })
     }
 
@@ -521,6 +535,37 @@ impl MicroBank {
         Ok(match self.kind {
             MicroScaled::Nvfp4 => gpu.dispatch(idx, &[x, tab, perm, &self.w, &self.s, &self.global, out], &params, grid),
             _ => gpu.dispatch(idx, &[x, tab, perm, &self.w, &self.s, out], &params, grid),
+        })
+    }
+
+    /// The input gradient of [`Self::gather`] through the frozen bank: `dx[s, :] (+)= W[ids[s]]^T dy[s, :]` for `slots`
+    /// slots (`dy` `[slots, n]`, `dx` `[slots, k]`, per slot: a caller whose slots share an input row sums them). The
+    /// bank is never written; it has no weight gradient (a trainable delta is an adapter beside it). `accumulate` adds
+    /// into `dx` instead of overwriting it. Barrier-free, so it runs on every backend including the CPU JIT.
+    pub fn gather_dx(&self, gpu: &Gpu, dy: &DeviceBuffer, ids: &DeviceBuffer, dx: &DeviceBuffer, slots: u32, accumulate: bool) -> Result<gpu_core::Step, String> {
+        self.gather_dx_at(gpu, dy, (ids, WHOLE), dx, slots, accumulate)
+    }
+
+    /// [`Self::gather_dx`] reading the ids from a word range of their buffer, as [`Self::gather_at`].
+    pub fn gather_dx_at(&self, gpu: &Gpu, dy: &DeviceBuffer, ids: (&DeviceBuffer, (u64, u64)), dx: &DeviceBuffer, slots: u32, accumulate: bool) -> Result<gpu_core::Step, String> {
+        let idx = self.kernel(gpu, "dx_gather")?;
+        let params = [slots, self.k, self.n, accumulate as u32];
+        Ok(match self.kind {
+            MicroScaled::Nvfp4 => gpu.step_sliced(idx, &[dy, ids.0, &self.w, &self.s, &self.global, dx], &[WHOLE, ids.1, WHOLE, WHOLE, WHOLE, WHOLE], &params, slots * self.k),
+            _ => gpu.step_sliced(idx, &[dy, ids.0, &self.w, &self.s, dx], &[WHOLE, ids.1, WHOLE, WHOLE, WHOLE], &params, slots * self.k),
+        })
+    }
+
+    /// The input gradient of [`Self::grouped`]: [`Self::gather_dx`]'s values, bit for bit per slot, over slots grouped by
+    /// expert (`tab` / `perm` / `tiles` / `ne` as for the forward), each decoded weight serving up to
+    /// [`MICRO_GROUPED_SLOTS`] slots of its expert.
+    #[allow(clippy::too_many_arguments)] // one buffer per binding of the kernel, and its counts
+    pub fn grouped_dx(&self, gpu: &Gpu, dy: &DeviceBuffer, tab: &DeviceBuffer, perm: &DeviceBuffer, dx: &DeviceBuffer, tiles: u32, ne: u32, accumulate: bool) -> Result<gpu_core::Step, String> {
+        let idx = self.kernel(gpu, "dx_grouped")?;
+        let params = [tiles, self.k, self.n, ne, accumulate as u32];
+        Ok(match self.kind {
+            MicroScaled::Nvfp4 => gpu.step(idx, &[dy, tab, perm, &self.w, &self.s, &self.global, dx], &params, tiles * self.k),
+            _ => gpu.step(idx, &[dy, tab, perm, &self.w, &self.s, dx], &params, tiles * self.k),
         })
     }
 }

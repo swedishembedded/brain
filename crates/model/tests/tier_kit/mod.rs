@@ -176,3 +176,48 @@ pub fn build_case(ops: &Ops, label: &'static str, n: usize, k: usize, rng: &mut 
         other => panic!("unknown case {other}"),
     }
 }
+
+/// A bank of `blocks` random microscaled `[n, k]` matrices (NVFP4 or MXFP8 E4M3, an expert projection's bank) built
+/// from random valid bytes, and the f32 values each block decodes to by the checkpoint crate's reference codec
+/// (`[blocks * n, k]`, the NVFP4 per-block global applied): the oracle of every bank test. Element magnitudes sit
+/// around `0.05`, so a product over `k` of a few hundred stays near 1.
+pub fn build_bank(g: &Gpu, kind: model::ops::MicroScaled, blocks: usize, n: usize, k: usize, rng: &mut Lcg) -> (model::ops::MicroBank, Vec<f32>) {
+    use model::ops::{MicroBank, MicroScaled};
+    let nvfp4 = match kind {
+        MicroScaled::Nvfp4 => true,
+        MicroScaled::Mxfp8E4m3 => false,
+        other => panic!("build_bank: a bank holds NVFP4 or MXFP8 E4M3 matrices, not {other:?}"),
+    };
+    let enc = if nvfp4 { QuantEncoding::nvfp4() } else { QuantEncoding::mxfp8() };
+    let desc = TensorDescriptor::new("bank", vec![n as u64, k as u64], enc.clone());
+    desc.validate().unwrap();
+    let fine = enc.scales.len() - 1;
+    let (mut payload, mut scales, mut globals, mut decoded) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for _ in 0..blocks {
+        // FP8 element bytes below 0x58 (no NaN, magnitudes up to ~16) with scales 2^-10..2^-8; E2M1 codes are any
+        // nibble with E4M3 block scales near 1 and a per-block global near 0.02.
+        let p: Vec<u8> = (0..desc.payload_bytes()).map(|_| if nvfp4 { rng.next_u32() as u8 } else { (rng.next_u32() % 0x58) as u8 | (rng.next_u32() as u8 & 0x80) }).collect();
+        let s: Vec<u8> = (0..desc.scale_bytes(fine)).map(|_| if nvfp4 { 0x30 + (rng.next_u32() % 0x10) as u8 } else { 117 + (rng.next_u32() % 3) as u8 }).collect();
+        let global = if nvfp4 { 0.01 + 0.02 * rng.unit() } else { 1.0 };
+        let gb = global.to_le_bytes();
+        let levels: Vec<&[u8]> = if nvfp4 { vec![&gb, &s] } else { vec![&s] };
+        let tile = Tile { elems: 0..desc.numel(), payload: &p, scales: levels };
+        let mut out = Vec::new();
+        CodecRegistry::reference().decoder(&enc).unwrap().decode_tile(&desc, &tile, &mut out).unwrap();
+        decoded.extend(out);
+        payload.extend(p);
+        scales.extend(s);
+        globals.push(global);
+    }
+    let words = |b: &[u8]| -> Vec<u32> { b.chunks(4).map(|c| c.iter().rev().fold(0u32, |w, &x| w << 8 | u32::from(x))).collect() };
+    let bank = MicroBank {
+        w: upload_u32(g, &words(&payload)),
+        s: upload_u32(g, &words(&scales)),
+        global: g.storage_init("bank.global", &globals),
+        n: n as u32,
+        k: k as u32,
+        blocks: blocks as u32,
+        kind,
+    };
+    (bank, decoded)
+}

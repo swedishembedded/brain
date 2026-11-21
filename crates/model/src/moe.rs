@@ -48,6 +48,9 @@
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 
+use crate::glu::{expert_bwd_glu, expert_fwd_glu, glu_act_bwd_step, glu_act_step, GluBwdScratch, GluGrads, GluIds, GluScratch, GluSpec, GluWeights};
+use crate::ops::MicroBank;
+
 /// Kernel indices this module dispatches, resolved by the calling model crate
 /// against its own registered pipeline list (same pattern as
 /// [`crate::block::KernelIds`]).
@@ -374,21 +377,31 @@ pub struct MoeActs {
     expert_out: Vec<DeviceBuffer>,
     /// `Some` for row-compacted activations ([`Self::compact`]): expert `e` holds only its routed rows.
     routed: Option<RoutedRows>,
+    /// `gate_pre` holds a fused `[rows, 2 * moe_ff]` gate/up projection output ([`Self::compact_for`]).
+    fused: bool,
 }
 
 /// Which rows each expert of a row-compacted [`MoeActs`] holds: one index upload with every expert's region
 /// ([`route_rows`]), and expert `e`'s `(start, count)` in it.
 struct RoutedRows {
     idx: DeviceBuffer,
+    /// Parallel to `idx`: the expert whose region each position lies in (what a microscaled bank's products read as
+    /// the slots' ids).
+    experts: DeviceBuffer,
     regions: Vec<(u32, u32)>,
 }
 
 /// The kernels the row-compacted training path dispatches beside a model's own MoE kernels, resolved by name: the
-/// row gather (`embed.wgsl`), the gate-scaled scatter of an expert's output (`moe_scatter_scaled_add.wgsl`) and the
-/// scatter-add of its gradients (`rows_scatter_add.wgsl`). A model training through [`MoeActs::compact`] registers
-/// these.
-pub const COMPACT_TRAIN_KERNELS: &[(&str, &str)] =
-    &[("embed", kernels::EMBED), ("moe_scatter_scaled_add", kernels::MOE_SCATTER_SCALED_ADD), ("rows_scatter_add", kernels::ROWS_SCATTER_ADD)];
+/// row gather (`embed.wgsl`), the gate-scaled scatter of an expert's output (`moe_scatter_scaled_add.wgsl`), the
+/// scatter-add of its gradients (`rows_scatter_add.wgsl`) and the declared expert activation of an [`ExpertSet`]
+/// (`glu_act.wgsl`, `glu_act_bwd.wgsl`). A model training through [`MoeActs::compact`] registers these.
+pub const COMPACT_TRAIN_KERNELS: &[(&str, &str)] = &[
+    ("embed", kernels::EMBED),
+    ("moe_scatter_scaled_add", kernels::MOE_SCATTER_SCALED_ADD),
+    ("rows_scatter_add", kernels::ROWS_SCATTER_ADD),
+    ("glu_act", kernels::GLU_ACT),
+    ("glu_act_bwd", kernels::GLU_ACT_BWD),
+];
 
 /// `pipelines` with every [`COMPACT_TRAIN_KERNELS`] entry it does not already name appended at the end, so the
 /// positions a model's kernel constants index stay where they are.
@@ -414,6 +427,7 @@ impl MoeActs {
             h: (0..n).map(|_| g.storage(rows * ff)).collect(),
             expert_out: (0..n).map(|_| g.storage(rows * d)).collect(),
             routed: None,
+            fused: false,
         }
     }
 
@@ -422,20 +436,39 @@ impl MoeActs {
     /// the host readback of the layer's dense gate (`[rows, n_experts]`), the same routing the forward
     /// ([`experts_fwd_train`]) and [`moe_layer_bwd`] then follow.
     pub fn compact(g: &Gpu, shape: &MoeShape, host_gate: &[f32]) -> MoeActs {
+        Self::compact_for(g, shape, host_gate, &GluSpec::default())
+    }
+
+    /// [`Self::compact`] for experts under a declared activation ([`ExpertSet`]): a fused gate/up layout saves its
+    /// `[rows, 2 * moe_ff]` projection output where the separate layout saves `gate_pre` and `up`.
+    pub fn compact_for(g: &Gpu, shape: &MoeShape, host_gate: &[f32], glu: &GluSpec) -> MoeActs {
         assert_eq!(host_gate.len(), (shape.rows * shape.n_experts) as usize, "MoeActs::compact: host_gate must be the full [rows, n_experts] gate");
         let (combined, regions) = route_rows(shape, host_gate);
         let idx = g.storage(combined.len().max(1) as u64);
         g.write(&idx, &combined);
+        let mut owner = vec![0u32; combined.len().max(1)];
+        for (e, &(start, count)) in regions.iter().enumerate() {
+            owner[start as usize..(start + count) as usize].fill(e as u32);
+        }
+        let experts = g.storage(owner.len() as u64);
+        g.write(&experts, &owner);
         let (ff, d) = (shape.moe_ff as u64, shape.d_model as u64);
         let rows = |e: usize| regions[e].1.max(1) as u64;
         let n = shape.n_experts as usize;
+        let (gate_up, up) = if glu.is_fused() { (2 * ff, 0) } else { (ff, ff) };
         MoeActs {
-            gate_pre: (0..n).map(|e| g.storage(rows(e) * ff)).collect(),
-            up: (0..n).map(|e| g.storage(rows(e) * ff)).collect(),
+            gate_pre: (0..n).map(|e| g.storage(rows(e) * gate_up)).collect(),
+            up: (0..n).map(|e| g.storage((rows(e) * up).max(1))).collect(),
             h: (0..n).map(|e| g.storage(rows(e) * ff)).collect(),
             expert_out: (0..n).map(|e| g.storage(rows(e) * d)).collect(),
-            routed: Some(RoutedRows { idx, regions }),
+            routed: Some(RoutedRows { idx, experts, regions }),
+            fused: glu.is_fused(),
         }
+    }
+
+    /// Expert `e`'s saved activations under a declared activation: the [`GluScratch`] [`expert_fwd_glu`] wrote.
+    fn glu_at(&self, e: usize) -> GluScratch<'_> {
+        GluScratch { gate_up: &self.gate_pre[e], up: (!self.fused).then_some(&self.up[e]), h: &self.h[e], expert_out: &self.expert_out[e] }
     }
 
     /// Expert `e`'s saved activations, as an [`ExpertScratch`] - the same
@@ -473,21 +506,48 @@ pub enum ExpertStage {
 /// them, and its output is scattered back gate-scaled. `weights[e]` is expert `e`'s ([`ExpertWeights`]).
 pub fn experts_fwd_train(g: &Gpu, ids: &MoeIds, shape: &MoeShape, x: &DeviceBuffer, gate: &DeviceBuffer, weights: &[ExpertWeights], acts: &MoeActs, acc: &DeviceBuffer) -> Vec<Step> {
     assert_eq!(weights.len(), shape.n_experts as usize, "experts_fwd_train: one ExpertWeights per expert");
-    let mut steps = Vec::new();
     let Some(routed) = &acts.routed else {
+        let mut steps = Vec::new();
         for (e, w) in weights.iter().enumerate() {
             steps.extend(expert_fwd(g, ids, shape, x, gate, &w.gate_w, &w.up_w, &w.down_w, &acts.at(e), acc, e as u32, w.w_off, true));
         }
         return steps;
     };
+    assert!(!acts.fused, "experts_fwd_train: SwiGLU over separate projections saves separate activations (MoeActs::compact)");
+    compact_fwd(g, shape, x, gate, routed, acts, acc, |e, sub, x_c, gate_c, steps| {
+        let w = &weights[e];
+        // The expert's projections over its rows; its dense combine (the fifth step) gives way to the gate-scaled
+        // scatter of the compacted output back to the rows it came from.
+        let [gate_pre, up, silu, down, _combine] = expert_fwd(g, ids, sub, x_c, gate_c, &w.gate_w, &w.up_w, &w.down_w, &acts.at(e), acc, e as u32, w.w_off, true);
+        steps.extend([gate_pre, up, silu, down]);
+        Ok(())
+    })
+    .expect("the SwiGLU expert steps cannot fail")
+}
+
+/// The row-compacted training forward's frame, shared by every expert kind: per expert with routed rows, its rows of
+/// `x` and of the gate are gathered (`[count, d_model]`, `[count, n_experts]`), `expert` emits the steps that write the
+/// expert's output to `acts.expert_out[e]` from them, and that output is scattered back gate-scaled into `acc`.
+#[allow(clippy::too_many_arguments)]
+fn compact_fwd(
+    g: &Gpu,
+    shape: &MoeShape,
+    x: &DeviceBuffer,
+    gate: &DeviceBuffer,
+    routed: &RoutedRows,
+    acts: &MoeActs,
+    acc: &DeviceBuffer,
+    mut expert: impl FnMut(usize, &MoeShape, &DeviceBuffer, &DeviceBuffer, &mut Vec<Step>) -> Result<(), String>,
+) -> Result<Vec<Step>, String> {
     let (d, ne) = (shape.d_model, shape.n_experts);
     let (gather, scatter) = (compact_kernel(g, "embed"), compact_kernel(g, "moe_scatter_scaled_add"));
     let most = routed.regions.iter().map(|r| r.1).max().unwrap_or(0).max(1) as u64;
     let (x_c, gate_c) = (g.storage(most * d as u64), g.storage(most * ne as u64));
     let full = (0u64, 0u64);
+    let mut steps = Vec::new();
     // Every `start` below (and in `CompactBwd`) is a region start from `route_rows`, which pads each to a multiple of
     // 64 words (256 bytes): the index-list bindings are aligned for any expert counts.
-    for (e, (w, &(start, count))) in weights.iter().zip(&routed.regions).enumerate() {
+    for (e, &(start, count)) in routed.regions.iter().enumerate() {
         if count == 0 {
             continue;
         }
@@ -495,13 +555,108 @@ pub fn experts_fwd_train(g: &Gpu, ids: &MoeIds, shape: &MoeShape, x: &DeviceBuff
         steps.push(g.step_sliced(gather, &[&routed.idx, x, &x_c], &[rows, full, full], &[d, count], count * d));
         steps.push(g.step_sliced(gather, &[&routed.idx, gate, &gate_c], &[rows, full, full], &[ne, count], count * ne));
         let sub = MoeShape { rows: count, ..*shape };
-        // The expert's projections over its rows; its dense combine (the fifth step) gives way to the gate-scaled
-        // scatter of the compacted output back to the rows it came from.
-        let [gate_pre, up, silu, down, _combine] = expert_fwd(g, ids, &sub, &x_c, &gate_c, &w.gate_w, &w.up_w, &w.down_w, &acts.at(e), acc, e as u32, w.w_off, true);
-        steps.extend([gate_pre, up, silu, down]);
+        expert(e, &sub, &x_c, &gate_c, &mut steps)?;
         steps.push(g.step_sliced(scatter, &[&routed.idx, gate, &acts.expert_out[e], acc], &[rows, full, full, full], &[count, d, ne, e as u32, 1], count * d));
     }
-    steps
+    Ok(steps)
+}
+
+/// Where the routed experts' projections of a training pass live ([`ExpertSet`]).
+#[derive(Clone, Copy)]
+pub enum ExpertBank<'a> {
+    /// Device f32 matrices, one [`GluWeights`] per expert (its own buffers, or banks addressed by offsets), trainable
+    /// ([`moe_layer_bwd_set`] writes the gradients [`GluGrads`] name) or frozen.
+    Dense(&'a [GluWeights<'a>]),
+    /// A frozen base held in its stored microscaled encoding ([`MicroBank`], NVFP4 or MXFP8 E4M3): `gate_up` is the
+    /// gate projection `[n_experts, moe_ff, d_model]` with `up` beside it (the separate layout) or the fused
+    /// `[n_experts, 2 * moe_ff, d_model]` (`up` absent), `down` is `[n_experts, d_model, moe_ff]`. The products read the
+    /// codes in place (`moe_{nvfp4,mxfp8}_gemv_gather` forward, `moe_{..}_dx_gather` input gradient); a bank has no
+    /// weight gradient, a trainable delta rides beside it as an adapter.
+    Micro { gate_up: &'a MicroBank, up: Option<&'a MicroBank>, down: &'a MicroBank },
+}
+
+/// The routed experts of a row-compacted training pass ([`experts_fwd_train_set`], [`moe_layer_bwd_set`]): their
+/// declared activation and gate/up layout ([`crate::glu`]) and where their weights live. A model registers
+/// [`COMPACT_TRAIN_KERNELS`] (which carries the activation pair) and, for a [`ExpertBank::Micro`] bank,
+/// [`crate::ops::micro_bank_kernels`].
+#[derive(Clone, Copy)]
+pub struct ExpertSet<'a> {
+    pub glu: GluSpec,
+    pub bank: ExpertBank<'a>,
+}
+
+impl ExpertSet<'_> {
+    /// Every declared shape agrees with `shape`: one weight set per expert, `up` present exactly for the separate
+    /// layout, bank dimensions and block counts as the module doc of [`ExpertBank`] states.
+    pub fn check(&self, shape: &MoeShape) -> Result<(), String> {
+        let (e, d, ff) = (shape.n_experts, shape.d_model, shape.moe_ff);
+        let gate_rows = if self.glu.is_fused() { 2 * ff } else { ff };
+        match self.bank {
+            ExpertBank::Dense(w) => {
+                if w.len() != e as usize {
+                    return Err(format!("ExpertSet: {} expert weight sets for {e} experts", w.len()));
+                }
+                if let Some(i) = w.iter().position(|w| w.up_w.is_some() == self.glu.is_fused()) {
+                    return Err(format!("ExpertSet: expert {i}'s up projection must be present exactly for the separate layout ({:?})", self.glu.layout));
+                }
+            }
+            ExpertBank::Micro { gate_up, up, down } => {
+                if up.is_some() == self.glu.is_fused() {
+                    return Err(format!("ExpertSet: the up bank must be present exactly for the separate layout ({:?})", self.glu.layout));
+                }
+                let want = [("gate_up", Some(gate_up), gate_rows, d), ("up", up, ff, d), ("down", Some(down), d, ff)];
+                for (name, bank, n, k) in want {
+                    let Some(b) = bank else { continue };
+                    if (b.blocks, b.n, b.k) != (e, n, k) {
+                        return Err(format!("ExpertSet: the {name} bank is {} x [{}, {}], the layer wants {e} x [{n}, {k}]", b.blocks, b.n, b.k));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The kernels of the declared activation, resolved by name from [`COMPACT_TRAIN_KERNELS`].
+fn glu_ids(g: &Gpu) -> GluIds {
+    GluIds { act: compact_kernel(g, "glu_act"), act_bwd: compact_kernel(g, "glu_act_bwd") }
+}
+
+/// The routed experts' row-compacted training forward under a declared activation and weight bank: [`experts_fwd_train`]
+/// for an [`ExpertSet`]. `acts` are [`MoeActs::compact_for`] the set's activation (built from the readback of `gate`),
+/// `acc` is zeroed by the caller and every routed expert's gate-weighted output is added into it. `ids` supplies the
+/// gated projection and combine kernels a [`ExpertBank::Dense`] bank runs through. An error names a shape that does not
+/// fit or a bank kernel that is not registered.
+#[allow(clippy::too_many_arguments)]
+pub fn experts_fwd_train_set(g: &Gpu, ids: &MoeIds, set: &ExpertSet, shape: &MoeShape, x: &DeviceBuffer, gate: &DeviceBuffer, acts: &MoeActs, acc: &DeviceBuffer) -> Result<Vec<Step>, String> {
+    set.check(shape)?;
+    let routed = acts.routed.as_ref().ok_or("experts_fwd_train_set: the activations must be row-compacted (MoeActs::compact_for)")?;
+    if acts.fused != set.glu.is_fused() {
+        return Err(format!("experts_fwd_train_set: the activations were built for another gate/up layout than {:?}", set.glu.layout));
+    }
+    let glu = glu_ids(g);
+    let ff = shape.moe_ff;
+    compact_fwd(g, shape, x, gate, routed, acts, acc, |e, sub, x_c, gate_c, steps| {
+        let saved = acts.glu_at(e);
+        match set.bank {
+            ExpertBank::Dense(w) => {
+                let mut s = expert_fwd_glu(g, ids, &glu, &set.glu, sub, x_c, gate_c, &w[e], &saved, acc, e as u32, true);
+                // The dense combine gives way to the gate-scaled scatter.
+                s.pop();
+                steps.extend(s);
+            }
+            ExpertBank::Micro { gate_up, up, down } => {
+                let at = (&routed.experts, (routed.regions[e].0 as u64, sub.rows as u64));
+                steps.push(gate_up.gather_at(g, x_c, at, saved.gate_up, sub.rows, 1)?);
+                if let (Some(up), Some(up_out)) = (up, saved.up) {
+                    steps.push(up.gather_at(g, x_c, at, up_out, sub.rows, 1)?);
+                }
+                steps.push(glu_act_step(g, &glu, &set.glu, sub.rows, ff, saved.gate_up, saved.up, saved.h));
+                steps.push(down.gather_at(g, saved.h, at, saved.expert_out, sub.rows, 1)?);
+            }
+        }
+        Ok(())
+    })
 }
 
 /// Kernel indices [`expert_dgate`]/[`expert_bwd`] dispatch, resolved by the
@@ -716,11 +871,16 @@ pub fn moe_layer_bwd(
     assert_eq!(expert_weights.len(), shape.n_experts as usize, "moe_layer_bwd: expert_weights.len() must equal shape.n_experts");
     assert_eq!(expert_grads.len(), shape.n_experts as usize, "moe_layer_bwd: expert_grads.len() must equal shape.n_experts");
     if let Some(routed) = &acts.routed {
-        let ctx = CompactBwd { g, ids: expert_bwd_ids, shape, routed, acts, x, gate, weights: expert_weights, grads: expert_grads, sb, d_moe_acc, d_x };
+        let ctx = CompactBwd { g, ids: expert_bwd_ids, shape, routed, acts, x, gate, d_moe_acc, d_x };
         let mut steps = ctx.dgate(d_gate);
         steps.extend(router_bwd(g, router_bwd_ids, kind, shape, logits, gate, d_gate, d_router_logits, fe));
         steps.extend_from_slice(router_weight_bwd);
-        ctx.experts(&mut steps);
+        ctx.experts(&mut steps, |e, sub, x_c, gate_c, d_acc_c, dx_c, steps| {
+            let w = &expert_weights[e];
+            expert_bwd(g, expert_bwd_ids, sub, x_c, gate_c, &w.gate_w, &w.up_w, &w.down_w, &expert_grads[e], &acts.at(e), sb, d_acc_c, dx_c, e as u32, w.w_off, false, steps);
+            Ok(())
+        })
+        .expect("the SwiGLU expert steps cannot fail");
         return steps;
     }
 
@@ -763,6 +923,83 @@ pub fn moe_layer_bwd(
     steps
 }
 
+/// Whether an MoE layer's backward differentiates through its routing weights ([`moe_layer_bwd_set`]).
+pub enum RouterGrad<'a> {
+    /// The full gradient: every expert's column of `d_gate` (Phase A), the router's kernel-level backward and then the
+    /// router weight's own dense-linear backward (`router_weight_bwd`, caller-built, whose dX write must be the FIRST
+    /// touch of `d_x`, accumulate 0) - exactly [`moe_layer_bwd`]'s ordering contract. `d_gate` must hold zeros.
+    Full { ids: &'a RouterBwdIds, kind: RouterKind, logits: &'a DeviceBuffer, fe: Option<&'a DeviceBuffer>, d_gate: &'a DeviceBuffer, d_router_logits: &'a DeviceBuffer, router_weight_bwd: &'a [Step] },
+    /// The routing weights held constant (a stop-gradient through the router: no gate gradient, no router backward,
+    /// nothing written for the router weight). The input gradient is then the experts' part only, ADDED into whatever
+    /// `d_x` holds (zero it, or pass the gradient other branches already wrote). A declared choice, never a fallback:
+    /// the layer's true gradient also flows through the router.
+    Detached,
+}
+
+/// One MoE layer's backward over row-compacted activations for an [`ExpertSet`]: [`moe_layer_bwd`] for a declared
+/// activation and weight bank, with the router's part chosen by `router` ([`RouterGrad`]). `grads[e]` names the weight
+/// gradients to write for a [`ExpertBank::Dense`] expert (`None` skips one) and must be empty for a frozen
+/// [`ExpertBank::Micro`] bank, which has none: there the experts contribute their input gradient only, through the
+/// transposed bank products. `sb` is sized for the largest expert's rows (`d_gate_up` `[rows, 2 * moe_ff]` for a fused
+/// layout). Each expert's input gradient is added into `d_x` on its routed rows.
+#[allow(clippy::too_many_arguments)]
+pub fn moe_layer_bwd_set(
+    g: &Gpu,
+    router: RouterGrad,
+    ids: &MoeIdsBwd,
+    set: &ExpertSet,
+    grads: &[GluGrads],
+    shape: &MoeShape,
+    x: &DeviceBuffer,
+    gate: &DeviceBuffer,
+    acts: &MoeActs,
+    sb: &GluBwdScratch,
+    d_moe_acc: &DeviceBuffer,
+    d_x: &DeviceBuffer,
+) -> Result<Vec<Step>, String> {
+    set.check(shape)?;
+    let routed = acts.routed.as_ref().ok_or("moe_layer_bwd_set: the activations must be row-compacted (MoeActs::compact_for)")?;
+    if acts.fused != set.glu.is_fused() {
+        return Err(format!("moe_layer_bwd_set: the activations were built for another gate/up layout than {:?}", set.glu.layout));
+    }
+    match set.bank {
+        ExpertBank::Dense(_) if grads.len() != shape.n_experts as usize => return Err(format!("moe_layer_bwd_set: {} gradient sets for {} experts", grads.len(), shape.n_experts)),
+        ExpertBank::Micro { .. } if !grads.is_empty() => return Err("moe_layer_bwd_set: a microscaled bank is a frozen base and has no weight gradients".into()),
+        _ => {}
+    }
+    let ctx = CompactBwd { g, ids, shape, routed, acts, x, gate, d_moe_acc, d_x };
+    let mut steps = Vec::new();
+    if let RouterGrad::Full { ids: rids, kind, logits, fe, d_gate, d_router_logits, router_weight_bwd } = router {
+        steps.extend(ctx.dgate(d_gate));
+        steps.extend(router_bwd(g, rids, kind, shape, logits, gate, d_gate, d_router_logits, fe));
+        steps.extend_from_slice(router_weight_bwd);
+    }
+    let glu = glu_ids(g);
+    let ff = shape.moe_ff;
+    ctx.experts(&mut steps, |e, sub, x_c, gate_c, d_acc_c, dx_c, steps| {
+        let saved = acts.glu_at(e);
+        match set.bank {
+            ExpertBank::Dense(w) => expert_bwd_glu(g, ids, &glu, &set.glu, sub, x_c, gate_c, &w[e], &grads[e], &saved, sb, d_acc_c, dx_c, e as u32, false, steps),
+            ExpertBank::Micro { gate_up, up, down } => {
+                let at = (&routed.experts, (routed.regions[e].0 as u64, sub.rows as u64));
+                // The expert's share of the combine, then the transposed products through the frozen bank.
+                steps.push(g.step(ids.scale_add_dexp, &[gate_c, d_acc_c, sb.d_expert_out], &[sub.rows, sub.d_model, sub.n_experts, e as u32], sub.rows * sub.d_model));
+                steps.push(down.gather_dx_at(g, sb.d_expert_out, at, sb.d_h, sub.rows, false)?);
+                steps.push(glu_act_bwd_step(g, &glu, &set.glu, sub.rows, ff, saved.gate_up, saved.up, sb.d_h, sb.d_gate_up, sb.d_up));
+                match up {
+                    Some(up) => {
+                        steps.push(up.gather_dx_at(g, sb.d_up, at, dx_c, sub.rows, false)?);
+                        steps.push(gate_up.gather_dx_at(g, sb.d_gate_up, at, dx_c, sub.rows, true)?);
+                    }
+                    None => steps.push(gate_up.gather_dx_at(g, sb.d_gate_up, at, dx_c, sub.rows, false)?),
+                }
+            }
+        }
+        Ok(())
+    })?;
+    Ok(steps)
+}
+
 /// [`moe_layer_bwd`] over row-compacted activations: every expert's phases run on its routed rows, gathered from the
 /// layer's buffers, and its gradients are added back to the rows they came from. `d_gate` must hold zeros (its
 /// columns are added into, one expert each); `d_x` holds the router's input gradient, as for the dense form.
@@ -774,9 +1011,6 @@ struct CompactBwd<'a> {
     acts: &'a MoeActs,
     x: &'a DeviceBuffer,
     gate: &'a DeviceBuffer,
-    weights: &'a [ExpertWeights],
-    grads: &'a [ExpertGrads<'a>],
-    sb: &'a ExpertBwdScratch<'a>,
     d_moe_acc: &'a DeviceBuffer,
     d_x: &'a DeviceBuffer,
 }
@@ -822,8 +1056,15 @@ impl CompactBwd<'_> {
         steps
     }
 
-    /// Phase C: every expert's SwiGLU backward on its rows, its input gradient added into `d_x`.
-    fn experts(&self, steps: &mut Vec<Step>) {
+    /// Phase C: every expert's backward on its rows: its rows of `x`, the gate and the output gradient gathered, `expert`
+    /// writing the expert's input gradient `[count, d_model]` (overwriting, not adding) into the compacted buffer it is
+    /// handed, which is then added into `d_x`.
+    #[allow(clippy::type_complexity)]
+    fn experts(
+        &self,
+        steps: &mut Vec<Step>,
+        mut expert: impl FnMut(usize, &MoeShape, &DeviceBuffer, &DeviceBuffer, &DeviceBuffer, &DeviceBuffer, &mut Vec<Step>) -> Result<(), String>,
+    ) -> Result<(), String> {
         let (d, ne) = (self.shape.d_model, self.shape.n_experts);
         let most = self.most_rows();
         let g = self.g;
@@ -833,10 +1074,10 @@ impl CompactBwd<'_> {
             steps.push(self.gather(rows, self.x, &x_c, d));
             steps.push(self.gather(rows, self.gate, &gate_c, ne));
             steps.push(self.gather(rows, self.d_moe_acc, &d_acc_c, d));
-            let w = &self.weights[e];
-            expert_bwd(g, self.ids, &sub, &x_c, &gate_c, &w.gate_w, &w.up_w, &w.down_w, &self.grads[e], &self.acts.at(e), self.sb, &d_acc_c, &dx_c, e as u32, w.w_off, false, steps);
+            expert(e, &sub, &x_c, &gate_c, &d_acc_c, &dx_c, steps)?;
             steps.push(self.scatter_add(rows, &dx_c, self.d_x, d, d, 0));
         }
+        Ok(())
     }
 }
 
@@ -1844,6 +2085,8 @@ const GROUP_GEMM_BM: u32 = 128;
 /// worst-case-per-expert bound like [`CompactExpertScratch`]'s).
 pub struct GroupedExpertScratch {
     n_experts: u32,
+    /// `gate_pre` holds a fused `[cap, 2 * moe_ff]` projection output ([`Self::new_for`]).
+    fused: bool,
     cap: u32,
     top_ids: DeviceBuffer,
     row_count: DeviceBuffer,
@@ -1865,10 +2108,18 @@ impl GroupedExpertScratch {
     /// scratch will ever be asked to serve - pass the largest `rows` any
     /// call will use, matching [`CompactExpertScratch::new`]'s convention.
     pub fn new(g: &Gpu, shape: &MoeShape) -> GroupedExpertScratch {
+        Self::new_for(g, shape, &GluSpec::default())
+    }
+
+    /// [`Self::new`] for experts under a declared activation ([`expert_fwd_grouped_glu`]): a fused gate/up layout holds
+    /// its `[cap, 2 * moe_ff]` projection output.
+    pub fn new_for(g: &Gpu, shape: &MoeShape, glu: &GluSpec) -> GroupedExpertScratch {
         let (d, ff, e) = (shape.d_model as u64, shape.moe_ff as u64, shape.n_experts);
         let cap = (shape.rows as u64 * shape.top_k as u64).max(1);
+        let (gate_up, up) = if glu.is_fused() { (2 * ff, 0) } else { (ff, ff) };
         GroupedExpertScratch {
             n_experts: e,
+            fused: glu.is_fused(),
             cap: cap as u32,
             top_ids: g.storage(cap),
             row_count: g.storage(e as u64),
@@ -1879,8 +2130,8 @@ impl GroupedExpertScratch {
             perm: g.storage(cap),
             pos_for_slot: g.storage(cap),
             x_compact: g.storage(cap * d),
-            gate_pre: g.storage(cap * ff),
-            up: g.storage(cap * ff),
+            gate_pre: g.storage(cap * gate_up),
+            up: g.storage((cap * up).max(1)),
             h: g.storage(cap * ff),
             expert_out: g.storage(cap * d),
         }
@@ -1922,6 +2173,55 @@ pub fn expert_fwd_grouped(
     gate_w_all: &DeviceBuffer,
     up_w_all: &DeviceBuffer,
     down_w_all: &DeviceBuffer,
+    scratch: &GroupedExpertScratch,
+    out: &DeviceBuffer,
+) -> Vec<Step> {
+    assert!(!scratch.fused, "expert_fwd_grouped: SwiGLU over separate projections needs GroupedExpertScratch::new");
+    grouped_fwd(g, ids, GroupedAct::SiluMul, shape, x, gate, (gate_w_all, Some(up_w_all), down_w_all), scratch, out)
+}
+
+/// [`expert_fwd_grouped`] under a declared expert activation and gate/up layout ([`crate::glu`]): `gate_up_all` is the
+/// gate bank `[n_experts, moe_ff, d_model]` with `up_all` beside it (separate layout) or the fused
+/// `[n_experts, 2 * moe_ff, d_model]` bank (`up_all` absent), read by the grouped GEMM with `n = 2 * moe_ff`; the
+/// activation kernel applies the layout. `scratch` is [`GroupedExpertScratch::new_for`] the same spec.
+#[allow(clippy::too_many_arguments)]
+pub fn expert_fwd_grouped_glu(
+    g: &Gpu,
+    ids: &GroupedExpertFwdIds,
+    glu: (&GluSpec, &GluIds),
+    shape: &MoeShape,
+    x: &DeviceBuffer,
+    gate: &DeviceBuffer,
+    gate_up_all: &DeviceBuffer,
+    up_all: Option<&DeviceBuffer>,
+    down_all: &DeviceBuffer,
+    scratch: &GroupedExpertScratch,
+    out: &DeviceBuffer,
+) -> Vec<Step> {
+    let (spec, _) = glu;
+    assert_eq!(up_all.is_some(), !spec.is_fused(), "expert_fwd_grouped_glu: `up_all` must be present exactly for the separate layout");
+    assert_eq!(scratch.fused, spec.is_fused(), "expert_fwd_grouped_glu: the scratch was built for another gate/up layout (GroupedExpertScratch::new_for)");
+    grouped_fwd(g, ids, GroupedAct::Glu(glu.0, glu.1), shape, x, gate, (gate_up_all, up_all, down_all), scratch, out)
+}
+
+/// The activation a grouped forward applies between its projections.
+#[derive(Clone, Copy)]
+enum GroupedAct<'a> {
+    /// `silu_mul` over separate projections (`ids.silu_mul`).
+    SiluMul,
+    /// A declared activation and layout.
+    Glu(&'a GluSpec, &'a GluIds),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn grouped_fwd(
+    g: &Gpu,
+    ids: &GroupedExpertFwdIds,
+    act: GroupedAct,
+    shape: &MoeShape,
+    x: &DeviceBuffer,
+    gate: &DeviceBuffer,
+    banks: (&DeviceBuffer, Option<&DeviceBuffer>, &DeviceBuffer),
     scratch: &GroupedExpertScratch,
     out: &DeviceBuffer,
 ) -> Vec<Step> {
@@ -1969,10 +2269,17 @@ pub fn expert_fwd_grouped(
             gpu_core::Dispatch::Workgroups(tiles),
         ));
     };
-    gemm(gate_w_all, &scratch.x_compact, &scratch.gate_pre, d, ff, &mut steps);
-    gemm(up_w_all, &scratch.x_compact, &scratch.up, d, ff, &mut steps);
-    steps.push(g.step(ids.silu_mul, &[&scratch.gate_pre, &scratch.up, &scratch.h], &[compacted * ff], compacted * ff));
-    gemm(down_w_all, &scratch.h, &scratch.expert_out, ff, d, &mut steps);
+    let (gate_up_all, up_all, down_all) = banks;
+    let gate_rows = if scratch.fused { 2 * ff } else { ff };
+    gemm(gate_up_all, &scratch.x_compact, &scratch.gate_pre, d, gate_rows, &mut steps);
+    if let Some(up_all) = up_all {
+        gemm(up_all, &scratch.x_compact, &scratch.up, d, ff, &mut steps);
+    }
+    match act {
+        GroupedAct::SiluMul => steps.push(g.step(ids.silu_mul, &[&scratch.gate_pre, &scratch.up, &scratch.h], &[compacted * ff], compacted * ff)),
+        GroupedAct::Glu(spec, glu) => steps.push(glu_act_step(g, glu, spec, compacted, ff, &scratch.gate_pre, up_all.map(|_| &scratch.up), &scratch.h)),
+    }
+    gemm(down_all, &scratch.h, &scratch.expert_out, ff, d, &mut steps);
 
     steps.push(g.step(
         ids.combine,

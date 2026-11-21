@@ -567,6 +567,23 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
 The first trainable target needs no streaming: the base is about 19.5 GB.
 - **I4.1** `model::moe`: a backward through frozen `Micro` expert banks (NVFP4 and MXFP8
   grouped dX). The router gradient is optional, behind a declared flag.
+  - Done (2026-11-22): kernels `moe_{nvfp4,mxfp8}_dx_gather` / `_dx_grouped` (the transposed bank products, one thread
+    per output, barrier-free, CPU JIT; grouped is the gather form to the bit) behind `MicroBank::{gather_dx,
+    grouped_dx}` and the id-range forms `gather_at` / `gather_dx_at` (in `micro_bank_kernels()`). The row-compacted
+    training path takes a declared activation and bank: `ExpertSet { glu: GluSpec, bank: ExpertBank::{Dense(&[GluWeights]),
+    Micro { gate_up, up, down }} }`, `MoeActs::compact_for(g, shape, host_gate, &spec)`, `experts_fwd_train_set`,
+    `moe_layer_bwd_set(g, RouterGrad::{Full{..} | Detached}, ..)` (a frozen bank takes no weight gradients, refused by
+    name); `COMPACT_TRAIN_KERNELS` now carries `glu_act` / `glu_act_bwd`; the SwiGLU `experts_fwd_train` /
+    `moe_layer_bwd` share the same compacted frame unchanged. Grouped path: `expert_fwd_grouped_glu` +
+    `GroupedExpertScratch::new_for`. Gates: `moe_micro_bwd.rs` (bank dX vs the f64 transposed product of the decoded
+    weights for both kinds; a softcap-sigmoid interleaved MXFP8 layer's output vs the f64 forward and its dX vs f64
+    central differences with the router differentiated and detached; refusals), `moe_block_gradcheck`
+    (`compacted_softcap_sigmoid_experts_pass_the_gradcheck`, compacted == dense declared path), `moe_grouped_parity`
+    (interleaved grouped == separate grouped); existing moe gradchecks, deepseek2/glmdsa/qwen35moe suites green.
+  - Left: the NVFP4 bank's forward products need workgroup reductions, so the NVFP4 layer-level check skips on the
+    CPU backend (its dX kernels ran); CUDA not exercised; the dX kernels are the reference tier (no tiled/tensor-core
+    candidate, no `gpu_core::cost` formula); the grouped forward over a `MicroBank` stays the serving path's
+    (`MicroBank::grouped`), training reads the bank through the compacted gather.
 - **I4.2** `model::adapter`: stacked-expert LoRA sites (per-expert A/B over a bank), plus
   sites for:
   - attention q/k/v/o/gate;
