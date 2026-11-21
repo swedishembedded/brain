@@ -69,6 +69,7 @@ mod lora_runtime_adapter;
 mod lora_saved_boundaries;
 mod lora_serve_fold;
 mod lora_snapshots;
+mod lora_spec;
 mod lsa_engine;
 mod lsa_native;
 mod mem_budget_inference;
