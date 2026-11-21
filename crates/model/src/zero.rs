@@ -395,9 +395,8 @@ mod device {
         value_dtype: CollectiveDtype,
         grad_dtype: CollectiveDtype,
         lr_mult: f32,
-        /// This rank's reduced gradient slice and new-value slice on the device.
-        grad_shard: DeviceBuffer,
-        value_shard: DeviceBuffer,
+        /// This rank's reduced gradient slice, in host memory (kept between steps: its pages are faulted in once).
+        grad: Vec<f32>,
         /// f32 master copy and AdamW moments of the slice, in host memory.
         master: Vec<f32>,
         m: Vec<f32>,
@@ -415,6 +414,8 @@ mod device {
         units: Vec<UnitState>,
         /// One unit's flat vector: packed gradients before a reduction, gathered values after one.
         staging: DeviceBuffer,
+        /// One unit's slice on the device: the reduced gradient this rank owns, then the new values it gathers out.
+        shard: DeviceBuffer,
         /// The optimizer steps applied so far.
         step: u32,
     }
@@ -471,6 +472,8 @@ mod device {
             let layout = ShardLayout::plan(&names, &numels, &group_keys(&params.tensors), unit_elems.max(1), world, align)?;
             let gpu = params.gpu.share();
             let staging = gpu.try_storage(layout.max_unit()).map_err(|e| format!("the sharded step's staging buffer ({} elements): {e:?}", layout.max_unit()))?;
+            let max_shard = (0..layout.units.len()).map(|u| layout.shard_len(u)).max().unwrap_or(0);
+            let shard = gpu.try_storage(max_shard.max(1)).map_err(|e| format!("the sharded step's shard buffer ({max_shard} elements): {e:?}"))?;
             let mut units = Vec::with_capacity(layout.units.len());
             for (u, unit) in layout.units.iter().enumerate() {
                 let first = &params.tensors[unit.members[0].0];
@@ -479,8 +482,7 @@ mod device {
                     value_dtype: first.value_dtype,
                     grad_dtype: first.grad_dtype,
                     lr_mult: first.lr_mult,
-                    grad_shard: gpu.try_storage(words(n, first.grad_dtype)).map_err(|e| format!("a gradient shard of {n} elements: {e:?}"))?,
-                    value_shard: gpu.try_storage(words(n, first.value_dtype)).map_err(|e| format!("a value shard of {n} elements: {e:?}"))?,
+                    grad: vec![0.0; n as usize],
                     master: Vec::new(),
                     m: vec![0.0; n as usize],
                     v: vec![0.0; n as usize],
@@ -491,7 +493,7 @@ mod device {
                 state.master = read_elems(&gpu, &staging, layout.slice(u, rank).start, n, state.value_dtype);
                 units.push(state);
             }
-            Ok(ZeroOptimizer { sharding, layout, rank, gpu, params: params.tensors, units, staging, step: 0 })
+            Ok(ZeroOptimizer { sharding, layout, rank, gpu, params: params.tensors, units, staging, shard, step: 0 })
         }
 
         pub fn sharding(&self) -> Sharding {
@@ -507,15 +509,14 @@ mod device {
             self.step
         }
 
-        /// Host bytes this rank's optimizer state holds (master and moments).
+        /// Host bytes this rank's optimizer state (master and moments) and its gradient slice hold.
         pub fn host_bytes(&self) -> u64 {
-            self.units.iter().map(|u| 4 * (u.master.len() + u.m.len() + u.v.len()) as u64).sum()
+            self.units.iter().map(|u| 4 * (u.grad.len() + u.master.len() + u.m.len() + u.v.len()) as u64).sum()
         }
 
-        /// Device bytes this rank's shard buffers and the staging buffer hold.
+        /// Device bytes the step adds to the model: one unit's staging buffer and one slice.
         pub fn device_bytes(&self) -> u64 {
-            let shards: u64 = (0..self.units.len()).map(|u| 4 * (words(self.layout.shard_len(u), self.units[u].grad_dtype) + words(self.layout.shard_len(u), self.units[u].value_dtype))).sum();
-            shards + 4 * self.layout.max_unit()
+            4 * (self.layout.max_unit() + (0..self.units.len()).map(|u| self.layout.shard_len(u)).max().unwrap_or(0))
         }
 
         /// Copy unit `u`'s members (`pick` chooses the buffer and type) into `staging` and zero its gaps and padding.
@@ -536,19 +537,26 @@ mod device {
             }
         }
 
-        /// Reduce every unit's gradient to this rank's shard, each rank's gradient weighted by `scale`.
-        fn reduce(&self, coll: &dyn Collective, scale: f32) -> CollectiveResult<()> {
+        /// Reduce every unit's gradient to this rank's slice in host memory, each rank's gradient weighted by `scale`.
+        fn reduce(&mut self, coll: &dyn Collective, scale: f32) -> CollectiveResult<()> {
             let gpu = &self.gpu;
-            for (u, state) in self.units.iter().enumerate() {
+            for (u, state) in self.units.iter_mut().enumerate() {
                 let dtype = state.grad_dtype;
                 Self::pack(gpu, &self.layout, u, &self.params, &self.staging, |p| (&p.grad, p.grad_dtype));
                 let n = self.layout.shard_len(u);
-                match self.sharding {
+                let (from, at) = match self.sharding {
                     Sharding::Optimizer => {
                         all_reduce(coll, self.rank, gpu, &self.staging, self.layout.units[u].padded, dtype, scale)?;
-                        gpu.copy_to(&self.staging, self.layout.slice(u, self.rank).start * dtype.bytes(), gpu, &state.grad_shard, 0, 4 * words(n, dtype));
+                        (&self.staging, self.layout.slice(u, self.rank).start)
                     }
-                    _ => reduce_scatter(coll, self.rank, gpu, &self.staging, &state.grad_shard, n, dtype, scale)?,
+                    _ => {
+                        reduce_scatter(coll, self.rank, gpu, &self.staging, &self.shard, n, dtype, scale)?;
+                        (&self.shard, 0)
+                    }
+                };
+                match dtype {
+                    CollectiveDtype::F32 => gpu.read_into(from, at, &mut state.grad),
+                    CollectiveDtype::Bf16 => state.grad = read_elems(gpu, from, at, n, dtype),
                 }
             }
             Ok(())
@@ -559,8 +567,8 @@ mod device {
             let gpu = &self.gpu;
             for (u, state) in self.units.iter().enumerate() {
                 let dtype = state.value_dtype;
-                write_elems(gpu, &state.value_shard, 0, &state.master, dtype);
-                all_gather(coll, self.rank, gpu, &state.value_shard, &self.staging, self.layout.shard_len(u), dtype)?;
+                write_elems(gpu, &self.shard, 0, &state.master, dtype);
+                all_gather(coll, self.rank, gpu, &self.shard, &self.staging, self.layout.shard_len(u), dtype)?;
                 for &(tensor, offset, count) in &self.layout.units[u].members {
                     gpu.copy_to(&self.staging, offset * dtype.bytes(), gpu, &self.params[tensor].value, 0, 4 * words(count, dtype));
                 }
@@ -587,13 +595,9 @@ mod device {
             }
             let clock = std::time::Instant::now();
             self.reduce(coll, local_weight / totals[0].max(1e-12))?;
-            self.gpu.poll_wait();
-            gpu_core::profile::stage_time("sharded step: reduce the gradients to their owners", clock);
+            gpu_core::profile::stage_time("sharded step: reduce the gradients to their owners and read them", clock);
             let clock = std::time::Instant::now();
-            let grads: Vec<Vec<f32>> = self.units.iter().enumerate().map(|(u, s)| read_elems(&self.gpu, &s.grad_shard, 0, self.layout.shard_len(u), s.grad_dtype)).collect();
-            gpu_core::profile::stage_time("sharded step: read the gradient shard", clock);
-            let clock = std::time::Instant::now();
-            let local_sq = backend_cpu::par::sum_sq_f64(&grads);
+            let local_sq: f64 = self.units.iter().map(|s| backend_cpu::par::sum_sq_f64(std::slice::from_ref(&s.grad))).sum();
             let global = pollster::block_on(coll.all_reduce(rank, Payload::f32(vec![local_sq as f32])))?.data;
             let sum_sq = f64::from(*global.first().ok_or_else(|| CollectiveError::Transport("the norm reduction returned nothing".into()))?);
             if !sum_sq.is_finite() {
@@ -601,9 +605,9 @@ mod device {
             }
             let multiplier = optim::grad_multiplier(sum_sq, args.clip, args.extra_scale);
             let bc = args.adam.bias_corrections(args.t);
-            for (state, g) in self.units.iter_mut().zip(&grads) {
+            for state in &mut self.units {
                 let (adam, lr, wd) = (args.adam, args.lr * state.lr_mult, args.wd);
-                backend_cpu::par::zip3_mut(&mut state.master, &mut state.m, &mut state.v, g, |w, m, v, g| adam.update(bc, lr, wd, g * multiplier, w, m, v));
+                backend_cpu::par::zip3_mut(&mut state.master, &mut state.m, &mut state.v, &state.grad, |w, m, v, g| adam.update(bc, lr, wd, g * multiplier, w, m, v));
             }
             gpu_core::profile::stage_time("sharded step: norm and AdamW on the host shard", clock);
             self.step = args.t;
