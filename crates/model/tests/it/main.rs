@@ -170,6 +170,7 @@ mod tensor_parallel;
 mod tier_policy;
 mod upload_from_source;
 mod upload_mixed_release;
+mod visit_plan;
 mod vit_bwd_kernels;
 mod vit_windowed;
 mod weight_round_trip;

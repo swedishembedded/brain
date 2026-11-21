@@ -82,6 +82,7 @@ pub mod int8;
 pub mod kquant;
 pub mod logitscale;
 pub mod logprobs;
+pub mod looped;
 pub mod lora;
 pub mod lsa;
 pub mod lossw;
