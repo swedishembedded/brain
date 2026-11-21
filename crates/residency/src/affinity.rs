@@ -22,16 +22,17 @@
 //! prefill again unless it lands on the replica that served its earlier turns,
 //! so the choice is made in this order:
 //!
-//! 1. **A replica holding a useful prefix of the prompt**, among the replicas
-//!    with a free slot that carry at most [`balance_slack`] more requests than
-//!    the least loaded one: the one holding the longest.
-//! 2. **The least-loaded active replica** with a free slot (one that is built or
-//!    already has work), so a light load is served by as few cards as possible
-//!    and shares one batch. Load is relative to the replica's own slots, so a
-//!    replica with twice the slots takes twice the requests.
-//! 3. **The next replica that is not built yet**, when every active replica's
+//! 1. **The cheapest active replica with a free slot** (one that is built or
+//!    already has work), by [`replica_cost`]: the prefill it still has to do
+//!    (the prompt less what its cache holds), the load it already carries
+//!    (each request weighed at the prompt over [`balance_slack`] of its slots),
+//!    and how close the request would bring its KV pool to full. A
+//!    conversation returns to the replica holding its history unless that one
+//!    is far busier; a light load is served by as few cards as possible and
+//!    shares one batch.
+//! 2. **The next replica that is not built yet**, when every active replica's
 //!    slots are taken: the instance is built on its card because demand needs it.
-//! 4. **The best-matching or least-loaded replica** when every replica is full:
+//! 3. **The best-matching or least-loaded replica** when every replica is full:
 //!    the request queues behind running work.
 //!
 //! A replica's prefix cache lives inside its instance, on the lane that is
@@ -101,6 +102,23 @@ impl PrefixChain {
         for part in bytes.chunks(chunk.max(1)) {
             self.push(part);
         }
+    }
+
+    /// Extend the chain by one segment of `units` units (tokens) whose identity is `segment`.
+    pub fn push_units(&mut self, segment: &[u8], units: u64) {
+        if self.links.len() >= MAX_LINKS {
+            return;
+        }
+        let (before, total) = self.links.last().copied().unwrap_or((0, 0));
+        let mut h = DefaultHasher::new();
+        h.write_u64(before);
+        h.write(segment);
+        self.links.push((h.finish(), total + units));
+    }
+
+    /// The units (bytes or tokens) the whole chain covers.
+    pub fn units(&self) -> u64 {
+        self.links.last().map_or(0, |&(_, units)| units)
     }
 
     /// No segment at all: nothing to route by.
@@ -200,6 +218,10 @@ pub struct ReplicaView {
     pub load: usize,
     /// Requests the replica runs at once: it has a free slot while `load` is below this.
     pub slots: usize,
+    /// Requests waiting on the replica beyond `load` (another client's, as the replica reports them).
+    pub queued: usize,
+    /// Free KV the replica reports, in the request's units (tokens); `None` when it reports none.
+    pub kv_free: Option<u64>,
     /// Built, or has work: running on its card now.
     pub active: bool,
     /// Its devices have the budget for it.
@@ -208,9 +230,43 @@ pub struct ReplicaView {
     pub matched: u64,
 }
 
-/// The replica that runs the next request (see the module doc for the order). Replicas that cannot run are passed over
-/// unless none can, so the refusal is the budget's own.
-pub fn choose_replica(views: &[ReplicaView]) -> usize {
+/// The prompt of the request being placed, in the units of its [`PrefixChain`] (tokens for a token chain, bytes for a
+/// text one), and the output it may add to the KV.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RequestSize {
+    pub prompt: u64,
+    pub output: u64,
+}
+
+/// What running a request of `size` on `view` is expected to cost, in prompt units: the prefill still to do, plus
+/// `size.prompt / balance_slack(slots)` for every request it already carries or queues (so a replica holding the whole
+/// prompt is worth up to `balance_slack` more requests than an idle one), plus a KV penalty growing with the square of
+/// the share of its free KV the request would take, and prohibitive when it would not fit.
+pub fn replica_cost(view: &ReplicaView, size: RequestSize) -> f64 {
+    let prompt = size.prompt.max(1) as f64;
+    let uncached = size.prompt.saturating_sub(view.matched) as f64;
+    let busy = (view.load + view.queued) as f64 * prompt / balance_slack(view.slots) as f64;
+    let kv = match view.kv_free {
+        None => 0.0,
+        Some(free) => {
+            let need = uncached + size.output as f64;
+            if need > free as f64 {
+                prompt * KV_FULL_PENALTY
+            } else {
+                prompt * (need / free.max(1) as f64).powi(2)
+            }
+        }
+    };
+    uncached + busy + kv
+}
+
+/// The cost, in prompts, of a replica whose KV the request would not fit: it would preempt or wait, so any replica
+/// where it fits is chosen first.
+const KV_FULL_PENALTY: f64 = 1000.0;
+
+/// The replica that runs the next request of `size` (see the module doc for the order). Replicas that cannot run are
+/// passed over unless none can, so the refusal is the budget's own.
+pub fn choose_replica(views: &[ReplicaView], size: RequestSize) -> usize {
     let usable: Vec<usize> = match (0..views.len()).filter(|&i| views[i].can_run).collect::<Vec<_>>() {
         none if none.is_empty() => (0..views.len()).collect(),
         some => some,
@@ -222,15 +278,8 @@ pub fn choose_replica(views: &[ReplicaView]) -> usize {
     };
     let least_loaded = |of: &mut dyn Iterator<Item = usize>| of.min_by(lighter);
     let free: Vec<usize> = usable.iter().copied().filter(|&i| views[i].load < views[i].slots).collect();
-    // A hit is worth its prefill only on a replica not far busier than the least loaded one: within
-    // [`balance_slack`] requests of the lowest load share among the free replicas.
-    let lowest_share = free.iter().map(|&i| views[i].load as f64 / views[i].slots.max(1) as f64).fold(f64::INFINITY, f64::min);
-    let balanced: Vec<usize> = free.iter().copied().filter(|&i| views[i].load as f64 <= lowest_share * views[i].slots.max(1) as f64 + balance_slack(views[i].slots) as f64).collect();
-    let best_match = balanced.iter().map(|&i| views[i].matched).max().unwrap_or(0);
-    if best_match >= MIN_USEFUL_PREFIX {
-        return least_loaded(&mut balanced.iter().copied().filter(|&i| views[i].matched == best_match)).unwrap_or(0);
-    }
-    if let Some(i) = least_loaded(&mut free.iter().copied().filter(|&i| views[i].active)) {
+    let cheapest = free.iter().copied().filter(|&i| views[i].active).map(|i| (replica_cost(&views[i], size), i)).min_by(|a, b| a.0.total_cmp(&b.0).then_with(|| lighter(&a.1, &b.1)));
+    if let Some((_, i)) = cheapest {
         return i;
     }
     if let Some(&i) = free.first() {
@@ -242,10 +291,10 @@ pub fn choose_replica(views: &[ReplicaView]) -> usize {
     least_loaded(&mut pool.into_iter()).unwrap_or(0)
 }
 
-/// How many requests more than the least-loaded free replica (at its share of slots) a replica holding a useful
-/// prefix may carry and still be chosen for it: an eighth of its slots, at least 8. Below that the cached prefill wins;
-/// past it balance does, so a prefix every request shares (one system prompt) spreads over the replicas instead of
-/// piling onto the one that served it first.
+/// How many requests a replica may carry beyond another before holding the whole prompt in cache stops paying for
+/// it ([`replica_cost`]): an eighth of its slots, at least 8. Below that the cached prefill wins; past it balance does,
+/// so a prefix every request shares (one system prompt) spreads over the replicas instead of piling onto the one that
+/// served it first, and on wide replicas load counts as a share of the slots.
 pub fn balance_slack(slots: usize) -> usize {
     (slots / 8).max(8)
 }
@@ -279,10 +328,30 @@ pub fn text_request_chain<'a>(namespace: &str, shaping: impl IntoIterator<Item =
         root.push('=');
         root.push_str(&value);
     }
-    let mut chain = PrefixChain::rooted(root.as_bytes());
+    // The root counts only the prompt it stands for (the shaping fields), not the namespace naming it: two requests
+    // that share nothing but the model share no work.
+    let mut chain = PrefixChain::default();
+    chain.push_units(root.as_bytes(), (root.len() - namespace.len()) as u64);
     match prompt {
         TextPrompt::Messages(messages) => json_array_elements(messages).into_iter().for_each(|message| chain.push(message.as_bytes())),
         TextPrompt::Raw(text) => chain.push_chunked(text.as_bytes(), RAW_PROMPT_LINK_BYTES),
+    }
+    chain
+}
+
+/// Tokens per link of a token chain: the granularity a paged KV cache shares prefixes at.
+pub const TOKEN_LINK: usize = 16;
+
+/// A request's prompt as a token [`PrefixChain`]: a root link for `root` (the namespace: model, its weights and adapter
+/// version, and the prompt-shaping fields), counted as `root_tokens`, then one link per [`TOKEN_LINK`] tokens of
+/// `prompt`. Two prompts share a prefix of `k` links exactly when they share the root and their first `k - 1` token
+/// blocks, so a match is counted in the tokens a cache would actually reuse, and never across namespaces.
+pub fn token_request_chain(root: &[u8], root_tokens: u64, prompt: &[u32]) -> PrefixChain {
+    let mut chain = PrefixChain::default();
+    chain.push_units(root, root_tokens);
+    for block in prompt.chunks(TOKEN_LINK) {
+        let bytes: Vec<u8> = block.iter().flat_map(|t| t.to_le_bytes()).collect();
+        chain.push_units(&bytes, block.len() as u64);
     }
     chain
 }
@@ -350,7 +419,14 @@ mod tests {
     }
 
     fn view(load: usize, active: bool, matched: u64) -> ReplicaView {
-        ReplicaView { load, slots: 8, active, can_run: true, matched }
+        ReplicaView { load, slots: 8, queued: 0, kv_free: None, active, can_run: true, matched }
+    }
+
+    /// The request the policy tests place: a prompt four useful prefixes long.
+    const SIZE: RequestSize = RequestSize { prompt: MIN_USEFUL_PREFIX * 4, output: 0 };
+
+    fn choose(views: &[ReplicaView]) -> usize {
+        choose_replica(views, SIZE)
     }
 
     #[test]
@@ -396,62 +472,62 @@ mod tests {
     #[test]
     fn a_light_load_fills_the_active_replica_before_building_another() {
         let views = [view(3, true, 0), view(0, false, 0), view(0, false, 0)];
-        assert_eq!(choose_replica(&views), 0);
+        assert_eq!(choose(&views), 0);
     }
 
     #[test]
     fn the_next_replica_is_built_once_the_active_ones_are_full() {
         let views = [view(8, true, 0), view(0, false, 0), view(0, false, 0)];
-        assert_eq!(choose_replica(&views), 1, "demand exceeds the slots of replica 0");
+        assert_eq!(choose(&views), 1, "demand exceeds the slots of replica 0");
         let views = [view(8, true, 0), view(8, true, 0), view(0, false, 0)];
-        assert_eq!(choose_replica(&views), 2);
+        assert_eq!(choose(&views), 2);
     }
 
     #[test]
     fn active_replicas_with_room_are_balanced_by_load() {
         let views = [view(5, true, 0), view(2, true, 0), view(0, false, 0)];
-        assert_eq!(choose_replica(&views), 1);
+        assert_eq!(choose(&views), 1);
     }
 
     #[test]
     fn a_cached_prefix_beats_the_least_loaded_replica() {
         let hit = MIN_USEFUL_PREFIX * 4;
         let views = [view(1, true, 0), view(6, true, hit)];
-        assert_eq!(choose_replica(&views), 1, "the replica holding the conversation, however busy, while it has a slot");
-        let views = [view(1, true, hit / 2), view(6, true, hit), view(0, true, 0)];
-        assert_eq!(choose_replica(&views), 1, "the longest prefix wins");
+        assert_eq!(choose(&views), 1, "the replica holding the conversation, however busy, while it has a slot");
+        let views = [view(3, true, hit / 2), view(3, true, hit), view(3, true, 0)];
+        assert_eq!(choose(&views), 1, "at equal load the longest prefix wins");
     }
 
     #[test]
     fn a_prefix_too_short_to_matter_does_not_override_balance() {
         let views = [view(6, true, 16), view(1, true, 0)];
-        assert_eq!(choose_replica(&views), 1);
+        assert_eq!(choose(&views), 1);
     }
 
     #[test]
     fn a_full_replica_holding_the_prefix_gives_way_to_one_with_room() {
         let hit = MIN_USEFUL_PREFIX * 4;
         let views = [view(8, true, hit), view(0, false, 0)];
-        assert_eq!(choose_replica(&views), 1, "a shared system prompt must not pin every conversation to one card");
+        assert_eq!(choose(&views), 1, "a shared system prompt must not pin every conversation to one card");
     }
 
     #[test]
     fn when_every_replica_is_full_the_request_waits_where_its_prompt_is_cached() {
         let hit = MIN_USEFUL_PREFIX * 4;
         let views = [view(9, true, 0), view(12, true, hit)];
-        assert_eq!(choose_replica(&views), 1);
+        assert_eq!(choose(&views), 1);
         let views = [view(12, true, 0), view(9, true, 0)];
-        assert_eq!(choose_replica(&views), 1, "no useful prefix: the shortest queue");
+        assert_eq!(choose(&views), 1, "no useful prefix: the shortest queue");
     }
 
     #[test]
     fn a_replica_that_cannot_run_is_passed_over_unless_none_can() {
         let mut held = view(0, true, 0);
         held.can_run = false;
-        assert_eq!(choose_replica(&[held, view(5, true, 0)]), 1);
+        assert_eq!(choose(&[held, view(5, true, 0)]), 1);
         let mut other = view(1, true, 0);
         other.can_run = false;
-        assert_eq!(choose_replica(&[held, other]), 0, "none can run: the first, so the refusal is the budget's");
+        assert_eq!(choose(&[held, other]), 0, "none can run: the first, so the refusal is the budget's");
     }
 
     #[test]
@@ -464,14 +540,14 @@ mod tests {
 
     #[test]
     fn load_is_weighed_against_each_replicas_own_slots() {
-        let small = ReplicaView { load: 4, slots: 8, active: true, can_run: true, matched: 0 };
-        let large = ReplicaView { load: 8, slots: 32, active: true, can_run: true, matched: 0 };
-        assert_eq!(choose_replica(&[small, large]), 1, "a quarter of 32 slots is lighter than half of 8");
-        let full_small = ReplicaView { load: 8, ..small };
-        let full_large = ReplicaView { load: 32, ..large };
-        let over_small = ReplicaView { load: 12, ..small };
-        assert_eq!(choose_replica(&[over_small, full_large]), 1, "every replica full: the shortest queue relative to its slots");
-        assert_eq!(choose_replica(&[full_small, ReplicaView { load: 31, ..large }]), 1, "the one with a free slot");
+        let small = ReplicaView { load: 32, slots: 64, queued: 0, kv_free: None, active: true, can_run: true, matched: 0 };
+        let large = ReplicaView { load: 64, slots: 256, ..small };
+        assert_eq!(choose(&[small, large]), 1, "a quarter of 256 slots is lighter than half of 64");
+        let full_small = ReplicaView { load: 64, ..small };
+        let full_large = ReplicaView { load: 256, ..large };
+        let over_small = ReplicaView { load: 96, ..small };
+        assert_eq!(choose(&[over_small, full_large]), 1, "every replica full: the shortest queue relative to its slots");
+        assert_eq!(choose(&[full_small, ReplicaView { load: 255, ..large }]), 1, "the one with a free slot");
     }
 
     fn chat_chain(namespace: &str, system: &str, messages: &[(&str, &str)]) -> PrefixChain {
@@ -507,9 +583,22 @@ mod tests {
         // Replicas with hundreds of slots are never full: the hit must give way once its replica carries much more
         // than the least loaded one, or one shared system prompt sends every request to one replica.
         let hit = MIN_USEFUL_PREFIX * 4;
-        let wide = |load, matched| ReplicaView { load, slots: 256, active: true, can_run: true, matched };
-        assert_eq!(choose_replica(&[wide(20, hit), wide(0, 0)]), 0, "a little more load is worth the cached prefill");
-        assert_eq!(choose_replica(&[wide(40, hit), wide(0, 0)]), 1, "far more load is not");
-        assert_eq!(choose_replica(&[wide(40, hit), wide(10, hit / 2), wide(0, 0)]), 1, "the best hit among the balanced ones");
+        let wide = |load, matched| ReplicaView { load, slots: 256, queued: 0, kv_free: None, active: true, can_run: true, matched };
+        assert_eq!(choose(&[wide(20, hit), wide(0, 0)]), 0, "a little more load is worth the cached prefill");
+        assert_eq!(choose(&[wide(40, hit), wide(0, 0)]), 1, "far more load is not");
+        assert_eq!(choose(&[wide(40, hit), wide(10, hit / 2), wide(0, 0)]), 1, "half the prompt cached on a lightly loaded replica is cheapest");
+    }
+
+    #[test]
+    fn a_replica_whose_kv_the_request_would_fill_loses_and_waiting_work_counts_as_load() {
+        let wide = |load, matched, kv_free| ReplicaView { load, slots: 256, queued: 0, kv_free, active: true, can_run: true, matched };
+        let hit = SIZE.prompt;
+        let size = RequestSize { prompt: SIZE.prompt, output: 1024 };
+        assert_eq!(choose_replica(&[wide(0, hit, Some(512)), wide(0, 0, Some(1 << 20))], size), 1, "the output does not fit beside the cached prompt");
+        assert_eq!(choose_replica(&[wide(0, hit, Some(1 << 20)), wide(0, 0, Some(1 << 20))], size), 0, "plenty of KV: the cache decides");
+        assert_eq!(choose_replica(&[wide(0, 0, Some(size.prompt + 1100)), wide(0, 0, Some(1 << 20))], size), 1, "nearly full KV costs more than an idle replica with room");
+        let mut busy = wide(0, 0, None);
+        busy.queued = 64;
+        assert_eq!(choose(&[busy, wide(10, 0, None)]), 1, "work queued on a replica is load too");
     }
 }

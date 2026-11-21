@@ -44,17 +44,37 @@ pub(crate) fn count_served(outcome: &capability::Outcome) {
     SERVED.cached_prompt_tokens.fetch_add(tokens("cached_tokens"), Ordering::Relaxed);
 }
 
-/// `{"status": "ok", "decode_slots": N, "edge_concurrency": M, "queue_depth": Q, "served": {...}}`: the sequences the
-/// served models decode at once, the requests the surface admits at once before it sheds with 503, the jobs waiting
-/// for a lane now, and the cumulative counts of finished generations, prompt, completion and prefix-cached prompt
-/// tokens (a reader takes rates from two readings).
+/// This process's identity for its lifetime: a reader that sees it change knows the server restarted, so whatever
+/// it cached (its KV, its weights) may differ from before.
+fn instance() -> &'static str {
+    static INSTANCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    INSTANCE.get_or_init(|| format!("{:016x}", rand::random::<u64>()))
+}
+
+/// `{"status", "instance", "decode_slots", "free_slots", "kv_free_tokens", "kv_total_tokens", "edge_concurrency",
+/// "queue_depth", "served": {...}}`: the process's identity, the sequences the served models decode at once and how
+/// many of those are free now, the KV pool's free and total tokens summed over the paged text models (null when none
+/// is resident), the requests the surface admits at once before it sheds with 503, the jobs waiting for a lane now,
+/// and the cumulative counts of finished generations, prompt, completion and prefix-cached prompt tokens (a reader
+/// takes rates from two readings). Model counters are as of the dispatcher's last pass.
 async fn health(State(state): State<AppState>) -> Json<Value> {
     let read = |c: &AtomicU64| c.load(Ordering::Relaxed);
+    let stats = state.exec.stats();
+    let sum = |name: &str| -> Option<u64> {
+        let values: Vec<u64> = stats.metrics.values().filter_map(|m| m.iter().find(|(n, _)| n == name)).filter_map(|(_, v)| v.as_u64()).collect();
+        (!values.is_empty()).then(|| values.iter().sum())
+    };
+    let slots = state.exec.decode_slots();
+    let running = sum("running_sequences").unwrap_or(0) as usize;
     Json(json!({
         "status": "ok",
-        "decode_slots": state.exec.decode_slots(),
+        "instance": instance(),
+        "decode_slots": slots,
+        "free_slots": slots.saturating_sub(running),
+        "kv_free_tokens": sum("kv_free_tokens"),
+        "kv_total_tokens": sum("kv_total_tokens"),
         "edge_concurrency": state.edge_concurrency,
-        "queue_depth": state.exec.stats().queue_depth,
+        "queue_depth": stats.queue_depth,
         "served": {
             "requests": read(&SERVED.requests),
             "prompt_tokens": read(&SERVED.prompt_tokens),

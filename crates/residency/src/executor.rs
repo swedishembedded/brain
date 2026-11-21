@@ -26,7 +26,7 @@ use gpu_supervisor::Health;
 
 use crate::adapter::{AdapterIdentity, ServedAdapters};
 use crate::contract::{Class, DeadlineSource, Decision, HoldChange, Holds, Waiting};
-use crate::affinity::{choose_replica, PrefixDirectory, ReplicaView};
+use crate::affinity::{choose_replica, PrefixDirectory, ReplicaView, RequestSize};
 use crate::manager::{Abandoned, ClaimError, Claimed, ClaimedMulti, InstanceHandle};
 use crate::scheduler::{choose_next, Group, Policy};
 use crate::supervised::{device_label, Probe, Supervision};
@@ -1300,10 +1300,10 @@ impl ReplicaRoutes {
                 if !active {
                     directories[i].clear();
                 }
-                ReplicaView { load, slots: routing.slots, active, can_run: mgr.replica_can_run(&k, model), matched: directories[i].matched(&chain) }
+                ReplicaView { load, slots: routing.slots, queued: 0, kv_free: None, active, can_run: mgr.replica_can_run(&k, model), matched: directories[i].matched(&chain) }
             })
             .collect();
-        let chosen = choose_replica(&views);
+        let chosen = choose_replica(&views, RequestSize { prompt: chain.units(), output: 0 });
         directories[chosen].record(&chain);
         base.replica(chosen)
     }

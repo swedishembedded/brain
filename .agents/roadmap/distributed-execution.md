@@ -556,15 +556,18 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
       measured across nodes (Measured, 2026-11-21). Open: tensor-parallel serving
       inside a node for a model that does not fit one card; a cross-node layer
       split only for one that does not fit a node; multipart uploads
-      (`/audio/transcriptions`) and job routes are not routed. Router policy
-      gaps (2026-11-21 review): the prefix key is request text, not the
-      model's token ids, and carries the model id but not the weights or
-      adapter digest, so affinity can cross a hot-swapped release (a stale
-      hint costs one prefill, never a wrong answer); upstreams report no
-      cached-prefix or eviction events, so the index is advisory; the choice
-      is longest prefix among replicas with a free slot, then load per slot,
-      not a predicted cost (uncached prefill + queue wait + free KV, which
-      needs upstream-reported KV headroom). Connections are a bounded
+      (`/audio/transcriptions`) and job routes are not routed. The router
+      keys prompts by the model's tokens (tokenizer read from the router's
+      model store, text when absent) under a namespace carrying the adapter
+      digest, drops an upstream's record when its instance id changes, and
+      chooses by cost (`residency::affinity::replica_cost`: uncached prefill,
+      load per slot including the upstream's own queue, KV headroom from its
+      `/v1/health`). Open: upstreams report no cached-prefix or eviction
+      events, so the index stays advisory; the tokenizer is loaded as
+      byte-level BPE (`QwenBpe`), exact for that family and only consistent
+      (not the model's ids) for others; the base-weight digest is not in the
+      namespace (a base changes only with a restart, which the instance id
+      catches). Connections are a bounded
       keep-alive pool per upstream, and a drain cuts what still runs at its
       deadline (`--drain-deadline-ms`, default 300000).
 - [ ] **C5 cluster launch sample and gates.** `samples/` gains a Slurm launch

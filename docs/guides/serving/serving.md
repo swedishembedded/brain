@@ -190,16 +190,25 @@ brain serve --openai 127.0.0.1:8788 --upstreams-file fleet.txt --upstream-key-fi
 starts a comment. `--upstream URL` (repeatable, or comma-separated) names them
 on the command line instead.
 
-- **Routing.** A chat or completion goes to the upstream whose prefix cache
-  holds the longest useful prefix of its prompt, so a conversation that resends
-  its history returns to the server that holds it; otherwise to the upstream
-  with the least load for its decode slots. It is the same policy as for
+- **Routing.** A chat or completion goes to the upstream where it costs least:
+  the prefill its prefix cache does not already hold, the load it carries for
+  its decode slots (its own queue included), and how full the request would
+  bring its KV pool (a pool it would not fit in is chosen last). A
+  conversation that resends its history returns to the server that holds it
+  unless that one is far busier, and a system prompt every request shares
+  does not pin them all to one server. It is the same policy as for
   [replicas on several cards](#serving-on-several-cards), with each server as a
-  replica. Requests that carry the same `prompt_cache_key` (OpenAI's routing
+  replica. Prompts are compared as the model's tokens: the router reads each
+  served model's `tokenizer.json` from `--models-dir` (the store the upstreams
+  serve, or a copy), and keys a model whose tokenizer is not there by its text
+  (`keying` in `/v1/metrics` counts both). The affinity namespace carries the
+  adapter digest an upstream serves a model under, and an upstream whose
+  `/v1/health` reports a new `instance` (it restarted) starts with no cache. Requests that carry the same `prompt_cache_key` (OpenAI's routing
   hint for a conversation) stay on one upstream while it has a free slot.
   Embeddings, images and speech go by load alone.
-- **Health.** Every upstream's `/v1/health` (its decode slots, its own queue
-  and what it has served) and `/v1/models` are read every
+- **Health.** Every upstream's `/v1/health` (its instance id, decode slots and
+  how many are free, its KV pool's free and total tokens, its own queue and
+  what it has served) and `/v1/models` are read every
   `--upstream-health-ms` (default 2000). An upstream is in rotation while both
   answer; one that a request cannot connect to is taken out at once.
 - **Models.** `GET /v1/models` lists every model any upstream in rotation
@@ -225,7 +234,8 @@ on the command line instead.
   with 503. Both carry `Retry-After`, and a server's own 429 and 503 pass
   through with theirs.
 - **Metrics.** `GET /v1/metrics` (the same report as `/v1/health`) gives, per
-  upstream, `in_flight`, `capacity`, `queue_depth`, `tokens_per_s` and
+  upstream, `in_flight`, `capacity`, `free_slots`, `kv_free_tokens`,
+  `queue_depth`, `idle_connections`, `tokens_per_s` and
   `prefix_hit_rate` (cached prompt tokens over prompt tokens between the last
   two probes), and the fleet's `capacity`, `in_flight`, `queued` and
   `tokens_per_s`: a client keeps `capacity` requests in flight to saturate the

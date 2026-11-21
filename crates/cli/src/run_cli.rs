@@ -135,9 +135,10 @@ ROUTING ACROSS SERVERS  (one URL for every card of a cluster)
                          here (repeatable, or comma-separated). URL is the base:
                          http[s]://HOST:PORT. This process loads no model and uses
                          no device; it serves the OpenAI dialect (--openai ADDR) over
-                         every upstream: a request goes to the upstream already
-                         holding the longest useful prefix of its prompt, else to
-                         the one with the least load for its slots. An upstream
+                         every upstream: a request goes to the upstream where it
+                         costs least - the prefill its cache does not already hold
+                         (counted in the model's tokens), the load it carries for
+                         its slots, and how full its KV pool would get. An upstream
                          is in rotation while its /health and /models answer; a
                          request is retried elsewhere only if its connection never
                          opened. Requests carrying the same prompt_cache_key stay
@@ -152,6 +153,9 @@ ROUTING ACROSS SERVERS  (one URL for every card of a cluster)
                          and the fleet totals; POST /v1/upstreams/N/drain and
                          .../resume take upstream N (0-based) out of rotation and
                          back (an admin caller only, with --caller).
+                         --models-dir DIR names the store the served models'
+                         tokenizers are read from, to key prompts by their tokens;
+                         a model whose tokenizer is not there is keyed by text.
   --upstreams-file FILE  upstream URLs, one per line (# comments)
   --upstream-key-file FILE  the key the router presents to every upstream (start
                          the upstreams with --api-key-file holding the same key).
@@ -1160,13 +1164,13 @@ pub fn run_serve(args: &[String]) {
             (mock, "--mock"),
             (training, "--training"),
             (autofetch, "--autofetch"),
-            (models_dir.is_some(), "--models-dir"),
             (adapter.is_some() || adapter_manifest.is_some() || watch_adapters.is_some() || serve_adapters.is_some(), "the adapter flags"),
         ];
         if let Some((_, flag)) = model_flags.iter().find(|(given, _)| *given) {
             eprintln!("brain serve: {flag} serves models in this process; a router (--upstream) serves its upstreams' models over the OpenAI dialect only");
             std::process::exit(2);
         }
+        upstream.models_dir = models_dir.as_deref().map(PathBuf::from);
         let fleet = upstream.fleet(insecure_plaintext, deadlines.admit).unwrap_or_else(|e| {
             eprintln!("brain serve: {e}");
             std::process::exit(2);

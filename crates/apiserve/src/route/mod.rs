@@ -42,6 +42,7 @@
 //!   and the router's own upstream key, never the client's key or any other header. The client sees only the
 //!   upstream's status, `Content-Type`, `Cache-Control`, `Retry-After` and body, and the same `X-Request-Id`.
 
+mod key;
 mod upstream;
 
 use std::collections::{HashMap, HashSet};
@@ -59,12 +60,14 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures::StreamExt;
-use residency::affinity::{choose_replica, text_request_chain, PrefixChain, PrefixDirectory, ReplicaView, TextPrompt, PROMPT_SHAPING};
+use key::{Keyed, Parts, RequestKey};
+use residency::affinity::{choose_replica, PrefixChain, PrefixDirectory, ReplicaView};
 use serde::de::{Deserializer, MapAccess, Visitor};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use serde_json::{json, Value};
 
+pub use key::{PromptTokenizer, TokenizerSource};
 pub use upstream::{check_upstream_exposure, UpstreamTls, UpstreamUrl};
 
 use crate::auth::{Authenticator, Caller, Principal, Role};
@@ -101,7 +104,7 @@ const MAX_DRAIN_DEADLINE: Duration = Duration::from_secs(24 * 3600);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Everything a [`Fleet`] is built from.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct FleetConfig {
     /// The upstream `brain serve` endpoints, in the order their indices name them.
     pub upstreams: Vec<UpstreamUrl>,
@@ -125,6 +128,8 @@ pub struct FleetConfig {
     pub queue_deadline: Duration,
     /// How long a drained upstream may finish what it runs before the rest is cut off; `None` waits for it all.
     pub drain_deadline: Option<Duration>,
+    /// Where the served models' tokenizers are found, to key prompts by tokens; `None` keys them by text.
+    pub tokenizers: Option<Arc<dyn TokenizerSource>>,
 }
 
 impl FleetConfig {
@@ -143,7 +148,12 @@ impl FleetConfig {
             queue_bound: 1024,
             queue_deadline: crate::DEFAULT_ADMIT_DEADLINE,
             drain_deadline: Some(Duration::from_secs(300)),
+            tokenizers: None,
         }
+    }
+    pub fn with_tokenizers(mut self, source: Option<Arc<dyn TokenizerSource>>) -> FleetConfig {
+        self.tokenizers = source;
+        self
     }
     pub fn with_drain_deadline(mut self, deadline: Option<Duration>) -> FleetConfig {
         self.drain_deadline = deadline;
@@ -183,9 +193,17 @@ struct Advertised {
     slots: usize,
     /// Jobs waiting for a lane on the upstream itself.
     queue_depth: usize,
+    /// Of its decode slots, those free (as of its last dispatcher pass).
+    free_slots: usize,
+    /// Free tokens of its KV pool, when it reports them.
+    kv_free_tokens: Option<u64>,
+    /// The process's identity: a change means it restarted, its caches (and maybe its weights) gone.
+    instance: String,
     /// The model cards it lists, and their ids.
     cards: Vec<Value>,
     ids: HashSet<String>,
+    /// For each model served with an adapter, the adapter's digest: part of the affinity namespace.
+    adapter_digests: HashMap<String, String>,
 }
 
 /// One upstream endpoint and what the router knows of it.
@@ -327,6 +345,7 @@ pub struct Fleet {
     queue_deadline: Duration,
     drain_deadline: Option<Duration>,
     sessions: Mutex<Sessions>,
+    tokens: Arc<key::Tokens>,
 }
 
 impl std::fmt::Debug for Fleet {
@@ -377,6 +396,7 @@ impl Fleet {
             queue_deadline: config.queue_deadline,
             drain_deadline: config.drain_deadline,
             sessions: Mutex::default(),
+            tokens: Arc::new(key::Tokens::new(config.tokenizers)),
         }))
     }
 
@@ -413,6 +433,11 @@ impl Fleet {
             .is_some();
         self.changed.notify_waiters();
         found
+    }
+
+    /// Whether some upstream, in rotation or not, lists `model`.
+    fn lists(&self, model: &str) -> bool {
+        self.members.iter().any(|m| m.advertised().ids.contains(model))
     }
 
     /// Whether some upstream is in rotation.
@@ -452,6 +477,8 @@ impl Fleet {
                     "tokens_per_s": readings.tokens_per_s,
                     "prefix_hit_rate": readings.prefix_hit_rate,
                     "idle_connections": m.pool.idle(),
+                    "free_slots": adv.free_slots,
+                    "kv_free_tokens": adv.kv_free_tokens,
                     "models": adv.ids.len(),
                 })
             })
@@ -467,6 +494,13 @@ impl Fleet {
             "queue_bound": self.queue_bound,
             "upstream_queue_depth": upstream_queued,
             "tokens_per_s": rate,
+            "keying": {
+                "token_keyed_requests": self.tokens.token_keyed.load(Ordering::Relaxed),
+                "text_keyed_requests": self.tokens.text_keyed.load(Ordering::Relaxed),
+                "encoded_tokens": self.tokens.encoded_tokens.load(Ordering::Relaxed),
+                "memo_tokens": self.tokens.memo_tokens.load(Ordering::Relaxed),
+                "encode_seconds": self.tokens.encode_nanos.load(Ordering::Relaxed) as f64 / 1e9,
+            },
             "upstreams": upstreams,
         })
     }
@@ -487,7 +521,17 @@ impl Fleet {
         };
         match read.await {
             Ok((advertised, served)) => {
-                *member.advertised.write().unwrap_or_else(std::sync::PoisonError::into_inner) = advertised;
+                let restarted = {
+                    let mut current = member.advertised.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let restarted = !current.instance.is_empty() && current.instance != advertised.instance;
+                    *current = advertised;
+                    restarted
+                };
+                if restarted {
+                    // Another process now: what the router recorded of its cache is gone with the old one.
+                    self.directories.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[index].clear();
+                    eprintln!("brain route: upstream {index} ({}) restarted; its prefix record is dropped", member.url);
+                }
                 member.readings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).read(served);
                 self.changed.notify_waiters();
                 member.probed.store(true, Ordering::SeqCst);
@@ -523,9 +567,9 @@ impl Fleet {
         }
     }
 
-    /// The upstream that runs a request for `model` keyed by `chain` (see the module doc), with one of its slots
-    /// taken. `excluded` upstreams failed to connect for this request.
-    fn pick(&self, model: &str, chain: &PrefixChain, session: Option<&str>, excluded: &[bool]) -> Pick {
+    /// The upstream that runs a request for `model` keyed by `key` (see the module doc), with one of its slots taken.
+    /// `chains` holds the request's chain per namespace, built once. `excluded` upstreams failed to connect for it.
+    fn pick(&self, model: &str, key: &RequestKey, chains: &mut HashMap<String, PrefixChain>, session: Option<&str>, excluded: &[bool]) -> Pick {
         let mut directories = self.directories.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let (mut known, mut open, mut candidates) = (false, Vec::new(), 0usize);
         for (i, m) in self.members.iter().enumerate() {
@@ -538,7 +582,11 @@ impl Fleet {
             candidates += 1;
             let load = m.in_flight.load(Ordering::SeqCst);
             if load < adv.slots {
-                open.push((i, ReplicaView { load, slots: adv.slots, active: true, can_run: true, matched: directories[i].matched(chain) }));
+                let namespace = format!("{model}\u{1f}{}", adv.adapter_digests.get(model).map_or("", String::as_str));
+                let chain = chains.entry(namespace.clone()).or_insert_with(|| key.chain(&namespace));
+                let kv_free = if key.in_tokens() { adv.kv_free_tokens } else { None };
+                let view = ReplicaView { load, slots: adv.slots, queued: adv.queue_depth, kv_free, active: true, can_run: true, matched: directories[i].matched(chain) };
+                open.push((i, view, namespace));
             }
         }
         if candidates == 0 {
@@ -550,24 +598,27 @@ impl Fleet {
         let mut sessions = self.sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // A session goes back to its upstream while that one has a free slot; otherwise the policy chooses, and the
         // session follows.
-        let sticky = session.and_then(|key| sessions.get(key)).filter(|i| open.iter().any(|(o, _)| o == i));
+        let sticky = session.and_then(|key| sessions.get(key)).and_then(|i| open.iter().position(|(o, _, _)| *o == i));
         let chosen = sticky.unwrap_or_else(|| {
-            let views: Vec<ReplicaView> = open.iter().map(|&(_, v)| v).collect();
-            open[choose_replica(&views)].0
+            let views: Vec<ReplicaView> = open.iter().map(|(_, v, _)| *v).collect();
+            let size = key.size(&chains[&open[0].2]);
+            choose_replica(&views, size)
         });
+        let (index, _, namespace) = &open[chosen];
         if let Some(key) = session {
-            sessions.record(key, chosen);
+            sessions.record(key, *index);
         }
-        directories[chosen].record(chain);
-        let member = self.members[chosen].clone();
+        directories[*index].record(&chains[namespace]);
+        let member = self.members[*index].clone();
         member.in_flight.fetch_add(1, Ordering::SeqCst);
-        Pick::Chosen(chosen, InFlight(member, self.changed.clone()))
+        Pick::Chosen(*index, InFlight(member, self.changed.clone()))
     }
 
     /// An upstream for a request, waiting in the router's queue while every upstream that serves its model holds as
     /// many requests as it decodes at once. Requests for one model get slots in arrival order; a request whose client
     /// goes away leaves the queue with it (this future is dropped).
-    async fn admit(&self, model: &str, chain: &PrefixChain, session: Option<&str>, excluded: &[bool]) -> Result<(usize, InFlight), Refusal> {
+    async fn admit(&self, model: &str, key: &RequestKey, session: Option<&str>, excluded: &[bool]) -> Result<(usize, InFlight), Refusal> {
+        let mut chains = HashMap::new();
         let deadline = tokio::time::Instant::now() + self.queue_deadline;
         let mut ticket: Option<Ticket<'_>> = None;
         loop {
@@ -580,7 +631,7 @@ impl Fleet {
                 !waiting.queue.iter().any(|(&id, m)| id < mine && m == model)
             };
             if first {
-                match self.pick(model, chain, session, excluded) {
+                match self.pick(model, key, &mut chains, session, excluded) {
                     Pick::Chosen(index, held) => return Ok((index, held)),
                     Pick::UnknownModel => return Err(Refusal::UnknownModel),
                     Pick::NoneAvailable => return Err(Refusal::NoneAvailable),
@@ -617,13 +668,19 @@ fn parse_advertised(health: &Value, listing: &Value) -> Result<(Advertised, Serv
     if data.len() > MAX_LISTED_MODELS {
         return Err(format!("it lists more than {MAX_LISTED_MODELS} models"));
     }
-    let mut adv = Advertised { slots, queue_depth, ..Advertised::default() };
+    let free_slots = health.get("free_slots").and_then(Value::as_u64).map_or(slots, |n| (n as usize).min(slots));
+    let kv_free_tokens = health.get("kv_free_tokens").and_then(Value::as_u64);
+    let instance = health.get("instance").and_then(Value::as_str).filter(|s| s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric())).unwrap_or("").to_string();
+    let mut adv = Advertised { slots, queue_depth, free_slots, kv_free_tokens, instance, ..Advertised::default() };
     for card in data {
         let Some(id) = card.get("id").and_then(Value::as_str).filter(|id| valid_model_id(id)) else {
             return Err("it lists a model whose id is not a plain string".into());
         };
         if adv.ids.insert(id.to_string()) {
             adv.cards.push(card.clone());
+            if let Some(digest) = card.get("adapter").and_then(|a| a.get("digest")).and_then(Value::as_str).filter(|d| d.len() <= 128) {
+                adv.adapter_digests.insert(id.to_string(), digest.to_string());
+            }
         }
     }
     Ok((adv, served))
@@ -688,17 +745,6 @@ impl Head {
     fn get(&self, name: &str) -> Option<&RawValue> {
         self.0.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_ref())
     }
-}
-
-/// How a forwarded route keys its requests for prefix affinity.
-#[derive(Clone, Copy)]
-enum Keyed {
-    /// A chat: the conversation's messages.
-    Chat,
-    /// A completion: the raw prompt.
-    Completion,
-    /// Nothing worth routing by: load alone decides.
-    Load,
 }
 
 /// The upstream routes a fleet client calls, each with how it is keyed. A path the router does not list here is a 404:
@@ -817,20 +863,6 @@ fn requested_model(head: &Head) -> Result<String, ApiError> {
     serde_json::from_str::<String>(raw.get()).ok().filter(|m| valid_model_id(m)).ok_or_else(|| ApiError::invalid_request(PROVIDER, format!("model must be a string of 1 to {MAX_MODEL_ID_BYTES} bytes")))
 }
 
-/// The prefix chain a request is routed by: the model is its namespace, the prompt-shaping fields its root.
-fn request_chain(head: &Head, model: &str, keyed: Keyed) -> PrefixChain {
-    let shaping = PROMPT_SHAPING.iter().filter_map(|&key| head.get(key).map(|v| (key, std::borrow::Cow::Borrowed(v.get()))));
-    match keyed {
-        Keyed::Load => PrefixChain::default(),
-        Keyed::Chat => text_request_chain(model, shaping, TextPrompt::Messages(head.get("messages").map_or("", RawValue::get))),
-        Keyed::Completion => {
-            let raw = head.get("prompt").map_or("", RawValue::get);
-            let text = serde_json::from_str::<String>(raw).ok();
-            text_request_chain(model, shaping, TextPrompt::Raw(text.as_deref().unwrap_or(raw)))
-        }
-    }
-}
-
 async fn forward(State(state): State<RouteState>, Extension(principal): Extension<Principal>, headers: HeaderMap, body: Bytes, path: &'static str, keyed: Keyed) -> Response {
     let head: Head = match serde_json::from_slice(&body) {
         Ok(head) => head,
@@ -840,7 +872,7 @@ async fn forward(State(state): State<RouteState>, Extension(principal): Extensio
         Ok(model) => model,
         Err(e) => return e.into_response(),
     };
-    let chain = request_chain(&head, &model, keyed);
+    let parts = Parts::of(&head, model.clone(), keyed);
     // OpenAI's routing hint for a conversation: requests that carry the same key go to the same upstream.
     let session = match head.get("prompt_cache_key").map(|raw| serde_json::from_str::<String>(raw.get())) {
         None => None,
@@ -860,10 +892,19 @@ async fn forward(State(state): State<RouteState>, Extension(principal): Extensio
     // One id per request, of the router's making: the upstream sees it (its logs, a later dedup) and so does the client.
     let request_id = format!("route-{}", uuid::Uuid::new_v4().simple());
     let fleet = &state.fleet;
+    // Keyed only for a model some upstream lists, so the tokenizer looked up is one the fleet serves.
+    if !fleet.lists(&model) {
+        return if fleet.available() { ApiError::model_not_found(PROVIDER, &model).into_response() } else { ApiError::saturated(PROVIDER, "no upstream serving this model is available").into_response() };
+    }
+    let tokens = fleet.tokens.clone();
+    let key = match tokio::task::spawn_blocking(move || RequestKey::build(&tokens, parts)).await {
+        Ok(key) => key,
+        Err(_) => return ApiError::internal(PROVIDER, "the request could not be keyed").into_response(),
+    };
     let mut excluded = vec![false; fleet.members.len()];
     let mut resends = 0usize;
     loop {
-        let (index, in_flight) = match fleet.admit(&model, &chain, session.as_deref(), &excluded).await {
+        let (index, in_flight) = match fleet.admit(&model, &key, session.as_deref(), &excluded).await {
             Ok(chosen) => chosen,
             Err(Refusal::UnknownModel) => return ApiError::model_not_found(PROVIDER, &model).into_response(),
             Err(Refusal::NoneAvailable) => return ApiError::saturated(PROVIDER, "no upstream serving this model is available").into_response(),

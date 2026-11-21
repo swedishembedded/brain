@@ -59,6 +59,8 @@ struct Mock {
     stream_go: Notify,
     /// Set when a streamed response is dropped before it ended (its client went away).
     stream_dropped: AtomicBool,
+    /// Free KV tokens its health reports (none when `None`).
+    kv_free: Mutex<Option<u64>>,
     /// The server task: aborting it closes the listener, so connecting is refused.
     server: Mutex<Option<tokio::task::AbortHandle>>,
 }
@@ -96,7 +98,8 @@ async fn mock_health(State(m): State<Arc<Mock>>, headers: HeaderMap) -> Response
     }
     let completion = 10 * m.count() as u64;
     let served = json!({"requests": m.count(), "prompt_tokens": 2 * completion, "completion_tokens": completion, "cached_prompt_tokens": completion});
-    Json(json!({"status": "ok", "decode_slots": m.slots, "edge_concurrency": m.edge, "queue_depth": 0, "served": served})).into_response()
+    let kv_free = *m.kv_free.lock().unwrap();
+    Json(json!({"status": "ok", "instance": "mock0", "decode_slots": m.slots, "free_slots": m.slots, "kv_free_tokens": kv_free, "edge_concurrency": m.edge, "queue_depth": 0, "served": served})).into_response()
 }
 
 async fn mock_models(State(m): State<Arc<Mock>>) -> Json<Value> {
@@ -141,6 +144,7 @@ async fn mock(name: &str, slots: u64, edge: u64, models: &[&str]) -> (Arc<Mock>,
         stream_go: Notify::new(),
         stream_dropped: AtomicBool::new(false),
         server: Mutex::default(),
+        kv_free: Mutex::default(),
     });
     let app = Router::new()
         .route("/v1/health", get(mock_health))
@@ -337,7 +341,7 @@ async fn an_unhealthy_upstream_is_out_of_rotation_until_it_answers_again() {
     assert!(!status.to_string().contains("127.0.0.1"), "the health report names no address: {status}");
     a.healthy.store(true, Ordering::SeqCst);
     fleet.probe().await;
-    assert_eq!(chat(addr, conversation("m", "s", 1)).await.2["upstream"], "a", "back in rotation, and first on a tie");
+    assert_eq!(chat(addr, conversation("m", "a new conversation", 1)).await.2["upstream"], "a", "back in rotation, and first on a tie");
     b.healthy.store(false, Ordering::SeqCst);
     a.healthy.store(false, Ordering::SeqCst);
     fleet.probe().await;
@@ -523,14 +527,15 @@ async fn a_session_key_keeps_a_conversation_on_one_upstream() {
     held["hold"] = json!(true);
     let busy = tokio::spawn(chat(addr, held));
     until("a to be busy", || a.count() == 1).await;
-    let mut keyed = conversation("m", "s", 1);
+    // Another conversation than the one `a` holds, so nothing but load and the key decide.
+    let mut keyed = conversation("m", "the keyed session", 1);
     keyed["prompt_cache_key"] = json!("session-7");
     assert_eq!(chat(addr, keyed.clone()).await.2["upstream"], "b", "least loaded");
     a.release.add_permits(1);
     busy.await.unwrap();
     for _ in 0..3 {
         assert_eq!(chat(addr, keyed.clone()).await.2["upstream"], "b", "the session stays where it started");
-        assert_eq!(chat(addr, conversation("m", "s", 1)).await.2["upstream"], "a");
+        assert_eq!(chat(addr, conversation("m", "s", 1)).await.2["upstream"], "a", "the unkeyed conversation stays where it is cached");
     }
     keyed["prompt_cache_key"] = json!(7);
     assert_eq!(chat(addr, keyed).await.0, StatusCode::BAD_REQUEST);
@@ -738,5 +743,56 @@ async fn a_drain_deadline_cuts_off_what_the_upstream_still_runs() {
     until("the upstream to see its client go", || a.stream_dropped.load(Ordering::SeqCst)).await;
     assert_eq!(call(addr, Method::POST, "/v1/upstreams/0/drain", Some(CLIENT_KEY), r#"{"deadline_ms": 0}"#).await.0, StatusCode::BAD_REQUEST);
     assert_eq!(call(addr, Method::POST, "/v1/upstreams/0/drain", Some(CLIENT_KEY), r#"{"deadline": 5}"#).await.0, StatusCode::BAD_REQUEST);
+}
+
+/// A tokenizer for the tests: one token per word.
+struct Words;
+impl route::PromptTokenizer for Words {
+    fn encode(&self, text: &str) -> Vec<u32> {
+        text.split_whitespace().map(|w| w.bytes().fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32))).collect()
+    }
+}
+struct WordsFor(&'static str);
+impl route::TokenizerSource for WordsFor {
+    fn tokenizer(&self, base: &str) -> Option<Arc<dyn route::PromptTokenizer>> {
+        (base == self.0).then(|| Arc::new(Words) as Arc<dyn route::PromptTokenizer>)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn prompts_are_keyed_by_tokens_and_kv_headroom_steers_the_choice() {
+    let (a, ua) = mock("a", 8, 16, &["m", "plain"]).await;
+    let (b, ub) = mock("b", 8, 16, &["m", "plain"]).await;
+    let config = config(&[ua, ub]).with_tokenizers(Some(Arc::new(WordsFor("m"))));
+    let (addr, fleet, _stop) = router_over(config, Arc::new(StaticKey::new(CLIENT_KEY))).await;
+    let long = |tag: &str| format!("{tag} ") + &"word ".repeat(400);
+
+    // Conversation one is held on `a`, so conversation two starts on `b`.
+    let mut held = conversation("m", &long("one"), 1);
+    held["hold"] = json!(true);
+    let first = tokio::spawn(chat(addr, held));
+    until("a to be busy", || a.count() == 1).await;
+    assert_eq!(chat(addr, conversation("m", &long("two"), 1)).await.2["upstream"], "b");
+    a.release.add_permits(1);
+    first.await.unwrap();
+
+    // Turn two of conversation two, written with other key order and spacing: the same tokens, so the same upstream.
+    let turn = conversation("m", &long("two"), 2);
+    let messages: Vec<String> = turn["messages"].as_array().unwrap().iter().map(|m| format!(r#"{{ "content" : {}, "role" : {} }}"#, m["content"], m["role"])).collect();
+    let respelled = format!(r#"{{"messages": [ {} ], "model": "m"}}"#, messages.join(" , "));
+    let (code, _, body) = call(addr, Method::POST, "/v1/chat/completions", Some(CLIENT_KEY), &respelled).await;
+    assert_eq!((code, body["upstream"].as_str()), (StatusCode::OK, Some("b")));
+
+    // `b` holds conversation two, but reports too little free KV for it: `a` takes it.
+    *b.kv_free.lock().unwrap() = Some(8);
+    *a.kv_free.lock().unwrap() = Some(1 << 20);
+    fleet.probe().await;
+    assert_eq!(chat(addr, conversation("m", &long("two"), 3)).await.2["upstream"], "a");
+
+    // A model without a tokenizer is keyed by text, and the metrics say how each was keyed.
+    assert_eq!(chat(addr, conversation("plain", "s", 1)).await.0, StatusCode::OK);
+    let keying = fleet.status()["keying"].clone();
+    assert_eq!((keying["token_keyed_requests"].clone(), keying["text_keyed_requests"].clone()), (json!(4), json!(1)), "{keying}");
+    assert!(keying["memo_tokens"].as_u64().unwrap() > 0, "resent messages came from the memo: {keying}");
 }
 

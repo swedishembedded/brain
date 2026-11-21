@@ -43,6 +43,13 @@ pub use taps::TapPool;
 use speculate::Scored;
 pub use speculate::{verify_proposals, DraftQuery, Drafter, NgramDrafter, SpecPolicy, SpecStats, SpeculativeMode, Verdict};
 
+/// `(free tokens, total tokens)` of `dec`'s KV pool.
+fn pool_reading<D: PagedDecoder>(dec: &mut D) -> (u64, u64) {
+    let alloc = dec.alloc_mut();
+    let block = alloc.block_size() as u64;
+    (alloc.free_blocks() as u64 * block, alloc.num_blocks() as u64 * block)
+}
+
 /// The seam a model's paged serving engine implements. Every method mirrors
 /// one qwen `Engine` method the [`Scheduler`] used to call directly (see
 /// `crates/qwen3/src/serve.rs`'s `impl PagedDecoder for Engine`) — this trait
@@ -1641,6 +1648,9 @@ const ADAPTER_LOAD_POLLS: u32 = 10_000;
 /// [`PagedDecoder`]; `qwen3::serve::Scheduler` is `Scheduler<qwen3::serve::Engine>`.
 pub struct Scheduler<D: PagedDecoder> {
     dec: D,
+    /// The KV pool as the last iteration left it: `(free tokens, total tokens)`, read by [`Scheduler::kv_pool`]
+    /// without the decoder (whose allocator is only reachable mutably).
+    kv_pool: (u64, u64),
     waiting: VecDeque<Waiting>,
     /// Requests admitted and being prefilled in slices, oldest first.
     prefilling: VecDeque<Prefilling>,
@@ -1710,8 +1720,10 @@ impl<D: PagedDecoder> Scheduler<D> {
         // admission moving under load, small enough that running sequences see
         // a decode step between arrivals.
         let prefill_budget = dec.prefill_batch_tokens().or(dec.prefill_interleave_tokens()).map_or_else(|| dec.max_prefill_tokens().saturating_mul(2), |n| n as u32).max(1);
+        let kv_pool = pool_reading(&mut dec);
         Scheduler {
             dec,
+            kv_pool,
             waiting: VecDeque::new(),
             prefilling: VecDeque::new(),
             running: Vec::new(),
@@ -2044,6 +2056,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             self.running.iter().map(|r| (r.id, r.generated.len())).collect();
 
         let completed = self.step_inner(&mut report);
+        self.kv_pool = pool_reading(&mut self.dec);
 
         // Tokens produced this iteration by sequences that are still running...
         for r in &self.running {
@@ -2157,7 +2170,20 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// Returns the `(id, tokens)` of requests finished here.
     pub fn step(&mut self) -> Vec<(u64, Vec<u32>)> {
         let mut sink = StepReport::default();
-        self.step_inner(&mut sink)
+        let completed = self.step_inner(&mut sink);
+        self.kv_pool = pool_reading(&mut self.dec);
+        completed
+    }
+
+    /// The KV pool after the last iteration: `(free tokens, total tokens)`. Free counts unreferenced blocks only; a
+    /// block the prefix cache holds is not free, though it is evicted when the pool needs it.
+    pub fn kv_pool(&self) -> (u64, u64) {
+        self.kv_pool
+    }
+
+    /// The most sequences that decode at once.
+    pub fn max_running(&self) -> usize {
+        self.max_running
     }
 
     /// Bring preempted sequences back onto the device, oldest demotion first,

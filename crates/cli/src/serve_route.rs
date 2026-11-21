@@ -15,7 +15,39 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use apiserve::route::{self, Fleet, FleetConfig, UpstreamTls, UpstreamUrl};
+use apiserve::route::{self, Fleet, FleetConfig, PromptTokenizer, TokenizerSource, UpstreamTls, UpstreamUrl};
+
+/// The served models' tokenizers, read from a model store the router can see (the store the upstreams serve from, on a
+/// cluster's shared filesystem, or a copy of it): `<store>/<vendor>/<repo>/tokenizer.json`. A model id that does not
+/// parse as a model reference, or whose tokenizer is not there or does not load, gets none (its requests are keyed by
+/// text; the router logs it once).
+struct StoreTokenizers(brain_modelstore::Store);
+
+/// A byte-level BPE `tokenizer.json`, as the router keys prompts with it.
+struct Bpe(data::qwen_tokenizer::QwenBpe);
+
+impl PromptTokenizer for Bpe {
+    fn encode(&self, text: &str) -> Vec<u32> {
+        data::tokenizer::Tokenizer::encode(&self.0, text)
+    }
+}
+
+impl TokenizerSource for StoreTokenizers {
+    fn tokenizer(&self, base_model: &str) -> Option<Arc<dyn PromptTokenizer>> {
+        // The id is a model the upstreams list, but it is still parsed as a reference before it names a path: a
+        // separator or dot segment in it is refused.
+        let reference = brain_modelref::ModelRef::parse(base_model).ok()?;
+        let path = self.0.repo_dir(&reference).join("tokenizer.json");
+        let loaded = path.to_str().map(data::qwen_tokenizer::QwenBpe::from_file)?;
+        match loaded {
+            Ok(bpe) => Some(Arc::new(Bpe(bpe))),
+            Err(e) => {
+                eprintln!("brain route: the tokenizer of {base_model} did not load ({e})");
+                None
+            }
+        }
+    }
+}
 
 /// The upstream flags of `brain serve`, as parsed.
 #[derive(Default)]
@@ -30,6 +62,8 @@ pub(crate) struct UpstreamFlags {
     pub queue: Option<usize>,
     /// `--drain-deadline-ms N`: how long a drained upstream may finish what it runs.
     pub drain_ms: Option<u64>,
+    /// `--models-dir DIR`: the model store the served models' tokenizers are read from.
+    pub models_dir: Option<PathBuf>,
 }
 
 impl UpstreamFlags {
@@ -66,6 +100,8 @@ impl UpstreamFlags {
         if let Some(ms) = self.timeout_ms {
             config = config.with_response_timeout(Duration::from_millis(ms));
         }
+        let store = loader::model_dir::resolve(self.models_dir.as_deref().and_then(|p| p.to_str()));
+        config = config.with_tokenizers(store.map(|dir| Arc::new(StoreTokenizers(brain_modelstore::Store::new(dir))) as Arc<dyn TokenizerSource>));
         if let Some(ms) = self.drain_ms {
             config = config.with_drain_deadline(Some(Duration::from_millis(ms)));
         }
@@ -141,3 +177,17 @@ mod tests {
         assert!(bad.fleet(false, Duration::from_secs(1)).unwrap_err().contains("line 1"));
     }
 }
+
+#[cfg(test)]
+mod tokenizer_tests {
+    use super::*;
+
+    #[test]
+    fn a_tokenizer_is_read_only_from_a_parsed_model_reference_in_the_store() {
+        let dir = brain_testutil::Scratch::dir("brain-route-tokenizers");
+        let source = StoreTokenizers(brain_modelstore::Store::new(dir.path()));
+        assert!(source.tokenizer("../etc").is_none() && source.tokenizer("a/../b").is_none(), "no path outside the store");
+        assert!(source.tokenizer("vendor/missing").is_none(), "a model whose tokenizer is not there");
+    }
+}
+
