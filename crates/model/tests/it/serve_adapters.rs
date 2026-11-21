@@ -182,6 +182,31 @@ fn a_cold_adapter_does_not_delay_base_requests_behind_it() {
     assert_eq!(f.pins(cold), 1);
 }
 
+/// More adapters with work than bank slots: a request waiting for its adapter to become resident is not overtaken
+/// by later requests for adapters that are resident, or their sequences would keep every slot pinned and the waiting
+/// adapter would never get one (18 arms on 8 slots starved 10 of them). Base requests pin no slot and still pass.
+#[test]
+fn a_request_waiting_for_a_slot_is_not_overtaken_by_later_requests_of_resident_adapters() {
+    let mut f = Fixture::new();
+    let warm = f.adapter(AdapterAvailability::Resident);
+    let cold = f.adapter(AdapterAvailability::Loading);
+    let first = f.sched.submit_for_adapter(req(1, 2), warm, Default::default(), 0);
+    let waiting = f.sched.submit_for_adapter(req(5, 2), cold, Default::default(), 0);
+    let later = f.sched.submit_for_adapter(req(9, 2), warm, Default::default(), 0);
+    let base = f.sched.submit(req(13, 2));
+
+    let report = f.sched.step_report();
+    assert_eq!(report.admitted, vec![first, base], "the later resident-adapter request waits behind the cold one");
+    // The resident adapter's slot drains once its running sequence ends.
+    for _ in 0..4 {
+        f.sched.step_report();
+    }
+    assert_eq!(f.pins(warm), 0, "nothing holds the warm adapter's slot any more");
+    f.set(cold, AdapterAvailability::Resident);
+    let report = f.sched.step_report();
+    assert_eq!(report.admitted, vec![waiting, later], "the waiting request goes first, then the later one");
+}
+
 #[test]
 fn running_sequences_decode_every_step_while_an_adapter_loads() {
     let mut f = Fixture::new();

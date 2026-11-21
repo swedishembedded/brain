@@ -2421,8 +2421,17 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// iteration. Only adapter residency is skipped; a request that merely
     /// does not fit the pool yet still holds the line (the caller stops at
     /// it), exactly as before adapters existed.
+    ///
+    /// Behind a request whose adapter is still loading, a later request for a
+    /// resident adapter is stepped over too: admitting it would pin that
+    /// adapter's slot again, and with more adapters at work than bank slots
+    /// the loading one would never get a slot (every resident one kept busy by
+    /// later arrivals). Held back, the resident adapters' running sequences
+    /// end, a slot falls idle and the waiting adapter takes it, in arrival
+    /// order. A base request pins no slot and is still admitted past it.
     fn next_admissible(&mut self, report: &mut StepReport) -> Option<usize> {
         let mut pos = 0;
+        let mut slot_awaited = false;
         while let Some(w) = self.waiting.get(pos) {
             let (id, adapter) = (w.id, w.adapter);
             // Already admitted once (so it passed every check below) and now
@@ -2435,9 +2444,13 @@ impl<D: PagedDecoder> Scheduler<D> {
                 None => self.adapter_verdict(adapter),
             };
             match verdict {
+                Admissibility::Admissible if slot_awaited && adapter.is_some() => pos += 1,
                 Admissibility::Admissible if self.waits_for_shared_prefill(pos) => pos += 1,
                 Admissibility::Admissible => return Some(pos),
-                Admissibility::AdapterLoading => pos += 1,
+                Admissibility::AdapterLoading => {
+                    slot_awaited = true;
+                    pos += 1;
+                }
                 Admissibility::Refused(reject) => {
                     self.waiting.remove(pos);
                     report.rejected.push((id, reject));
