@@ -556,6 +556,14 @@ pub trait Model {
         None
     }
 
+    /// Write the trained model of a parameter-sharded run ([`Model::parameter_shards`]): every rank of the group calls
+    /// it at the same point (each block is gathered over the group), the rank given `path` writes the checkpoint the
+    /// model's [`Model::save`] would, its sharded tensors in the encoding they train in, streamed so no rank holds the
+    /// whole model. Refused by a model that does not shard its parameters.
+    fn save_sharded(&self, _path: Option<&str>) -> Result<(), String> {
+        Err("this model does not shard its parameters".into())
+    }
+
     /// This rank's share of the next step's items (`local / total`), by which a parameter-sharded model weighs the
     /// gradients it reduces. Refused by a model that does not shard its parameters.
     fn set_shard_weight(&self, _share: f32) -> Result<(), String> {

@@ -23,6 +23,7 @@
 use std::collections::BTreeMap;
 use std::io;
 
+use checkpoint::packed::{CodecRegistry, EncodeCtx, TensorDescriptor, TensorSink, Tile, TileBuf};
 use checkpoint::TensorSource;
 use gpu_core::{CollectiveDtype, DeviceBuffer, Gpu};
 use optim::rule::Rule;
@@ -81,6 +82,8 @@ pub(crate) struct ShardedLayers {
     reduced: Vec<bool>,
     /// The layer loaded last: the direction a prefetch follows.
     last_layer: Option<u32>,
+    /// One word on the card the per-layer norm is summed in.
+    scalar: std::sync::OnceLock<DeviceBuffer>,
 }
 
 impl ShardedLayers {
@@ -101,7 +104,7 @@ impl ShardedLayers {
         let zero = ZeroOptimizer::new_parameter_shards(DeviceParams { gpu: gpu.share(), tensors }, &groups, &*group.collective, group.rank, &mut read)?;
         gpu_core::profile::stage_time("parameter sharding: read this rank's slices and build the state on the card", clock);
         let units = zero.unit_count();
-        Ok(ShardedLayers { group, zero, step: 0, scale: 1.0, reduced: vec![false; units], last_layer: None })
+        Ok(ShardedLayers { group, zero, step: 0, scale: 1.0, reduced: vec![false; units], last_layer: None, scalar: std::sync::OnceLock::new() })
     }
 
     pub(crate) fn report(&self) -> String {
@@ -166,17 +169,30 @@ impl ShardedLayers {
         Ok(())
     }
 
-    /// Reduce the unit of `tensors` (a finished layer) to its owners and return this rank's sum of squares of its
-    /// slice; with `updating` (`lr`, the gradient multiplier) update the slice on the card.
-    pub(crate) fn finish(&mut self, ops: &dyn DeviceIo, tensors: &[usize], updating: Option<(f32, f32)>, rule: Rule) -> io::Result<f64> {
+    /// Reduce the unit of `tensors` to its owners; this rank's sum of squares of its slice.
+    pub(crate) fn reduce_layer(&mut self, ops: &dyn DeviceIo, tensors: &[usize]) -> io::Result<f64> {
         let Some(&first) = tensors.first() else { return Ok(0.0) };
         let u = self.zero.unit_of(first);
         self.reduce(ops, u)?;
-        let local = self.zero.unit_sum_sq(u);
-        if let Some((lr, multiplier)) = updating {
-            self.update(u, lr, multiplier, rule)?;
+        Ok(self.zero.unit_sum_sq(u))
+    }
+
+    /// Update the (reduced) unit of `tensors` with every gradient multiplied by `multiplier`.
+    pub(crate) fn update_layer(&mut self, tensors: &[usize], lr: f32, multiplier: f32, rule: Rule) -> io::Result<()> {
+        let Some(&first) = tensors.first() else { return Ok(()) };
+        self.update(self.zero.unit_of(first), lr, multiplier, rule)
+    }
+
+    /// The group's sum of `local` over its ranks on the device collective (a scalar all-reduce of microseconds there;
+    /// through the transport's payload op where the group has no device path): what a running clip needs per layer.
+    pub(crate) fn device_sum(&self, gpu: &Gpu, local: f64) -> io::Result<f64> {
+        let coll = &*self.group.collective;
+        let buf = self.scalar.get_or_init(|| gpu.storage(1));
+        gpu.write_f32(buf, &[local as f32]);
+        if pollster::block_on(coll.all_reduce_device(self.group.rank, gpu, &[(buf, 1)], CollectiveDtype::F32, 1.0)).map_err(io::Error::other)? {
+            return Ok(f64::from(gpu.read(buf, 1)[0]));
         }
-        Ok(local)
+        self.global_sum(local)
     }
 
     fn reduce(&mut self, ops: &dyn DeviceIo, u: usize) -> io::Result<()> {
@@ -189,6 +205,54 @@ impl ShardedLayers {
     fn update(&self, u: usize, lr: f32, multiplier: f32, rule: Rule) -> io::Result<()> {
         let Rule::AdamW { adam, wd } = rule else { return Err(invalid(format!("the sharded update is AdamW, not {rule:?}"))) };
         self.zero.update_unit(u, &UnitUpdate { t: self.step, lr, wd, adam }, multiplier).map_err(invalid)
+    }
+
+    /// Save this rank's slices as of step `step` in `dir` (its own file, the layout in its header), keeping the newest
+    /// two generations; returns the file.
+    pub(crate) fn save(&self, dir: &std::path::Path, step: u32) -> io::Result<std::path::PathBuf> {
+        if step != self.step {
+            return Err(invalid(format!("committing step {step}, the sharded state has applied {}", self.step)));
+        }
+        let path = self.zero.save(dir, serde_json::json!({ "rank": self.group.rank }))?;
+        self.zero.prune(dir, 2)?;
+        Ok(path)
+    }
+
+    /// Restore the slices saved at `step` in `dir` (resliced from every rank's file when the layout changed).
+    pub(crate) fn restore(&mut self, dir: &std::path::Path, step: u32) -> io::Result<()> {
+        self.zero.restore(&*self.group.collective, dir, step)?;
+        self.step = step;
+        Ok(())
+    }
+
+    /// Stream the master weights of every unit into `sink` (rank 0's; `None` elsewhere), each tensor encoded as its
+    /// descriptor in `descs` says, one tile of `tile` elements at a time: every rank gathers each unit in turn, the
+    /// writer reads its tensors from the gathered unit tile by tile, so no rank holds more than one unit on the card
+    /// and one tile on the host. A collective: every rank calls, in the same order.
+    pub(crate) fn export(&self, descs: &[TensorDescriptor], registry: &CodecRegistry, tile: usize, mut sink: Option<&mut dyn TensorSink>) -> io::Result<()> {
+        let coll = &*self.group.collective;
+        let gpu = self.zero.gpu();
+        let mut vals = vec![0f32; tile];
+        let mut enc = TileBuf::default();
+        for u in 0..self.zero.unit_count() {
+            let staging = self.zero.gather_master(coll, u).map_err(io::Error::other)?;
+            let Some(sink) = sink.as_deref_mut() else { continue };
+            for &(ti, offset, count) in self.zero.unit_members(u) {
+                let d = &descs[ti];
+                sink.begin(d).map_err(invalid)?;
+                let encoder = registry.encoder(&d.encoding).map_err(invalid)?;
+                for start in (0..count).step_by(tile) {
+                    let n = (tile as u64).min(count - start) as usize;
+                    gpu.read_into(staging, offset + start, &mut vals[..n]);
+                    let e = start..start + n as u64;
+                    encoder.encode_tile(d, &e, &vals[..n], &EncodeCtx::default(), &mut enc).map_err(invalid)?;
+                    let t = Tile { elems: e, payload: &enc.payload, scales: enc.scales.iter().map(|s| s.as_slice()).collect() };
+                    sink.write_tile(d, &t).map_err(invalid)?;
+                }
+                sink.finish(d).map_err(invalid)?;
+            }
+        }
+        Ok(())
     }
 
     /// The group's sum of squares given this rank's `local` share.

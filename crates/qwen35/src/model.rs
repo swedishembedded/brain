@@ -7729,6 +7729,36 @@ impl Qwen35 {
         Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg, b, t, &reader, &TrainOpts::default())
     }
 
+    /// [`Self::save`] of a parameter-sharded resident build: every rank of its group calls it, the rank given `path`
+    /// writes. The resident linears and tables are written in bf16 (the encoding they train in), streamed from their
+    /// masters one layer at a time; the remaining parameters (the norms, which every rank holds) in f32. The file opens
+    /// as this family's brain checkpoint ([`crate::base_source::open_base`]).
+    pub fn save_sharded(&self, path: Option<&str>) -> Result<(), String> {
+        use checkpoint::packed::{QuantEncoding, TensorDescriptor, TensorSink};
+        let ft = self.resident.as_ref().filter(|ft| ft.borrow().parameter_sharded()).ok_or("qwen35: save_sharded: this build does not shard its parameters")?;
+        self.gpu.flush();
+        let mut ft = ft.borrow_mut();
+        let encodings = vec![model::resident_ft::ResidentValue::Bf16.encoding(); ft.specs().len()];
+        let Some(path) = path else {
+            return ft.export_collective(&self.ops, &encodings, None).map_err(|e| e.to_string());
+        };
+        let linear = ft.export_descriptors(&encodings).map_err(|e| e.to_string())?;
+        let rest: Vec<TensorDescriptor> = self.ps.params.iter().map(|(n, numel)| TensorDescriptor::new(n.clone(), vec![*numel as u64], QuantEncoding::f32())).collect();
+        let all: Vec<TensorDescriptor> = linear.iter().chain(&rest).cloned().collect();
+        let card = checkpoint::st::ModelCard::new("brain/qwen35", "qwen35");
+        let mut sink = checkpoint::packed::SafetensorsSink::create_carded(std::path::Path::new(path), &all, &self.cfg.to_json(), Some(&card)).map_err(|e| format!("{path}: {e}"))?;
+        ft.export_collective(&self.ops, &encodings, Some(&mut sink)).map_err(|e| e.to_string())?;
+        for d in &rest {
+            let vals = self.ps.read_weight(&self.gpu, &d.name);
+            let bytes: Vec<u8> = vals.iter().flat_map(|v| v.to_le_bytes()).collect();
+            sink.begin(d)?;
+            sink.write_tile(d, &checkpoint::packed::Tile { elems: 0..vals.len() as u64, payload: &bytes, scales: Vec::new() })?;
+            sink.finish(d)?;
+        }
+        sink.commit().map_err(|e| format!("{path}: {e}"))?;
+        Ok(())
+    }
+
     pub fn save(&self, path: &str) {
         let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> =
             self.ps.params.iter().map(|(name, _)| (name.clone(), vec![self.ps.numel(name) as u64], self.read_weight(name))).collect();
@@ -7966,6 +7996,9 @@ impl model::Model for Qwen35 {
     }
     fn save(&self, path: &str) {
         Qwen35::save(self, path)
+    }
+    fn save_sharded(&self, path: Option<&str>) -> Result<(), String> {
+        Qwen35::save_sharded(self, path)
     }
     fn config_json(&self) -> serde_json::Value {
         self.cfg.to_json()

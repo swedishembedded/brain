@@ -82,6 +82,12 @@ impl SafetensorsSink {
     /// Plan the file for `descs` (every tensor of the export, in the order it will arrive) and write its header.
     /// `config` is stored under the brain config key so the file opens as a brain checkpoint.
     pub fn create(path: &Path, descs: &[TensorDescriptor], config: &Value) -> io::Result<SafetensorsSink> {
+        Self::create_carded(path, descs, config, None)
+    }
+
+    /// [`Self::create`] with the model card a brain checkpoint carries ([`crate::st::ModelCard`]), so the file names
+    /// its family the way [`crate::save_carded`]'s do.
+    pub fn create_carded(path: &Path, descs: &[TensorDescriptor], config: &Value, card: Option<&crate::st::ModelCard>) -> io::Result<SafetensorsSink> {
         let bad = |m: String| io::Error::new(io::ErrorKind::InvalidInput, m);
         let mut header = Map::new();
         let mut off = 0u64;
@@ -126,6 +132,9 @@ impl SafetensorsSink {
         let mut meta = Map::new();
         meta.insert(CONFIG_KEY.to_string(), Value::String(serde_json::to_string(config)?));
         meta.insert(PACKED_METADATA_KEY.to_string(), Value::String(Value::Object(packed).to_string()));
+        for (k, v) in card.map(crate::st::ModelCard::to_metadata).unwrap_or_default() {
+            meta.insert(k, Value::String(v));
+        }
         header.insert("__metadata__".to_string(), Value::Object(meta));
         let mut hbytes = serde_json::to_vec(&Value::Object(header))?;
         // Pad to a multiple of 8 so every 4-byte-wide tensor lands word aligned (see StWriter).

@@ -608,6 +608,36 @@ impl ZeroOptimizer {
         Ok(())
     }
 
+    /// Gather unit `u`'s f32 master slices from every rank into a staging buffer, which then holds the unit's flat f32
+    /// vector (members at their layout offsets); returns it. Every rank calls; the buffer is valid until the next
+    /// collective of the unit's parity.
+    pub fn gather_master(&self, coll: &dyn Collective, u: usize) -> CollectiveResult<&DeviceBuffer> {
+        let gpu = &self.gpu;
+        let staging = &self.staging[u % 2];
+        let n = self.layout.shard_len(u);
+        let send: &DeviceBuffer = match &self.units[u].slice {
+            Slice::Device(d) => &d.w,
+            Slice::Host(h) => {
+                let shard = self.shard.as_ref().expect("the host tier keeps a slice buffer");
+                write_elems(gpu, shard, 0, &h.master, CollectiveDtype::F32);
+                shard
+            }
+        };
+        all_gather(coll, self.rank, gpu, send, staging, n, CollectiveDtype::F32)?;
+        self.settle(coll)?;
+        Ok(staging)
+    }
+
+    /// Unit `u`'s members: `(tensor, offset, count)` in its flat vector.
+    pub fn unit_members(&self, u: usize) -> &[(usize, u64, u64)] {
+        &self.layout.units[u].members
+    }
+
+    /// The card this optimizer's buffers live on.
+    pub fn gpu(&self) -> &Gpu {
+        &self.gpu
+    }
+
     /// Wait for every device collective this rank enqueued, and for the card.
     pub fn settle(&self, coll: &dyn Collective) -> CollectiveResult<()> {
         pollster::block_on(coll.settle_device(self.rank, &self.gpu))?;

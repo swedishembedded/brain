@@ -9,8 +9,8 @@
 //! in-process ranks, every layer gathered from the ranks' slices where the forward and the backward reach it,
 //! reduce-scattered and updated by its owners once its gradient is complete, follows the single-rank layer-streamed
 //! run (every rank given the same batch, so the group's mean gradient is that batch's) within the rounding of the
-//! sharded update, with and without the two-pass global clip and with a window of one or two layers (the second
-//! prefetches), and every rank sees the same losses bit for bit. What
+//! sharded update, with no clip, the two-pass global clip and the single-pass running clip, with a window of one or
+//! two layers (the second prefetches), and every rank sees the same losses bit for bit. What
 //! the sharded build does not run is refused by name.
 
 use std::collections::HashMap;
@@ -95,7 +95,7 @@ fn forward(ops: &Ops, w: &Weight, x: &DeviceBuffer, y: &DeviceBuffer) {
 
 /// One layer-streamed step (the protocol a model drives): load each layer in the forward, then per backward pass
 /// load, backward and finish each layer in reverse. Returns the loss before the update.
-fn step(ops: &Ops, ft: &mut ResidentFullFt, task: &Task, clip: Option<f32>) -> f64 {
+fn step(ops: &Ops, ft: &mut ResidentFullFt, task: &Task, clip: Option<f32>, running: bool) -> f64 {
     let g = ops.gpu();
     let mut x = upload(ops, &task.x);
     let mut inputs = Vec::new();
@@ -131,6 +131,9 @@ fn step(ops: &Ops, ft: &mut ResidentFullFt, task: &Task, clip: Option<f32>) -> f
         ft.end_pass().unwrap()
     };
     match clip {
+        Some(_) if running => {
+            backward(ft, StreamPass::Running { lr: LR, clip, extra_scale: 1.0 });
+        }
         Some(_) => {
             let measured = backward(ft, StreamPass::Measure);
             backward(ft, StreamPass::Update { lr: LR, grad_multiplier: optim::grad_multiplier(measured.sum_sq, clip, 1.0) });
@@ -143,7 +146,7 @@ fn step(ops: &Ops, ft: &mut ResidentFullFt, task: &Task, clip: Option<f32>) -> f
 }
 
 /// Every rank of `world` trains the task for `steps` steps; each rank's losses.
-fn sharded(world: usize, window: u32, task: &Task, clip: Option<f32>, steps: usize) -> Vec<Vec<f64>> {
+fn sharded(world: usize, window: u32, task: &Task, clip: Option<f32>, running: bool, steps: usize) -> Vec<Vec<f64>> {
     let coll = HostCollective::new(world);
     std::thread::scope(|s| {
         let handles: Vec<_> = (0..world)
@@ -154,7 +157,7 @@ fn sharded(world: usize, window: u32, task: &Task, clip: Option<f32>, steps: usi
                     let group = ShardGroup { collective: coll, rank };
                     let mut ft = ResidentFullFt::new(&ops, config(Some(group), window), specs(), &task.init, &roomy()).unwrap();
                     ft.set_shard_weight(1.0 / world as f32).unwrap();
-                    (0..steps).map(|_| step(&ops, &mut ft, task, clip)).collect::<Vec<f64>>()
+                    (0..steps).map(|_| step(&ops, &mut ft, task, clip, running)).collect::<Vec<f64>>()
                 })
             })
             .collect();
@@ -165,13 +168,15 @@ fn sharded(world: usize, window: u32, task: &Task, clip: Option<f32>, steps: usi
 #[test]
 fn a_parameter_sharded_step_follows_the_layer_streamed_step() {
     let task = task();
-    for clip in [None, Some(1e-2f32)] {
+    // No clip, the exact two-pass clip, and the single-pass running clip (the group's norm of each layer summed as the
+    // layers finish).
+    for (clip, running) in [(None, false), (Some(1e-2f32), false), (Some(1e-2f32), true)] {
         let ops = ops();
         let mut single = ResidentFullFt::new(&ops, config(None, 1), specs(), &task.init, &roomy()).unwrap();
-        let want: Vec<f64> = (0..5).map(|_| step(&ops, &mut single, &task, clip)).collect();
+        let want: Vec<f64> = (0..5).map(|_| step(&ops, &mut single, &task, clip, running)).collect();
         // A window of two layers prefetches the next layer while one computes.
         for (world, window) in [(2, 1), (3, 2)] {
-            let got = sharded(world, window, &task, clip, 5);
+            let got = sharded(world, window, &task, clip, running, 5);
             for (rank, losses) in got.iter().enumerate() {
                 assert_eq!(losses.iter().map(|l| l.to_bits()).collect::<Vec<_>>(), got[0].iter().map(|l| l.to_bits()).collect::<Vec<_>>(), "clip {clip:?} world {world}: rank {rank}'s losses differ from rank 0's");
             }
@@ -194,7 +199,4 @@ fn what_the_sharded_build_does_not_run_is_refused() {
     assert!(ResidentFullFt::new(&ops, f32_grads, specs(), &task.init, &roomy()).err().unwrap().contains("bf16 gradients"));
     let mut ft = ResidentFullFt::new(&ops, config(group(), 1), specs(), &task.init, &roomy()).unwrap();
     assert!(ft.read_master(&ops, 0).unwrap_err().to_string().contains("this rank's slices"));
-    ft.begin_pass(StreamPass::Running { lr: LR, clip: Some(1.0), extra_scale: 1.0 });
-    ft.load_layer(&ops, LAYERS - 1).unwrap();
-    assert!(ft.finish_layer(&ops, LAYERS - 1).unwrap_err().to_string().contains("two-pass"));
 }

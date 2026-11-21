@@ -1280,23 +1280,29 @@ impl ResidentFullFt {
     fn finish_layer_in(&mut self, ops: &dyn DeviceIo, pass: &mut PassState, tensors: &[usize]) -> io::Result<()> {
         #[cfg(not(target_arch = "wasm32"))]
         if let (Some(sh), Some(w)) = (&mut self.sharded, &mut self.window) {
-            let updating = match pass.pass {
-                StreamPass::Measure => None,
-                StreamPass::Update { lr, grad_multiplier } => Some((lr, grad_multiplier)),
-                StreamPass::Running { .. } => return Err(invalid("a parameter-sharded build clips by the exact global norm (clip=two-pass), not a running one".into())),
+            let local = sh.reduce_layer(ops, tensors)?;
+            // A running clip needs the group's norm of every layer as it finishes (one scalar all-reduce); the other
+            // passes sum the ranks' shares once, at the end of the pass.
+            let (sum, updating) = match pass.pass {
+                StreamPass::Measure => (local, None),
+                StreamPass::Update { lr, grad_multiplier } => (local, Some((lr, grad_multiplier))),
+                StreamPass::Running { lr, clip, extra_scale } => {
+                    let global = sh.device_sum(ops.gpu(), local)?;
+                    (global, Some((lr, optim::grad_multiplier(pass.running + global, clip, extra_scale))))
+                }
             };
-            let local = sh.finish(ops, tensors, updating, self.cfg.rule)?;
+            if let Some((lr, multiplier)) = updating {
+                sh.update_layer(tensors, lr, multiplier, self.cfg.rule)?;
+                pass.min_multiplier = pass.min_multiplier.min(multiplier);
+            }
             for (i, &ti) in tensors.iter().enumerate() {
-                pass.tensor_sum[ti] = Some(if i == 0 { local } else { 0.0 });
+                pass.tensor_sum[ti] = Some(if i == 0 { sum } else { 0.0 });
                 if updating.is_some() {
                     pass.updated[ti] = true;
                     w.versions[ti] += 1;
                 }
             }
-            pass.running += local;
-            if let Some((_, multiplier)) = updating {
-                pass.min_multiplier = pass.min_multiplier.min(multiplier);
-            }
+            pass.running += sum;
             return Ok(());
         }
         let items: Vec<NormItem<'_>> = tensors.iter().map(|&ti| NormItem { buf: &self.grads[ti], numel: self.specs[ti].n as usize * self.specs[ti].k as usize, dtype: self.cfg.grad }).collect();
@@ -1359,9 +1365,10 @@ impl ResidentFullFt {
         };
         // A parameter-sharded rank measured its slices: the pass's norm is the group's.
         #[cfg(not(target_arch = "wasm32"))]
-        let sum_sq = match &self.sharded {
-            Some(sh) => sh.global_sum(sum_sq)?,
-            None => sum_sq,
+        let sum_sq = match (&self.sharded, pass.pass) {
+            // A running pass summed the group's norm layer by layer already.
+            (Some(sh), StreamPass::Measure | StreamPass::Update { .. }) => sh.global_sum(sum_sq)?,
+            _ => sum_sq,
         };
         Ok(PassReport { step: pass.step, sum_sq, min_multiplier: if updating { pass.min_multiplier } else { 1.0 } })
     }
@@ -1493,6 +1500,22 @@ impl ResidentFullFt {
         self.state.export_masters(&mut tiles, &descs, &self.registry, sink, self.tile)
     }
 
+    /// [`Self::export`] of a parameter-sharded build: every rank calls it in step (each unit is gathered over the
+    /// group), only the rank holding `sink` writes. The masters are encoded as `dst[i]` for tensor `i`, one tile at a
+    /// time; no rank holds more than one unit. For a build that is not sharded, `sink` is required and this is
+    /// [`Self::export`].
+    pub fn export_collective(&mut self, ops: &dyn DeviceIo, dst: &[QuantEncoding], sink: Option<&mut dyn TensorSink>) -> io::Result<()> {
+        let descs = self.export_descriptors(dst)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(sh) = &self.sharded {
+            ops.gpu().flush();
+            let tile = lcm(aligned_tile(&descs, self.tile) as u64, 4) as usize;
+            return sh.export(&descs, &self.registry, tile, sink);
+        }
+        let sink = sink.ok_or_else(|| invalid("export_collective: a build that is not sharded exports on the rank that writes".into()))?;
+        self.export(ops, dst, sink).map(drop)
+    }
+
     /// The descriptors an export to `dst` writes, one per tensor.
     pub fn export_descriptors(&self, dst: &[QuantEncoding]) -> io::Result<Vec<TensorDescriptor>> {
         if dst.len() != self.specs.len() {
@@ -1503,13 +1526,22 @@ impl ResidentFullFt {
 
     /// Atomically commit values, master, moments, step, seed and the trainer's schedule.
     pub fn commit(&mut self, ops: &dyn DeviceIo, dir: &CheckpointDir, run: &RunState) -> io::Result<PathBuf> {
-        self.require_whole_state("commit")?;
+        // A parameter-sharded rank commits its slices (and the group's layout), one file of its own.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(sh) = &self.sharded {
+            ops.gpu().flush();
+            return sh.save(dir.root(), run.step);
+        }
         let mut tiles = tiles!(self, ops);
         self.state.commit(dir, &mut tiles, run)
     }
 
     /// The run state to commit now, given the trainer's schedule scalars and RNG counter.
     pub fn run_state(&self, rng_counter: u64, schedule: Vec<(String, f64)>) -> RunState {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(sh) = &self.sharded {
+            return RunState { step: sh.step, seed: self.state.seed(), rng_counter, schedule };
+        }
         self.state.run_state(rng_counter, schedule)
     }
 
@@ -1524,6 +1556,19 @@ impl ResidentFullFt {
 
     /// [`Self::restore`] of exactly the checkpoint committed at optimizer step `step`.
     pub fn restore_at(&mut self, ops: &dyn DeviceIo, dir: &CheckpointDir, step: u32) -> io::Result<Option<RunState>> {
+        // A parameter-sharded rank restores its slices (from its own file, or resliced from every rank's when the
+        // layout changed); every slot is then stale and the tables are gathered again. A collective: every rank calls.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(sh) = &mut self.sharded {
+            ops.gpu().flush();
+            sh.restore(dir.root(), step)?;
+            if let Some(w) = &mut self.window {
+                w.slot_holds.iter_mut().for_each(|h| *h = None);
+            }
+            let tables = self.tables();
+            self.load_tensors(ops, &tables)?;
+            return Ok(Some(RunState { step, seed: self.state.seed(), rng_counter: 0, schedule: Vec::new() }));
+        }
         self.require_whole_state("restore_at")?;
         let mut tiles = tiles!(self, ops);
         let run = self.state.restore_at(dir, &mut tiles, step)?;
@@ -1632,9 +1677,7 @@ pub fn adamw_step(host: &dyn ResidentBackward, ft: &RefCell<ResidentFullFt>, ops
         if matches!(ft.rule(), Rule::AdamW { .. }) {
             ft.set_rule(Rule::AdamW { adam, wd });
         }
-        if ft.parameter_sharded() && clip.is_some() && ft.clip_pass() == ClipPass::Running {
-            return Err(invalid("a parameter-sharded build clips by the exact global norm (clip=two-pass), not a running one".into()));
-        }
+
         debug_assert_eq!(ft.step_count() + 1, step, "the resident state and the run agree on the step index");
     }
     let norm = |sum_sq: f64| clip.map(|_| (sum_sq.sqrt() * f64::from(extra_scale)) as f32);
@@ -1705,9 +1748,15 @@ pub fn adamw_step(host: &dyn ResidentBackward, ft: &RefCell<ResidentFullFt>, ops
             // The head and final norm are complete after the first segment: they open the running norm. The rest of
             // the remainder (the embedding gradient completes last) is clipped by the full norm.
             let head = Cell::new(0.0);
+            // A parameter-sharded rank holds no reduced head gradient yet (the remainder and the tables are summed over
+            // the group once the backward is complete): its layers clip by the layers' running norm alone, softer than
+            // with the head counted and never harder than the global clip.
+            let sharded = ft.borrow().parameter_sharded();
             let report = run(StreamPass::Running { lr, clip, extra_scale }, &|| {
-                head.set(remainder());
-                ft.borrow_mut().add_external_sum_sq(head.get());
+                if !sharded {
+                    head.set(remainder());
+                    ft.borrow_mut().add_external_sum_sq(head.get());
+                }
             })?;
             let sum_sq = report.sum_sq - head.get() + remainder();
             (optim::grad_multiplier(sum_sq, clip, extra_scale), sum_sq)

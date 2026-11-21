@@ -459,7 +459,12 @@ impl ChatFullFineTune {
         } else {
             crate::device::resolve(&self.device)?
         };
-        plan_before_load(&open, block, &set)?;
+        // The fp32 plan below prices every weight and gradient on the cards; a resident build holds its linears in
+        // their own encoding (streamed through a window, sharded over a group) and its planner checks that build
+        // before anything is allocated.
+        if self.precision.resident.is_none() {
+            plan_before_load(&open, block, &set)?;
+        }
 
         if self.parallel.is_some() && self.seed.is_none() {
             return Err(Error::MissingArgument("ChatFullFineTune: a data-parallel rank needs the seed every rank shares; call .seed(n) with the same n on every rank".to_string()));

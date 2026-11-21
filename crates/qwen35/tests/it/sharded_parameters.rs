@@ -62,6 +62,10 @@ fn gpu() -> Gpu {
 }
 
 fn build(shard: Option<ShardGroup>) -> Qwen35 {
+    build_with(shard, ClipPass::TwoPass)
+}
+
+fn build_with(shard: Option<ShardGroup>, clip_pass: ClipPass) -> Qwen35 {
     let resident = ResidentFtConfig {
         value: ResidentValue::Bf16,
         master: MasterPolicy::F32,
@@ -74,7 +78,7 @@ fn build(shard: Option<ShardGroup>) -> Qwen35 {
         state_dir: None,
         defer_publication: false,
         window: Some(LayerWindow { layers: 1 }),
-        clip_pass: ClipPass::TwoPass,
+        clip_pass,
         shard,
     };
     let plan = ResidentPlan { cfg: resident, capacity: Capacity { device_bytes: 1 << 30, host_bytes: 1 << 30 }, others: Vec::new() };
@@ -86,15 +90,98 @@ fn build(shard: Option<ShardGroup>) -> Qwen35 {
 
 /// Each step's (loss, global gradient norm).
 fn losses(dir: &Path, opts: &model::FitOpts, m: Qwen35, sync: Option<GradSync<'_>>) -> Vec<(f32, f32)> {
+    run(dir, opts, m, sync, None, None, None)
+}
+
+/// [`losses`] writing the trained model to `out`, keeping the resume state at `state`, stopping after `stop` steps.
+fn run(dir: &Path, opts: &model::FitOpts, m: Qwen35, sync: Option<GradSync<'_>>, out: Option<&Path>, state: Option<&Path>, stop: Option<u32>) -> Vec<(f32, f32)> {
     let (train, val, bcfg, _, itos) = model::load_dataset_with_itos(dir, opts).unwrap();
     let mut seen = Vec::new();
     let mut on_step = |r: &model::StepReport| {
         seen.push((r.loss, r.grad_norm.unwrap_or(f32::NAN)));
-        true
+        stop.is_none_or(|n| r.step < n)
     };
-    let control = model::FitControl { on_step: Some(&mut on_step), grad_sync: sync, ..Default::default() };
-    model::fit_controlled(m, model::causal_lm::<Qwen35>(train, val, bcfg, itos), opts, None, control).unwrap();
+    let control = model::FitControl { on_step: Some(&mut on_step), grad_sync: sync, state, identity: serde_json::json!({ "test": "zero3" }), ..Default::default() };
+    model::fit_controlled(m, model::causal_lm::<Qwen35>(train, val, bcfg, itos), opts, out, control).unwrap();
     seen
+}
+
+/// Run `world` ranks of a parameter-sharded fit as threads; every rank's (loss, norm) per step.
+fn ranks(dir: &Path, world: usize, opts: &model::FitOpts, clip_pass: ClipPass, out: Option<&Path>, state: Option<&(dyn Fn(usize) -> PathBuf + Sync)>, stop: Option<u32>) -> Vec<Vec<(f32, f32)>> {
+    let coll = HostCollective::new(world);
+    std::thread::scope(|s| {
+        let handles: Vec<_> = (0..world)
+            .map(|rank| {
+                let coll = Arc::clone(&coll);
+                s.spawn(move || {
+                    let shared: Arc<dyn Collective> = coll.clone();
+                    let m = build_with(Some(ShardGroup { collective: shared, rank }), clip_pass);
+                    let sync = GradSync { collective: &*coll, rank, checkpoint: None, observer: None };
+                    let path = state.map(|f| f(rank));
+                    run(dir, opts, m, Some(sync), out, path.as_deref(), stop)
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    })
+}
+
+fn bits(r: &[(f32, f32)]) -> Vec<(u32, u32)> {
+    r.iter().map(|s| (s.0.to_bits(), s.1.to_bits())).collect()
+}
+
+/// A sharded run stopped after two steps with every rank's state committed, then restarted in fresh models, ends where
+/// the uninterrupted run does bit for bit (its losses and its written model); the written model opens as a qwen35
+/// checkpoint (bf16 linears and tables, f32 norms) whose weights are the single-rank run's within bf16 rounding.
+#[test]
+fn a_parameter_sharded_run_resumes_exactly_and_writes_a_checkpoint() {
+    let dir = tmp("resume");
+    write_dataset(&dir);
+    let seed = data::rng::random_seed();
+    let o = opts(Sharding::Parameters, seed);
+    let (straight_out, resumed_out, single_out) = (dir.join("straight.safetensors"), dir.join("resumed.safetensors"), dir.join("single.safetensors"));
+    let straight = ranks(&dir, 2, &o, ClipPass::TwoPass, Some(&straight_out), None, None);
+    let state = |rank: usize| dir.join(format!("rank{rank}.state"));
+    ranks(&dir, 2, &o, ClipPass::TwoPass, None, Some(&state), Some(2));
+    let resumed = ranks(&dir, 2, &o, ClipPass::TwoPass, Some(&resumed_out), Some(&state), None);
+    assert_eq!(bits(&resumed[0]), bits(&straight[0][2..]), "the resumed steps differ from the uninterrupted run's");
+    assert_eq!(std::fs::read(&resumed_out).unwrap(), std::fs::read(&straight_out).unwrap(), "the resumed run wrote another model");
+    // The written model opens like any qwen35 base and holds the single-rank run's weights within bf16 rounding.
+    losses_to(&dir, &opts(Sharding::Replicated, seed), &single_out);
+    let got = qwen35::base_source::open_base(&straight_out).unwrap();
+    let want = qwen35::base_source::open_base(&single_out).unwrap();
+    assert_eq!(got.cfg.n_layers, want.cfg.n_layers);
+    for (name, numel) in cfg().param_list().into_iter().filter(|(n, _)| !model::adapter::device::is_adapter_param(n)) {
+        let (a, b) = (read_all(&*got.src, &name, numel), read_all(&*want.src, &name, numel));
+        let scale = b.iter().fold(1e-6f32, |m, v| m.max(v.abs()));
+        let worst = a.iter().zip(&b).fold(0f32, |m, (x, y)| m.max((x - y).abs()));
+        // bf16 rounding of the written values, and the sharded update's rounding: AdamW's normalised step turns a
+        // rounding difference in a near-zero gradient into up to a fraction of the learning rate.
+        let bound = 4e-3 * scale + 0.1 * o.lr;
+        assert!(worst <= bound, "{name}: {worst:e} from the single-rank run (bound {bound:e})");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+fn losses_to(dir: &Path, opts: &model::FitOpts, out: &Path) {
+    run(dir, opts, build(None), None, Some(out), None, None);
+}
+
+fn read_all(src: &dyn checkpoint::TensorSource, name: &str, numel: usize) -> Vec<f32> {
+    let mut out = vec![0f32; numel];
+    assert!(checkpoint::read_range_into(src, name, 0, &mut out), "{name} is not in the checkpoint");
+    out
+}
+
+/// The single-pass running clip: one backward a step, every rank the same losses and norms, and the run trains.
+#[test]
+fn a_parameter_sharded_run_clips_in_one_pass() {
+    let dir = tmp("running");
+    write_dataset(&dir);
+    let got = ranks(&dir, 2, &opts(Sharding::Parameters, data::rng::random_seed()), ClipPass::Running, None, None, None);
+    assert_eq!(bits(&got[0]), bits(&got[1]), "the ranks' losses or norms differ");
+    assert!(got[0][3].0 < got[0][0].0 / 2.0, "the run did not train: {:?}", got[0]);
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
@@ -132,7 +219,8 @@ fn a_parameter_sharded_run_follows_the_single_rank_run() {
 
 /// The measurement harness of a parameter-sharded full fine-tune of a real checkpoint: one process per card, started
 /// by a launcher with `-- --plan=P --rank=N --secret=S --base=DIR --data=DIR --steps=K --block=T --window=W` (the
-/// launcher restricts each process to its card; `--layers=L` trains only the first `L` layers, for a smoke run). Trains `K` steps on a synthetic token stream and prints each step's
+/// launcher restricts each process to its card; `--layers=L` trains only the first `L` layers, for a smoke run;
+/// `--clip=running` clips in one backward pass instead of two). Trains `K` steps on a synthetic token stream and prints each step's
 /// time, phases, loss, global norm and device memory. Ignored: it needs the checkpoint, the cards and a job.
 #[test]
 #[ignore = "measurement harness: one process per card under a launcher"]
@@ -146,6 +234,7 @@ fn measure_sharded_parameters_rank() {
         return;
     };
     let (steps, block, window) = (num("--steps=", 3), num("--block=", 1024), num("--window=", 2));
+    let clip = flag("--clip=").unwrap_or_else(|| "two-pass".into());
     let started = std::time::Instant::now();
     let ctx = model::JobContext::from_plan_file(Path::new(&plan), rank, Path::new(&secret)).unwrap();
     let job: Arc<dyn Collective> = Arc::new(ctx.job_collective().unwrap());
@@ -162,7 +251,7 @@ fn measure_sharded_parameters_rank() {
     binio::write_u32_bin(&dir.join("val.u32.bin"), &[]).unwrap();
     binio::write_mask_bin(&dir.join("val.mask.bin"), &[]).unwrap();
     std::fs::write(dir.join("meta.json"), Meta::vocab_only(cfg.vocab as usize)).unwrap();
-    let precision = model::TrainPrecision::parse(&format!("weights=bf16,grad=bf16,window={window},clip=two-pass,activations=recompute")).unwrap();
+    let precision = model::TrainPrecision::parse(&format!("weights=bf16,grad=bf16,window={window},clip={clip},activations=recompute")).unwrap();
     let opts = model::FitOpts {
         steps,
         batch_size: 1,

@@ -1993,11 +1993,20 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
     // One writer: every rank holds the same replica, so a second writer would
     // only race the first.
     let parameter_sharded = opts.sharding == crate::zero::Sharding::Parameters;
-    if parameter_sharded && (out.is_some() || control.state.is_some()) {
-        // Each rank holds only its slices of the trained weights; a save gathers nothing yet.
-        return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "sharded training (Parameters): writing the trained model or a resume state of a parameter-sharded run is not wired yet; run without an output or a state file"));
+    if parameter_sharded && opts.patience > 0 {
+        // Each rank holds only its slices: holding the best parameters is not a collective yet.
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "sharded training (Parameters): selecting on held-out loss (patience) is not run for a parameter-sharded model; the trained model is written at the end and the resume state per rank",
+        ));
+    }
+    if parameter_sharded && opts.checkpoint_secs > 0 && out.is_some() {
+        // A timed save is decided by each rank's own clock, which the ranks of a collective save cannot agree on.
+        eprintln!("sharded training (Parameters): no timed checkpoints of the model are taken; the resume state is (state_every), and the model is written at the end");
     }
     let writer = grad_sync.as_ref().is_none_or(|sync| sync.rank == 0);
+    // Where a parameter-sharded run's final save goes on every rank: all take part, the writer writes.
+    let sharded_out = out.filter(|_| parameter_sharded);
     let out = out.filter(|_| writer);
     // A writer publishes what it saved, so a later attempt can verify exactly
     // what it resumes from and another system can find the artifact.
@@ -2343,7 +2352,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         // Wall-clock checkpointing: once the timer has expired, the NEXT completed
         // step saves (atomic temp-rename), reports the save duration, and restarts
         // the timer. A slow big-model step thus never pays a per-eval 2.4 GB write.
-        if let Some(p) = out {
+        if let Some(p) = out.filter(|_| !parameter_sharded) {
             if opts.checkpoint_secs > 0 && last_save.elapsed().as_secs() >= opts.checkpoint_secs {
                 let ts = std::time::Instant::now();
                 model.save_with_itos(p.to_str().expect("utf-8 path"), obj.itos());
@@ -2419,7 +2428,15 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
 
     // The final save would overwrite the best checkpoint with the last one,
     // which is exactly the model early stopping exists to discard.
-    if let Some(p) = out.filter(|_| !kept_best) {
+    if let Some(p) = sharded_out.filter(|_| !interrupted) {
+        let ts = std::time::Instant::now();
+        let path = p.to_str().expect("utf-8 path");
+        model.save_sharded(writer.then_some(path)).map_err(|e| std::io::Error::other(format!("{}: {e}", p.display())))?;
+        if writer {
+            eprintln!("saved checkpoint -> {} ({:.1} s)", p.display(), ts.elapsed().as_secs_f64());
+            commit(p, completed)?;
+        }
+    } else if let Some(p) = out.filter(|_| !kept_best && !parameter_sharded) {
         let ts = std::time::Instant::now();
         model.save_with_itos(p.to_str().expect("utf-8 path"), obj.itos());
         eprintln!("saved checkpoint -> {} ({:.1} s)", p.display(), ts.elapsed().as_secs_f64());

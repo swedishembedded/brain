@@ -138,6 +138,12 @@ impl CheckpointDir {
         Ok(CheckpointDir { root })
     }
 
+    /// The directory the generations live in: where a state with its own file layout (one rank's shard of a sharded
+    /// run) commits beside them.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// The part of the manifest that identifies the run's tensors and rule.
     fn tensor_table<S: OptimizerStateStorage>(opt: &StreamedOptimizer<S>) -> Value {
         Value::Array(
