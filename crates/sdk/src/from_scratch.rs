@@ -734,7 +734,7 @@ impl Pretrain {
             identity["exit_entropy"] = serde_json::json!(exit_entropy);
         }
         let precision = model::TrainPrecision::default();
-        let run = FullRun { chat: &chat, open: &open, tokenizer_dir: &model_dir, prepared_dir: &prepared, out_dir, opts: &opts, set: &set, precision: &precision, resume_state: self.resume_state.as_deref(), checkpoint_every: self.checkpoint_every, identity };
+        let run = FullRun { chat: &chat, open: &open, tokenizer_dir: &model_dir, prepared_dir: &prepared, out_dir, opts: &opts, set: &set, precision: &precision, resume_state: self.resume_state.as_deref(), checkpoint_every: self.checkpoint_every, identity, parallel: None };
         let trained = run.train_and_export(cancel, &mut on_progress)?;
         Ok(PretrainOutcome {
             status: trained.status,

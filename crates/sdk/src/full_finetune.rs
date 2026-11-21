@@ -100,6 +100,8 @@ pub struct ChatFullFineTune {
     precision: model::TrainPrecision,
     resume_state: Option<PathBuf>,
     checkpoint_every: u32,
+    /// This run as one rank of a data-parallel group.
+    parallel: Option<crate::DataParallel>,
 }
 
 impl ChatFullFineTune {
@@ -133,6 +135,7 @@ impl ChatFullFineTune {
             precision: model::TrainPrecision::default(),
             resume_state: None,
             checkpoint_every: 0,
+            parallel: None,
         }
     }
 
@@ -142,6 +145,16 @@ impl ChatFullFineTune {
     /// checkpoint an uninterrupted run would have written. A state written by a run over other data, another base or
     /// other options is refused, never continued. Removed once the checkpoint is exported. Unset (the default), a
     /// stopped run starts over.
+    /// Train as one rank of a data-parallel group ([`crate::DataParallel`]): every rank runs this fine-tune with the
+    /// same settings and the same [`Self::seed`], each on its own card, trains on its own shard of the records, and
+    /// every step's gradients are reduced over the group; the group's [`crate::DataParallel::sharding`] decides
+    /// whether the optimizer state (and the reduced gradients) are sharded across the ranks instead of replicated.
+    /// Rank 0 alone writes the checkpoint.
+    pub fn data_parallel(mut self, rank: crate::DataParallel) -> Self {
+        self.parallel = Some(rank);
+        self
+    }
+
     pub fn resume_state(mut self, path: impl Into<PathBuf>) -> Self {
         self.resume_state = Some(path.into());
         self
@@ -391,7 +404,8 @@ impl ChatFullFineTune {
     fn plan(&self, chat: &crate::chat_trainer::ChatEntry, block: u32, seed: u64) -> Result<(model::FitOpts, f32)> {
         chat.train_precision.check(&self.precision).map_err(|why| Error::Backend(format!("ChatFullFineTune: {why}")))?;
         let exit_entropy = exit_entropy_for(chat, self.exit_entropy, FINE_TUNE_EXIT_ENTROPY)?;
-        let requested = model::FitOpts { grad_accum: self.grad_accum, strict_updates: self.strict_updates, weight_decay: self.weight_decay, precision: self.precision.clone(), stages: self.stages, native_sparse: self.native_sparse, exit_entropy, ..fit_opts(self.steps, block, self.lr, seed) };
+        let sharding = self.parallel.as_ref().map_or(model::zero::Sharding::Replicated, crate::DataParallel::sharding);
+        let requested = model::FitOpts { grad_accum: self.grad_accum, strict_updates: self.strict_updates, sharding, weight_decay: self.weight_decay, precision: self.precision.clone(), stages: self.stages, native_sparse: self.native_sparse, exit_entropy, ..fit_opts(self.steps, block, self.lr, seed) };
         let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &[]).map_err(|e| Error::Backend(format!("ChatFullFineTune: {e}")))?.into_opts();
         Ok((opts, exit_entropy))
     }
@@ -445,6 +459,9 @@ impl ChatFullFineTune {
         };
         plan_before_load(&open, block, &set)?;
 
+        if self.parallel.is_some() && self.seed.is_none() {
+            return Err(Error::MissingArgument("ChatFullFineTune: a data-parallel rank needs the seed every rank shares; call .seed(n) with the same n on every rank".to_string()));
+        }
         let seed = resolve_seed(self.seed, self.resume_state.as_deref())?;
         let (opts, exit_entropy) = self.plan(&chat, block, seed)?;
         let digest_clock = std::time::Instant::now();
@@ -464,7 +481,7 @@ impl ChatFullFineTune {
         if exit_entropy > 0.0 {
             identity["exit_entropy"] = serde_json::json!(exit_entropy);
         }
-        let run = FullRun { chat: &chat, open: &open, tokenizer_dir: &model_dir, prepared_dir: &prepared_dir, out_dir, opts: &opts, set: &set, precision: &self.precision, resume_state: self.resume_state.as_deref(), checkpoint_every: self.checkpoint_every, identity };
+        let run = FullRun { chat: &chat, open: &open, tokenizer_dir: &model_dir, prepared_dir: &prepared_dir, out_dir, opts: &opts, set: &set, precision: &self.precision, resume_state: self.resume_state.as_deref(), checkpoint_every: self.checkpoint_every, identity, parallel: self.parallel.as_ref() };
         let trained = run.train_and_export(cancel, &mut on_progress)?;
         let mut outcome = ChatFullFineTuneOutcome {
             status: trained.status,
@@ -518,6 +535,8 @@ pub(crate) struct FullRun<'a> {
     pub checkpoint_every: u32,
     /// What else a saved state must agree with to be continued (digests of the base and data, settings).
     pub identity: serde_json::Value,
+    /// This run as one rank of a data-parallel group; only rank 0 exports.
+    pub parallel: Option<&'a crate::DataParallel>,
 }
 
 /// What a [`FullRun`] produced.
@@ -538,10 +557,19 @@ impl FullRun<'_> {
             on_progress(&FineTuneProgress::of(s));
             !cancel.is_cancelled()
         };
-        let control = model::FitControl { on_step: Some(&mut on_step), state: self.resume_state, state_every: self.checkpoint_every, identity: self.identity.clone(), ..Default::default() };
+        let control = model::FitControl {
+            on_step: Some(&mut on_step),
+            state: self.resume_state,
+            state_every: self.checkpoint_every,
+            identity: self.identity.clone(),
+            grad_sync: self.parallel.map(crate::DataParallel::grad_sync),
+            ..Default::default()
+        };
         let tuned = self.out_dir.join(TUNED_FILE);
         let train_clock = std::time::Instant::now();
-        let state = optimizer_state_for(self.open, self.opts.block_size, self.set, self.precision)?;
+        // A sharded run's optimizer holds this rank's slice of the moments in host memory: the card is planned and
+        // built with none beside the weights.
+        let state = if self.opts.sharding.is_replicated() { optimizer_state_for(self.open, self.opts.block_size, self.set, self.precision)? } else { model::finetune::OptimizerState::HostOffload };
         let report = (self.chat.full)(self.open, self.prepared_dir, self.opts, &tuned, state, control).map_err(|e| match e.kind() {
             std::io::ErrorKind::InvalidData if self.resume_state.is_some_and(Path::exists) => Error::Backend(format!("the saved training state cannot be continued by this run: {e}")),
             _ => Error::Backend(format!("training: {e}")),
@@ -551,6 +579,10 @@ impl FullRun<'_> {
         if trained.report.interrupted {
             std::fs::remove_file(&tuned).ok();
             trained.status = FineTuneStatus::Cancelled;
+            return Ok(trained);
+        }
+        // The ranks hold the same weights; rank 0 wrote them and exports them.
+        if self.parallel.is_some_and(|p| p.rank() != 0) {
             return Ok(trained);
         }
         let checkpoint = self.out_dir.join(CHECKPOINT_DIR);

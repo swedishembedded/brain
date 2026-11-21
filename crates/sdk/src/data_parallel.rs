@@ -33,11 +33,13 @@ pub struct DataParallel {
     rank: usize,
     /// The job and plan identity a checkpoint commit is filed under, for a job a launcher started.
     job: Option<(String, String)>,
+    /// What the group shards across its ranks: the plan's for a launched job, [`Self::sharded`]'s otherwise.
+    sharding: model::zero::Sharding,
 }
 
 impl std::fmt::Debug for DataParallel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DataParallel").field("rank", &self.rank).field("world", &self.group.world_size()).field("job", &self.job.as_ref().map(|(job, _)| job)).finish()
+        f.debug_struct("DataParallel").field("rank", &self.rank).field("world", &self.group.world_size()).field("job", &self.job.as_ref().map(|(job, _)| job)).field("sharding", &self.sharding).finish()
     }
 }
 
@@ -49,7 +51,7 @@ impl DataParallel {
         let context = JobContext::from_plan_file(plan, rank, secret).map_err(Error::MissingArgument)?;
         let group = context.job_collective().map_err(|e| Error::Backend(format!("joining the job: {e}")))?;
         let job = Some((context.plan().job.clone(), context.plan().identity()));
-        Ok(DataParallel { group: Arc::new(group), rank, job })
+        Ok(DataParallel { group: Arc::new(group), rank, job, sharding: context.plan().sharding })
     }
 
     /// `world` ranks that are threads of this process, one per card: hand rank `r` to the trainer that runs on card
@@ -62,9 +64,24 @@ impl DataParallel {
         Ok((0..world)
             .map(|rank| {
                 let group = JobCollective::new(Arc::clone(&host), CollectivePath::Auto, IN_PROCESS_JOIN, IN_PROCESS_OP).with_bucket_bytes(u64::from(model::job::DEFAULT_BUCKET_MIB) << 20);
-                DataParallel { group: Arc::new(group), rank, job: None }
+                DataParallel { group: Arc::new(group), rank, job: None, sharding: model::zero::Sharding::Replicated }
             })
             .collect())
+    }
+
+    /// Shard `sharding` across the group ([`model::zero`]): every rank of the group must ask for the same. A job a
+    /// launcher started shards as its plan says; naming another stage for one of its ranks is refused.
+    pub fn sharded(mut self, sharding: model::zero::Sharding) -> Result<DataParallel> {
+        if self.job.is_some() && sharding != self.sharding {
+            return Err(Error::MissingArgument(format!("this rank's job plan shards {:?}; a rank cannot shard {sharding:?} on its own", self.sharding)));
+        }
+        self.sharding = sharding;
+        Ok(self)
+    }
+
+    /// What the group shards across its ranks.
+    pub fn sharding(&self) -> model::zero::Sharding {
+        self.sharding
     }
 
     /// This rank's place in the group.

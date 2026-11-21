@@ -1275,6 +1275,7 @@ impl ChatFineTune {
         let requested = model::FitOpts {
             grad_accum: self.grad_accum,
             strict_updates: self.strict_updates,
+            sharding: self.parallel.as_ref().map_or(model::zero::Sharding::Replicated, crate::DataParallel::sharding),
             eval_interval: self.eval_every,
             // Every monitoring record, once, each time.
             eval_batches: 0,

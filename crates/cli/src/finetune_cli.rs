@@ -116,10 +116,11 @@ brain finetune BASE --dataset FILE --out DIR [options]
                      run a choice refuses it by name.
   --no-thinking      render records without the reasoning block.
   --job-plan FILE --job-rank N --job-secret FILE
-                     with --lora: train as rank N of the distributed job the plan names (the same three on every rank,
-                     a different N): each rank trains on its own shard of the records and every step's gradients are
-                     reduced over the job, on the cards when every rank can. Without --seed every rank uses the
-                     plan's digest.
+                     train as rank N of the distributed job the plan names (the same three on every rank, a different
+                     N): each rank trains on its own shard of the records and every step's gradients are reduced over
+                     the job, on the cards when every rank can. The plan's `sharding` (optimizer|gradients) shards the
+                     optimizer state, and the reduced gradients, across the ranks instead of replicating them. Without
+                     --seed every rank uses the plan's digest; rank 0 writes the result.
 
 Run on a device with `--device` (default: every device brain finds).
 ";
@@ -330,7 +331,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
     }
     if a.lora.is_none() {
         // Each of these shapes an adapter; a full fine-tune that was given one would silently ignore it.
-        for (flag, given) in [("--job-plan", a.job_plan.is_some()), ("--alpha", a.alpha.is_some()), ("--continue", a.continue_from.is_some()), ("--adapter-id", a.adapter_id.is_some()), ("--base-format", a.base_format.is_some()), ("--held-out", a.held_out.is_some()), ("--policy-gradient", a.policy_gradient), ("--modules-to-save", !a.modules_to_save.is_empty())] {
+        for (flag, given) in [("--alpha", a.alpha.is_some()), ("--continue", a.continue_from.is_some()), ("--adapter-id", a.adapter_id.is_some()), ("--base-format", a.base_format.is_some()), ("--held-out", a.held_out.is_some()), ("--policy-gradient", a.policy_gradient), ("--modules-to-save", !a.modules_to_save.is_empty())] {
             if given {
                 return Err(format!("brain finetune: {flag} applies to an adapter; give --lora RANK"));
             }
@@ -562,7 +563,7 @@ pub fn run_finetune(argv: &[String]) -> ! {
                 1
             }
         },
-        None => match full(&args).run_with(&brain::CancelToken::default(), |p| eprintln!("step {}: loss {:.4}", p.step, p.loss)) {
+        None => match full(&args).and_then_job(&args).run_with(&brain::CancelToken::default(), |p| eprintln!("step {}: loss {:.4}", p.step, p.loss)) {
             Ok(o) => {
                 println!("status: {:?}, {} steps, {}", o.status, o.steps_completed, losses(o.initial_loss, o.final_loss));
                 if let Some(p) = &o.checkpoint {
@@ -610,6 +611,22 @@ impl JoinJob for brain::ChatFineTune {
     }
 }
 
+impl JoinJob for brain::ChatFullFineTune {
+    fn and_then_job(self, a: &Args) -> Self {
+        let fail = |e: String| -> ! {
+            eprintln!("{e}");
+            std::process::exit(2)
+        };
+        let Some(job) = job(a).unwrap_or_else(|e| fail(e)) else { return self };
+        let seeded = match a.seed {
+            Some(_) => self,
+            None => self.seed(job.plan_seed().unwrap_or_else(|e| fail(format!("brain finetune: {e}")))),
+        };
+        let rank = brain::DataParallel::join_job(&job.plan, job.rank, &job.secret).unwrap_or_else(|e| fail(format!("brain finetune: {e}")));
+        seeded.data_parallel(rank)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -620,11 +637,11 @@ mod tests {
 
     /// A distributed run names its plan, rank and secret together, and trains an adapter.
     #[test]
-    fn a_job_is_all_three_flags_and_an_adapter() {
+    fn a_job_is_all_three_flags_for_an_adapter_or_a_full_fine_tune() {
         let err = parse(&argv("base --dataset d --out o --lora 4 --job-plan p.json")).unwrap_err();
         assert!(err.contains("go together"), "{err}");
-        let err = parse(&argv("base --dataset d --out o --job-plan p.json --job-rank 1 --job-secret s")).unwrap_err();
-        assert!(err.contains("--lora"), "{err}");
+        let full = parse(&argv("base --dataset d --out o --job-plan p.json --job-rank 1 --job-secret s")).unwrap();
+        assert_eq!(job(&full).unwrap().map(|j| j.rank), Some(1), "a full fine-tune runs as a rank of a job too");
         let a = parse(&argv("base --dataset d --out o --lora 4 --job-plan p.json --job-rank 1 --job-secret s")).unwrap();
         assert_eq!(job(&a).unwrap().map(|j| j.rank), Some(1));
         let err = parse(&argv("base --dataset d --out o --lora 4 --objective feedback --job-plan p.json --job-rank 1 --job-secret s")).unwrap_err();
