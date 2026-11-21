@@ -2087,6 +2087,7 @@ dependencies = [
  "brain-residency",
  "brain-testutil",
  "hex",
+ "serde",
  "serde_json",
  "sha2 0.11.1",
 ]

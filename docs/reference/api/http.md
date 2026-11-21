@@ -330,14 +330,24 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   `generic-messages-v2` JSONL text blob. Each message marked `"train": true` is an answer, scored teacher-forced
   under the model's full distribution at temperature 1, as the model is asked for it: the prompt is what a `generate`
   call renders for the messages before it (client text cannot spell a control token), the answer's tokens are its
-  content plus the end-of-turn token that closes it (`include_stop`, default true). Params: `per_token` (also return
+  content plus the end-of-turn token that closes it (`include_stop`, default true). A line may instead be a token
+  record, `{"prompt_token_ids": [...], "token_ids": [...]}`: its `token_ids` are scored exactly as given after its
+  `prompt_token_ids` as given, with nothing rendered or added. That is the form for a served generation whatever it
+  holds (reasoning, tool calls, tokens a thinking budget forced): send back the `prompt_token_ids` and
+  `completion_token_ids` (or a policy trace's `generation_token_ids`) a reply reported, under the model or adapter
+  whose log-probabilities you want, for an importance ratio against the policy that sampled them or a teacher's
+  log-probabilities for distillation. Params: `per_token` (also return
   each answer's `token_ids` and `token_logprobs`), `include_stop`, `enable_thinking` (render the prompts as a request
-  that allows reasoning would). The reply's `outputs` hold `records` (each with its `answers`: `message`, `tokens`,
-  `logprob`, `mean_logprob`), the totals `tokens`, `logprob`, `mean_logprob`, the `tokenizer_digest`,
+  that allows reasoning would), `temperature` (default 1, within 0.001..=100: the log-probabilities are
+  `log_softmax(logits / temperature)` over the whole vocabulary, so a ratio against a policy sampled at temperature
+  T scores at T). The reply's `outputs` hold `records` (each with its `answers`: `message` (absent for a token
+  record), `tokens`, `logprob`, `mean_logprob`), the totals `tokens`, `logprob`, `mean_logprob`,
+  `log_prob_temperature`, the `tokenizer_digest`,
   `chat_template_digest` and `base_digest`, and the `adapter` that scored. At most 4096 records of at most 64
-  supervised answers each, and 8192 answers in a call; a record with tool calls, tool results, tool schemas or reasoning content, one with no
-  supervised message, a malformed one, or one longer than the model holds fails the whole call by record number
-  before any pass (400). A model that cannot score a continuation does not declare the action. Scoring is one
+  supervised answers each, and 8192 answers in a call; a chat record with tool calls, tool results, tool schemas or
+  reasoning content, one with no supervised message, a token record with an empty context or nothing to score, an id
+  outside the tokenizer's vocabulary or a field it does not have, a malformed record, or one longer than the model
+  holds fails the whole call by record number before any pass (400). A model that cannot score a continuation does not declare the action. Scoring is one
   prefill per answer on the serving instance, between its decode steps; it does not read or write the prefix cache.
 - **Seed and served identity.** An OpenAI or OpenRouter chat or completions
   reply (and the terminal chunk of a stream) and an Anthropic `Message` (and a

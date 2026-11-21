@@ -6,16 +6,21 @@
 // evaluation of fine-tuned models then you can procure our services by sending an email to
 // info@swedishembedded.com.
 
-//! The `score` action: teacher-forced log-likelihood of the supervised answers of given chat records under the served
-//! model (and the adapter its id names), through the serving scheduler.
+//! The `score` action: teacher-forced log-likelihood of given tokens under a given context, for the served model and
+//! the adapter its id names, through the serving scheduler. A record is either a chat record, whose supervised answers
+//! are scored after the prompt the model renders for them, or a token record, whose `token_ids` are scored as given
+//! after its `prompt_token_ids` as given: the form for a served generation (the ids a policy trace or
+//! `return_token_ids` reports), whatever it holds (reasoning, tool calls, forced tokens), scored under another
+//! policy for importance ratios, or under a teacher for distillation.
 //!
 //! A record is a `generic-messages-v2` line. Each supervised assistant message (`"train": true`) is one answer, scored
 //! as the model is asked for it: the prompt is the request path's own render of the messages before it (the same
 //! [`Frontend::parse`] a `generate` call uses, so the template, the tokenizer's escaping of client text and the
 //! generation prompt are the sampler's), the answer's tokens are its content, tokenized with client text escaped, and
 //! the end-of-turn token that closes it (`include_stop`, default on). The log-probabilities are the model's full,
-//! untruncated distribution at temperature 1 ([`Scheduler::score_continuation`]): one teacher-forced pass per answer
-//! under the adapter, with the same weights, quantisation and KV precision that serve generation.
+//! untruncated distribution at the call's `temperature` (default 1, [`Scheduler::score_continuation`]): one
+//! teacher-forced pass per answer under the adapter, with the same weights, quantisation and KV precision that serve
+//! generation.
 //!
 //! Scoring is scheduled work: a `score` group runs on the instance like any other group, one prefill per answer
 //! between the instance's decode steps, so it is concurrency-safe by the same lock the scheduler owns. A decoder that
@@ -25,6 +30,7 @@ use capability::{ActionResult, ActionSpec, BlobSpec, Invocation, Media, Outcome,
 use data::chat::{ChatSample, TextOnly};
 use data::tokenizer::Tokenizer;
 use model::serve::{PagedDecoder, Scheduler};
+use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::Frontend;
@@ -41,19 +47,56 @@ pub const MAX_ANSWERS_PER_RECORD: usize = 64;
 
 /// What `score` is, for every scheduler-backed chat manifest.
 pub fn score_spec() -> ActionSpec {
-    ActionSpec::new(SCORE_ACTION, "teacher-forced log-likelihood of the supervised answers of chat records under this model (and the adapter its id names): per answer, per record and in total, optionally per token; nothing is generated")
+    ActionSpec::new(SCORE_ACTION, "teacher-forced log-likelihood of given tokens under a given context for this model (and the adapter its id names): the supervised answers of chat records, or given token ids after given context ids; per answer, per record and in total, optionally per token; nothing is generated")
         .cancellable()
         .param(ParamSpec::new("per_token", ParamType::Bool, "also return each answer's token ids and their log-probabilities").default(json!(false)))
-        .param(ParamSpec::new("include_stop", ParamType::Bool, "score the end-of-turn token that closes each answer too, as a trainer that trains the stop does").default(json!(true)))
-        .param(ParamSpec::new("enable_thinking", ParamType::Bool, "render the prompts as a request that allows reasoning would").default(json!(true)))
-        .input(BlobSpec::new("records", Media::Text, "`generic-messages-v2` JSONL: the messages marked `\"train\": true` are scored; plain text answers only (no tool calls, reasoning content or tool schemas)").required())
+        .param(ParamSpec::new("include_stop", ParamType::Bool, "score the end-of-turn token that closes each chat answer too, as a trainer that trains the stop does (a token record is scored as given)").default(json!(true)))
+        .param(ParamSpec::new("enable_thinking", ParamType::Bool, "render the prompts of chat records as a request that allows reasoning would").default(json!(true)))
+        .param(ParamSpec::new("temperature", ParamType::Float, "the log-probabilities are log softmax(logits / temperature) over the whole vocabulary: a sampling policy's temperature, for ratios against it").default(json!(1.0)).min(1e-3).max(100.0))
+        .input(BlobSpec::new("records", Media::Text, "JSONL, one record per line: a `generic-messages-v2` chat record (the messages marked `\"train\": true` are scored; plain text answers only, no tool calls, reasoning content or tool schemas), or a token record `{\"prompt_token_ids\": [...], \"token_ids\": [...]}` (the token ids scored as given after the context ids as given)").required())
 }
 
-/// One answer to score: where it sits and the ids around it.
+/// One answer to score: where it sits (the message of a chat record; none for a token record) and the ids around it.
 struct Answer {
-    message: usize,
+    message: Option<usize>,
     prompt: Vec<u32>,
     answer: Vec<u32>,
+}
+
+/// A token record: `token_ids` scored after `prompt_token_ids`, both as given.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TokenRecord {
+    prompt_token_ids: Vec<u32>,
+    token_ids: Vec<u32>,
+}
+
+/// The answer of token record `index`, its ids checked against the vocabulary of `front`'s tokenizer.
+fn token_answer<F: Frontend + ?Sized>(front: &F, index: usize, line: &str) -> Result<Vec<Answer>, String> {
+    let at = |e: String| invalid(format!("record {index}: {e}"));
+    let record: TokenRecord = serde_json::from_str(line).map_err(|e| at(format!("not a token record: {e}")))?;
+    if record.prompt_token_ids.is_empty() {
+        return Err(at("`prompt_token_ids` is empty: a token is scored after a context of at least one token".to_string()));
+    }
+    if record.token_ids.is_empty() {
+        return Err(at("`token_ids` is empty: there is nothing to score".to_string()));
+    }
+    let vocab = front.tok().vocab_size();
+    if let Some(&id) = record.prompt_token_ids.iter().chain(&record.token_ids).find(|&&id| id as usize >= vocab) {
+        return Err(at(format!("token id {id} is outside this model's vocabulary of {vocab}")));
+    }
+    Ok(vec![Answer { message: None, prompt: record.prompt_token_ids, answer: record.token_ids }])
+}
+
+/// The answers of record `index`: a token record when the line is an object naming `prompt_token_ids`, a chat
+/// record otherwise.
+fn record_answers<F: Frontend + ?Sized>(front: &F, index: usize, line: &str, thinking: bool, include_stop: bool) -> Result<Vec<Answer>, String> {
+    let is_token_record = serde_json::from_str::<Value>(line).ok().is_some_and(|v| v.get("prompt_token_ids").is_some());
+    if is_token_record {
+        token_answer(front, index, line)
+    } else {
+        answers_of(front, index, line, thinking, include_stop)
+    }
 }
 
 fn invalid(message: impl AsRef<str>) -> String {
@@ -95,7 +138,7 @@ fn answers_of<F: Frontend + ?Sized>(front: &F, index: usize, line: &str, thinkin
         if answer.is_empty() {
             return Err(at(format!("message {} encodes to no token", message + 1)));
         }
-        answers.push(Answer { message: message + 1, prompt, answer });
+        answers.push(Answer { message: Some(message + 1), prompt, answer });
     }
     Ok(answers)
 }
@@ -108,6 +151,10 @@ fn score_one<D: PagedDecoder, F: Frontend + ?Sized>(sched: &mut Scheduler<D>, fr
     let blob = inv.get_blob("records").ok_or_else(|| invalid("score: the input blob `records` is required"))?;
     let text = std::str::from_utf8(&blob.bytes).map_err(|e| invalid(format!("score: records is not UTF-8: {e}")))?;
     let (per_token, include_stop, thinking) = (inv.get_bool("per_token").unwrap_or(false), inv.get_bool("include_stop").unwrap_or(true), inv.get_bool("enable_thinking").unwrap_or(true));
+    let temperature = inv.get_f64("temperature").unwrap_or(1.0);
+    if !(temperature.is_finite() && (1e-3..=100.0).contains(&temperature)) {
+        return Err(invalid(format!("score: temperature {temperature} is outside 0.001..=100")));
+    }
     let (adapter, identity) = match front.route(inv)? {
         Some((adapter, identity)) => (Some(adapter), Some(identity)),
         None => (None, None),
@@ -120,7 +167,7 @@ fn score_one<D: PagedDecoder, F: Frontend + ?Sized>(sched: &mut Scheduler<D>, fr
         return Err(invalid(format!("score: {} records; at most {MAX_SCORE_RECORDS} are scored in one call", lines.len())));
     }
     // Every record is read before any is scored, so a malformed one fails the call without costing a pass.
-    let records: Vec<Vec<Answer>> = lines.iter().enumerate().map(|(i, line)| answers_of(front, i + 1, line, thinking, include_stop)).collect::<Result<_, _>>()?;
+    let records: Vec<Vec<Answer>> = lines.iter().enumerate().map(|(i, line)| record_answers(front, i + 1, line, thinking, include_stop)).collect::<Result<_, _>>()?;
     let answers_in_call: usize = records.iter().map(Vec::len).sum();
     if answers_in_call > MAX_ANSWERS_PER_CALL {
         return Err(invalid(format!("score: {answers_in_call} supervised answers; at most {MAX_ANSWERS_PER_CALL} are scored in one call")));
@@ -138,13 +185,17 @@ fn score_one<D: PagedDecoder, F: Frontend + ?Sized>(sched: &mut Scheduler<D>, fr
             let mut all = a.prompt.clone();
             all.extend(&a.answer);
             if all.len() > capacity {
-                return Err(invalid(format!("record {}: message {} is {} tokens with its prompt; this model holds at most {capacity}", index + 1, a.message, all.len())));
+                let what = a.message.map_or_else(|| "its tokens are".to_string(), |m| format!("message {m} is"));
+                return Err(invalid(format!("record {}: {what} {} tokens with its prompt; this model holds at most {capacity}", index + 1, all.len())));
             }
-            let logprobs = sched.score_continuation(adapter, &all, a.prompt.len(), 1.0).map_err(|e| capability::failure::tag(capability::failure::FailureClass::Unavailable, format!("{}: score: {e}", front.label())))?;
+            let logprobs = sched.score_continuation(adapter, &all, a.prompt.len(), temperature as f32).map_err(|e| capability::failure::tag(capability::failure::FailureClass::Unavailable, format!("{}: score: {e}", front.label())))?;
             let sum: f64 = logprobs.iter().map(|&l| f64::from(l)).sum();
             record_tokens += logprobs.len();
             record_logprob += sum;
-            let mut entry = json!({"message": a.message, "tokens": logprobs.len(), "logprob": sum, "mean_logprob": sum / logprobs.len() as f64});
+            let mut entry = json!({"tokens": logprobs.len(), "logprob": sum, "mean_logprob": sum / logprobs.len() as f64});
+            if let Some(message) = a.message {
+                entry["message"] = json!(message);
+            }
             if per_token {
                 entry["token_ids"] = json!(a.answer);
                 entry["token_logprobs"] = json!(logprobs);
@@ -160,7 +211,7 @@ fn score_one<D: PagedDecoder, F: Frontend + ?Sized>(sched: &mut Scheduler<D>, fr
         .set("tokens", json!(total_tokens))
         .set("logprob", json!(total_logprob))
         .set("mean_logprob", json!(total_logprob / total_tokens as f64))
-        .set("log_prob_temperature", json!(1.0))
+        .set("log_prob_temperature", json!(temperature))
         .set("backend", json!(gpu_core::backend_name()))
         .set("engine", json!(concat!("brain ", env!("CARGO_PKG_VERSION"))));
     if let Some(digest) = front.tokenizer_digest() {

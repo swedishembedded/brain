@@ -66,12 +66,12 @@ impl PagedDecoder for Toy {
         self.busy_polls.set(left.saturating_sub(1));
         left == 0
     }
-    fn score_continuation(&mut self, _namespace: model::paged::KvNamespace, tokens: &[u32], from: usize, _temperature: f32) -> Result<Vec<f32>, String> {
+    fn score_continuation(&mut self, _namespace: model::paged::KvNamespace, tokens: &[u32], from: usize, temperature: f32) -> Result<Vec<f32>, String> {
         if !self.scoring {
             return Err("the toy cannot score".to_string());
         }
         self.scores_run += 1;
-        Ok(tokens[from..].iter().map(|&t| -(t as f32) / 100.0).collect())
+        Ok(tokens[from..].iter().map(|&t| -(t as f32) / 100.0 / temperature).collect())
     }
     fn alloc_mut(&mut self) -> &mut BlockAllocator {
         &mut self.alloc

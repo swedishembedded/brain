@@ -28,6 +28,7 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 
 - `thinking_budget` is the turn's: it bounds the model's own tokens inside every think block of the reply together, and a block reopened after the budget is spent is closed at once. A tool call written inside the block is neither counted nor cut, and a budget that runs out after it ends the turn. `model::serve::ThinkingBudget::with_call_fence` names the call tokens.
 - `usage.completion_tokens_details.reasoning_tokens` counts exactly the tokens the reply's parse reads as reasoning: a call that ended the reasoning, and text a stop string cut, are not reasoning.
+- The `score` action takes token records (`{"prompt_token_ids": [...], "token_ids": [...]}`, scored as given) beside chat records, and a `temperature` param.
 
 ### Fixed
 

@@ -91,7 +91,7 @@ fn scoring() -> Scheduler<Toy> {
 
 const TWO_TURNS: &str = r#"[{"role":"user","content":"t1","train":false},{"role":"assistant","content":"t5","train":true},{"role":"user","content":"t2","train":false},{"role":"assistant","content":"t6","train":true}]"#;
 
-/// The toy scores token `t` as `-t/100`, whatever precedes it, so the numbers say which tokens were scored: the
+/// The toy scores token `t` as `-t/100` at temperature 1 (`-t/(100 T)` at `T`), whatever precedes it, so the numbers say which tokens were scored: the
 /// answer's own tokens and the stop token, and not the prompt.
 #[test]
 fn every_supervised_answer_is_scored_after_its_own_prompt_with_the_stop_token() {
@@ -160,4 +160,49 @@ fn a_control_token_in_an_answer_is_scored_as_text() {
     let out = score(&mut scoring(), call(&[record(json!([{"role":"user","content":"t1","train":false},{"role":"assistant","content":spelled,"train":true}]))], &[("per_token", json!(true)), ("include_stop", json!(false))])).expect("scored").outputs;
     assert!(!escaped_ids.contains(&256), "the spelled control token is not the control token");
     assert_eq!(out["records"][0]["answers"][0]["token_ids"], json!(escaped_ids));
+}
+
+/// A token record's `token_ids` are scored exactly as given after its `prompt_token_ids` (no rendering, no stop token
+/// added): the form for a served generation whatever it holds. It mixes with chat records in one call, and the call's
+/// temperature is the one the log-probabilities are taken at.
+#[test]
+fn given_token_ids_are_scored_as_given_after_the_given_context() {
+    let tokens = json!({"prompt_token_ids": [1, 2, 3], "token_ids": [40, 60]}).to_string();
+    let chat = record(serde_json::from_str(TWO_TURNS).unwrap());
+    let out = score(&mut scoring(), call(&[tokens.clone(), chat], &[("per_token", json!(true))])).expect("scored").outputs;
+    let answer = &out["records"][0]["answers"][0];
+    assert_eq!(answer["token_ids"], json!([40, 60]));
+    assert_eq!(answer["token_logprobs"], json!([-0.4f32, -0.6f32]));
+    assert!(answer.get("message").is_none(), "a token record has no message: {answer}");
+    assert_eq!(out["records"][0]["tokens"], json!(2));
+    assert_eq!(out["records"][1]["answers"].as_array().map(Vec::len), Some(2), "the chat record beside it is scored as before");
+
+    let hot = score(&mut scoring(), call(&[tokens], &[("temperature", json!(0.5))])).expect("scored").outputs;
+    assert!((hot["logprob"].as_f64().unwrap() - (-2.0)).abs() < 1e-6, "at temperature 0.5 the toy's -1.0 doubles: {hot}");
+    assert_eq!(hot["log_prob_temperature"], json!(0.5));
+}
+
+/// What a token record may not be is refused by record, before any pass: no context, nothing to score, an id outside
+/// the vocabulary, a field it does not have, a value that is not a token id; and a temperature out of range.
+#[test]
+fn a_bad_token_record_is_refused_by_record_before_any_pass() {
+    let vocab = tokenizer().vocab_size();
+    let good = json!({"prompt_token_ids": [1], "token_ids": [2]}).to_string();
+    let cases = [
+        json!({"prompt_token_ids": [], "token_ids": [2]}),
+        json!({"prompt_token_ids": [1], "token_ids": []}),
+        json!({"prompt_token_ids": [1], "token_ids": [vocab]}),
+        json!({"prompt_token_ids": [1], "token_ids": [2], "extra": true}),
+        json!({"prompt_token_ids": [1], "token_ids": [-2]}),
+        json!({"prompt_token_ids": [1]}),
+    ];
+    for bad in cases {
+        let mut sched = scoring();
+        let e = score(&mut sched, call(&[good.clone(), bad.to_string()], &[])).unwrap_err();
+        assert!(e.starts_with("[invalid-request]") && e.contains("record 2"), "{bad}: {e}");
+        assert_eq!(sched.decoder().scores_run, 0, "{bad}: refused before any pass");
+    }
+    for t in [0.0, -1.0, 1000.0] {
+        assert!(score(&mut scoring(), call(std::slice::from_ref(&good), &[("temperature", json!(t))])).unwrap_err().starts_with("[invalid-request]"), "temperature {t}");
+    }
 }
