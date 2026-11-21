@@ -44,6 +44,9 @@ pub enum Capability {
     /// A trainer that reads rows packed with several documents ([`crate::Batch::LmPacked`],
     /// [`crate::Model::reads_packed_rows`]).
     PackedRows,
+    /// A trainer whose MoE routers can be forced to the routing a rollout engine recorded
+    /// ([`TokenObjectives::set_routing_replay`]).
+    RoutingReplay,
 }
 
 impl Capability {
@@ -55,6 +58,7 @@ impl Capability {
             Capability::ChatLoraFineTune => "chat LoRA fine-tuning",
             Capability::KvRoundtrip => "a KV-cache round trip in its attention",
             Capability::PackedRows => "training on packed rows (several documents per row)",
+            Capability::RoutingReplay => "routing replay in its MoE routers",
         }
     }
 }
@@ -149,6 +153,26 @@ pub trait TokenObjectives {
         match element {
             None => Ok(()),
             Some(e) => Err(format!("this model's trainer cannot round-trip its keys and values through a {e:?} KV cache")),
+        }
+    }
+
+    /// The MoE calls the trainer's forward makes, in forward order (a looped model lists one per visit of a layer), when
+    /// it can replay recorded routing ([`Self::set_routing_replay`]); `None` (the default): it cannot. What a
+    /// [`crate::routing::RoutingRecord`] is validated against.
+    fn routing_calls(&self) -> Option<Vec<crate::routing::RouterCallShape>> {
+        None
+    }
+
+    /// Force the routing of the batches forwarded from now on (`Some`): each MoE call of the forward routes every
+    /// recorded position of the batch to the recorded experts, with the router's own weights over the current logits
+    /// ([`crate::moe::router_fwd_replay`]), and routes unrecorded positions itself; the backward differentiates what
+    /// the forward ran. `None` (the default state) routes everything itself. The replay's `batch` and `seq` must be
+    /// the next batch's. The default is a refusal naming the gap: a model that cannot replay must not be asked to
+    /// score a rollout as if it did.
+    fn set_routing_replay(&self, replay: Option<std::sync::Arc<crate::routing::RoutingReplay>>) -> Result<(), String> {
+        match replay {
+            None => Ok(()),
+            Some(_) => Err("this model's trainer cannot replay recorded MoE routing".to_string()),
         }
     }
 

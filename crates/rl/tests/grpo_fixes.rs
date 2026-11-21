@@ -64,7 +64,7 @@ impl SyncRollout for Scripted {
 }
 
 fn completion(tokens: &[u32]) -> Completion {
-    Completion { tokens: tokens.to_vec(), logprobs: vec![-1.0; tokens.len()], stop: StopReason::MaxNew, eos_logprob: None, policy_version: 0, cached_tokens: 0 }
+    Completion { tokens: tokens.to_vec(), logprobs: vec![-1.0; tokens.len()], stop: StopReason::MaxNew, eos_logprob: None, policy_version: 0, cached_tokens: 0, routing: None }
 }
 
 fn stopped(tokens: &[u32]) -> Completion {

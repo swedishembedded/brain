@@ -198,6 +198,9 @@ pub struct BlockTable {
     index_pages: Vec<Vec<u32>>,
     /// Node pages of each level of the same index's tree (see [`Self::node_pages`]).
     node_pages: Vec<Vec<u32>>,
+    /// The MoE routing a decoder records while it serves the sequence, when a caller asked for it (see
+    /// [`Self::routing_log_mut`]). Sequence metadata, not cache: [`Self::release`] keeps it.
+    routing: Option<Box<crate::routing::RoutingLog>>,
 }
 
 /// Unwind with the typed out-of-memory payload for a KV pool that could not back a request's blocks (`why` is the
@@ -326,6 +329,23 @@ impl BlockTable {
         self.cached_rows = rows;
     }
 
+    /// Record the sequence's MoE routing into `log` from now on: a decoder that records routing
+    /// ([`crate::serve::PagedDecoder::routing_calls`]) writes each MoE call's selected experts for every position it
+    /// computes through [`Self::routing_log_mut`].
+    pub fn begin_routing_log(&mut self, log: crate::routing::RoutingLog) {
+        self.routing = Some(Box::new(log));
+    }
+
+    /// The routing log being recorded for this sequence, `None` when nobody asked for one.
+    pub fn routing_log_mut(&mut self) -> Option<&mut crate::routing::RoutingLog> {
+        self.routing.as_deref_mut()
+    }
+
+    /// Stop recording and hand the log over.
+    pub fn take_routing_log(&mut self) -> Option<crate::routing::RoutingLog> {
+        self.routing.take().map(|b| *b)
+    }
+
     /// The `(physical_block, offset)` holding logical token `tok` (must be < len).
     pub fn locate(&self, tok: u32, block_size: u32) -> (u32, u32) {
         (self.blocks[(tok / block_size) as usize], tok % block_size)
@@ -406,7 +426,7 @@ impl BlockTable {
         for &b in &self.blocks {
             alloc.incref(b);
         }
-        BlockTable { blocks: self.blocks.clone(), len: self.len, kv_namespace: self.kv_namespace, state_row: None, cached_rows: 0, index_pages: Vec::new(), node_pages: Vec::new() }
+        BlockTable { blocks: self.blocks.clone(), len: self.len, kv_namespace: self.kv_namespace, state_row: None, cached_rows: 0, index_pages: Vec::new(), node_pages: Vec::new(), routing: None }
     }
 
     /// Copy-on-write the last (writable) block if it is shared: allocate a private
@@ -445,7 +465,7 @@ impl BlockTable {
     /// demoted from: the restored bytes are only valid under it.
     pub fn restore(kv_namespace: KvNamespace, blocks: Vec<u32>, len: u32) -> BlockTable {
         assert!(!blocks.is_empty() || len == 0, "restore: {len} tokens cannot live in zero blocks");
-        BlockTable { blocks, len, kv_namespace, state_row: None, cached_rows: 0, index_pages: Vec::new(), node_pages: Vec::new() }
+        BlockTable { blocks, len, kv_namespace, state_row: None, cached_rows: 0, index_pages: Vec::new(), node_pages: Vec::new(), routing: None }
     }
 
     /// Start a FRESH table from shared full prefix blocks (incref each): the

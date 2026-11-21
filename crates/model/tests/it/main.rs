@@ -149,6 +149,7 @@ mod rope2d_partial;
 mod rope_scaling_golden;
 mod router_bwd_expert_cap;
 mod router_replay;
+mod routing_replay_rollout;
 mod router_gate_expert_cap;
 mod router_gate_sigmoid_expert_cap;
 mod router_sigmoid_reference;

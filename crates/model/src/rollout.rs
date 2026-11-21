@@ -76,6 +76,11 @@ pub struct Completion {
     /// them: how much of this sample's prefill the group shared. `0` for a
     /// rollout without a cache.
     pub cached_tokens: usize,
+    /// The MoE routing the engine ran the prompt and these tokens with (routing replay, [`crate::routing`]), stamped
+    /// with [`Self::policy_version`]; `Some` only from a rollout asked to record it
+    /// ([`SchedulerRollout::record_routing`]). Positions the engine did not compute (a prompt prefix served from its
+    /// prefix cache, the last token, which is never fed back) are masked in it.
+    pub routing: Option<crate::routing::RoutingRecord>,
 }
 
 /// Sampling policy + stopping conditions shared by every completion a
@@ -284,7 +289,7 @@ impl<'a, M: Model> ModelRollout<'a, M> {
                 None => ctx.push(next),
             }
         }
-        Completion { tokens, logprobs, stop, eos_logprob: eos_lp, policy_version: 0, cached_tokens: 0 }
+        Completion { tokens, logprobs, stop, eos_logprob: eos_lp, policy_version: 0, cached_tokens: 0, routing: None }
     }
 }
 
@@ -345,6 +350,12 @@ impl<D: PagedDecoder> SchedulerRollout<D> {
     pub fn set_adapter(&mut self, adapter: Option<AdapterId>, version: u64) {
         self.adapter = adapter;
         self.policy_version = version;
+    }
+
+    /// Record the MoE routing of every sample from now on (`true`) and carry it on [`Completion::routing`], for a
+    /// trainer that replays it; `false` stops. Refused, naming the gap, by an engine that does not record routing.
+    pub fn record_routing(&mut self, on: bool) -> Result<(), String> {
+        self.sched.record_routing(on)
     }
 
     /// The version completions are stamped with now.
@@ -422,6 +433,7 @@ impl<D: PagedDecoder> Rollout for SchedulerRollout<D> {
             }
             let mut logprobs: HashMap<u64, Vec<f32>> = report.completed_logprobs.into_iter().collect();
             let mut meta: HashMap<u64, serve::Completion> = report.completed_meta.into_iter().collect();
+            let mut routing: HashMap<u64, crate::routing::RoutingLog> = report.completed_routing.into_iter().collect();
             for (id, tokens) in report.completed {
                 let logprobs = logprobs.remove(&id).expect("every completed request reports its log-probabilities");
                 let meta = meta.remove(&id).expect("every completed request reports how it was served");
@@ -429,7 +441,9 @@ impl<D: PagedDecoder> Rollout for SchedulerRollout<D> {
                     Some(_) => (StopReason::Eos, meta.stop_logprob),
                     None => (StopReason::MaxNew, None),
                 };
-                done.insert(id, Completion { tokens, logprobs, stop, eos_logprob, policy_version: self.policy_version, cached_tokens: meta.cached_tokens });
+                let positions = (prompt.len() + tokens.len()) as u32;
+                let routing = routing.remove(&id).map(|log| log.into_record(positions, self.policy_version));
+                done.insert(id, Completion { tokens, logprobs, stop, eos_logprob, policy_version: self.policy_version, cached_tokens: meta.cached_tokens, routing });
             }
             assert!(!report.finished.is_empty() || self.sched.pending(), "SchedulerRollout: the scheduler went idle with {} of {n} samples unfinished", n - done.len());
         }

@@ -109,6 +109,15 @@ pub trait PagedDecoder {
         crate::head_transform::HeadTransform::NONE
     }
 
+    /// The MoE calls this decoder records, in forward order, when a sequence's table carries a routing log
+    /// ([`BlockTable::routing_log_mut`]): for every position a prefill or decode step computes, each MoE call writes
+    /// the experts it selected there ([`crate::routing::RoutingLog::record`]); a position served from the prefix cache
+    /// is not computed and stays unrecorded. `None` (the default): the decoder does not record routing, and a caller
+    /// that asks for it ([`Scheduler::record_routing`]) is refused.
+    fn routing_calls(&self) -> Option<Vec<crate::routing::RouterCallShape>> {
+        None
+    }
+
     /// KV blocks needed to hold `tokens` cached positions.
     fn blocks_for(&self, tokens: u32) -> u32;
 
@@ -1400,6 +1409,9 @@ pub struct StepReport {
     pub completed_traces: Vec<(u64, Vec<f32>)>,
     /// For each of `completed`, how its prompt was served and why it stopped (see [`Completion`]).
     pub completed_meta: Vec<(u64, Completion)>,
+    /// For each of `completed`, the MoE routing the decoder recorded for its prompt and generated tokens, while
+    /// [`Scheduler::record_routing`] is on (position `p` is the `p`-th token of prompt then generated tokens).
+    pub completed_routing: Vec<(u64, crate::routing::RoutingLog)>,
     /// Requests preempted this iteration: their KV went to host RAM and their
     /// device blocks back to the pool (see [`crate::kv_offload`]).
     pub demoted: Vec<u64>,
@@ -1455,6 +1467,8 @@ struct Resume {
     think: Option<sampler::ThinkState>,
     /// Prompt tokens the first admission served from the prefix cache.
     cached_tokens: usize,
+    /// The routing recorded before the preemption, continued after it.
+    routing: Option<crate::routing::RoutingLog>,
 }
 
 /// What a finished request reports beside its tokens, the same for every decoder whatever shape its cache has.
@@ -1730,6 +1744,8 @@ pub struct Scheduler<D: PagedDecoder> {
     oldest_credit: Option<(u64, usize)>,
     /// Token rows of one KV block of the decoder's pool.
     block_rows: u32,
+    /// The decoder's MoE calls while every admitted sequence records its routing ([`Scheduler::record_routing`]).
+    routing_calls: Option<Vec<crate::routing::RouterCallShape>>,
 }
 
 impl<D: PagedDecoder> Scheduler<D> {
@@ -1770,7 +1786,19 @@ impl<D: PagedDecoder> Scheduler<D> {
             pressure: MemoryPressure::default(),
             oldest_credit: None,
             block_rows,
+            routing_calls: None,
         }
+    }
+
+    /// Record the MoE routing of every sequence admitted from now on (`true`), reported with its completion in
+    /// [`StepReport::completed_routing`]; `false` stops. Refused, naming the decoder's gap, when the decoder does not
+    /// record routing ([`PagedDecoder::routing_calls`]).
+    pub fn record_routing(&mut self, on: bool) -> Result<(), String> {
+        self.routing_calls = match on {
+            false => None,
+            true => Some(self.dec.routing_calls().ok_or_else(|| "this decoder does not record its MoE routing (PagedDecoder::routing_calls)".to_string())?),
+        };
+        Ok(())
     }
 
     /// Install an admission policy (default: [`UnboundedQueue`], the historical
@@ -2240,7 +2268,11 @@ impl<D: PagedDecoder> Scheduler<D> {
             let mut r = self.swapped.pop_front().expect("non-empty");
             match self.dec.promote_sequence(r.id) {
                 Ok(table) => {
+                    let routing = r.table.take_routing_log();
                     r.table = table;
+                    if let Some(log) = routing {
+                        r.table.begin_routing_log(log);
+                    }
                     report.promoted.push(r.id);
                     self.running.push(r);
                 }
@@ -2405,6 +2437,10 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// adapter pinned; a fresh one gives the pin back, since admission pins again.
     fn requeue_prefilling(&mut self, mut p: Prefilling) {
         self.dec.release_table(&mut p.table);
+        // A resumed sequence keeps what it recorded; a fresh one records its prompt again when it is prefilled again.
+        if let Some(resume) = &mut p.resume {
+            resume.routing = p.table.take_routing_log();
+        }
         if p.resume.is_none() {
             self.unpin(p.adapter);
         }
@@ -2419,11 +2455,12 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// as part of the context to prefill.
     fn requeue_for_recompute(&mut self, mut r: Running) {
         self.dec.release_table(&mut r.table);
+        let routing = r.table.take_routing_log();
         let Running { id, adapter, generated, logprobs, whole, max_new, stop, next_input, mut context, spec, sample, seed, rng, think, embeds, cached_tokens, .. } = r;
         let uncached = context.pop();
         debug_assert_eq!(uncached, Some(next_input), "the newest token is the one with no cache entry yet");
         let req = Request { prompt: context, max_new, stop };
-        self.waiting.push_front(Waiting { id, req, adapter, sample, seed, resume: Some(Resume { generated, logprobs, whole, next_input, spec, rng, think, cached_tokens }), embeds, bad_token: None });
+        self.waiting.push_front(Waiting { id, req, adapter, sample, seed, resume: Some(Resume { generated, logprobs, whole, next_input, spec, rng, think, cached_tokens, routing }), embeds, bad_token: None });
     }
 
     /// Index of the first waiting request that can be admitted this
@@ -2600,7 +2637,7 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// picked from the prefill's final hidden state.
     fn start_running(&mut self, p: Prefilling, hidden: Vec<f32>, first_candidates: Vec<(u32, f32)>, report: &mut StepReport) {
         let Prefilling { id, prompt, max_new, stop, adapter, sample, seed, table, resume, embeds, .. } = p;
-        if let Some(Resume { generated, logprobs, whole, next_input, spec, rng, think, cached_tokens }) = resume {
+        if let Some(Resume { generated, logprobs, whole, next_input, spec, rng, think, cached_tokens, .. }) = resume {
             // The cache is whole again; the token to decode next was chosen
             // before the preemption, so the prefill's own output is not used.
             let mut context = prompt;
@@ -2689,7 +2726,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         if self.dec.free_blocks() < want {
             return false;
         }
-        let Waiting { id, req, adapter, sample, seed, resume, embeds, .. } = self.waiting.remove(pos).expect("admissible position");
+        let Waiting { id, req, adapter, sample, seed, mut resume, embeds, .. } = self.waiting.remove(pos).expect("admissible position");
         // Service starts here; a preempted request that comes back keeps its first start.
         let now = (self.clock)();
         self.started.entry(id).or_insert(now);
@@ -2703,6 +2740,11 @@ impl<D: PagedDecoder> Scheduler<D> {
             }
             None => BlockTable::new(),
         };
+        let mut table = table;
+        if let Some(calls) = &self.routing_calls {
+            let earlier = resume.as_mut().and_then(|r| r.routing.take());
+            table.begin_routing_log(earlier.unwrap_or_else(|| crate::routing::RoutingLog::new(calls)));
+        }
         self.prefilling.push_back(Prefilling { id, prompt: req.prompt, done: 0, adopted: cached, max_new: req.max_new, stop: req.stop, adapter, sample, seed, table, resume, embeds, shared_hint: None });
         self.hint_for_waiting_sharers();
         true
@@ -3192,6 +3234,9 @@ impl<D: PagedDecoder> Scheduler<D> {
             if self.running[i].done {
                 let mut r = self.running.remove(i);
                 self.dec.release_table(&mut r.table);
+                if let Some(log) = r.table.take_routing_log() {
+                    report.completed_routing.push((r.id, log));
+                }
                 self.unpin(r.adapter);
                 if let Some(trace) = Self::trace_of(&r) {
                     report.completed_traces.push((r.id, trace));
