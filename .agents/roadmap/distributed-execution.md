@@ -613,6 +613,22 @@ Scope: Running one training job as ranks across machines, and serving one model 
   51.5 GB. Communication plus waiting is at most 84 of 210 ms (40%) for
   ZeRO-2; the ranks' losses match the replicated run (0.0049 at step 6).
 
+- **Parameter-sharded (ZeRO-3) full fine-tune of Qwen3.8-27B-FP8, 8 GH200s on
+  two nodes (2026-11-21, brain 8a7bc274d plus the freed-block fix, NCCL 2.32.3
+  over the libfabric plugin, one process per card, batch 1, synthetic tokens,
+  window of 2 layers, recomputed activations, two-pass global clip so every
+  step runs two backward passes, 3 steps, rank 0).**
+  - block 1024: 5.9 s a step (forward 0.55 s, backward passes, reductions and
+    updates 5.3 s), peak 73.5 GiB a card. nsys on rank 0, one step: NCCL
+    kernels busy 2.6 s (43%: reduce-scatter 1.31 s, all-gather 1.26 s),
+    compute kernels 3.9 s, NCCL alone (not overlapped with compute) 1.7 s
+    (28% of the step).
+  - block 4096: 15.6 s a step (forward 0.8 s), peak 84.4 GiB a card.
+  - first 16 layers on 4 cards of one node, block 512: 0.99 s, 55.6 GiB.
+  Before the resident build held its freed blocks the block-1024 step took
+  29 s: 80k cuMemAlloc/cuMemFree calls, each free waiting for the device,
+  took 85-95% of the host's time (knowledge 311's mechanism).
+
 ## Plan: multi-node clusters (2026-11-21)
 
 Target machine class: Slurm allocations of GH200 nodes, 4 cards per node on
@@ -738,7 +754,7 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         Cross-node served training would take a job plan in the request (the
         plan, this server's rank range and the secret's digest) and the
         server's own sealed coordinator address.
-- [ ] **C3 sharded training.** Optimizer state and gradient sharding over the dp
+- [x] **C3 sharded training.** Optimizer state and gradient sharding over the dp
       group (reduce-scatter + all-gather), then parameter sharding; tensor
       parallelism inside a node over NVLink, sharded data parallelism across
       nodes. Gate: a full-parameter 27B fine-tune step that does not fit one card.
@@ -795,14 +811,14 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         `resident_shard`, qwen35 `sharded_parameters`. Open: writing the trained
         model or a resume state of a parameter-sharded run is refused (no
         collective gather on save yet); the SDK path therefore refuses too.
-      - [ ] The 27B gate. Smoke 2026-11-21 on n442 (4 cards): Qwen3.8-27B-FP8,
-        first 16 layers, block 512, window 2, two-pass clip, 3 steps: 0.99 s a
-        step, 55.6 GB peak per card, loss falling, every rank the same global
-        norm. All 64 layers on 4 cards were refused by the planner (116 GB
-        needed per card against 89 GB free), so the full model needs 8 or more
-        cards. The 8 and 12 card runs (n445+n467, +n442) were not reached in
-        this lane's window. Harness: qwen35 `measure_sharded_parameters_rank`
-        (one process per card under srun).
+      - [x] The 27B gate (2026-11-21): a full-parameter fine-tune step of
+        Qwen3.8-27B-FP8 (all 64 layers, bf16 values from the FP8 checkpoint,
+        f32 master and AdamW state) parameter-sharded over 8 GH200s on two
+        nodes (Measured). It does not fit fewer: 4 cards are refused by the
+        planner at 116 GB a card against 89 GB free, one card would need about
+        384 GB of state alone. Harness: qwen35
+        `measure_sharded_parameters_rank` (one process per card under srun).
+        Open: a 12- and 16-card scaling point; saving the trained model.
       - [ ] Overlap of ZeRO-2's reduce-scatter with the backward (per-unit
         gradient-ready hook in whole-model backwards).
 - [ ] **C4 serving across nodes.** A router capability in front of several
