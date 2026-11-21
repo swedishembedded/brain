@@ -29,6 +29,7 @@ use std::cell::Cell;
 
 use gpu_core::{BufUsage, DeviceBuffer, Gpu, Step};
 use ::model::block;
+use ::model::looped::VisitPlan;
 use paramstore::ParamStore;
 
 use crate::config::OuroConfig;
@@ -58,9 +59,11 @@ pub struct Decode<'a> {
     pub ps: &'a ParamStore,
     pub cfg: &'a OuroConfig,
     cap: u32,
-    /// `(pass, layer)` KV histories, `[cap * kv_dim]` each.
-    kv_k: Vec<Vec<DeviceBuffer>>,
-    kv_v: Vec<Vec<DeviceBuffer>>,
+    /// Which layer each visit runs and the KV slot it owns (the base model's plan).
+    plan: &'a VisitPlan,
+    /// One KV history per slot of the plan, `[cap * kv_dim]` each.
+    kv_k: Vec<DeviceBuffer>,
+    kv_v: Vec<DeviceBuffer>,
     token: DeviceBuffer,
     h: [DeviceBuffer; 2],
     hs: Vec<DeviceBuffer>,
@@ -84,18 +87,9 @@ impl<'a> Decode<'a> {
         let ncap = cap as u64;
         let st = |x: u64| gpu.storage(x);
 
-        let mut kv_k = Vec::new();
-        let mut kv_v = Vec::new();
-        for _ in 0..cfg.total_ut_steps {
-            let mut pk = Vec::new();
-            let mut pv = Vec::new();
-            for _ in 0..cfg.n_layers {
-                pk.push(st(ncap * hkv));
-                pv.push(st(ncap * hkv));
-            }
-            kv_k.push(pk);
-            kv_v.push(pv);
-        }
+        let plan = base.plan();
+        let kv_k = (0..plan.slots()).map(|_| st(ncap * hkv)).collect();
+        let kv_v = (0..plan.slots()).map(|_| st(ncap * hkv)).collect();
 
         let token = gpu.buffer("decode_token", 4, BufUsage::STORAGE | BufUsage::COPY_DST);
         let h = [st(d), st(d)];
@@ -120,7 +114,7 @@ impl<'a> Decode<'a> {
             scores: st(nh * ncap),
             probs: st(nh * ncap),
         };
-        Decode { gpu, ps, cfg, cap, kv_k, kv_v, token, h, hs, gates, logits, scratch, exit: Cell::new(0) }
+        Decode { gpu, ps, cfg, cap, plan, kv_k, kv_v, token, h, hs, gates, logits, scratch, exit: Cell::new(0) }
     }
 
     pub fn capacity(&self) -> u32 {
@@ -162,8 +156,7 @@ impl<'a> Decode<'a> {
         let s = &self.scratch;
         let (d, ff) = (cfg.d_model, cfg.d_ff);
         let (hq, hkv, nh, nkv, hd) = (cfg.q_dim(), cfg.kv_dim(), cfg.n_heads, cfg.n_kv_heads, cfg.head_dim);
-        let t = cfg.total_ut_steps as usize;
-        let l_count = cfg.n_layers as usize;
+        let t = self.plan.shape().passes;
 
         let mut steps = vec![gpu.step(model::EMBED_ID, &[&self.token, self.ps.w("tok.weight"), &self.h[0]], &[d, 1], d)];
         for p in 0..t {
@@ -171,8 +164,9 @@ impl<'a> Decode<'a> {
             // input is the embedding buffer, so the first output must be the
             // other one; later passes start from `hs[p-1]` and may write h[0].
             let mut prev: &DeviceBuffer = if p == 0 { &self.h[0] } else { &self.hs[p - 1] };
-            for l in 0..l_count {
-                let out: &DeviceBuffer = if p == 0 { &self.h[(l + 1) % 2] } else { &self.h[l % 2] };
+            for (i, visit) in self.plan.pass(p).iter().enumerate() {
+                let out: &DeviceBuffer = if p == 0 { &self.h[(i + 1) % 2] } else { &self.h[i % 2] };
+                let l = visit.layer;
                 let pfx = |name: &str| format!("blocks.{l}.{name}");
                 steps.push(block::rmsnorm_fwd(gpu, &ids, prev, self.ps.w(&pfx("ln1.weight")), &s.xn1, d, 1, cfg.norm_eps));
                 steps.push(gpu.step(model::MATMUL_ID, &[&s.xn1, self.ps.w(&pfx("attn.wq.weight")), &s.q], &[1, d, hq], hq));
@@ -181,7 +175,7 @@ impl<'a> Decode<'a> {
                 steps.push(rope_at(gpu, &s.q, 1, nh, hd, hq, pos, cfg.rope_theta));
                 steps.push(rope_at(gpu, &s.k, 1, nkv, hd, hkv, pos, cfg.rope_theta));
                 steps.extend(block::gqa_decode_step(
-                    gpu, &dec_ids, nh, nkv, hd, pos, self.cap, &s.q, &s.k, &s.v, &self.kv_k[p][l], &self.kv_v[p][l], &s.scores, &s.probs, &s.ctx,
+                    gpu, &dec_ids, nh, nkv, hd, pos, self.cap, &s.q, &s.k, &s.v, &self.kv_k[visit.slot], &self.kv_v[visit.slot], &s.scores, &s.probs, &s.ctx,
                 ));
                 steps.push(gpu.step(model::MATMUL_ID, &[&s.ctx, self.ps.w(&pfx("attn.wo.weight")), &s.proj], &[1, hq, d], d));
                 steps.push(block::rmsnorm_fwd(gpu, &ids, &s.proj, self.ps.w(&pfx("ln1_2.weight")), &s.xn1_2, d, 1, cfg.norm_eps));

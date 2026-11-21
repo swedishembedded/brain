@@ -30,9 +30,10 @@ use std::cell::{Cell, RefCell};
 use gpu_core::provider::library::GemmPrecision;
 use gpu_core::{BufUsage, DeviceBuffer, Gpu, Step};
 use model::block::{self, FlashGqaIds, Gqa, KernelIds};
+use model::looped::VisitPlan;
 use model::ops::{Ops, Weight};
 use model::saved::{Residuals, SavedFormat, SavedPolicy};
-use model::streamed::{RevisitingPass, StreamedStore};
+use model::streamed::{LayeredPass, RevisitingPass, StreamedStore};
 use model::segmented::SegmentedPass;
 use paramstore::ParamStore;
 
@@ -313,9 +314,11 @@ pub struct Ouro {
     /// The weight of the exit-distribution entropy in the objective ([`model::Model::set_exit_entropy`]); 0: off.
     exit_entropy: Cell<f32>,
 
+    /// Which layer runs at each logical depth: the whole stack, once per pass.
+    plan: VisitPlan,
     tokens: DeviceBuffer,
     targets: DeviceBuffer,
-    /// `T * L + 1` boundary residuals, `[n, d]` each.
+    /// One boundary residual per visit plus the last output (`T * L + 1`), `[n, d]` each.
     res: Residuals,
     /// `T` pass outputs: the final-normed hidden state each pass ends on.
     hs: Vec<DeviceBuffer>,
@@ -423,7 +426,8 @@ impl Ouro {
 
         let tokens = gpu.buffer("tokens", n * 4, BufUsage::STORAGE | BufUsage::COPY_DST);
         let targets = gpu.buffer("targets", n * 4, BufUsage::STORAGE | BufUsage::COPY_DST);
-        let boundaries = (cfg.total_ut_steps * cfg.n_layers + 1) as usize;
+        let plan = cfg.visit_plan()?;
+        let boundaries = plan.boundaries();
         let res = Residuals::new((0..boundaries).map(|_| st(n * d)).collect(), 0..boundaries);
         let hs = (0..cfg.total_ut_steps).map(|_| st(n * d)).collect::<Vec<_>>();
         let gates = (0..cfg.total_ut_steps).map(|_| st(n)).collect::<Vec<_>>();
@@ -506,6 +510,7 @@ impl Ouro {
             count: Cell::new(1.0),
             supervised: RefCell::new(Vec::new()),
             exit_entropy: Cell::new(0.0),
+            plan,
             tokens,
             targets,
             res,
@@ -543,6 +548,11 @@ impl Ouro {
     }
     pub fn steps(&self) -> u32 {
         self.cfg.total_ut_steps
+    }
+
+    /// Which layer runs at each logical depth (and in which KV slot).
+    pub fn plan(&self) -> &VisitPlan {
+        &self.plan
     }
     pub fn is_training(&self) -> bool {
         self.train
@@ -639,24 +649,24 @@ impl Ouro {
         let ids = self.k();
         let n = self.rows();
         let d = cfg.d_model;
-        let t = cfg.total_ut_steps;
+        let t = self.plan.shape().passes;
 
         let mut pass = SegmentedPass::default();
         let mut steps = vec![self.gpu.step(EMBED, &[&self.tokens, self.ps.w("tok.weight"), &self.res[0]], &[d, n], n * d)];
         self.res.round_trip(&self.gpu, &mut steps, 0);
-        for p in 0..t as usize {
+        for p in 0..t {
             pass.segment(&mut steps, None);
-            for l in 0..cfg.n_layers as usize {
-                let i = p * cfg.n_layers as usize + l;
+            for (l, v) in self.plan.pass(p).iter().enumerate() {
+                let i = v.index;
                 // The reference reassigns `hidden_states = norm(hidden_states)`
                 // at the end of every pass, so pass p > 0 consumes the previous
                 // pass's NORMED output, not its pre-norm residual.
                 let h_in: &DeviceBuffer = if l == 0 && p > 0 { &self.hs[p - 1] } else { &self.res[i] };
-                self.layer_steps_into(&mut steps, l, h_in, &self.res[i + 1], None);
+                self.layer_steps_into(&mut steps, v.layer, h_in, &self.res[i + 1], None);
                 self.res.round_trip(&self.gpu, &mut steps, i + 1);
-                pass.segment(&mut steps, Some(l));
+                pass.segment(&mut steps, Some(v.layer));
             }
-            let last = &self.res[(p + 1) * cfg.n_layers as usize];
+            let last = &self.res[self.pass_end(p)];
             steps.push(block::rmsnorm_fwd(&self.gpu, &ids, last, self.ps.w("norm.weight"), &self.hs[p], d, n, cfg.norm_eps));
             // Exit gate: one linear over the model width, plus its bias.
             self.linear(&mut steps, &self.hs[p], "gate.weight", &self.gates[p], n, d, 1);
@@ -664,6 +674,11 @@ impl Ouro {
         }
         pass.segment(&mut steps, None);
         pass
+    }
+
+    /// The residual boundary pass `p` ends on (its last visit's output, before the final norm).
+    fn pass_end(&self, p: usize) -> usize {
+        self.plan.pass(p).last().expect("a pass has visits").index + 1
     }
 
     fn head_steps(&self, pass: usize) -> Vec<Step> {
@@ -699,8 +714,7 @@ impl Ouro {
         let n = self.rows();
         let d = cfg.d_model;
         let v = cfg.vocab;
-        let t = cfg.total_ut_steps as usize;
-        let l_count = cfg.n_layers as usize;
+        let t = self.plan.shape().passes;
         let g = self.grad.as_ref().expect("training graph on an inference build");
         let mut pass = SegmentedPass::default();
         let mut steps = Vec::new();
@@ -733,20 +747,22 @@ impl Ouro {
         // one producer except `dhs[p]`, which the head wrote and the next
         // pass's first layer accumulates into.
         for p in (0..t).rev() {
-            self.res.restore(&self.gpu, &mut steps, (p + 1) * l_count);
-            let last = &self.res[(p + 1) * l_count];
-            steps.extend(block::rmsnorm_bwd(&self.gpu, &ids, last, self.ps.w("norm.weight"), &g.dhs[p], &g.dres[(p + 1) * l_count], &g.rms_inv, Some(self.ps.g("norm.weight")), d, n, cfg.norm_eps));
-            for l in (0..l_count).rev() {
-                let i = p * l_count + l;
-                let h_in: &DeviceBuffer = if l == 0 && p > 0 { &self.hs[p - 1] } else { &self.res[i] };
-                if !(l == 0 && p > 0) {
+            let end = self.pass_end(p);
+            self.res.restore(&self.gpu, &mut steps, end);
+            let last = &self.res[end];
+            steps.extend(block::rmsnorm_bwd(&self.gpu, &ids, last, self.ps.w("norm.weight"), &g.dhs[p], &g.dres[end], &g.rms_inv, Some(self.ps.g("norm.weight")), d, n, cfg.norm_eps));
+            for (l, visit) in self.plan.pass(p).iter().enumerate().rev() {
+                let i = visit.index;
+                let enters = l == 0 && p > 0;
+                let h_in: &DeviceBuffer = if enters { &self.hs[p - 1] } else { &self.res[i] };
+                if !enters {
                     self.res.restore(&self.gpu, &mut steps, i);
                 }
                 // Rebuild the layer's internals from its boundary residual.
                 pass.segment(&mut steps, None);
-                self.layer_steps_into(&mut steps, l, h_in, &self.res[i + 1], None);
-                self.layer_bwd_into(&mut steps, l, h_in, &g.dres[i + 1], if l == 0 && p > 0 { &g.dhs[p - 1] } else { &g.dres[i] }, l == 0 && p > 0);
-                pass.segment(&mut steps, Some(l));
+                self.layer_steps_into(&mut steps, visit.layer, h_in, &self.res[i + 1], None);
+                self.layer_bwd_into(&mut steps, visit.layer, h_in, &g.dres[i + 1], if enters { &g.dhs[p - 1] } else { &g.dres[i] }, enters);
+                pass.segment(&mut steps, Some(visit.layer));
             }
         }
 
@@ -918,7 +934,8 @@ impl Ouro {
     /// `n_layers` is that pass's pre-norm output).
     pub fn read_res(&self, pass: usize, layer: usize) -> Vec<f32> {
         assert!(self.res.format() == SavedFormat::F32, "ouro: narrow boundary residuals keep no per-layer stream to read");
-        let i = pass * self.cfg.n_layers as usize + layer;
+        assert!(layer <= self.cfg.n_layers as usize, "ouro: layer {layer} of a {}-layer stack", self.cfg.n_layers);
+        let i = self.plan.pass(pass)[0].index + layer;
         self.gpu.read(&self.res[i], self.rows() as usize * self.cfg.d_model as usize)
     }
 }
@@ -1133,7 +1150,10 @@ impl model::Model for Ouro {
                     assert!(self.backward_pending.replace(false), "ouro layer-streamed full fine-tune: adamw_step without a backward");
                 }
                 let args = model::resident_ft::StepArgs { step: t, lr, wd, adam, clip, extra_scale };
-                stream.adamw_step(&self.gpu, &self.ps, opt, &RevisitingPass(&self.bwd_steps), &args).unwrap_or_else(|e| panic!("ouro layer-streamed update: {e}"));
+                // A layer visited once per pass carries its gradient across its visits.
+                let revisiting = RevisitingPass(&self.bwd_steps);
+                let bwd: &dyn LayeredPass = if self.plan.revisits() { &revisiting } else { &self.bwd_steps };
+                stream.adamw_step(&self.gpu, &self.ps, opt, bwd, &args).unwrap_or_else(|e| panic!("ouro layer-streamed update: {e}"));
             }
             None => opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale),
         }

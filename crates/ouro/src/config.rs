@@ -14,6 +14,7 @@
 //! projection. The **same** 48 layers run on every step, so the layer count is
 //! a shape fact while `total_ut_steps` is the compute axis.
 
+use model::looped::{Attention, LoopShape, VisitPlan};
 use serde_json::Value;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -159,6 +160,12 @@ impl OuroConfig {
             ));
         }
         Ok(())
+    }
+
+    /// The visit plan: the whole stack looped `total_ut_steps` times (no prelude, no coda), full causal attention in
+    /// every layer. Every pass's visits own their KV slots.
+    pub fn visit_plan(&self) -> Result<VisitPlan, String> {
+        VisitPlan::uniform(LoopShape::whole_stack(self.n_layers as usize, self.total_ut_steps as usize), Attention::Full).map_err(|e| format!("ouro config: {e}"))
     }
 
     /// The released config's own spelling, for a checkpoint card.

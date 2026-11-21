@@ -461,6 +461,18 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
   - It is used by inkling2's forward, backward, serving and streaming.
   - It is shaped so ouro and huginn can migrate to it (tracked in their ledgers; not a
     blocker).
+
+  Done (2026-11-21): `model::looped::{VisitPlan, LoopShape, Visit, Segment, Attention}`.
+  `VisitPlan::new(shape, |layer| Attention::Full | Attention::Window(n))` lists every
+  logical visit in forward order with its physical `layer`, `segment`, `pass`, `attention`
+  and state `slot` (one per visit, or `share_core_slots(r)` for a ring); `pass(p)`,
+  `prelude()`, `coda()`, `visits_of(layer)`, `boundaries()` (visit i reads boundary i,
+  writes i+1), `revisits()` (drives `RevisitingPass`), `count(attention)` (pool charging),
+  `slot_owners()`. `crates/model/tests/it/visit_plan.rs` holds it to the tiny golden's
+  recorded visit order. Ouro and huginn migrated onto it in the same series (their
+  forward, backward, decode and paged engines; outputs, gradients and served tokens
+  bit-identical before and after on cpu). The reference's own cache numbering differs
+  (manifest `cache_slot`); brain's slot is the visit index.
 - **I2.2** `crates/inkling2`:
   - Config (strict serde, `deny_unknown_fields`, every field validated).
   - The `arch` row for `Inkling2LoopForConditionalGeneration` / `inkling2_loop`, plus the

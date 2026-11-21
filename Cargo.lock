@@ -1909,7 +1909,6 @@ dependencies = [
  "brain-gpu-core",
  "brain-kernels",
  "brain-model",
- "brain-modelstore",
  "brain-optim",
  "brain-paramstore",
  "brain-testutil",

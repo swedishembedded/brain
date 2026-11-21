@@ -54,6 +54,13 @@ gate and a pass-selected or exit-weighted head.
   on every parameter (the shared 2-layer stack visited three times) on cpu,
   wgpu, native Vulkan and CUDA.
 
+- Visit bookkeeping on the shared plan (2026-11-21): the trunk, the training
+  backward, the decode engine and the paged engine walk
+  `model::looped::VisitPlan` (`OuroConfig::visit_plan`, the whole stack looped
+  `total_ut_steps` times); KV planes are one per visit slot. Every output,
+  loss, gradient, decode step and served token was bit-identical before and
+  after on cpu.
+
 ## Training
 
 - The objective is the reference's: every pass's cross-entropy weighted by

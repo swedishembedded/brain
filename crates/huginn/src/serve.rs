@@ -41,6 +41,7 @@ use std::collections::HashMap;
 
 use gpu_core::{BufUsage, DeviceBuffer, Gpu, Step};
 use ::model::block::{self, Gqa};
+use ::model::looped::{Visit, VisitPlan};
 use ::model::paged::{BlockAllocator, BlockTable};
 use ::model::serve::PagedDecoder;
 use paramstore::ParamStore;
@@ -119,7 +120,7 @@ struct PrefillBufs {
 
 /// Dispatches one stage's RoPE and attention into `ctx` (the prefill variant
 /// also scatters the chunk's K/V into that stage's paged plane).
-type Attention<'a> = dyn FnMut(&mut Vec<Step>, usize, &DeviceBuffer, &DeviceBuffer, &DeviceBuffer, &DeviceBuffer) + 'a;
+type Attention<'a> = dyn FnMut(&mut Vec<Step>, &Visit, &DeviceBuffer, &DeviceBuffer, &DeviceBuffer, &DeviceBuffer) + 'a;
 
 pub struct Engine {
     gpu: Gpu,
@@ -135,12 +136,11 @@ pub struct Engine {
     max_bt: u32,
     /// Per-sequence logit-addressable capacity (`max_bt * block_size`).
     cap: u32,
-    /// Weight prefix of each stage, in execution order.
-    stages: Vec<String>,
-    /// The KV plane each stage reads and writes. Without sharing this is the
-    /// stage's own index; under a ring, several recurrent stages map to the
-    /// same plane and the later one overwrites the earlier one's history.
-    stage_plane: Vec<usize>,
+    /// The stages (visits) in execution order: the block each runs and the KV
+    /// plane (slot) it reads and writes. Without sharing a stage owns its
+    /// plane; under a ring, several recurrent stages map to the same plane and
+    /// the later one overwrites the earlier one's history.
+    plan: VisitPlan,
     /// `[max_tokens, d]` K/V planes, one per plane index.
     k_pool: Vec<DeviceBuffer>,
     v_pool: Vec<DeviceBuffer>,
@@ -266,38 +266,15 @@ impl Engine {
 
         // The stage list: prelude, every recurrent iteration's core blocks in
         // order, coda. A core stage repeats its weights on every iteration but
-        // owns its own history.
-        let mut stages = Vec::with_capacity((cfg.n_prelude + steps * cfg.n_recurrent + cfg.n_coda) as usize);
-        for i in 0..cfg.n_prelude {
-            stages.push(format!("prelude.{i}"));
-        }
-        for _ in 0..steps {
-            for i in 0..cfg.n_recurrent {
-                stages.push(format!("core.{i}"));
-            }
-        }
-        for i in 0..cfg.n_coda {
-            stages.push(format!("coda.{i}"));
-        }
-        let stage_count = stages.len();
-
-        // The plane each stage reads and writes. Prelude and coda stages always
-        // own theirs; the recurrent stages wrap around a ring of `share` when
-        // one is asked for.
-        let core_stages = (steps * cfg.n_recurrent) as usize;
-        let core_planes = share.map_or(core_stages, |r| (r as usize).min(core_stages));
-        let mut stage_plane = Vec::with_capacity(stage_count);
-        for i in 0..cfg.n_prelude as usize {
-            stage_plane.push(i);
-        }
-        for k in 0..core_stages {
-            stage_plane.push(cfg.n_prelude as usize + k % core_planes.max(1));
-        }
-        for i in 0..cfg.n_coda as usize {
-            stage_plane.push(cfg.n_prelude as usize + core_planes + i);
-        }
-        let planes = cfg.n_prelude as usize + core_planes + cfg.n_coda as usize;
-        debug_assert_eq!(stage_plane.len(), stage_count);
+        // owns its own history, unless the core's stages share a ring of
+        // `share` planes. Prelude and coda stages always own theirs.
+        let plan = cfg.visit_plan(steps).expect("huginn: a valid config has a visit plan");
+        let plan = match share {
+            Some(r) => plan.share_core_slots(r as usize).expect("huginn: a positive ring of KV planes"),
+            None => plan,
+        };
+        let stage_count = plan.len();
+        let planes = plan.slots();
 
         let allocs = (0..planes).map(|_| BlockAllocator::new(num_blocks, block_size)).collect();
         let k_pool = (0..planes).map(|_| gpu.storage(max_tokens as u64 * d as u64)).collect();
@@ -345,8 +322,7 @@ impl Engine {
             block_size,
             max_bt,
             cap,
-            stages,
-            stage_plane,
+            plan,
             k_pool,
             v_pool,
             rows: HashMap::new(),
@@ -398,8 +374,8 @@ impl Engine {
     }
 
     /// The plane every stage reads and writes, in execution order.
-    pub fn stage_planes(&self) -> &[usize] {
-        &self.stage_plane
+    pub fn stage_planes(&self) -> Vec<usize> {
+        self.plan.visits().iter().map(|v| v.slot).collect()
     }
 
     fn ensure_row(&mut self, table: &mut BlockTable) -> u32 {
@@ -438,7 +414,7 @@ impl Engine {
         &self,
         steps: &mut Vec<Step>,
         sb: &BlockBufs,
-        stage: usize,
+        visit: &Visit,
         x_in: &DeviceBuffer,
         x_out: &DeviceBuffer,
         m: u32,
@@ -448,7 +424,8 @@ impl Engine {
         let gpu = &self.gpu;
         let ids = model::kernel_ids();
         let (d, ff) = (cfg.d_model, cfg.d_ff);
-        let w = |leaf: &str| format!("{}.{leaf}", self.stages[stage]);
+        let name = cfg.block_name(visit.layer);
+        let w = |leaf: &str| format!("{name}.{leaf}");
 
         steps.push(block::rmsnorm_fwd(gpu, &ids, x_in, self.ps.w(&w("ln1.weight")), &sb.xn1, d, m, cfg.norm_eps));
         self.linear(steps, &sb.xn1, &w("attn.wqkv.weight"), &sb.qkv, m, d, 3 * d);
@@ -457,7 +434,7 @@ impl Engine {
         self.copy_cols(steps, &sb.qkv, m, d, 3 * d, 2 * d, &sb.v, d, 0);
         steps.push(gpu.step(model::BIAS_ADD_ID, &[&sb.q, self.ps.w(&w("attn.q_bias"))], &[m, d], m * d));
         steps.push(gpu.step(model::BIAS_ADD_ID, &[&sb.k, self.ps.w(&w("attn.k_bias"))], &[m, d], m * d));
-        attention(steps, stage, &sb.q, &sb.k, &sb.v, &sb.ctx);
+        attention(steps, visit, &sb.q, &sb.k, &sb.v, &sb.ctx);
         self.linear(steps, &sb.ctx, &w("attn.wo.weight"), &sb.proj, m, d, d);
         steps.push(gpu.step(model::ADD2_ID, &[&sb.proj, x_in, &sb.tmp], &[m * d], m * d));
         steps.push(block::rmsnorm_fwd(gpu, &ids, &sb.tmp, self.ps.w(&w("ln2.weight")), &sb.xn2, d, m, cfg.norm_eps));
@@ -500,10 +477,10 @@ impl Engine {
         let sb = &self.sb;
         let d = cfg.d_model;
         let (nh, hd) = (cfg.n_heads, cfg.head_dim);
-        let mut stage = 0usize;
 
-        let mut attention = |steps: &mut Vec<Step>, stage: usize, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, ctx: &DeviceBuffer| {
-            let plane = self.stage_plane[stage];
+        let mut attention = |steps: &mut Vec<Step>, visit: &Visit, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, ctx: &DeviceBuffer| {
+            let stage = visit.index;
+            let plane = visit.slot;
             steps.push(gpu.step_buf(model::ROPE_AT_ID, &self.rope_uni[stage], &[q], nh * hd / 2));
             steps.push(gpu.step_buf(model::ROPE_AT_ID, &self.rope_uni[stage], &[k], nh * hd / 2));
             steps.extend(block::gqa_decode_batched_step(
@@ -539,9 +516,8 @@ impl Engine {
         // need their own buffers: the residual pair is overwritten by the
         // first core block.
         let mut cur = 1usize;
-        for _ in 0..cfg.n_prelude {
-            self.block(&mut steps, sb, stage, &self.h[cur], &self.h[1 - cur], 1, &mut attention);
-            stage += 1;
+        for v in self.plan.prelude() {
+            self.block(&mut steps, sb, v, &self.h[cur], &self.h[1 - cur], 1, &mut attention);
             cur = 1 - cur;
         }
         self.copy_cols(&mut steps, &self.h[cur], 1, d, d, 0, &self.inject, d, 0);
@@ -551,16 +527,15 @@ impl Engine {
         // adapter output and writes the other residual buffer, later blocks
         // ping-pong, so the last block's output is the running state.
         let mut state = 0usize;
-        for _ in 0..self.steps {
+        for p in 0..self.plan.shape().passes {
             let mid = 1 - state;
             self.copy_cols(&mut steps, &self.h[state], 1, d, 2 * d, 0, &self.concat, 2 * d, 0);
             self.copy_cols(&mut steps, &self.inject, 1, d, d, 0, &self.concat, 2 * d, d);
             self.linear(&mut steps, &self.concat, "adapter.weight", &self.h[mid], 1, 2 * d, d);
-            self.block(&mut steps, sb, stage, &self.h[mid], &self.h[state], 1, &mut attention);
-            stage += 1;
-            for _ in 1..cfg.n_recurrent {
-                self.block(&mut steps, sb, stage, &self.h[state], &self.h[1 - state], 1, &mut attention);
-                stage += 1;
+            let (first, rest) = self.plan.pass(p).split_first().expect("a pass has visits");
+            self.block(&mut steps, sb, first, &self.h[mid], &self.h[state], 1, &mut attention);
+            for v in rest {
+                self.block(&mut steps, sb, v, &self.h[state], &self.h[1 - state], 1, &mut attention);
                 state = 1 - state;
             }
         }
@@ -570,15 +545,13 @@ impl Engine {
         steps.push(block::rmsnorm_fwd(gpu, &ids, &self.h[state], self.ps.w("ln_f.weight"), &self.latent, d, 1, cfg.norm_eps));
         let mut last: &DeviceBuffer = &self.latent;
         let mut ccur = 0usize;
-        for _ in 0..cfg.n_coda {
+        for v in self.plan.coda() {
             let x_out = &self.h[ccur];
-            self.block(&mut steps, sb, stage, last, x_out, 1, &mut attention);
-            stage += 1;
+            self.block(&mut steps, sb, v, last, x_out, 1, &mut attention);
             last = x_out;
             ccur = 1 - ccur;
         }
         steps.push(block::rmsnorm_fwd(gpu, &ids, last, self.ps.w("ln_f.weight"), &self.hrow, d, 1, cfg.norm_eps));
-        debug_assert_eq!(stage, self.stages.len());
         steps
     }
 
@@ -589,14 +562,14 @@ impl Engine {
         let (nh, hd) = (self.cfg.n_heads, self.cfg.head_dim);
         let theta = gpu_core::f(self.cfg.rope_theta);
         self.gpu.write(&self.token, &[token]);
-        for stage in 0..self.stages.len() {
+        let planes: Vec<usize> = self.plan.visits().iter().map(|v| v.slot).collect();
+        for (stage, plane) in planes.into_iter().enumerate() {
             // Plane 0 appends into the scheduler's table; every other plane
             // appends into its own table, from its own allocator, so each
             // paged plane is charged exactly the sequence's page count. A
             // stage reads and writes its plane, so under a ring the stage that
             // reuses a plane appends the new row at that plane's length, which
             // is the same position for every plane.
-            let plane = self.stage_plane[stage];
             let pos = if plane == 0 { table.len() } else { self.rows[&row].extra[plane - 1].len() };
             let appended = if plane == 0 {
                 table.append(&mut self.allocs[0])
@@ -642,10 +615,10 @@ impl Engine {
         reserved[0] = true;
         // Slots are recorded per stage (each stage scatters its own chunk),
         // but a plane is reserved once however many stages share it.
-        let mut slots: Vec<(Vec<u32>, Vec<u32>)> = Vec::with_capacity(self.stages.len());
+        let planes: Vec<usize> = self.plan.visits().iter().map(|v| v.slot).collect();
+        let mut slots: Vec<(Vec<u32>, Vec<u32>)> = Vec::with_capacity(planes.len());
         slots.push(locate_all(table, n, bs));
-        for stage in 1..self.stages.len() {
-            let plane = self.stage_plane[stage];
+        for &plane in &planes[1..] {
             if !reserved[plane] {
                 let ex = &mut self.rows.get_mut(&row).expect("row").extra[plane - 1];
                 ex.reserve(n, &mut self.allocs[plane]).expect("paged KV pool exhausted");
@@ -699,12 +672,13 @@ impl Engine {
         let (nh, hd) = (cfg.n_heads, cfg.head_dim);
         let theta = cfg.rope_theta;
         let ga = Gqa { b: 1, t: n, n_heads: nh, n_kv_heads: nh, head_dim: hd };
-        let mut attention = |steps: &mut Vec<Step>, stage: usize, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, ctx: &DeviceBuffer| {
+        let mut attention = |steps: &mut Vec<Step>, visit: &Visit, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, ctx: &DeviceBuffer| {
+            let stage = visit.index;
             // Huginn's rotary pairs consecutive channels (`rope_train`), the
             // kernel its materialized forward dispatches.
             steps.push(block::rope_fwd(gpu, &ids, q, n, nh, hd, d as u32, n, theta));
             steps.push(block::rope_fwd(gpu, &ids, k, n, nh, hd, d as u32, n, theta));
-            let plane = self.stage_plane[stage];
+            let plane = visit.slot;
             steps.push(gpu.step(dec.kv_append_batched, &[k, &b.blocks[stage], &b.offsets[stage], &self.k_pool[plane]], &[n, d as u32, bs], n * d as u32));
             steps.push(gpu.step(dec.kv_append_batched, &[v, &b.blocks[stage], &b.offsets[stage], &self.v_pool[plane]], &[n, d as u32, bs], n * d as u32));
             if flash {
@@ -714,13 +688,11 @@ impl Engine {
             }
         };
 
-        let mut stage = 0usize;
         let mut steps = vec![gpu.step(model::EMBED_ID, &[&b.tokens, self.ps.w("tok.weight"), &b.h[0]], &[cfg.d_model, n], n * cfg.d_model)];
         steps.push(gpu.step(model::SCALE_ROW_ID, &[&b.h[0], &b.scale, &b.h[1]], &[n * cfg.d_model, cfg.d_model], n * cfg.d_model));
         let mut cur = 1usize;
-        for _ in 0..cfg.n_prelude {
-            self.block(&mut steps, &b.block, stage, &b.h[cur], &b.h[1 - cur], n, &mut attention);
-            stage += 1;
+        for v in self.plan.prelude() {
+            self.block(&mut steps, &b.block, v, &b.h[cur], &b.h[1 - cur], n, &mut attention);
             cur = 1 - cur;
         }
         // The prelude's output, not the raw embedding, is what every recurrent
@@ -731,16 +703,15 @@ impl Engine {
         // of zero broadcasts the one stored row to all `n` rows.
         self.copy_cols(&mut steps, &self.state, n, cfg.d_model, 0, 0, &b.h[0], cfg.d_model, 0);
         let mut state = 0usize;
-        for _ in 0..self.steps {
+        for p in 0..self.plan.shape().passes {
             let mid = 1 - state;
             self.copy_cols(&mut steps, &b.h[state], n, cfg.d_model, cfg.d_model, 0, &b.concat, 2 * cfg.d_model, 0);
             self.copy_cols(&mut steps, &b.inject, n, cfg.d_model, cfg.d_model, 0, &b.concat, 2 * cfg.d_model, cfg.d_model);
             self.linear(&mut steps, &b.concat, "adapter.weight", &b.h[mid], n, 2 * cfg.d_model, cfg.d_model);
-            self.block(&mut steps, &b.block, stage, &b.h[mid], &b.h[state], n, &mut attention);
-            stage += 1;
-            for _ in 1..cfg.n_recurrent {
-                self.block(&mut steps, &b.block, stage, &b.h[state], &b.h[1 - state], n, &mut attention);
-                stage += 1;
+            let (first, rest) = self.plan.pass(p).split_first().expect("a pass has visits");
+            self.block(&mut steps, &b.block, first, &b.h[mid], &b.h[state], n, &mut attention);
+            for v in rest {
+                self.block(&mut steps, &b.block, v, &b.h[state], &b.h[1 - state], n, &mut attention);
                 state = 1 - state;
             }
         }
@@ -748,15 +719,13 @@ impl Engine {
         steps.push(block::rmsnorm_fwd(gpu, &ids, &b.h[state], self.ps.w("ln_f.weight"), &b.latent, cfg.d_model, n, cfg.norm_eps));
         let mut last: &DeviceBuffer = &b.latent;
         let mut ccur = 0usize;
-        for _ in 0..cfg.n_coda {
+        for v in self.plan.coda() {
             let x_out = &b.h[ccur];
-            self.block(&mut steps, &b.block, stage, last, x_out, n, &mut attention);
-            stage += 1;
+            self.block(&mut steps, &b.block, v, last, x_out, n, &mut attention);
             last = x_out;
             ccur = 1 - ccur;
         }
         steps.push(block::rmsnorm_fwd(gpu, &ids, last, self.ps.w("ln_f.weight"), &b.final_hidden, cfg.d_model, n, cfg.norm_eps));
-        debug_assert_eq!(stage, self.stages.len());
         gpu.submit(&[], &steps);
 
         let all = gpu.read(&b.final_hidden, (nn * d) as usize);

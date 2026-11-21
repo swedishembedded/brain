@@ -14,23 +14,15 @@
 //! core is applied `mean_recurrence` (32) times; the same 4 blocks' weights
 //! are used on every step.
 
+use model::looped::{Attention, LoopShape, Segment, VisitPlan};
 use serde_json::Value;
 
-/// One of the three functional groups.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Group {
-    Prelude,
-    Core,
-    Coda,
-}
-
-impl Group {
-    pub fn name(self) -> &'static str {
-        match self {
-            Group::Prelude => "prelude",
-            Group::Core => "core",
-            Group::Coda => "coda",
-        }
+/// The weight-name prefix of a segment's blocks (`prelude.{i}`, `core.{i}`, `coda.{i}`).
+pub fn segment_name(segment: Segment) -> &'static str {
+    match segment {
+        Segment::Prelude => "prelude",
+        Segment::Core => "core",
+        Segment::Coda => "coda",
     }
 }
 
@@ -108,9 +100,38 @@ impl HuginnConfig {
         }
     }
 
-    pub fn groups(&self) -> impl Iterator<Item = (Group, u32)> {
-        [(Group::Prelude, self.n_prelude), (Group::Core, self.n_recurrent), (Group::Coda, self.n_coda)]
-            .into_iter()
+    /// The three segments and their block counts, in forward order.
+    pub fn groups(&self) -> impl Iterator<Item = (Segment, u32)> {
+        [(Segment::Prelude, self.n_prelude), (Segment::Core, self.n_recurrent), (Segment::Coda, self.n_coda)].into_iter()
+    }
+
+    /// The visit plan of a forward running the core `steps` times: the prelude blocks, the core blocks once per
+    /// recurrent step, the coda blocks, full causal attention in every block, each visit owning its KV slot.
+    pub fn visit_plan(&self, steps: u32) -> Result<VisitPlan, String> {
+        let shape = LoopShape { prelude: self.n_prelude as usize, core: self.n_recurrent as usize, coda: self.n_coda as usize, passes: steps as usize };
+        VisitPlan::uniform(shape, Attention::Full).map_err(|e| format!("huginn config: {e}"))
+    }
+
+    /// The weight prefix of physical block `layer` (prelude blocks first, then the core's, then the coda's: the
+    /// layer numbering of [`Self::visit_plan`]).
+    pub fn block_name(&self, layer: usize) -> String {
+        let shape = LoopShape { prelude: self.n_prelude as usize, core: self.n_recurrent as usize, coda: self.n_coda as usize, passes: 1 };
+        let segment = [Segment::Prelude, Segment::Core, Segment::Coda].into_iter().find(|s| shape.layers_of(*s).contains(&layer)).unwrap_or_else(|| panic!("huginn: block {layer} of a {}-block stack", shape.layers()));
+        format!("{}.{}", segment_name(segment), layer - shape.layers_of(segment).start)
+    }
+
+    /// The physical block a tensor belongs to (`prelude.{i}.*`, `core.{i}.*`, `coda.{i}.*`), or `None` for the
+    /// embedding, the adapter and the final norm.
+    pub fn block_of(&self, name: &str) -> Option<usize> {
+        let (stage, rest) = name.split_once('.')?;
+        let i: usize = rest.split_once('.')?.0.parse().ok()?;
+        let (start, count) = match stage {
+            "prelude" => (0, self.n_prelude),
+            "core" => (self.n_prelude, self.n_recurrent),
+            "coda" => (self.n_prelude + self.n_recurrent, self.n_coda),
+            _ => return None,
+        };
+        (i < count as usize).then_some(start as usize + i)
     }
 
     pub fn qkv_dim(&self) -> u32 {
@@ -196,7 +217,7 @@ impl HuginnConfig {
         let mut out = vec![("tok.weight".to_string(), v * d), ("ln_f.weight".to_string(), d), ("adapter.weight".to_string(), d * 2 * d)];
         for (group, n) in self.groups() {
             for i in 0..n {
-                let p = |s: &str| format!("{}.{i}.{s}", group.name());
+                let p = |s: &str| format!("{}.{i}.{s}", segment_name(group));
                 out.push((p("ln1.weight"), d));
                 out.push((p("ln2.weight"), d));
                 out.push((p("attn.wqkv.weight"), self.qkv_dim() as usize * d));

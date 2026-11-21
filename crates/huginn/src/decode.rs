@@ -29,6 +29,7 @@
 
 use gpu_core::{BufUsage, DeviceBuffer, Gpu, Step};
 use ::model::block::{self, GqaDecodeIds, KernelIds};
+use ::model::looped::{Visit, VisitPlan};
 use paramstore::ParamStore;
 
 use crate::config::HuginnConfig;
@@ -62,7 +63,8 @@ pub struct Decode<'a> {
     pub cfg: &'a HuginnConfig,
     cap: u32,
     steps: u32,
-    stages: Vec<String>,
+    /// Which block each visit runs and the KV history (slot) it owns.
+    plan: VisitPlan,
     kv_k: Vec<DeviceBuffer>,
     kv_v: Vec<DeviceBuffer>,
     token: DeviceBuffer,
@@ -91,20 +93,9 @@ impl<'a> Decode<'a> {
         let ncap = cap as u64;
         let st = |x: u64| gpu.storage(x);
 
-        let mut stages = Vec::new();
-        for i in 0..cfg.n_prelude {
-            stages.push(format!("prelude.{i}"));
-        }
-        for _ in 0..steps {
-            for i in 0..cfg.n_recurrent {
-                stages.push(format!("core.{i}"));
-            }
-        }
-        for i in 0..cfg.n_coda {
-            stages.push(format!("coda.{i}"));
-        }
-        let kv_k = stages.iter().map(|_| st(ncap * d)).collect();
-        let kv_v = stages.iter().map(|_| st(ncap * d)).collect();
+        let plan = cfg.visit_plan(steps).expect("huginn: a valid config has a visit plan");
+        let kv_k = (0..plan.slots()).map(|_| st(ncap * d)).collect();
+        let kv_v = (0..plan.slots()).map(|_| st(ncap * d)).collect();
 
         let token = gpu.buffer("huginn_decode_token", 4, BufUsage::STORAGE | BufUsage::COPY_DST);
         let scale = gpu.buffer("huginn_decode_scale", 4, BufUsage::STORAGE | BufUsage::COPY_DST);
@@ -134,7 +125,7 @@ impl<'a> Decode<'a> {
             scores: st(nh * ncap),
             probs: st(nh * ncap),
         };
-        Decode { gpu, ps, cfg, cap, steps, stages, kv_k, kv_v, token, h, init_state, state0, scale, logits, scratch }
+        Decode { gpu, ps, cfg, cap, steps, plan, kv_k, kv_v, token, h, init_state, state0, scale, logits, scratch }
     }
 
     pub fn capacity(&self) -> u32 {
@@ -182,7 +173,7 @@ impl<'a> Decode<'a> {
             gpu.step(model::COPY_COLS_ID, &[src, dst], &[1, d, d, 0, dst_stride, dst_off], d)
         };
         let mut out = Vec::new();
-        let mut stage = 0usize;
+        let plan = &self.plan;
 
         out.push(gpu.step(model::EMBED_ID, &[&self.token, self.ps.w("tok.weight"), &self.h[0]], &[d, 1], d));
         // Embeddings enter the prelude scaled, as in the full forward.
@@ -190,9 +181,8 @@ impl<'a> Decode<'a> {
         // The prelude rewrites the embedding; its output for this position is
         // what every recurrent step re-injects.
         let mut cur = 1usize;
-        for _ in 0..cfg.n_prelude {
-            self.block(&mut out, &ids, &dec_ids, &self.stages[stage], &self.h[cur], &self.h[1 - cur], stage, pos);
-            stage += 1;
+        for v in plan.prelude() {
+            self.block(&mut out, &ids, &dec_ids, v, &self.h[cur], &self.h[1 - cur], pos);
             cur = 1 - cur;
         }
         // Both the injection and the starting state need their own buffers:
@@ -203,15 +193,14 @@ impl<'a> Decode<'a> {
         out.push(copy(&self.state0, &self.h[0], d, 0));
 
         let mut state = 0usize;
-        for _ in 0..self.steps {
+        for p in 0..plan.shape().passes {
             let mid = 1 - state;
             out.push(gpu.step(model::COPY_COLS_ID, &[&self.h[state], &s.concat], &[1, d, 2 * d, 0, 2 * d, 0], d));
             out.push(gpu.step(model::COPY_COLS_ID, &[&s.latent, &s.concat], &[1, d, 2 * d, 0, 2 * d, d], d));
             out.push(gpu.step(model::MATMUL_ID, &[&s.concat, self.ps.w("adapter.weight"), &self.h[mid]], &[1, 2 * d, d], d));
-            for i in 0..cfg.n_recurrent {
+            for (i, v) in plan.pass(p).iter().enumerate() {
                 let (x_in, x_out) = if i == 0 { (&self.h[mid], &self.h[state]) } else { (&self.h[state], &self.h[1 - state]) };
-                self.block(&mut out, &ids, &dec_ids, &self.stages[stage], x_in, x_out, stage, pos);
-                stage += 1;
+                self.block(&mut out, &ids, &dec_ids, v, x_in, x_out, pos);
                 if i > 0 {
                     state = 1 - state;
                 }
@@ -221,16 +210,14 @@ impl<'a> Decode<'a> {
         out.push(block::rmsnorm_fwd(gpu, &ids, &self.h[state], self.ps.w("ln_f.weight"), &s.latent, d, 1, cfg.norm_eps));
         let mut last: &DeviceBuffer = &s.latent;
         let mut ccur = 0usize;
-        for _ in 0..cfg.n_coda {
+        for v in plan.coda() {
             let x_out = &self.h[ccur];
-            self.block(&mut out, &ids, &dec_ids, &self.stages[stage], last, x_out, stage, pos);
-            stage += 1;
+            self.block(&mut out, &ids, &dec_ids, v, last, x_out, pos);
             last = x_out;
             ccur = 1 - ccur;
         }
         out.push(block::rmsnorm_fwd(gpu, &ids, last, self.ps.w("ln_f.weight"), &s.xn2, d, 1, cfg.norm_eps));
         out.push(gpu.step(model::MATMUL_ID, &[&s.xn2, self.ps.w("tok.weight"), &self.logits], &[1, d, cfg.vocab], cfg.vocab));
-        debug_assert_eq!(stage, self.stages.len());
         out
     }
 
@@ -240,10 +227,9 @@ impl<'a> Decode<'a> {
         out: &mut Vec<Step>,
         ids: &KernelIds,
         dec_ids: &GqaDecodeIds,
-        name: &str,
+        visit: &Visit,
         x_in: &DeviceBuffer,
         x_out: &DeviceBuffer,
-        stage: usize,
         pos: u32,
     ) {
         let cfg = self.cfg;
@@ -251,6 +237,7 @@ impl<'a> Decode<'a> {
         let s = &self.scratch;
         let (d, ff) = (cfg.d_model, cfg.d_ff);
         let (nh, hd) = (cfg.n_heads, cfg.head_dim);
+        let name = cfg.block_name(visit.layer);
         let w = |leaf: &str| self.ps.w(&format!("{name}.{leaf}"));
 
         out.push(block::rmsnorm_fwd(gpu, ids, x_in, w("ln1.weight"), &s.xn1, d, 1, cfg.norm_eps));
@@ -263,7 +250,7 @@ impl<'a> Decode<'a> {
         out.push(rope_at(gpu, &s.q, 1, nh, hd, d, pos, cfg.rope_theta));
         out.push(rope_at(gpu, &s.k, 1, nh, hd, d, pos, cfg.rope_theta));
         out.extend(block::gqa_decode_step(
-            gpu, dec_ids, nh, nh, hd, pos, self.cap, &s.q, &s.k, &s.v, &self.kv_k[stage], &self.kv_v[stage], &s.scores, &s.probs, &s.ctx,
+            gpu, dec_ids, nh, nh, hd, pos, self.cap, &s.q, &s.k, &s.v, &self.kv_k[visit.slot], &self.kv_v[visit.slot], &s.scores, &s.probs, &s.ctx,
         ));
         out.push(gpu.step(model::MATMUL_ID, &[&s.ctx, w("attn.wo.weight"), &s.proj], &[1, d, d], d));
         out.push(gpu.step(model::ADD2_ID, &[&s.proj, x_in, &s.tmp], &[d], d));

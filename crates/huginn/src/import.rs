@@ -160,7 +160,7 @@ mod tests {
             "freqs_cis".to_string(),
         ];
         for (group, count) in cfg.groups() {
-            let hf = match group.name() {
+            let hf = match crate::config::segment_name(group) {
                 "core" => "core_block",
                 other => other,
             };

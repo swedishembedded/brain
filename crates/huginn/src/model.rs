@@ -46,8 +46,9 @@ use std::cell::Cell;
 
 use gpu_core::{BufUsage, DeviceBuffer, Gpu, Step};
 use model::block::{self, Gqa, KernelIds};
+use model::looped::VisitPlan;
 use model::saved::{Residuals, SavedPolicy};
-use model::streamed::{RevisitingPass, StreamedStore};
+use model::streamed::{LayeredPass, RevisitingPass, StreamedStore};
 use model::segmented::SegmentedPass;
 use paramstore::ParamStore;
 
@@ -313,24 +314,6 @@ struct Back {
     ce_grad_uniform: DeviceBuffer,
 }
 
-/// The layer index a block of stage `stage` (`prelude`, `core` or `coda`) has in the window: the prelude blocks
-/// first, then the core blocks, then the coda, each block its own layer.
-fn block_layer(cfg: &HuginnConfig, stage: &str, i: usize) -> usize {
-    match stage {
-        "prelude" => i,
-        "core" => cfg.n_prelude as usize + i,
-        _ => (cfg.n_prelude + cfg.n_recurrent) as usize + i,
-    }
-}
-
-/// The layer a tensor belongs to in the window (`prelude.{i}.*`, `core.{i}.*` and `coda.{i}.*` by [`block_layer`]), or
-/// `None` for the embedding, the adapter and the final norm, which stay in the store.
-fn tensor_layer(cfg: &HuginnConfig, name: &str) -> Option<u32> {
-    let (stage, rest) = name.split_once('.')?;
-    let i: usize = rest.split_once('.')?.0.parse().ok()?;
-    matches!(stage, "prelude" | "core" | "coda").then(|| block_layer(cfg, stage, i) as u32)
-}
-
 pub struct Huginn {
     pub gpu: Gpu,
     pub cfg: HuginnConfig,
@@ -340,6 +323,8 @@ pub struct Huginn {
     train: bool,
     /// Recurrent iterations the graph runs, fixed at construction.
     steps: u32,
+    /// The training graph's visits: prelude, the core once per recurrent step, coda.
+    plan: VisitPlan,
     /// Supervised rows the loss is averaged over.
     count: Cell<f32>,
     tokens: DeviceBuffer,
@@ -397,7 +382,7 @@ impl Huginn {
         Huginn::build(cfg, b, t, src, train, None).unwrap_or_else(|e| panic!("huginn: {e}"))
     }
 
-    /// A training build whose block tensors (prelude, core and coda; see [`block_layer`]) stream through a device
+    /// A training build whose block tensors (prelude, core and coda; see [`HuginnConfig::block_of`]) stream through a device
     /// window under `resident` from the start (see [`model::streamed`]): they are read from `src` into the window's
     /// host state and never all reach the device, so a model larger than it trains. The embedding (the tied head), the
     /// adapter and the final norm load as usual.
@@ -414,7 +399,7 @@ impl Huginn {
         }
         let gpu = Gpu::new(&optim::with_moment_kernels(PIPELINES));
         let model_cfg = cfg.clone();
-        let layer_of = |name: &str| tensor_layer(&model_cfg, name);
+        let layer_of = |name: &str| model_cfg.block_of(name).map(|l| l as u32);
         let roles = cfg
             .param_list()
             .into_iter()
@@ -473,6 +458,7 @@ impl Huginn {
         // graph is recorded for the same count, fixed here because it sizes the
         // tape.
         let steps = cfg.mean_recurrence.max(1);
+        let plan = cfg.visit_plan(steps)?;
         let per_step = cfg.n_recurrent as usize + 1;
         let tape = train.then(|| Tape {
             embeds: (0..cfg.n_prelude as usize + 2).map(|_| st(n * d)).collect(),
@@ -522,6 +508,7 @@ impl Huginn {
             t,
             train,
             steps,
+            plan,
             count: Cell::new(1.0),
             tokens,
             embeds,
@@ -663,9 +650,10 @@ impl Huginn {
 
         g.push(self.gpu.step(EMBED, &[&self.tokens, self.ps.w("tok.weight"), &self.embeds[0]], &[d, n], n * d));
         g.push(self.gpu.step(SCALE_ROW, &[&self.embeds[0], &self.scale, &self.embeds[1]], &[n * d, d], n * d));
+        let plan = cfg.visit_plan(steps.max(1)).expect("huginn: a valid config has a visit plan");
         let mut cur = 1usize;
-        for i in 0..cfg.n_prelude {
-            self.block_steps(&mut g, &format!("prelude.{i}"), &self.embeds[cur], &self.embeds[1 - cur]);
+        for v in plan.prelude() {
+            self.block_steps(&mut g, &cfg.block_name(v.layer), &self.embeds[cur], &self.embeds[1 - cur]);
             cur = 1 - cur;
         }
         // The prelude's output, not the raw embedding, is what every recurrent
@@ -677,15 +665,18 @@ impl Huginn {
         // is ever needed after the initial one.
         let mut state = 0usize;
         self.copy_cols(&mut g, &self.init_state, d, 0, &self.h[0], d, 0, d);
-        for _ in 0..steps.max(1) {
+        for p in 0..plan.shape().passes {
             let mid = 1 - state;
             self.copy_cols(&mut g, &self.h[state], d, 0, &self.scratch.concat, 2 * d, 0, d);
             self.copy_cols(&mut g, inject, d, 0, &self.scratch.concat, 2 * d, d, d);
             self.linear(&mut g, &self.scratch.concat, "adapter.weight", &self.h[mid], n, 2 * d, d);
-            self.block_steps(&mut g, "core.0", &self.h[mid], &self.h[state]);
-            for i in 1..cfg.n_recurrent {
-                self.block_steps(&mut g, &format!("core.{i}"), &self.h[state], &self.h[1 - state]);
-                state = 1 - state;
+            for (i, v) in plan.pass(p).iter().enumerate() {
+                if i == 0 {
+                    self.block_steps(&mut g, &cfg.block_name(v.layer), &self.h[mid], &self.h[state]);
+                } else {
+                    self.block_steps(&mut g, &cfg.block_name(v.layer), &self.h[state], &self.h[1 - state]);
+                    state = 1 - state;
+                }
             }
         }
         self.state_buf.set(state);
@@ -693,9 +684,9 @@ impl Huginn {
         // Final norm, then the coda from the normed state, then the norm again.
         g.push(block::rmsnorm_fwd(&self.gpu, &k, &self.h[state], self.ps.w("ln_f.weight"), &self.latent, d, n, cfg.norm_eps));
         let mut cur = 0usize;
-        for i in 0..cfg.n_coda {
+        for (i, v) in plan.coda().iter().enumerate() {
             let x_in = if i == 0 { &self.latent } else { &self.coda[cur] };
-            self.block_steps(&mut g, &format!("coda.{i}"), x_in, &self.coda[1 - cur]);
+            self.block_steps(&mut g, &cfg.block_name(v.layer), x_in, &self.coda[1 - cur]);
             cur = 1 - cur;
         }
         g.push(block::rmsnorm_fwd(&self.gpu, &k, &self.coda[cur], self.ps.w("ln_f.weight"), &self.coda[1 - cur], d, n, cfg.norm_eps));
@@ -707,7 +698,7 @@ impl Huginn {
     /// The training forward: the inference graph's own block composition, but
     /// every block application writes its output to its own tape slot, and the
     /// graph ends in the tied head and the masked cross-entropy rows.
-    /// One segment per block application (the layer indices are [`block_layer`]'s): a core block appears once
+    /// One segment per block application (the layer indices are [`HuginnConfig::block_of`]'s): a core block appears once
     /// in every recurrent step, the prelude and coda blocks once.
     fn training_forward_steps(&self) -> SegmentedPass {
         let cfg = &self.cfg;
@@ -720,10 +711,10 @@ impl Huginn {
 
         g.push(self.gpu.step(EMBED, &[&self.tokens, self.ps.w("tok.weight"), &tape.embeds[0]], &[d, n], n * d));
         g.push(self.gpu.step(SCALE_ROW, &[&tape.embeds[0], &self.scale, &tape.embeds[1]], &[n * d, d], n * d));
-        for i in 0..cfg.n_prelude as usize {
+        for (i, v) in self.plan.prelude().iter().enumerate() {
             passes.segment(&mut g, None);
-            self.block_steps(&mut g, &format!("prelude.{i}"), &tape.embeds[1 + i], &tape.embeds[2 + i]);
-            passes.segment(&mut g, Some(block_layer(&self.cfg, "prelude", i)));
+            self.block_steps(&mut g, &cfg.block_name(v.layer), &tape.embeds[1 + i], &tape.embeds[2 + i]);
+            passes.segment(&mut g, Some(v.layer));
         }
         // The prelude's output, not the raw embedding, is what every recurrent
         // step re-injects - so its gradient is the sum over all of them.
@@ -731,19 +722,19 @@ impl Huginn {
 
         let per_step = cfg.n_recurrent as usize + 1;
         let mut state = &self.init_state;
-        for s in 0..self.steps as usize {
+        for s in 0..self.plan.shape().passes {
             let b = s * per_step;
             self.copy_cols(&mut g, state, d, 0, &self.scratch.concat, 2 * d, 0, d);
             self.copy_cols(&mut g, inject, d, 0, &self.scratch.concat, 2 * d, d, d);
             self.linear(&mut g, &self.scratch.concat, "adapter.weight", &tape.core[b], n, 2 * d, d);
             tape.core.round_trip(&self.gpu, &mut g, b);
             let mut prev = &tape.core[b];
-            for i in 0..cfg.n_recurrent as usize {
+            for (i, v) in self.plan.pass(s).iter().enumerate() {
                 let out = &tape.core[b + 1 + i];
                 passes.segment(&mut g, None);
-                self.block_steps(&mut g, &format!("core.{i}"), prev, out);
+                self.block_steps(&mut g, &cfg.block_name(v.layer), prev, out);
                 tape.core.round_trip(&self.gpu, &mut g, b + 1 + i);
-                passes.segment(&mut g, Some(block_layer(&self.cfg, "core", i)));
+                passes.segment(&mut g, Some(v.layer));
                 prev = out;
             }
             state = prev;
@@ -752,10 +743,10 @@ impl Huginn {
         g.push(block::rmsnorm_fwd(&self.gpu, &k, state, self.ps.w("ln_f.weight"), &tape.latent, d, n, cfg.norm_eps));
         let n_coda = cfg.n_coda as usize;
         let mut cur = &tape.latent;
-        for (i, out) in tape.coda.iter().enumerate().take(n_coda) {
+        for (v, out) in self.plan.coda().iter().zip(&tape.coda[..n_coda]) {
             passes.segment(&mut g, None);
-            self.block_steps(&mut g, &format!("coda.{i}"), cur, out);
-            passes.segment(&mut g, Some(block_layer(&self.cfg, "coda", i)));
+            self.block_steps(&mut g, &cfg.block_name(v.layer), cur, out);
+            passes.segment(&mut g, Some(v.layer));
             cur = out;
         }
         g.push(block::rmsnorm_fwd(&self.gpu, &k, cur, self.ps.w("ln_f.weight"), &tape.coda[n_coda], d, n, cfg.norm_eps));
@@ -805,16 +796,16 @@ impl Huginn {
             n,
             cfg.norm_eps,
         ));
-        for i in (0..n_coda).rev() {
+        for (i, v) in self.plan.coda().iter().enumerate().rev() {
             let x_in = if i == 0 { &tape.latent } else { &tape.coda[i - 1] };
             let dest = if i == 0 { &g.latent } else { &g.coda[i - 1] };
             passes.segment(&mut steps, None);
-            self.block_bwd(&mut steps, &format!("coda.{i}"), x_in, &g.coda[i], dest);
-            passes.segment(&mut steps, Some(block_layer(&self.cfg, "coda", i)));
+            self.block_bwd(&mut steps, &cfg.block_name(v.layer), x_in, &g.coda[i], dest);
+            passes.segment(&mut steps, Some(v.layer));
         }
         // The first use of `ln_f`: its input is the last recurrent block's
         // output, so its input gradient lands on that block's output gradient.
-        let last_core = self.steps as usize * per_step - 1;
+        let last_core = self.plan.shape().passes * per_step - 1;
         tape.core.restore(&self.gpu, &mut steps, last_core);
         steps.extend(block::rmsnorm_bwd(
             &self.gpu,
@@ -833,13 +824,13 @@ impl Huginn {
         // The recurrence in reverse. Each step's state gradient is written by
         // the step after it (or by `ln_f` above), so the blocks see it complete.
         let inject = &tape.embeds[cfg.n_prelude as usize + 1];
-        for s in (0..self.steps as usize).rev() {
+        for s in (0..self.plan.shape().passes).rev() {
             let b = s * per_step;
-            for i in (0..cfg.n_recurrent as usize).rev() {
+            for (i, v) in self.plan.pass(s).iter().enumerate().rev() {
                 passes.segment(&mut steps, None);
                 tape.core.restore(&self.gpu, &mut steps, b + i);
-                self.block_bwd(&mut steps, &format!("core.{i}"), &tape.core[b + i], &g.core[b + i + 1], &g.core[b + i]);
-                passes.segment(&mut steps, Some(block_layer(&self.cfg, "core", i)));
+                self.block_bwd(&mut steps, &cfg.block_name(v.layer), &tape.core[b + i], &g.core[b + i + 1], &g.core[b + i]);
+                passes.segment(&mut steps, Some(v.layer));
             }
             // Adapter: out = concat(state, inject) @ adapter.weightᵀ.
             if s > 0 {
@@ -861,11 +852,12 @@ impl Huginn {
 
         // The prelude in reverse, then the row scale and the scatter into the
         // tied table (which already holds the head's contribution).
-        for i in (0..cfg.n_prelude as usize).rev() {
-            let d_out = if i + 1 == cfg.n_prelude as usize { &g.d_inject } else { &g.d_embeds[i + 1] };
+        let n_prelude = self.plan.prelude().len();
+        for (i, v) in self.plan.prelude().iter().enumerate().rev() {
+            let d_out = if i + 1 == n_prelude { &g.d_inject } else { &g.d_embeds[i + 1] };
             passes.segment(&mut steps, None);
-            self.block_bwd(&mut steps, &format!("prelude.{i}"), &tape.embeds[1 + i], d_out, &g.d_embeds[i]);
-            passes.segment(&mut steps, Some(block_layer(&self.cfg, "prelude", i)));
+            self.block_bwd(&mut steps, &cfg.block_name(v.layer), &tape.embeds[1 + i], d_out, &g.d_embeds[i]);
+            passes.segment(&mut steps, Some(v.layer));
         }
         steps.push(self.gpu.step(SCALE_ROW, &[&g.d_embeds[0], &self.scale, &g.d_embed], &[n * d, d], n * d));
         steps.push(self.gpu.step(EMB_BWD, &[&self.tokens, &g.d_embed, self.ps.g("tok.weight")], &[n, d, v], v * d));
@@ -1002,7 +994,7 @@ impl model::Model for Huginn {
     /// refused by name.
     ///
     /// Stream every block's tensors (prelude, core and coda; each block is a layer of its own, see
-    /// [`block_layer`]) through a device window under `cfg` (see [`model::streamed`]): a core block runs once
+    /// [`HuginnConfig::block_of`]) through a device window under `cfg` (see [`model::streamed`]): a core block runs once
     /// in every recurrent step, so each application loads it, its gradient is carried on the host between its visits,
     /// and it is updated once the backward is complete. The embedding (the tied head), the adapter and the final norm
     /// stay in the store under its own optimizer.
@@ -1014,7 +1006,7 @@ impl model::Model for Huginn {
             return Err("huginn: the blocks already stream".into());
         }
         let model_cfg = self.cfg.clone();
-        let layer_of = |name: &str| tensor_layer(&model_cfg, name);
+        let layer_of = |name: &str| model_cfg.block_of(name).map(|l| l as u32);
         let stream = StreamedStore::convert(&self.gpu, &mut self.ps, cfg.clone(), &layer_of).map_err(|e| format!("huginn: {e}"))?;
         self.opt.as_ref().expect("a training build has an optimizer").invalidate();
         self.streamed = Some(stream);
@@ -1111,7 +1103,10 @@ impl model::Model for Huginn {
                     assert!(self.backward_pending.replace(false), "huginn layer-streamed full fine-tune: adamw_step without a backward");
                 }
                 let args = model::resident_ft::StepArgs { step: t, lr, wd, adam, clip, extra_scale };
-                stream.adamw_step(&self.gpu, &self.ps, opt, &RevisitingPass(&self.bwd_steps), &args).unwrap_or_else(|e| panic!("huginn layer-streamed update: {e}"));
+                // A core block visited once per recurrent step carries its gradient across its visits.
+                let revisiting = RevisitingPass(&self.bwd_steps);
+                let bwd: &dyn LayeredPass = if self.plan.revisits() { &revisiting } else { &self.bwd_steps };
+                stream.adamw_step(&self.gpu, &self.ps, opt, bwd, &args).unwrap_or_else(|e| panic!("huginn layer-streamed update: {e}"));
             }
             None => opt.step(&self.gpu, &self.ps, t, lr, wd, adam, clip, extra_scale),
         }

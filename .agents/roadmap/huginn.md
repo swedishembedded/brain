@@ -50,6 +50,12 @@ un-embeds the final latent state into the tied head.
   accumulating over all of them; a finite-difference gate over every
   parameter on cpu, wgpu and cuda, plus an AdamW-step test that the loss
   falls and the shared core moves.
+- Visit bookkeeping on the shared plan (2026-11-21): the training graph, the
+  inference forward, the single-sequence decode and the paged engine walk
+  `model::looped::VisitPlan` (`HuginnConfig::visit_plan(steps)`, block names
+  from `block_name`/`block_of`); the `compress-sN` ring is
+  `VisitPlan::share_core_slots`. Every output, loss, gradient, decode step and
+  served token was bit-identical before and after on cpu.
 
 ## Serving findings (released checkpoint, one 24 GB card)
 

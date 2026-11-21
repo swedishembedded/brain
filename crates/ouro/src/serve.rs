@@ -34,6 +34,7 @@
 use std::collections::HashMap;
 
 use gpu_core::{BufUsage, DeviceBuffer, Gpu, Step};
+use ::model::looped::VisitPlan;
 use ::model::ops::{Ops, Weight};
 use ::model::paged::{BlockAllocator, BlockTable};
 use ::model::serve::PagedDecoder;
@@ -208,9 +209,11 @@ pub struct Engine {
     max_bt: u32,
     /// Per-sequence logit-addressable capacity (`max_bt * block_size`).
     cap: u32,
-    /// `[pass][layer]` K/V planes over the shared block pool.
-    k_pool: Vec<Vec<DeviceBuffer>>,
-    v_pool: Vec<Vec<DeviceBuffer>>,
+    /// Which layer each visit runs and the K/V plane (slot) it owns.
+    plan: VisitPlan,
+    /// One K/V plane per slot of the plan over the shared block pool; a visit pages it through its pass's table.
+    k_pool: Vec<DeviceBuffer>,
+    v_pool: Vec<DeviceBuffer>,
     rows: HashMap<u32, Row>,
     next_row: u32,
     rope_paged: usize,
@@ -263,9 +266,11 @@ impl Engine {
         Engine::build(gpu, cfg, ps, max_tokens, block_size, max_batch).expect("ouro: engine build")
     }
 
-    /// The KV pool's bytes for `tokens` of shared capacity: every pass owns a K and a V plane per layer.
+    /// The KV pool's bytes for `tokens` of shared capacity: every visit (each layer in every pass) owns a K and a V
+    /// plane.
     pub fn kv_bytes_per_token(cfg: &OuroConfig) -> u64 {
-        cfg.kv_dim() as u64 * 4 * 2 * cfg.n_layers as u64 * cfg.total_ut_steps as u64
+        let slots = cfg.visit_plan().map_or(0, |p| p.slots()) as u64;
+        cfg.kv_dim() as u64 * 4 * 2 * slots
     }
 
     fn build(gpu: Gpu, cfg: OuroConfig, ps: ParamStore, max_tokens: u32, block_size: u32, max_batch: u32) -> Result<Engine, String> {
@@ -281,9 +286,9 @@ impl Engine {
         let cap = max_bt * block_size;
         let allocs = (0..cfg.total_ut_steps).map(|_| BlockAllocator::new(num_blocks, block_size)).collect();
         let hkv = cfg.kv_dim() as u64;
-        let planes = || (0..cfg.n_layers).map(|_| gpu.storage(max_tokens as u64 * hkv)).collect::<Vec<_>>();
-        let k_pool = (0..cfg.total_ut_steps).map(|_| planes()).collect();
-        let v_pool = (0..cfg.total_ut_steps).map(|_| planes()).collect();
+        let plan = cfg.visit_plan()?;
+        let k_pool = (0..plan.slots()).map(|_| gpu.storage(max_tokens as u64 * hkv)).collect();
+        let v_pool = (0..plan.slots()).map(|_| gpu.storage(max_tokens as u64 * hkv)).collect();
         let mut ops = Ops::new(gpu.share())?;
         ops.set_gemm_precision(gpu_core::provider::library::GemmPrecision::Auto);
         let rope_paged = gpu.kernel_index("rope_paged").ok_or("ouro: rope_paged is not registered")?;
@@ -297,7 +302,7 @@ impl Engine {
         let prompt = PromptBufs::new(&gpu, &cfg, cap);
         let hrow = gpu.storage(d as u64);
         let hrow_logits = gpu.storage(cfg.vocab as u64);
-        Ok(Engine { gpu, ops, cfg, ps, allocs, block_size, pool_tokens: max_tokens, max_bt, cap, k_pool, v_pool, rows: HashMap::new(), next_row: 0, rope_paged, flash, hrow, hrow_logits, dec, prompt, graphs: HashMap::new() })
+        Ok(Engine { gpu, ops, cfg, ps, allocs, block_size, pool_tokens: max_tokens, max_bt, cap, plan, k_pool, v_pool, rows: HashMap::new(), next_row: 0, rope_paged, flash, hrow, hrow_logits, dec, prompt, graphs: HashMap::new() })
     }
 
     fn ensure_row(&mut self, table: &mut BlockTable) -> Result<u32, String> {
@@ -341,8 +346,9 @@ impl Engine {
         for p in 0..t {
             // What this pass reads: the embedding for the first, the previous pass's normed output after it.
             let (mut prev, mut prev_range): (&DeviceBuffer, (u64, u64)) = if p == 0 { (&z.h[0], whole) } else { (&z.hs, slice(p - 1)) };
-            for l in 0..cfg.n_layers as usize {
-                let out: &DeviceBuffer = if p == 0 { &z.h[(l + 1) % 2] } else { &z.h[l % 2] };
+            for (i, visit) in self.plan.pass(p as usize).iter().enumerate() {
+                let out: &DeviceBuffer = if p == 0 { &z.h[(i + 1) % 2] } else { &z.h[i % 2] };
+                let l = visit.layer;
                 let pfx = |name: &str| format!("blocks.{l}.{name}");
                 steps.push(::model::block::rmsnorm_fwd_sliced(gpu, &ids, (prev, prev_range), self.ps.w(&pfx("ln1.weight")), (&s.xn1, whole), d, b, cfg.norm_eps));
                 self.linear(&mut steps, &s.xn1, &pfx("attn.wq.weight"), &s.q, b, d, hq);
@@ -364,8 +370,8 @@ impl Engine {
                     &s.q,
                     &s.k,
                     &s.v,
-                    &self.k_pool[pu][l],
-                    &self.v_pool[pu][l],
+                    &self.k_pool[visit.slot],
+                    &self.v_pool[visit.slot],
                     &z.blocks[pu],
                     &z.offsets[pu],
                     &z.tables[pu],
@@ -529,8 +535,9 @@ impl Engine {
         let mut steps = vec![gpu.step(model::EMBED_ID, &[tokens, self.ps.w("tok.weight"), &h[0]], &[cfg.d_model, n], n * cfg.d_model)];
         for p in 0..t {
             let mut prev: &DeviceBuffer = if p == 0 { &h[0] } else { &hs[p - 1] };
-            for l in 0..cfg.n_layers as usize {
-                let out: &DeviceBuffer = if p == 0 { &h[(l + 1) % 2] } else { &h[l % 2] };
+            for (i, visit) in self.plan.pass(p).iter().enumerate() {
+                let out: &DeviceBuffer = if p == 0 { &h[(i + 1) % 2] } else { &h[i % 2] };
+                let l = visit.layer;
                 let pfx = |name: &str| format!("blocks.{l}.{name}");
                 steps.push(::model::block::rmsnorm_fwd(gpu, &ids, prev, self.ps.w(&pfx("ln1.weight")), &sc.xn1, cfg.d_model, n, cfg.norm_eps));
                 self.linear(&mut steps, &sc.xn1, &pfx("attn.wq.weight"), &sc.q, n, cfg.d_model, cfg.q_dim());
@@ -541,8 +548,8 @@ impl Engine {
                 // Scatter this chunk's K/V into the pass's paged plane.
                 if scatter.is_some() {
                     let (blocks, offsets) = (&z.blocks[p], &z.offsets[p]);
-                    steps.push(gpu.step(dec.kv_append_batched, &[&sc.k, blocks, offsets, &self.k_pool[p][l]], &[n, cfg.kv_dim(), bs], n * cfg.kv_dim()));
-                    steps.push(gpu.step(dec.kv_append_batched, &[&sc.v, blocks, offsets, &self.v_pool[p][l]], &[n, cfg.kv_dim(), bs], n * cfg.kv_dim()));
+                    steps.push(gpu.step(dec.kv_append_batched, &[&sc.k, blocks, offsets, &self.k_pool[visit.slot]], &[n, cfg.kv_dim(), bs], n * cfg.kv_dim()));
+                    steps.push(gpu.step(dec.kv_append_batched, &[&sc.v, blocks, offsets, &self.v_pool[visit.slot]], &[n, cfg.kv_dim(), bs], n * cfg.kv_dim()));
                 }
                 match &self.flash {
                     Some(flash) => steps.push(::model::block::flash_gqa_causal_fwd(gpu, flash, &ga, &sc.q, &sc.k, &sc.v, &sc.ctx, lse)),
