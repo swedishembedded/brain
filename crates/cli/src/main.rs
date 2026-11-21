@@ -147,6 +147,13 @@ MODEL STORE (global - valid on any subcommand)
                            $HOME/.local/share/brain/models. The flag DOES
                            outrank an explicitly-set $BRAIN_MODELS_DIR, and
                            says so on stderr when it does.
+  --stage-models <DIR>     answer every argument naming a path inside a
+                           <vendor>/<repo> entry of the models directory (or of
+                           --stage-from <ROOT>) from a copy under DIR, made once
+                           per node: the first process copies and verifies the
+                           entry, the node's others wait and use it. For
+                           cluster ranks that would all read one base from a
+                           shared filesystem.
 
 AUTO-FETCH (global - valid on any subcommand)
   --autofetch              Allow missing model weights to be downloaded on
@@ -1267,6 +1274,71 @@ fn parse_data_dir(argv: Vec<String>) -> (Option<String>, Vec<String>) {
     (root, rest)
 }
 
+/// `--stage-models DIR` (with `--stage-from ROOT`, default the models directory): every argument that names a path
+/// inside a `<vendor>/<repo>` entry of ROOT is answered from a node-local copy of that entry under DIR, which the
+/// first process on the node makes (verified, renamed into place once complete) while the node's other processes
+/// wait for it (`brain_modelstore::stage`). For a cluster whose ranks would otherwise all read a base from a shared
+/// filesystem at once. Without the flag, `argv` is returned as it came.
+fn stage_models(argv: Vec<String>) -> Vec<String> {
+    let mut local = None;
+    let mut from = None;
+    let mut rest = Vec::with_capacity(argv.len());
+    let mut i = 0;
+    while i < argv.len() {
+        let slot = match argv[i].as_str() {
+            "--stage-models" => &mut local,
+            "--stage-from" => &mut from,
+            _ => {
+                rest.push(argv[i].clone());
+                i += 1;
+                continue;
+            }
+        };
+        let Some(value) = argv.get(i + 1).filter(|v| !v.is_empty()) else {
+            eprintln!("brain: {} needs a directory", argv[i]);
+            std::process::exit(2);
+        };
+        *slot = Some(std::path::PathBuf::from(value));
+        i += 2;
+    }
+    let Some(local) = local else {
+        if from.is_some() {
+            eprintln!("brain: --stage-from names where --stage-models copies from; give --stage-models DIR");
+            std::process::exit(2);
+        }
+        return rest;
+    };
+    let Some(root) = from.or_else(brain_modelstore::default_root) else {
+        eprintln!("brain: --stage-models has no models directory to stage from; give --stage-from ROOT");
+        std::process::exit(2);
+    };
+    let started = std::time::Instant::now();
+    let mut staged = false;
+    let rest = rest
+        .into_iter()
+        .map(|arg| {
+            let path = std::path::Path::new(&arg);
+            if !path.is_absolute() || !path.starts_with(&root) || !path.exists() {
+                return arg;
+            }
+            match brain_modelstore::stage::stage(&root, path, &local) {
+                Ok(copy) => {
+                    staged |= copy != path;
+                    copy.to_string_lossy().into_owned()
+                }
+                Err(e) => {
+                    eprintln!("brain: staging {arg} under {}: {e}", local.display());
+                    std::process::exit(1);
+                }
+            }
+        })
+        .collect();
+    if staged {
+        eprintln!("brain: models staged under {} in {:.1} s", local.display(), started.elapsed().as_secs_f64());
+    }
+    rest
+}
+
 /// Extract the global `--autofetch` switch from anywhere in `argv` and
 /// return `(present, remaining args)`. Pure, so it's testable like
 /// [`parse_verbosity`] and [`parse_limits`]; [`forward_autofetch`] hands the
@@ -1674,6 +1746,8 @@ fn main() {
     // flag rather than published process-wide.
     let (autofetch, argv) = parse_autofetch(argv);
     let argv = forward_autofetch(autofetch, argv);
+    // After the models directory is published: a staged path is answered from it.
+    let argv = stage_models(argv);
     if matches!(argv.get(1).map(String::as_str), Some("--version" | "-V")) {
         println!("brain {}", env!("CARGO_PKG_VERSION"));
         return;

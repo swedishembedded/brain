@@ -395,6 +395,22 @@ Scope: Running one training job as ranks across machines, and serving one model 
     about 530 ms (2 ranks) and 900 ms (4 ranks) of each step in 504
     per-tensor reductions.
 
+- **Scalars on the device, and 27B staging (2026-11-21, GH200 nodes, same
+  setup as the scaling runs below).**
+  - Qwen3-4B LoRA r16, 10 steps, step stage median: 8 cards (n442+n467)
+    127.5 ms with the step-weight scalar over the host star (13.2 ms of it)
+    -> 117.1 ms with it on the device group (2.8 ms); 12 cards (n424+n442+
+    n467) 129.9 -> 129.3 ms, scalar 15.2 -> 13.3 ms. Adapters byte-identical
+    before and after (`sha256:a533c71c...` at 8, `271dc7d1...` at 12).
+  - 27B base (Qwen3.8-27B FP8, about 27 GB) time to a finished 1-step run,
+    8 ranks on n442+n467, slowest rank: from the shared filesystem 124.7 s;
+    staged into `/scratch/local` (copy and verify 15-18 s per node) 92.3 s;
+    already staged 54.5 s. The nodes had read this base earlier that day, so
+    the shared-filesystem figure includes whatever their page caches held;
+    one rank alone took 221.6 s on n467 and four ranks right after it 54.6
+    s each, a page-cache effect, so the question "do four concurrent readers
+    of the shared filesystem slow each other" is not answered by these runs.
+
 - **Data-parallel LoRA scaling across nodes (2026-11-21, GH200 nodes, NCCL
   2.32.3 over the libfabric plugin with GPU Direct RDMA on cxi0-3, `alt_read`,
   one srun step per run, one rank per card pinned to its NUMA node).** Fit-loop
@@ -685,11 +701,22 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
       - [x] Gate: replicas bit-identical across nodes (2026-11-21: 8 ranks
         on two nodes and 12 on three, Qwen3-4B and 27B LoRA; see Measured).
       - [ ] Gate: the scaling table at 16 cards (measured to 12: 85% for the
-        4B LoRA, 90% for the 27B LoRA). Across nodes the step-weight scalar
-        over the host star takes 13-14 ms; it is the first point where ranks
-        wait for each other, so how much of it is the round trip and how much
-        is ranks arriving at different times is not yet separated (measure
-        before moving it onto the device).
+        4B LoRA, 90% for the 27B LoRA).
+      - [x] A step's scalars ride the device group (2026-11-21): once the
+        ranks formed one, `JobCollective`'s all-reduce and broadcast of up to
+        62 values (the step's token count, an evaluation's result) are one
+        NCCL round of a fixed 64-value slot carrying length and type, checked
+        like the host star and summed in rank order on every rank; the sealed
+        host channel is left to rendezvous and control. Same bytes as
+        before. Test: `nccl_job` (a sum, and a broadcast to ranks that pass
+        nothing). At 8 cards over two nodes the scalar went from 13.2 to 2.8
+        ms and the step from 127.5 to 117.1 ms; at 12 cards with the node that
+        also hosts the login containers it stayed about 13 ms (129.9 -> 129.3
+        ms per step): there it is ranks waiting for a slow rank, not the round
+        trip (Measured).
+      - [ ] Load balance: a rank on a node shared with other work (n424) holds
+        every step of a 12-card run back by about 10 ms; the first collective
+        of a step is where it shows.
       - [ ] Overlap with backward. Not done: on the measured LoRA step the
         whole exposed reduction is 3.0 ms of 118 ms, so overlap could gain at
         most about 2.5%; it needs a per-layer gradient-ready hook in each backward and
@@ -830,6 +857,17 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
       per-rank RNG state, with loading into a different layout as a separate
       correctness test (logical tensor digests equal; training behaviour
       compared, not bitwise). Gate: time until all 16 ranks hold a 27B base.
+      - [x] Staging (2026-11-21): the global `--stage-models DIR` (with
+        `--stage-from ROOT`) answers every argument naming a path inside a
+        `<vendor>/<repo>` store entry from a node-local copy
+        (`brain_modelstore::stage`): the first process on the node takes the
+        entry's lock and copies it with 8 parallel streams, hashing what it
+        writes and refusing a file whose SHA-256 is not the store's, into a
+        private directory renamed into place when complete; the node's other
+        processes wait on the lock and read the copy. Generic over every
+        model and verb. Tests: concurrent stagers make one copy, a path
+        outside the store is untouched, a digest mismatch fails and leaves
+        nothing. Measured in Measured; the 16-rank gate is open.
 - [ ] **C8 collective failure handling.** A communicator state machine
       (active, suspect, aborting, rebuilding) driven by op deadlines and async
       error polling; recovery is a job-level restart from the last committed

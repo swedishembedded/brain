@@ -39,6 +39,7 @@ pub mod plan;
 pub mod recipe;
 pub mod refurl;
 pub mod resolve;
+pub mod stage;
 #[cfg(test)]
 mod test_store;
 

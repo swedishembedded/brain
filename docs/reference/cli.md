@@ -298,6 +298,12 @@ surfaces.
 models are - see [Configuration](configuration.md#paths) for the full
 precedence ladder.
 
+`--stage-models <DIR>` (global) answers every argument that names a path inside a `<vendor>/<repo>` entry of the
+models directory (or of `--stage-from <ROOT>`) from a node-local copy of that entry under `DIR`. The first process on a
+node copies the entry, checking every file's SHA-256 against the store's, and renames the copy into place once it is
+complete; the node's other processes wait for it and then read the copy. Point it at fast local disk when many ranks
+of a cluster job would otherwise read the same base from a shared filesystem.
+
 ### Naming weights on a model command
 
 A multi-role model command names each weight role with a flag spelled exactly
