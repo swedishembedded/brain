@@ -27,5 +27,6 @@ mod inkling2_tokenizer_parity;
 mod llama_bpe_parity;
 mod packed_rows;
 mod t5xxl_precompiled_parity;
+mod tokenizer_identity_real;
 mod umt5_tokenizer_parity;
 mod wordpiece_parity;

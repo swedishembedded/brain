@@ -42,6 +42,7 @@ pub mod rng;
 pub mod special_match;
 pub mod sample;
 pub mod tokenizer;
+pub mod tokenizer_identity;
 pub mod unigram;
 pub mod wordpiece;
 pub mod videoset;
