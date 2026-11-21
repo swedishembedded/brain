@@ -96,4 +96,5 @@ mod step_parity;
 mod step_parity_fixture;
 mod step_timing;
 mod train_cuda_matches_cpu;
+mod train_serve_prompt;
 mod trimmed_rows;
