@@ -448,7 +448,7 @@ impl Context {
         blas.gemm(gemm, a, b, c)
     }
 
-    fn make_current(&self) -> Result<(), String> {
+    pub(crate) fn make_current(&self) -> Result<(), String> {
         // SAFETY: `self.ctx` is retained for the lifetime of `self`.
         self.d.check(unsafe { (self.fns.ctx_set_current)(self.ctx) }, "cuCtxSetCurrent")
     }

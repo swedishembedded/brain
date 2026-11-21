@@ -36,6 +36,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::collective::CollectiveError;
+use crate::devcollective::{CollectivePath, JobCollective};
 use crate::grid::Grid;
 use crate::netcollective::{GroupHello, NetworkCollective};
 use crate::sealedwire::JobSecret;
@@ -69,6 +70,11 @@ pub struct JobPlan {
     pub handshake_timeout_ms: u64,
     /// How long one collective op may wait on a peer.
     pub op_timeout_ms: u64,
+    /// Where gradients are reduced: on the device when every rank can
+    /// (`auto`, the default a plan leaves out), always through the host star
+    /// (`host`), or on the device or not at all (`device`).
+    #[serde(default, skip_serializing_if = "CollectivePath::is_auto")]
+    pub collectives: CollectivePath,
 }
 
 impl JobPlan {
@@ -83,6 +89,7 @@ impl JobPlan {
             coordinator: coordinator.into(),
             handshake_timeout_ms: DEFAULT_HANDSHAKE_TIMEOUT_MS,
             op_timeout_ms: DEFAULT_OP_TIMEOUT_MS,
+            collectives: CollectivePath::Auto,
         }
     }
 
@@ -210,6 +217,17 @@ impl JobContext {
         } else {
             NetworkCollective::worker(&hello, &self.plan.coordinator, &self.secret, self.plan.handshake_timeout(), self.plan.op_timeout())
         }
+    }
+}
+
+impl JobContext {
+    /// [`Self::collective`], wrapped so gradient reductions run on the card
+    /// over a device collective when every rank can, as the plan's
+    /// `collectives` field allows ([`JobCollective`]). Forming the device group
+    /// waits on the plan's handshake timeout, each device reduction on its op
+    /// timeout.
+    pub fn job_collective(&self) -> Result<JobCollective<NetworkCollective>, CollectiveError> {
+        Ok(JobCollective::new(self.collective()?, self.plan.collectives, self.plan.handshake_timeout(), self.plan.op_timeout()))
     }
 }
 
@@ -377,6 +395,21 @@ mod tests {
         let plan = JobPlan::new("run", 2, "127.0.0.1:7000");
         let err = JobContext::new(plan, crate::sealedwire::JobSecret::random(), 2).expect_err("rank 2 of a two-rank job");
         assert!(err.contains("outside"), "{err}");
+    }
+
+    /// A plan that leaves the collective path out is `auto`, and an `auto`
+    /// plan's identity is the bytes it had before the field existed.
+    #[test]
+    fn a_plan_without_a_collective_path_is_auto_and_keeps_its_identity() {
+        let plan = JobPlan::new("run", 2, "127.0.0.1:7000");
+        assert!(!plan.identity().contains("collectives"), "{}", plan.identity());
+        let old = r#"{"job":"run","world_size":2,"tp":1,"pp":1,"dp":2,"coordinator":"127.0.0.1:7000","handshake_timeout_ms":1,"op_timeout_ms":1}"#;
+        assert_eq!(serde_json::from_str::<JobPlan>(old).unwrap().collectives, CollectivePath::Auto);
+        let mut host = plan.clone();
+        host.collectives = CollectivePath::Host;
+        assert!(host.identity().contains(r#""collectives":"host""#), "{}", host.identity());
+        assert_ne!(host.identity(), plan.identity(), "ranks that disagree on the path are refused at join");
+        assert!(serde_json::from_str::<JobPlan>(&old.replace("}", r#","collectives":"nccl"}"#)).is_err());
     }
 
     #[test]

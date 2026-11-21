@@ -45,7 +45,11 @@ long completions don't recompute the whole prefix each step.
 
 `train --job-plan FILE --job-rank N --job-secret FILE` makes the run one rank
 of a distributed job (the same parameters every distributed trainer takes),
-and `--profile-collectives FILE` writes what its collectives cost.
+and `--profile-collectives FILE` writes what its collectives cost. The plan's optional `"collectives"` field
+chooses where gradients are reduced: `"auto"` (the default) reduces them on
+the cards over NCCL when every rank has a CUDA card and NCCL loads, and
+otherwise through the job's sealed host transport, each rank saying why once;
+`"host"` always uses the host transport; `"device"` fails rather than fall back.
 
 To serve it over HTTP or D-Bus:
 

@@ -100,6 +100,9 @@ pub fn fed_avg_flat(coll: &dyn Collective, rank: usize, weights: &[f32], local_s
 /// vector, and run the same optimiser.
 pub fn reduce_grads<M: Model>(model: &M, coll: &dyn Collective, rank: usize) -> CollectiveResult<()> {
     let world = coll.world_size() as f32;
+    if reduce_on_device(model, coll, rank, 1.0 / world)? {
+        return Ok(());
+    }
     for name in model.param_names() {
         let local = model.read_grad(&name);
         let summed = pollster::block_on(coll.all_reduce(rank, Payload::f32(local)))?.data;
@@ -117,6 +120,9 @@ pub fn reduce_grads<M: Model>(model: &M, coll: &dyn Collective, rank: usize) -> 
 pub fn reduce_grads_weighted<M: Model>(model: &M, coll: &dyn Collective, rank: usize, local_weight: f32) -> CollectiveResult<()> {
     let total = pollster::block_on(coll.all_reduce(rank, Payload::f32(vec![local_weight])))?.data[0];
     let inv = 1.0 / total.max(1e-12);
+    if reduce_on_device(model, coll, rank, local_weight * inv)? {
+        return Ok(());
+    }
     for name in model.param_names() {
         let scaled: Vec<f32> = model.read_grad(&name).iter().map(|&g| g * local_weight).collect();
         let summed = pollster::block_on(coll.all_reduce(rank, Payload::f32(scaled)))?.data;
@@ -124,6 +130,21 @@ pub fn reduce_grads_weighted<M: Model>(model: &M, coll: &dyn Collective, rank: u
         model.write_grad(&name, &mean).map_err(CollectiveError::Transport)?;
     }
     Ok(())
+}
+
+/// Replace every gradient with the sum over the ranks of `scale * g` where the
+/// gradients live, when the model keeps them in its parameter store and the
+/// transport reduces on the device; `false` (nothing moved) otherwise, for the
+/// host path. The condition depends only on the model and the transport, so
+/// every rank of a job takes the same branch.
+fn reduce_on_device<M: Model>(model: &M, coll: &dyn Collective, rank: usize, scale: f32) -> CollectiveResult<bool> {
+    let Some(parts) = model.optimizer_parts() else { return Ok(false) };
+    let names = model.param_names();
+    if names.iter().any(|n| !parts.store.grad.contains_key(n)) {
+        return Ok(false);
+    }
+    let bufs: Vec<(&gpu_core::DeviceBuffer, u64)> = names.iter().map(|n| (parts.store.g(n), parts.store.numel(n) as u64)).collect();
+    pollster::block_on(coll.all_reduce_device(rank, parts.gpu, &bufs, scale))
 }
 
 // ---- Model-generic glue (flatten from / scatter to the model) ------------------

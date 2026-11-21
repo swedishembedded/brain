@@ -91,6 +91,8 @@ pub mod ops;
 // the wasm build the crate declares support for (the re-exports referenced
 // modules whose declarations WERE gated).
 #[cfg(not(target_arch = "wasm32"))]
+pub mod devcollective;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod netcollective;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod sealedwire;
@@ -128,10 +130,12 @@ pub use distributed::{federated_average, reduce_grads, reduce_grads_weighted, Dd
 #[cfg(not(target_arch = "wasm32"))]
 pub use netcollective::NetworkCollective;
 #[cfg(not(target_arch = "wasm32"))]
+pub use devcollective::{CollectivePath, JobCollective};
+#[cfg(not(target_arch = "wasm32"))]
 pub use job::{CheckpointCommit, CommitFile, JobContext, JobPlan};
 #[cfg(not(target_arch = "wasm32"))]
 pub use sealedwire::JobSecret;
-pub use grid::{Coord, Grid, LocalGroups};
+pub use grid::{Axis, Coord, Grid, LocalGroups};
 #[cfg(not(target_arch = "wasm32"))]
 pub use parallel::DataParallel;
 pub use plan::{plan_tp, Hardware, ModelShape, TpPlan};

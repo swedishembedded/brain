@@ -23,7 +23,7 @@
 //! `dyn`, and async device init / read-back via `new_async` / `read_async`).
 
 pub use backend_api::{
-    f, AllocPolicy, BufUsage, DeviceBuffer, DeviceCaps, DeviceClass, DeviceOutOfMemory, DeviceStats, LiveResources, LiveTally,
+    f, AllocPolicy, BufUsage, CollectiveDtype, CollectiveId, DeviceBuffer, DeviceCaps, DeviceClass, DeviceOutOfMemory, DeviceStats, LiveResources, LiveTally,
     MemAdvice, MemoryLimits, MemoryUsage, Lowering, NumericSupport, PlacementFacts, PortableDispatch, PrefetchTarget, Step, StepMeta,
     STORAGE_BINDING_OFFSET_ALIGN_BYTES,
 };
@@ -2574,6 +2574,22 @@ mod native_facade {
                 ids.push(m.identity().ok_or_else(|| format!("the {} backend does not identify its cards", m.kind()))?);
             }
             self.be().open_collective(&ids)
+        }
+
+        /// Whether this card could join a device collective of one rank per process, or why not.
+        pub(crate) fn rank_collective_support(&self) -> Result<(), String> {
+            self.be().rank_collective_support()
+        }
+
+        /// A fresh rendezvous id for a device collective of one rank per process, or why this backend has none.
+        pub(crate) fn collective_id(&self) -> Result<backend_api::CollectiveId, String> {
+            self.be().collective_id()
+        }
+
+        /// Join the device collective `id` names as `rank` of `world` on this card; see
+        /// `backend_api::Backend::join_collective`.
+        pub(crate) fn join_collective(&self, id: &backend_api::CollectiveId, world: usize, rank: usize, timeout: std::time::Duration) -> Result<Box<dyn backend_api::RankCollective>, String> {
+            self.be().join_collective(id, world, rank, timeout)
         }
 
         /// Issue what this handle still holds back in an open pass; see `backend_api::Backend::release_held`.

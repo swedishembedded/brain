@@ -77,6 +77,28 @@ impl Grid {
         let c = self.coord(rank);
         (0..self.dp).map(|dp| self.rank(Coord { dp, ..c })).collect()
     }
+
+    /// How a communicator over the whole world splits into `rank`'s group
+    /// along `axis`: `(color, key)`, where the ranks that share a color are
+    /// exactly that group (the one [`Self::tp_group`], [`Self::pp_group`] or
+    /// [`Self::dp_group`] names) and the key is `rank`'s position in it.
+    pub fn split_key(&self, rank: usize, axis: Axis) -> (u32, u32) {
+        let c = self.coord(rank);
+        let (color, key) = match axis {
+            Axis::Tp => (c.dp * self.pp + c.pp, c.tp),
+            Axis::Pp => (c.dp * self.tp + c.tp, c.pp),
+            Axis::Dp => (c.pp * self.tp + c.tp, c.dp),
+        };
+        (color as u32, key as u32)
+    }
+}
+
+/// One parallelism dimension of a [`Grid`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Axis {
+    Tp,
+    Pp,
+    Dp,
 }
 
 // ---- in-process realisation: one collective per group in each dimension --------
@@ -276,5 +298,22 @@ mod tests {
         assert_eq!(r[1], vec![1.0]);
         assert_eq!(r[2], vec![5.0]); // 2+3
         assert_eq!(r[3], vec![5.0]);
+    }
+
+    /// Splitting the world by `split_key` yields exactly the groups the grid
+    /// names, each ordered as the grid orders it, for every axis and shape.
+    #[test]
+    fn a_split_by_key_forms_the_grid_groups() {
+        for (tp, pp, dp) in [(1, 1, 4), (2, 1, 2), (2, 2, 2), (4, 1, 1), (1, 3, 2)] {
+            let grid = Grid::new(tp, pp, dp);
+            for (axis, group) in [(Axis::Tp, Grid::tp_group as fn(&Grid, usize) -> Vec<usize>), (Axis::Pp, Grid::pp_group), (Axis::Dp, Grid::dp_group)] {
+                for rank in 0..grid.world_size() {
+                    let (color, _) = grid.split_key(rank, axis);
+                    let mut members: Vec<usize> = (0..grid.world_size()).filter(|&r| grid.split_key(r, axis).0 == color).collect();
+                    members.sort_by_key(|&r| grid.split_key(r, axis).1);
+                    assert_eq!(members, group(&grid, rank), "{axis:?} group of rank {rank} in {grid:?}");
+                }
+            }
+        }
     }
 }

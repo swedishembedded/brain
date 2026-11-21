@@ -177,6 +177,19 @@ pub trait Collective: Send + Sync {
     /// Every rank receives `root`'s `local`. Non-root `local` (data AND dtype)
     /// is ignored (pass an empty vec).
     fn broadcast<'a>(&'a self, rank: usize, local: Payload, root: usize) -> CollectiveFuture<'a, Payload>;
+
+    /// Sum fp32 device buffers in place across the ranks without staging them
+    /// through the host: for every `(buf, count)` on `gpu`, the first `count`
+    /// elements become the sum over the ranks of `scale * x` (each rank's own
+    /// `scale`), and every rank receives the same bytes. Resolves to `false`
+    /// when this transport has no device path for `gpu`, having moved nothing:
+    /// the caller then reduces through the payload ops. Every rank must make
+    /// the same call, so the ranks agree on the path.
+    ///
+    /// The default has no device path.
+    fn all_reduce_device<'a>(&'a self, _rank: usize, _gpu: &'a gpu_core::Gpu, _bufs: &'a [(&'a gpu_core::DeviceBuffer, u64)], _scale: f32) -> CollectiveFuture<'a, bool> {
+        Box::pin(async { Ok(false) })
+    }
 }
 
 pub(crate) fn check_rank(rank: usize, world_size: usize) -> CollectiveResult<()> {
@@ -626,6 +639,20 @@ impl Collective for TimedCollective<'_> {
             let started = Instant::now();
             let out = self.inner.broadcast(rank, local, root).await;
             self.record(OpKind::Broadcast, bytes, started.elapsed());
+            out
+        })
+    }
+
+    /// Timed as an all-reduce of the buffers' fp32 bytes when the inner
+    /// transport takes the device path; a call it declines is not an op.
+    fn all_reduce_device<'a>(&'a self, rank: usize, gpu: &'a gpu_core::Gpu, bufs: &'a [(&'a gpu_core::DeviceBuffer, u64)], scale: f32) -> CollectiveFuture<'a, bool> {
+        Box::pin(async move {
+            let bytes = bufs.iter().map(|(_, n)| n.saturating_mul(4)).sum();
+            let started = Instant::now();
+            let out = self.inner.all_reduce_device(rank, gpu, bufs, scale).await;
+            if matches!(out, Ok(true) | Err(_)) {
+                self.record(OpKind::AllReduce, bytes, started.elapsed());
+            }
             out
         })
     }

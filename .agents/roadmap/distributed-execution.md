@@ -3,7 +3,7 @@
 
 # distributed-execution - roadmap
 
-Scope: Running one training job as ranks across machines, and serving one model fleet across machines - the job plan every rank agrees on, the process group it joins, the transport's failure semantics, device-resident collectives across nodes, the request router over several servers, the cluster launch sample, and the tests that start a cluster as real processes (`crates/model`: `job`, `collective`, `netcollective`, `distributed`, `grid`; `backend_cuda::nccl`, `gpu_core::devgroup`).
+Scope: Running one training job as ranks across machines, and serving one model fleet across machines - the job plan every rank agrees on, the process group it joins, the transport's failure semantics, device-resident collectives across nodes, the request router over several servers, the cluster launch sample, and the tests that start a cluster as real processes (`crates/model`: `job`, `collective`, `devcollective`, `netcollective`, `distributed`, `grid`; `backend_cuda::nccl`, `gpu_core::devgroup`).
 
 ## Delivered
 
@@ -284,6 +284,22 @@ Scope: Running one training job as ranks across machines, and serving one model 
   in about a millisecond across 8 cards, a full bf16 27B gradient (54 GB) in
   about 0.7 s, so full-parameter runs need C3's sharding and overlap.
 
+- **Gradient reduction, device vs host star (2026-11-21, one GH200 node, NCCL
+  2.32.3, CUDA backend, one process per card, `nccl_job::measure_*`).** Median
+  wall time per reduction, including the wait for completion: the device path
+  is `JobCollective::all_reduce_device` (one NCCL all-reduce over NVLink); the
+  host star reads the gradient back, all-reduces it over the sealed loopback
+  transport in pieces of at most 2^27 floats and writes it back. fp32 payloads:
+  - Qwen3-0.6B LoRA r4 (10.1 MB): 2 ranks 0.23 vs 45.5 ms; 4 ranks 0.23 vs
+    75.7 ms.
+  - 27B LoRA r16 on every linear (108.9 M params, 435 MB): 2 ranks 3.9 ms vs
+    2.14 s; 4 ranks 2.1 ms vs 3.55 s.
+  - Qwen3-0.6B full gradient (596 M params, 2.38 GB): 2 ranks 20.2 ms vs
+    13.2 s; 4 ranks 10.7 ms vs 21.4 s (4 ranks: 222 GB/s algorithm, 333 GB/s
+    bus bandwidth, the C0 ceiling).
+  The host star is 200-2000x slower and its time grows with the world; for
+  the large payloads the device path's time falls with it.
+
 - **End to end through a durable job controller.** An orchestrator submitted
       two Qwen3-0.6B LoRA ranks on one machine (eval-free, 2 steps, one P40
       each); the job completed 6.6 s after launch with exit 0, the adapters in
@@ -318,16 +334,38 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
       Measured. This is the ceiling every later item is judged against.
       Done 2026-11-21 for 4 cards (NVLink), 2 and 8 ranks over two nodes
       (knowledge #541); 12 and 16 ranks follow with C2's scaling runs.
-- [ ] **C1 NCCL across processes and nodes.** `backend_cuda::nccl` gains
-      `ncclGetUniqueId`/`ncclCommInitRank` (one rank per process, one card per
-      process) and `ncclCommSplit` for the tp/dp groups `Grid` addresses, plus
-      reduce-scatter and broadcast over fp32/bf16. The unique id travels over
-      the authenticated, sealed control channel, so the job secret still gates
-      membership. `model::collective` gets a device-resident provider on that
-      communicator, so gradients never stage through host fp32; a fall back to
-      the host star names its reason. NCCL payloads on the fabric are not
-      encrypted (decided 2026-11-21: the per-step VNI isolates them; the control
-      channel stays sealed).
+- [x] **C1 NCCL across processes and nodes.** Done 2026-11-21.
+      `backend_cuda::nccl::NcclRank` is one rank per process on one card:
+      `ncclGetUniqueId`, nonblocking `ncclCommInitRankConfig`, `ncclCommSplit`
+      (`Grid::split_key` gives the color and key of a tp/pp/dp group),
+      all-reduce (grouped, with a per-rank pre-multiplied sum), all-gather,
+      reduce-scatter and broadcast over fp32 and bf16. Creation, a split and
+      every enqueue are bounded by a deadline, and `wait` polls the stream and
+      `ncclCommGetAsyncError`, so a dead peer is an error within the plan's op
+      timeout (the communicator is then aborted), never a hang; a clean drop
+      finalizes and destroys. `gpu_core::devgroup::RankGroup` is the facade;
+      the single-process `NcclGroup` (`ncclCommInitAll`) serving uses is
+      unchanged. `model::devcollective::rendezvous` forms the group over the
+      job's sealed host transport: every rank states whether it can take
+      part, rank 0 creates the id and broadcasts it there (so only holders of
+      the job secret ever see it), every rank joins and reports, and only a
+      group every rank joined is used. `JobCollective` (what
+      `JobContext::job_collective` and so every `--job-plan` verb now get)
+      keeps payload ops on the host star and reduces device gradients with
+      `Collective::all_reduce_device`; `reduce_grads(_weighted)` take that path
+      when the model keeps its gradients in its parameter store. The plan's
+      `collectives` field (`auto` default, `host`, `device`) chooses; `auto`
+      falls back to the host star and every rank says why once. Replicas get
+      the same reduced bytes from NCCL, so they stay bit-identical; for a
+      fixed world, card set and library a repeat gives the same bytes
+      (asserted), but a device run is not bitwise equal to a host-star run.
+      Tests: `crates/model/tests/it/nccl_job.rs` (2 and 4 OS processes on one
+      node: every op, bf16, tp/dp splits against a host reference, identical
+      bytes across ranks and repeats; a rank that dies, error in 5.5 s for a
+      5 s op timeout; a rank without the secret never joins), the
+      `devcollective`, `grid` and `job` unit tests. Open: the qwen3/gpt2 verbs
+      were not run end to end on the device path (no Qwen3-0.6B in the node's
+      model store; see Measured), and no two-node run of the provider yet.
 - [ ] **C2 data parallelism for every trainer.** The plan-file data-parallel
       path moves from the GPT and Qwen3 LoRA bindings into the shared training
       capability, so any architecture with gradients trains as ranks; gradients
@@ -370,11 +408,11 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
 - [ ] `DdpOptimizer`, `DataParallel` and `federated_average` have no
       production caller; the shipped driver reduces through `reduce_grads` so
       each model keeps its own optimizer and schedule.
-- [ ] Device-resident collectives: `gpu_core::devgroup::DeviceGroup` (NCCL by
-      `dlopen`, host fallback with a stated reason) exists, ledger in
-      `serving-runtime.md` item 12; the `Collective` seam in `model::collective`
-      does not call it yet, so every distributed-training payload is still
-      staged through host fp32.
+- [ ] Device-resident collectives cover the data-parallel gradient reduction
+      of a model whose gradients live in its parameter store (C1). A resident
+      full fine-tune (`model::resident_ft`) keeps its linears' gradients
+      outside the store and still reduces through the host star; the payload
+      ops (`Collective::all_reduce` and friends) stay on the host transport.
 - [ ] Wire the commit into a trainer: rank 0 writes the weights and the
       exact-resume state, calls `CheckpointCommit::build`/`write`, and the
       driver resumes from `CheckpointCommit::latest` after verifying it.

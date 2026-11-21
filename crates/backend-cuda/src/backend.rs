@@ -601,6 +601,21 @@ impl CudaBackend {
         self.ctx.stream()
     }
 
+    /// The CUDA ordinal of this handle's device.
+    pub(crate) fn ordinal(&self) -> u32 {
+        self.ordinal
+    }
+
+    /// Make this handle's context current on the calling thread, for a library that takes the device from it.
+    pub(crate) fn bind_context(&self) -> Result<(), String> {
+        self.ctx.make_current()
+    }
+
+    /// Whether everything enqueued on this handle's stream has run, without waiting for it.
+    pub(crate) fn stream_idle(&self) -> Result<bool, String> {
+        self.ctx.stream_idle()
+    }
+
     /// The device address and length in bytes of `buf`, which must be one of this backend's.
     pub(crate) fn address_of(buf: &DeviceBuffer) -> Result<(CuDevicePtr, u64), String> {
         let b = buf.try_downcast_ref::<CudaBuf>().ok_or("the buffer is not a CUDA buffer")?;
@@ -2350,6 +2365,18 @@ impl backend_api::Backend for CudaBackend {
             .map(|m| all.iter().find(|c| c.identity().same_device(m)).map(|c| c.ordinal).ok_or_else(|| format!("{} is not visible to the CUDA driver", m.name)))
             .collect::<Result<Vec<u32>, String>>()?;
         Ok(Box::new(crate::nccl::NcclGroup::open(&ordinals)?))
+    }
+
+    fn rank_collective_support(&self) -> Result<(), String> {
+        crate::nccl::rank_support()
+    }
+
+    fn collective_id(&self) -> Result<backend_api::CollectiveId, String> {
+        crate::nccl::unique_id()
+    }
+
+    fn join_collective(&self, id: &backend_api::CollectiveId, world: usize, rank: usize, timeout: std::time::Duration) -> Result<Box<dyn backend_api::RankCollective>, String> {
+        Ok(Box::new(crate::nccl::NcclRank::join(self.ordinal, id, world, rank, timeout)?))
     }
 
     fn release_held(&self) {

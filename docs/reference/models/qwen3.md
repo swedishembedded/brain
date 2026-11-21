@@ -207,7 +207,11 @@ Several ranks can train one adapter as a distributed job (`--job-plan`,
 `--job-rank`, `--job-secret`, and `--profile-collectives` for what the
 collectives cost): every step's gradients are averaged over the group, each
 rank trains on its own shard of the records, and rank 0 commits the adapter.
-Without `--seed` every rank derives the seed from the plan.
+Without `--seed` every rank derives the seed from the plan. The plan's optional `"collectives"` field
+chooses where gradients are reduced: `"auto"` (the default) reduces them on
+the cards over NCCL when every rank has a CUDA card and NCCL loads, and
+otherwise through the job's sealed host transport, each rank saying why once;
+`"host"` always uses the host transport; `"device"` fails rather than fall back.
 
 The base may be a brain checkpoint or a `transformers` directory
 (`deepseek-ai/DeepSeek-R1-Distill-Qwen-7B`, ...), and `brain serve` lists the

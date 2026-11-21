@@ -1928,6 +1928,26 @@ pub trait Backend: Send + Sync {
         Err(format!("the {} backend has no device collectives", self.kind()))
     }
 
+    /// Whether this handle could join a communicator whose ranks are separate processes, without creating one;
+    /// `Err` with the reason when it could not.
+    fn rank_collective_support(&self) -> Result<(), String> {
+        Err(format!("the {} backend has no cross-process device collectives", self.kind()))
+    }
+
+    /// A fresh rendezvous id for a communicator whose ranks are separate processes (one card each): the rank that
+    /// creates it hands it to every other rank over a channel the job trusts, and each passes it to
+    /// [`Backend::join_collective`]. `Err` with the reason when this backend has no such communicator.
+    fn collective_id(&self) -> Result<CollectiveId, String> {
+        Err(format!("the {} backend has no cross-process device collectives", self.kind()))
+    }
+
+    /// Join the communicator `id` names as `rank` of `world`, on this handle's device. Blocks until every rank has
+    /// joined, or fails (leaving nothing behind) once `timeout` passes, so a rank that never arrives is an error
+    /// rather than a hang.
+    fn join_collective(&self, _id: &CollectiveId, _world: usize, _rank: usize, _timeout: std::time::Duration) -> Result<Box<dyn RankCollective>, String> {
+        Err(format!("the {} backend has no cross-process device collectives", self.kind()))
+    }
+
     /// Issue whatever this handle still holds back in an open pass, so work on other handles that is ordered
     /// against this handle's buffers sees all of it. A no-op where nothing is held.
     fn release_held(&self) {}
@@ -2268,6 +2288,75 @@ pub trait DeviceCollective: Send + Sync {
     /// Every rank's `recv[j]` (`ranks * words` f32 words) becomes the concatenation, in rank order, of every rank's
     /// first `words` words of `send`.
     fn all_gather(&self, send: &[&DeviceBuffer], recv: &[&DeviceBuffer], words: u64) -> Result<(), String>;
+}
+
+/// The bytes a cross-process communicator's ranks meet by ([`Backend::collective_id`]). Whoever holds them can join
+/// the communicator, so they travel only over a channel the job authenticates.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CollectiveId(pub [u8; CollectiveId::BYTES]);
+
+impl CollectiveId {
+    /// The id's length (NCCL's `NCCL_UNIQUE_ID_BYTES`).
+    pub const BYTES: usize = 128;
+}
+
+impl std::fmt::Debug for CollectiveId {
+    /// Never the bytes: they are a membership credential.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CollectiveId(..)")
+    }
+}
+
+/// The element type a [`RankCollective`] moves and sums.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CollectiveDtype {
+    F32,
+    /// bfloat16, two elements to a 32-bit word of the buffer.
+    Bf16,
+}
+
+impl CollectiveDtype {
+    /// Bytes one element occupies.
+    pub fn bytes(self) -> u64 {
+        match self {
+            CollectiveDtype::F32 => 4,
+            CollectiveDtype::Bf16 => 2,
+        }
+    }
+}
+
+/// One rank of a communicator whose ranks are separate processes, each driving one card
+/// ([`Backend::join_collective`]). Every operation is called by every rank of the communicator in the same order;
+/// it is enqueued behind the work already submitted on the buffers it touches and completes on the device, so the
+/// call returns before the bytes have moved. [`RankCollective::wait`] is where a dead or stalled peer surfaces: it
+/// returns once everything enqueued has completed, or an error (and the communicator aborted) when a peer failed
+/// or the deadline passed. After an error the communicator refuses every further operation.
+///
+/// Counts are elements of `dtype` from the start of each buffer; sums are element-wise.
+pub trait RankCollective: Send + Sync {
+    /// The library that moves the bytes, for reporting.
+    fn provider(&self) -> &'static str;
+    /// How many ranks the communicator has.
+    fn world(&self) -> usize;
+    /// This process's rank in it.
+    fn rank(&self) -> usize;
+    /// In place, for every `(buf, count)`: the first `count` elements become the sum over the ranks of
+    /// `scale * x` (each rank's own `scale`; `1.0` for a plain sum). The buffers are reduced as one group.
+    fn all_reduce_sum(&self, bufs: &[(&DeviceBuffer, u64)], dtype: CollectiveDtype, scale: f32) -> Result<(), String>;
+    /// `recv` (`world * count` elements) becomes every rank's first `count` elements of `send`, in rank order.
+    fn all_gather(&self, send: &DeviceBuffer, recv: &DeviceBuffer, count: u64, dtype: CollectiveDtype) -> Result<(), String>;
+    /// `recv` (`count` elements) becomes this rank's slice `[rank * count, (rank + 1) * count)` of the element-wise
+    /// sum of every rank's `send` (`world * count` elements).
+    fn reduce_scatter(&self, send: &DeviceBuffer, recv: &DeviceBuffer, count: u64, dtype: CollectiveDtype) -> Result<(), String>;
+    /// `buf`'s first `count` elements become `root`'s.
+    fn broadcast(&self, buf: &DeviceBuffer, count: u64, dtype: CollectiveDtype, root: usize) -> Result<(), String>;
+    /// Split into sub-communicators: the ranks that pass the same `color` form one, ordered by `key` (then by rank);
+    /// `None` takes part in none and gets `None` back. Every rank of this communicator calls it. Bounded by
+    /// `timeout` like [`Backend::join_collective`].
+    fn split(&self, color: Option<u32>, key: u32, timeout: std::time::Duration) -> Result<Option<Box<dyn RankCollective>>, String>;
+    /// Wait until everything enqueued on this communicator has completed. A peer's failure, or `timeout` passing
+    /// first, aborts the communicator and is the `Err`.
+    fn wait(&self, timeout: std::time::Duration) -> Result<(), String>;
 }
 
 /// Per-handle device-op counters - the queryable form of what

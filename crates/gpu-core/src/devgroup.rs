@@ -3,6 +3,12 @@
 
 //! Collectives over several cards: all-reduce and all-gather on `DeviceBuffer`s.
 //!
+//! [`DeviceGroup`] is the shape one process driving several cards uses (a
+//! tensor-parallel server). [`RankGroup`] is one rank of a group whose ranks are
+//! separate processes, one card each, as a distributed job runs: it has no host
+//! fallback of its own, because the ranks' host transport is the job's (the
+//! caller decides, and says why, when [`RankGroup::join`] fails).
+//!
 //! When the backend has a device collective library (NCCL for CUDA) the
 //! payload never leaves the cards and the operations are stream-ordered, so a
 //! tensor-parallel layer needs no host wait. When it does not - another
@@ -17,7 +23,9 @@
 //! host memory, you can procure our services by sending an email to
 //! info@swedishembedded.com.
 
-use crate::{DeviceBuffer, Gpu};
+use std::time::Duration;
+
+use crate::{CollectiveDtype, CollectiveId, DeviceBuffer, Gpu};
 
 /// A group of cards that run collectives together. Rank = position in the slice given to [`DeviceGroup::open`];
 /// every operation takes one buffer per rank, in rank order, each on its rank's card.
@@ -91,5 +99,87 @@ impl DeviceGroup {
             g.write_f32(b, &all);
         }
         Ok(())
+    }
+}
+
+/// One rank of a device collective whose ranks are separate processes, each driving one card
+/// (`backend_api::RankCollective`). Every operation is enqueued behind the work already submitted on its buffers
+/// and completes on the device; [`RankGroup::wait`] is where a failed or stalled peer surfaces, within its deadline.
+pub struct RankGroup {
+    gpu: Gpu,
+    comm: Box<dyn backend_api::RankCollective>,
+}
+
+impl RankGroup {
+    /// Whether `gpu` could join a group of this kind, without creating one; the reason when it could not.
+    pub fn supported(gpu: &Gpu) -> Result<(), String> {
+        gpu.rank_collective_support()
+    }
+
+    /// A fresh rendezvous id, made on `gpu`'s backend: one rank creates it and hands it to the others over a channel
+    /// the job authenticates (whoever holds it can join). `Err` with the reason when the backend has no device
+    /// collective of this kind (not CUDA, or NCCL absent or too old).
+    pub fn id(gpu: &Gpu) -> Result<CollectiveId, String> {
+        gpu.collective_id()
+    }
+
+    /// Join the group `id` names as `rank` of `world` on `gpu`'s card, or fail once `timeout` passes without every
+    /// rank having joined.
+    pub fn join(gpu: &Gpu, id: &CollectiveId, world: usize, rank: usize, timeout: Duration) -> Result<RankGroup, String> {
+        let comm = gpu.join_collective(id, world, rank, timeout)?;
+        Ok(RankGroup { gpu: gpu.share(), comm })
+    }
+
+    /// Who moves the bytes (`"nccl"`).
+    pub fn provider(&self) -> &'static str {
+        self.comm.provider()
+    }
+
+    /// How many ranks the group has.
+    pub fn world(&self) -> usize {
+        self.comm.world()
+    }
+
+    /// This process's rank in it.
+    pub fn rank(&self) -> usize {
+        self.comm.rank()
+    }
+
+    /// In place, for every `(buf, count)`: the sum over the ranks of `scale * x` (each rank's own `scale`), the
+    /// buffers reduced as one group. Every rank receives the same bytes.
+    pub fn all_reduce_sum(&self, bufs: &[(&DeviceBuffer, u64)], dtype: CollectiveDtype, scale: f32) -> Result<(), String> {
+        self.gpu.release_held_work();
+        self.comm.all_reduce_sum(bufs, dtype, scale)
+    }
+
+    /// `recv` (`world * count` elements) becomes every rank's first `count` elements of `send`, in rank order.
+    pub fn all_gather(&self, send: &DeviceBuffer, recv: &DeviceBuffer, count: u64, dtype: CollectiveDtype) -> Result<(), String> {
+        self.gpu.release_held_work();
+        self.comm.all_gather(send, recv, count, dtype)
+    }
+
+    /// `recv` (`count` elements) becomes this rank's slice of the element-wise sum of every rank's `send`
+    /// (`world * count` elements).
+    pub fn reduce_scatter(&self, send: &DeviceBuffer, recv: &DeviceBuffer, count: u64, dtype: CollectiveDtype) -> Result<(), String> {
+        self.gpu.release_held_work();
+        self.comm.reduce_scatter(send, recv, count, dtype)
+    }
+
+    /// `buf`'s first `count` elements become `root`'s.
+    pub fn broadcast(&self, buf: &DeviceBuffer, count: u64, dtype: CollectiveDtype, root: usize) -> Result<(), String> {
+        self.gpu.release_held_work();
+        self.comm.broadcast(buf, count, dtype, root)
+    }
+
+    /// The sub-group of the ranks that pass the same `color`, ordered by `key`; `None` joins none. Every rank of
+    /// this group calls it.
+    pub fn split(&self, color: Option<u32>, key: u32, timeout: Duration) -> Result<Option<RankGroup>, String> {
+        Ok(self.comm.split(color, key, timeout)?.map(|comm| RankGroup { gpu: self.gpu.share(), comm }))
+    }
+
+    /// Wait until everything enqueued has completed; a failed peer, or `timeout` passing first, aborts the group
+    /// and is the error.
+    pub fn wait(&self, timeout: Duration) -> Result<(), String> {
+        self.comm.wait(timeout)
     }
 }

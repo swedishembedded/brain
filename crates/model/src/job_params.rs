@@ -81,7 +81,7 @@ impl JobRequest {
     /// the profile written once the run returns.
     pub fn run<R>(&self, train: impl FnOnce(GradSync<'_>) -> Result<R, String>) -> Result<R, String> {
         let context = JobContext::from_plan_file(&self.plan, self.rank, &self.secret)?;
-        let collective = context.collective().map_err(|e| e.to_string())?;
+        let collective = context.job_collective().map_err(|e| e.to_string())?;
         let timed = self.profile.as_ref().map(|_| TimedCollective::new(&collective));
         let group: &dyn crate::Collective = match &timed {
             Some(timed) => timed,
