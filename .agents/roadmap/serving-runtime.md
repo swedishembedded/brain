@@ -39,6 +39,7 @@ column: **open** unless stated.
 | G10 | Layer-sharded serving stages the boundary residual through host memory per step; collectives stage through host and block on TCP | `int8_gguf_resident.rs` shard path, `model::collective`, `netcollective` | device peer copies are the first step |
 | G11 | Multi-request prefill is off by default (`batch_tokens = 0`, slice 512) because batching hurt early requests' latency in the measured workload | `PrefillPolicy::default` | wants a cost model, not a new constant |
 | G12 | The GGUF engine's decode window is 1 | `decode_window_capacity` | |
+| G13 | An adapter bank with fewer slots than adapters in use starves the non-resident ones silently: a swap waits for an idle resident adapter, which never comes while every resident one stays busy | knowledge #544 (18 arms on 8 slots: 12 arms 0 trials in 8 minutes, no error) | **defect, open**: refuse loudly, or evict at a step boundary and queue fairly so every adapter with work makes progress |
 
 Not gaps (claims checked and found already in place): arrival-time continuous
 batching through `llmserve::run_open_scheduled`; prefix caches keyed by adapter
