@@ -546,6 +546,16 @@ pub const FLASH_ATTN_CAUSAL_GQA_BWD_DQ: &str = include_str!("../wgsl/flash_attn_
 pub const FLASH_ATTN_CROSS_REG2: &str = include_str!("../wgsl/flash_attn_cross_reg2.wgsl");
 /// `wgsl/flash_attn_cross_relpos.wgsl`
 pub const FLASH_ATTN_CROSS_RELPOS: &str = include_str!("../wgsl/flash_attn_cross_relpos.wgsl");
+/// `wgsl/flash_attn_gqa_ext.wgsl`
+pub const FLASH_ATTN_GQA_EXT: &str = include_str!("../wgsl/flash_attn_gqa_ext.wgsl");
+/// `wgsl/flash_attn_gqa_ext_bwd_dbank.wgsl`
+pub const FLASH_ATTN_GQA_EXT_BWD_DBANK: &str = include_str!("../wgsl/flash_attn_gqa_ext_bwd_dbank.wgsl");
+/// `wgsl/flash_attn_gqa_ext_bwd_dkv.wgsl`
+pub const FLASH_ATTN_GQA_EXT_BWD_DKV: &str = include_str!("../wgsl/flash_attn_gqa_ext_bwd_dkv.wgsl");
+/// `wgsl/flash_attn_gqa_ext_bwd_dq.wgsl`
+pub const FLASH_ATTN_GQA_EXT_BWD_DQ: &str = include_str!("../wgsl/flash_attn_gqa_ext_bwd_dq.wgsl");
+/// `wgsl/flash_attn_gqa_ext_bwd_prep.wgsl`
+pub const FLASH_ATTN_GQA_EXT_BWD_PREP: &str = include_str!("../wgsl/flash_attn_gqa_ext_bwd_prep.wgsl");
 /// `wgsl/flash_attn_vsa.wgsl`
 pub const FLASH_ATTN_VSA: &str = include_str!("../wgsl/flash_attn_vsa.wgsl");
 /// `wgsl/focal_dice_grad.wgsl`
@@ -2021,6 +2031,11 @@ pub const ALL: &[(&str, &str)] = &[
     ("flash_attn_causal_gqa_bwd_dq", FLASH_ATTN_CAUSAL_GQA_BWD_DQ),
     ("flash_attn_cross_reg2", FLASH_ATTN_CROSS_REG2),
     ("flash_attn_cross_relpos", FLASH_ATTN_CROSS_RELPOS),
+    ("flash_attn_gqa_ext", FLASH_ATTN_GQA_EXT),
+    ("flash_attn_gqa_ext_bwd_dbank", FLASH_ATTN_GQA_EXT_BWD_DBANK),
+    ("flash_attn_gqa_ext_bwd_dkv", FLASH_ATTN_GQA_EXT_BWD_DKV),
+    ("flash_attn_gqa_ext_bwd_dq", FLASH_ATTN_GQA_EXT_BWD_DQ),
+    ("flash_attn_gqa_ext_bwd_prep", FLASH_ATTN_GQA_EXT_BWD_PREP),
     ("flash_attn_vsa", FLASH_ATTN_VSA),
     ("focal_dice_grad", FOCAL_DICE_GRAD),
     ("focal_dice_stats", FOCAL_DICE_STATS),

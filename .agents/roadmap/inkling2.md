@@ -375,6 +375,23 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
 
   Gate: equality against the dense `attn_scores_causal_bias` oracle and finite
   differences; CUDA included.
+  - Done (2026-11-21): `model::flash_ext` over the `flash_attn_gqa_ext*` kernels (forward, `_bwd_prep`
+    (D, lse, d-sink), `_bwd_dq` (dQ, d-rel), `_bwd_dkv`, `_bwd_dbank`), all four options declared in
+    `AttnOptions` and off by default, inputs refused unless declared. Distances and `tau` come from absolute
+    positions; the forward reads a contiguous layout or paged / ring KV (f32 or bf16 planes) through a
+    per-sequence index, so chunked prefill, decode, a mixed batch and a ring of `window` rows compute the
+    same logits. `gqa_mixer_fwd_windowed` runs it (no `[B,H,T,T]` slab, `AttnSaved::Windowed`), and
+    `gqa_mixer::ring_chunk_attend` is the ring prefill with any options. Gated against a host f64 oracle
+    for every option combination, every gradient by element-wise central differences, the window and
+    `n_floor` boundaries, and whole == chunked == decode == ring (`crates/model/tests/it/flash_ext.rs`);
+    verified on the CPU backend (the qwen35 EdgeRock suite included).
+  - Left: the kernels are the barrier-free reference tier (one invocation per row and head); a tiled
+    workgroup form for GPUs (and its native CUDA twin) is not written: no barrier-capable device was free
+    to gate one, so it is Phase 7 work, gated against these kernels. CUDA was not exercised (the tests run
+    there unchanged through `testgpu::dev`). The causal flash trio, the tensor-core and native paths and
+    the paged flash decode kernels take none of the options; callers with an option call `flash_ext`. The
+    ext kernels have no `gpu_core::cost` formula yet (they run unpriced). Training reads the contiguous
+    layout only (no packed-row document resets: I4.4).
 - **I1.6** `kernels`: the `dyn_group_conv1d` backward trio (dx, d-base, d-dyn), plus a
   single-token decode form with ring state. Make the static conv's residual-and-scale
   `(conv(x)+x)*s` one fused parameter of the step and prefill kernels. Document-boundary

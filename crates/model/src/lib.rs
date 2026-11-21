@@ -47,6 +47,7 @@ pub mod conformance_trainable;
 pub mod conformance_zero;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod finetune;
+pub mod flash_ext;
 pub mod flow;
 pub mod session;
 pub mod paged;

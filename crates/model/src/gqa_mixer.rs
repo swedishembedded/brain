@@ -26,8 +26,9 @@ use gpu_core::provider::attention::AttnShape;
 use gpu_core::provider::library::LibraryGemmProvider;
 use gpu_core::{DeviceBuffer, Gpu, Step};
 
+use crate::flash_ext::{flash_ext_bwd, flash_ext_fwd, flash_ext_paged_fwd, paged_index, AttnInputGrads, AttnInputs, AttnOptions, Contiguous, FlashExtIds, HeadShape, KvPlanes, PagedKv, PagedSeq};
 use crate::kv_tier::{KvKernels, KvLayer};
-use crate::block::{flash_gqa_causal_bwd, flash_gqa_causal_fwd, gqa_bwd, gqa_fwd, gqa_fwd_win, rmsnorm_bwd, rmsnorm_fwd, rope2d_partial_bwd, rope2d_partial_fwd, FlashGqaIds, Gqa, KernelIds};
+use crate::block::{flash_gqa_causal_bwd, flash_gqa_causal_fwd, gqa_bwd, gqa_fwd, rmsnorm_bwd, rmsnorm_fwd, rope2d_partial_bwd, rope2d_partial_fwd, FlashGqaIds, Gqa, KernelIds};
 
 /// Kernel-pipeline indices [`gqa_mixer_fwd`]/[`gqa_mixer_bwd`] dispatch,
 /// beyond `kernels`. Resolved by the calling model against its own
@@ -99,6 +100,9 @@ pub enum AttnSaved {
     /// The blockwise tensor-core path ([`gpu_core::provider::attention`]): the
     /// same row log-sum-exp, and the provider that ran the forward.
     Library { lse: DeviceBuffer, gemm: LibraryGemmProvider },
+    /// The sliding-window path ([`gqa_mixer_fwd_windowed`], [`crate::flash_ext`]): the `[rows, n_heads]` row
+    /// log-sum-exp and the window, for [`flash_ext_bwd`].
+    Windowed { lse: DeviceBuffer, ids: Box<FlashExtIds>, window: u32 },
 }
 
 /// Everything [`gqa_mixer_bwd`] needs beyond what it recomputes fresh. The
@@ -170,22 +174,21 @@ pub fn gqa_mixer_fwd_tc(
 }
 
 /// A causal sliding window on the mixer's attention: query `i` reads keys `j`
-/// with `i - window < j <= i` (`gqa_scores_win`). `window >= shape.t` is plain
-/// causal attention.
+/// with `i - window < j <= i`. `window >= shape.t` is plain causal attention.
 #[derive(Clone, Copy, Debug)]
 pub struct SlidingWindow {
-    /// Pipeline index of `gqa_scores_win` in the caller's kernel list.
-    pub scores_kernel: usize,
+    /// The windowed online-softmax attention ([`crate::flash_ext::pipelines`] registered by the caller).
+    pub flash: FlashExtIds,
     /// Keys each query may look back over, itself included. At least 1.
     pub window: u32,
 }
 
 /// [`gqa_mixer_fwd`] with a sliding-window causal mask. The attention is the
-/// materialised scores/softmax/apply chain: the masked probabilities are exactly
-/// zero outside the window, so [`gqa_mixer_bwd`] on the returned
-/// [`AttnSaved::Probs`] needs no window of its own. The flash and tensor-core
-/// paths have no window, so a long windowed sequence pays the `[B,H,T,T]` slabs
-/// until a windowed flash kernel exists.
+/// windowed online-softmax kernel of [`crate::flash_ext`] (`O(T * head_dim)`
+/// memory, never the `[B,H,T,T]` slabs), and [`gqa_mixer_bwd`] follows it through
+/// [`AttnSaved::Windowed`]. The causal flash trio and the tensor-core path have no
+/// window and are never selected for a window shorter than the sequence; a window
+/// that covers it is plain causal attention and runs as [`gqa_mixer_fwd`] does.
 #[allow(clippy::too_many_arguments)]
 pub fn gqa_mixer_fwd_windowed(
     g: &Gpu,
@@ -219,6 +222,8 @@ fn gqa_mixer_fwd_core(
     is_train: bool,
 ) -> (DeviceBuffer, Option<GqaMixerActs>) {
     assert!(window.is_none() || (flash.is_none() && tensor.is_none()), "gqa_mixer: the flash and tensor-core attention paths have no sliding window");
+    // A window that covers the sequence masks nothing: the plain causal attention is the same computation.
+    let window = window.filter(|w| w.window < shape.t);
     let (nh, nkv, hd) = (shape.n_heads, shape.n_kv_heads, shape.head_dim);
     let qd = shape.qd();
 
@@ -241,6 +246,15 @@ fn gqa_mixer_fwd_core(
     });
     let attn = match flash {
         _ if library.is_some() => library.expect("checked"),
+        _ if window.is_some() => {
+            let win = window.expect("checked");
+            let heads = HeadShape { n_heads: nh, n_kv_heads: nkv, head_dim: hd };
+            let opts = AttnOptions { window: Some(win.window), ..AttnOptions::plain(1.0 / (hd as f32).sqrt()) };
+            let lse = g.storage_uninit(u64::from(n) * u64::from(nh));
+            let layout = Contiguous { b: shape.b, t: shape.t, pos0: 0 };
+            g.submit(&[], &flash_ext_fwd(g, &win.flash, &heads, &opts, &AttnInputs::default(), layout, &prep.q_normed, &prep.k_normed, v, &ctx, &lse));
+            AttnSaved::Windowed { lse, ids: Box::new(win.flash), window: win.window }
+        }
         Some(fids) => {
             assert!(FlashGqaIds::supported(g, hd), "flash attention requested on a device that cannot run it at head_dim {hd}");
             let lse = g.storage(shape.b as u64 * nh as u64 * shape.t as u64);
@@ -250,11 +264,7 @@ fn gqa_mixer_fwd_core(
         None => {
             let scores = g.storage(shape.b as u64 * nh as u64 * shape.t as u64 * shape.t as u64);
             let probs = g.storage(shape.b as u64 * nh as u64 * shape.t as u64 * shape.t as u64);
-            let steps = match window {
-                Some(win) => gqa_fwd_win(g, win.scores_kernel, &ids.kernels, &ga, win.window, &prep.q_normed, &prep.k_normed, v, &scores, &probs, &ctx),
-                None => gqa_fwd(g, &ids.kernels, &ga, &prep.q_normed, &prep.k_normed, v, &scores, &probs, &ctx),
-            };
-            g.submit(&[], &steps);
+            g.submit(&[], &gqa_fwd(g, &ids.kernels, &ga, &prep.q_normed, &prep.k_normed, v, &scores, &probs, &ctx));
             AttnSaved::Probs(probs)
         }
     };
@@ -297,12 +307,13 @@ pub struct RingChunk<'a> {
     pub window: u32,
     /// Absolute position of the chunk's first token.
     pub start: u32,
-    /// Pipeline index of `gqa_scores_win` in the caller's kernel list.
-    pub scores_win: usize,
+    /// The windowed online-softmax attention ([`crate::flash_ext::pipelines`] registered by the caller).
+    pub flash: FlashExtIds,
     /// The row copies in and out of the ring.
     pub copy: RingCopyIds,
     /// `gqa_ring_chunk_attn`, the fused windowed attention of a chunk (workgroup-cooperative): used where the device
-    /// runs such kernels and the window fits it; `None` keeps the three-kernel path, the reference.
+    /// runs such kernels, the window fits it and the attention has no option beyond the window; `None` keeps the
+    /// windowed online-softmax attention of [`crate::flash_ext`], the reference.
     pub ring_attn: Option<usize>,
 }
 
@@ -343,18 +354,9 @@ fn copy_rows(g: &Gpu, copy: RingCopyIds, src: &DeviceBuffer, src_row: u64, dst: 
     (n > 0).then(|| g.step(copy.splice_at, &[src, dst], &[word(n), word(src_row * kvd), word(dst_row * kvd)], n as u32))
 }
 
-/// [`gqa_mixer_fwd`] for ONE CHUNK of `n` rows at positions `start ..` of a sliding-window layer, against the
-/// sequence's ring ([`RingChunk`]) instead of a cache that grows with the sequence. The keys of the last
-/// `min(start, window)` positions are gathered out of the ring in logical order and the chunk's own roped keys appended
-/// (a chunk's later rows cannot be written into the ring first: they would overwrite rows its earlier queries still
-/// need); the chunk's queries attend that run under the window mask; then the chunk's last `min(n, window)` rows are
-/// written back to their ring rows. Equal to the same rows of a whole-sequence windowed forward.
-///
-/// The attention is the materialised scores/softmax/apply chain over `m + n` rows with the first `m` query rows idle:
-/// the cost is `O((m + n)^2)` per head, which is fine for a bounded chunk and is what a windowed flash kernel replaces.
-#[allow(clippy::too_many_arguments)]
 /// Rows `row .. row + rows` of a ring plane into f32 `dst` (from row `dst_row`): a word copy for an f32 ring, an exact
 /// widening for a bf16 one.
+#[allow(clippy::too_many_arguments)]
 fn ring_read(g: &Gpu, ring: &RingChunk, plane: &crate::kv_tier::KvPlane, row: u64, dst: &DeviceBuffer, dst_row: u64, rows: u64, kvd: u64) -> Option<Step> {
     if plane.tier() == crate::kv_tier::KvTier::F32 {
         return copy_rows(g, ring.copy, plane.data(), row, dst, dst_row, rows, kvd);
@@ -364,6 +366,7 @@ fn ring_read(g: &Gpu, ring: &RingChunk, plane: &crate::kv_tier::KvPlane, row: u6
 }
 
 /// f32 rows of `src` (from row `src_row`) into rows `row ..` of a ring plane: a word copy, or a rounding to bf16.
+#[allow(clippy::too_many_arguments)]
 fn ring_write(g: &Gpu, ring: &RingChunk, plane: &crate::kv_tier::KvPlane, row: u64, src: &DeviceBuffer, src_row: u64, rows: u64, kvd: u64) -> Option<Step> {
     if plane.tier() == crate::kv_tier::KvTier::F32 {
         return copy_rows(g, ring.copy, src, src_row, plane.data(), row, rows, kvd);
@@ -372,16 +375,41 @@ fn ring_write(g: &Gpu, ring: &RingChunk, plane: &crate::kv_tier::KvPlane, row: u
     (n > 0).then(|| g.step(ring.copy.pack_at, &[src, plane.data()], &[word(n), word(src_row * kvd), word(row * kvd / 2)], n.div_ceil(2) as u32))
 }
 
+/// [`gqa_mixer_fwd`] for ONE CHUNK of `n` rows at positions `start ..` of a sliding-window layer, against the
+/// sequence's ring ([`RingChunk`]) instead of a cache that grows with the sequence: the mixer's projections, then
+/// [`ring_chunk_attend`] with the plain windowed attention, then the output gate. Equal to the same rows of a
+/// whole-sequence windowed forward.
 pub fn gqa_mixer_ring_chunk_fwd(g: &Gpu, ids: &GqaMixerIds, ring: &RingChunk, shape: &GqaMixerShape, w: &GqaMixerWeights, q_full: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, n: u32) -> DeviceBuffer {
+    let prep = qkv_prepare(g, ids, shape, w, q_full, k, n);
+    let heads = HeadShape { n_heads: shape.n_heads, n_kv_heads: shape.n_kv_heads, head_dim: shape.head_dim };
+    let opts = AttnOptions { window: Some(ring.window), ..AttnOptions::plain(1.0 / (shape.head_dim as f32).sqrt()) };
+    let ctx = ring_chunk_attend(g, ring, &heads, &opts, &AttnInputs::default(), &prep.q_normed, &prep.k_normed, v, n);
+    gate_ctx(g, ids, &ctx, &prep.q_gate, n, shape.qd()).1
+}
+
+/// The attention of ONE CHUNK of `n` query rows at absolute positions `ring.start ..` of a sliding-window layer whose
+/// keys live in a ring of `ring.window` rows per sequence: `q` `[n, n_heads*head_dim]`, the chunk's own keys and
+/// values `k`/`v` `[n, n_kv_heads*head_dim]` (rotated, normed: what the cache stores). Returns the context
+/// `[n, n_heads*head_dim]` and leaves the chunk's last `min(n, window)` keys and values in the ring.
+///
+/// The keys of the last `min(start, window)` positions are gathered out of the ring in logical order and the
+/// chunk's own keys appended (a chunk's later rows cannot be written into the ring first: they would overwrite rows
+/// its earlier queries still need); the queries attend that run under `opts` (whose window must not exceed the
+/// ring's), with distances from absolute positions; then the chunk's last rows are written to their ring rows. The
+/// attention is the fused `gqa_ring_chunk_attn` where `ring.ring_attn` names it, the device runs workgroup kernels
+/// and `opts` is exactly the plain windowed attention it computes; any other option set runs the windowed
+/// online-softmax attention of [`crate::flash_ext`]. `inputs` are the chunk's rows of the declared options.
+#[allow(clippy::too_many_arguments)]
+pub fn ring_chunk_attend(g: &Gpu, ring: &RingChunk, heads: &HeadShape, opts: &AttnOptions, inputs: &AttnInputs, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, n: u32) -> DeviceBuffer {
     assert!(
         [crate::kv_tier::KvTier::F32, crate::kv_tier::KvTier::BF16].contains(&ring.layer.k.tier()) && ring.layer.k.tier() == ring.layer.v.tier(),
-        "gqa_mixer_ring_chunk_fwd: the ring's planes must be f32 or bf16"
+        "ring_chunk_attend: the ring's planes must be f32 or bf16"
     );
-    assert!(u64::from(shape.kvd()).is_multiple_of(2), "gqa_mixer_ring_chunk_fwd: a bf16 ring packs pairs, so a row must be even");
-    let (nh, nkv, hd) = (shape.n_heads, shape.n_kv_heads, shape.head_dim);
-    let (qd, kvd) = (u64::from(shape.qd()), u64::from(shape.kvd()));
+    let (nh, nkv, hd) = (heads.n_heads, heads.n_kv_heads, heads.head_dim);
+    let (qd, kvd) = (u64::from(nh * hd), u64::from(nkv * hd));
+    assert!(kvd.is_multiple_of(2), "ring_chunk_attend: a bf16 ring packs pairs, so a row must be even");
     let (win, start) = (ring.window, ring.start);
-    let prep = qkv_prepare(g, ids, shape, w, q_full, k, n);
+    assert!(opts.window.is_some_and(|w| w <= win), "ring_chunk_attend: a ring of {win} rows needs a window of at most {win} keys, got {:?}", opts.window);
 
     let m = start.min(win);
     let len = m + n;
@@ -397,29 +425,23 @@ pub fn gqa_mixer_ring_chunk_fwd(g: &Gpu, ids: &GqaMixerIds, ring: &RingChunk, sh
         }
         p += run;
     }
-    steps.extend(copy_rows(g, ring.copy, &prep.k_normed, 0, &ctx_k, u64::from(m), u64::from(n), kvd));
+    steps.extend(copy_rows(g, ring.copy, k, 0, &ctx_k, u64::from(m), u64::from(n), kvd));
     steps.extend(copy_rows(g, ring.copy, v, 0, &ctx_v, u64::from(m), u64::from(n), kvd));
-    let fused = ring.ring_attn.filter(|_| g.caps().workgroup_reductions && win <= 2048 && hd <= 256);
-    let ctx = if let Some(attn) = fused {
-        g.submit(&[], &steps);
-        let ctx = g.storage_uninit(u64::from(n) * qd);
-        g.submit(&[], &[g.dispatch(attn, &[&prep.q_normed, &ctx_k, &ctx_v, &ctx], &[n, nh, nkv, hd, m, win], gpu_core::Dispatch::Workgroups(n * nh))]);
-        ctx
-    } else {
-        // Queries sit at logical rows `m ..` of the run; the rows before them are idle.
-        let q_pad = g.storage_uninit(u64::from(len) * qd);
-        steps.extend(copy_rows(g, ring.copy, &prep.q_normed, 0, &q_pad, u64::from(m), u64::from(n), qd));
-        g.submit(&[], &steps);
+    g.submit(&[], &steps);
 
-        let slabs = u64::from(nh) * u64::from(len) * u64::from(len);
-        let (scores, probs) = (g.storage_uninit(slabs), g.storage_uninit(slabs));
-        let ctx_pad = g.storage_uninit(u64::from(len) * qd);
-        let ga = Gqa { b: 1, t: len, n_heads: nh, n_kv_heads: nkv, head_dim: hd };
-        g.submit(&[], &gqa_fwd_win(g, ring.scores_win, &ids.kernels, &ga, win, &q_pad, &ctx_k, &ctx_v, &scores, &probs, &ctx_pad));
-        let ctx = g.storage_uninit(u64::from(n) * qd);
-        g.submit(&[], &copy_rows(g, ring.copy, &ctx_pad, u64::from(m), &ctx, 0, u64::from(n), qd).into_iter().collect::<Vec<_>>());
-        ctx
-    };
+    let plain_window = AttnOptions { window: Some(win), ..AttnOptions::plain(1.0 / (hd as f32).sqrt()) };
+    let fused = ring.ring_attn.filter(|_| *opts == plain_window && g.caps().workgroup_reductions && win <= 2048 && hd <= 256);
+    let ctx = g.storage_uninit(u64::from(n) * qd);
+    if let Some(attn) = fused {
+        g.submit(&[], &[g.dispatch(attn, &[q, &ctx_k, &ctx_v, &ctx], &[n, nh, nkv, hd, m, win], gpu_core::Dispatch::Workgroups(n * nh))]);
+    } else {
+        // The gathered run is one linear block whose slot 0 holds position `start - m`.
+        let index = g.storage(4 + 1);
+        g.write(&index, &paged_index(&[PagedSeq { q_row0: 0, n_q: n, q_pos0: start, kv_pos0: start - m }], &[&[0]], 1));
+        let paged = PagedKv { index: &index, n_seqs: 1, max_q: n, n_rows: n, block_size: len, max_bt: 1, ring: 0 };
+        let lse = g.storage_uninit(u64::from(n) * u64::from(nh));
+        g.submit(&[], &flash_ext_paged_fwd(g, &ring.flash, heads, opts, inputs, &paged, q, KvPlanes::F32 { k: &ctx_k, v: &ctx_v }, &ctx, &lse));
+    }
 
     // The chunk's last `window` positions become the ring.
     let keep = n.min(win);
@@ -428,14 +450,13 @@ pub fn gqa_mixer_ring_chunk_fwd(g: &Gpu, ids: &GqaMixerIds, ring: &RingChunk, sh
     while p < end {
         let row = ring_row(p, win);
         let run = (end - p).min(win - row);
-        for (plane, src) in [(&ring.layer.k, &prep.k_normed), (&ring.layer.v, v)] {
+        for (plane, src) in [(&ring.layer.k, k), (&ring.layer.v, v)] {
             steps.extend(ring_write(g, ring, plane, u64::from(ring.row0 + row), src, u64::from(p - start), u64::from(run), kvd));
         }
         p += run;
     }
     g.submit(&[], &steps);
-
-    gate_ctx(g, ids, &ctx, &prep.q_gate, n, shape.qd()).1
+    ctx
 }
 
 /// [`gqa_mixer_fwd`] for ONE CHUNK of a multi-round prefill: identical
@@ -970,6 +991,12 @@ pub fn gqa_mixer_bwd(g: &Gpu, ids: &GqaMixerIds, shape: &GqaMixerShape, w: &GqaM
             let dsum = g.storage(shape.b as u64 * nh as u64 * shape.t as u64);
             g.submit(&[], &flash_gqa_causal_bwd(g, fids, &ga, &la.q_normed, &la.k_normed, &la.v, &la.ctx, lse, &d_ctx, &dsum, &d_q_normed, &d_k_normed, &d_v));
         }
+        AttnSaved::Windowed { lse, ids: fids, window } => {
+            let heads = HeadShape { n_heads: nh, n_kv_heads: nkv, head_dim: hd };
+            let opts = AttnOptions { window: Some(*window), ..AttnOptions::plain(1.0 / (hd as f32).sqrt()) };
+            let layout = Contiguous { b: shape.b, t: shape.t, pos0: 0 };
+            g.submit(&[], &flash_ext_bwd(g, fids, &heads, &opts, &AttnInputs::default(), layout, &la.q_normed, &la.k_normed, &la.v, &la.ctx, lse, &d_ctx, &d_q_normed, &d_k_normed, &d_v, &AttnInputGrads::default()));
+        }
     }
 
     // ---- RoPE backward (in place, sign=-1) ----
@@ -1014,11 +1041,13 @@ mod ring_copy_tests {
     #[test]
     fn ring_rows_round_trip_at_offsets_off_the_binding_grain() {
         let (kvd, window, row0) = (10u64, 7u32, 3u32);
-        let g = Gpu::new_cpu(&ring_copy_pipelines());
-        let copy = RingCopyIds::resolve(&g);
+        let mut list = ring_copy_pipelines().to_vec();
+        crate::ops::extend_kernel_list(&mut list, &crate::flash_ext::pipelines());
+        let g = Gpu::new_cpu(&list);
+        let (copy, flash) = (RingCopyIds::resolve(&g), FlashExtIds::resolve(&g));
         for tier in [KvTier::F32, KvTier::BF16] {
             let layer = KvLayer::new(&g, tier, u64::from(row0 + window), kvd, 2);
-            let ring = RingChunk { layer: &layer, row0, window, start: 0, scores_win: 0, copy, ring_attn: None };
+            let ring = RingChunk { layer: &layer, row0, window, start: 0, flash, copy, ring_attn: None };
             // 5 source rows of small integers (exact in bf16); ring rows 2..5 take source rows 1..4.
             let src_data: Vec<f32> = (0..50).map(|i| i as f32 - 20.0).collect();
             let src = g.storage_init("src", &src_data);

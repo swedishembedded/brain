@@ -6,7 +6,8 @@
 // bounded-memory model architectures then you can procure our services by
 // sending an email to info@swedishembedded.com.
 
-//! `gqa_mixer_fwd_windowed` and `gqa_mixer_bwd` on its saved probabilities: the
+//! `gqa_mixer_fwd_windowed` and `gqa_mixer_bwd` through the windowed online-softmax
+//! attention it saves (`AttnSaved::Windowed`, never a `[B,H,T,T]` slab): the
 //! window must reach the output (a query sees only the last `window` keys) and the
 //! backward must carry no gradient across it. Central finite differences of
 //! `L = sum(ctx_gated * d_out)` against the analytic input gradients, at
@@ -16,9 +17,20 @@
 use data::rng::Lcg;
 use gpu_core::Gpu;
 use model::block::{KernelIds, UNREGISTERED};
-use model::gqa_mixer::{gqa_mixer_bwd, gqa_mixer_fwd, gqa_mixer_fwd_windowed, GqaMixerGrads, GqaMixerIds, GqaMixerShape, GqaMixerWeights, SlidingWindow};
+use model::flash_ext::FlashExtIds;
+use model::gqa_mixer::{gqa_mixer_bwd, gqa_mixer_fwd, gqa_mixer_fwd_windowed, AttnSaved, GqaMixerGrads, GqaMixerIds, GqaMixerShape, GqaMixerWeights, SlidingWindow};
 
-const KERNELS: &[(&str, &str)] = &[
+/// The mixer's kernels plus the windowed attention's.
+fn kernels() -> &'static [(&'static str, &'static str)] {
+    static K: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
+    K.get_or_init(|| {
+        let mut v = BASE_KERNELS.to_vec();
+        model::ops::extend_kernel_list(&mut v, &model::flash_ext::pipelines());
+        v
+    })
+}
+
+const BASE_KERNELS: &[(&str, &str)] = &[
     ("rmsnorm", kernels::RMSNORM),
     ("rms_inv", kernels::RMS_INV),
     ("rmsnorm_dx", kernels::RMSNORM_DX),
@@ -30,7 +42,6 @@ const KERNELS: &[(&str, &str)] = &[
     ("mul", kernels::MUL),
     ("rope2d_partial", kernels::ROPE2D_PARTIAL),
     ("gqa_scores", kernels::GQA_SCORES),
-    ("gqa_scores_win", kernels::GQA_SCORES_WIN),
     ("attn_softmax", kernels::ATTN_SOFTMAX),
     ("gqa_apply", kernels::GQA_APPLY),
     ("gqa_bwd_dscores", kernels::GQA_BWD_DSCORES),
@@ -100,7 +111,13 @@ fn run(g: &Gpu, shape: &GqaMixerShape, x: &Inputs, tables: &(Vec<f32>, Vec<f32>)
     let (cos, sin) = (g.storage_init("cos", &tables.0), g.storage_init("sin", &tables.1));
     let w = GqaMixerWeights { q_norm: &q_norm, k_norm: &k_norm, cos: &cos, sin: &sin };
     let (out, acts) = match window {
-        Some(window) => gqa_mixer_fwd_windowed(g, &ids, SlidingWindow { scores_kernel: idx(g, "gqa_scores_win"), window }, shape, &w, &q_full, &k, &v, n, backward),
+        Some(window) => {
+            let (out, acts) = gqa_mixer_fwd_windowed(g, &ids, SlidingWindow { flash: FlashExtIds::resolve(g), window }, shape, &w, &q_full, &k, &v, n, backward);
+            // A window shorter than the sequence runs the online-softmax attention (its lse, never probabilities); one
+            // that covers the sequence is plain causal attention.
+            assert!(acts.as_ref().is_none_or(|a| matches!(a.attn, AttnSaved::Windowed { .. }) == (window < shape.t)), "window {window} over {} rows took the wrong attention", shape.t);
+            (out, acts)
+        }
         None => gqa_mixer_fwd(g, &ids, shape, &w, &q_full, &k, &v, n, backward),
     };
     let mut r = Run { out: g.read(&out, (n * qd) as usize), d_q_full: vec![], d_k: vec![], d_v: vec![] };
@@ -129,7 +146,7 @@ fn shape() -> GqaMixerShape {
 /// A window as long as the sequence is the plain causal mask.
 #[test]
 fn a_window_covering_the_sequence_is_the_plain_causal_mixer() {
-    let g = Gpu::new_cpu(KERNELS);
+    let g = Gpu::new_cpu(kernels());
     let s = shape();
     let (x, tables) = draw(&s, &mut Lcg::new(0x77aa_0001)); // seed: fixed so a failure reproduces
     let plain = run(&g, &s, &x, &tables, None, true);
@@ -144,7 +161,7 @@ fn a_window_covering_the_sequence_is_the_plain_causal_mixer() {
 /// from every query gets no gradient.
 #[test]
 fn windowed_backward_matches_finite_differences_and_carries_nothing_across_the_window() {
-    let g = Gpu::new_cpu(KERNELS);
+    let g = Gpu::new_cpu(kernels());
     let s = shape();
     let window = 6u32;
     let (x, tables) = draw(&s, &mut Lcg::new(0x77aa_0002)); // seed: fixed so a failure reproduces

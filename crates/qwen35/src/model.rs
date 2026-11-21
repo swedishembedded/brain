@@ -237,7 +237,7 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         // The KV cache's encodings, applied to the training attention's keys and values on request.
         v.push(("kv_roundtrip_i8", kernels::KV_ROUNDTRIP_I8));
         v.push(("kv_roundtrip_fp8", kernels::KV_ROUNDTRIP_FP8));
-        // EdgeRock: the anchor memory's kernels and the windowed attention scores, resolved by name.
+        // EdgeRock: the anchor memory's kernels, resolved by name.
         v.extend(model::anchor_memory::anchor_memory_pipelines());
         // The Gated-DeltaNet pool staging for a pool stored as bf16: the gather decodes, the scatter rounds.
         let gather_a = kernels::template::dtype_variant("pool_rows_gather2", kernels::POOL_ROWS_GATHER2, "pool_a", Dtype::BF16).unwrap();
@@ -245,9 +245,10 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         v.push(("pool_rows_scatter2_bf16", kernels::POOL_ROWS_SCATTER2_BF16));
         // The exact fp32 product of the memory's scorer at a large decode batch (`memory_project`).
         v.push(("matmul_tile16", kernels::MATMUL_TILE16));
-        v.push(("gqa_scores_win", kernels::GQA_SCORES_WIN));
         v.push(("gqa_ring_chunk_attn", kernels::GQA_RING_CHUNK_ATTN));
         v.extend(model::gqa_mixer::ring_copy_pipelines());
+        // The windowed attention of a sliding-window layer (training and ring prefill), resolved by name.
+        model::ops::extend_kernel_list(&mut v, &model::flash_ext::pipelines());
         // Device AdamW over bf16 or blockwise-int8 moments (`optim::Optim` resolves them by name).
         v.extend(optim::MOMENT_KERNELS);
         v.push(("gradnorm_part", kernels::GRADNORM_PART));
@@ -3614,10 +3615,7 @@ impl Qwen35 {
         }
         let (ctx_gated, internals) = match cached {
             None => match c.swa_window {
-                Some(window) => {
-                    let scores_kernel = g.kernel_index("gqa_scores_win").unwrap_or_else(|| panic!("qwen35: gqa_scores_win is not registered on this Gpu"));
-                    model::gqa_mixer::gqa_mixer_fwd_windowed(g, &gqa_mixer_ids(), model::gqa_mixer::SlidingWindow { scores_kernel, window }, &shape, &weights, &q_full, &k, &v, n, self.is_train)
-                }
+                Some(window) => model::gqa_mixer::gqa_mixer_fwd_windowed(g, &gqa_mixer_ids(), model::gqa_mixer::SlidingWindow { flash: model::flash_ext::FlashExtIds::resolve(g), window }, &shape, &weights, &q_full, &k, &v, n, self.is_train),
                 None => model::gqa_mixer::gqa_mixer_fwd_tc(g, &self.gqa_mixer_ids_train(), self.training_flash(), Some(self.ops.tensor_gemm()), &shape, &weights, &q_full, &k, &v, n, self.is_train),
             },
             Some(GqaCached::Ring(rc)) => (
@@ -3629,7 +3627,7 @@ impl Qwen35 {
                         row0: rc.row0,
                         window: rc.window,
                         start: rc.start,
-                        scores_win: g.kernel_index("gqa_scores_win").unwrap_or_else(|| panic!("qwen35: gqa_scores_win is not registered on this Gpu")),
+                        flash: model::flash_ext::FlashExtIds::resolve(g),
                         copy: model::gqa_mixer::RingCopyIds::resolve(g),
                         ring_attn: g.kernel_index("gqa_ring_chunk_attn"),
                     },

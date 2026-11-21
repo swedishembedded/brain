@@ -45,6 +45,7 @@ mod embed_moe_roundtrip;
 mod embed_tiled_ops;
 mod f16_roundtrip;
 mod flash_attn_bidir_train;
+mod flash_ext;
 mod flash_gqa_train;
 mod flash_gqa_workgroup_bytes;
 mod folded_source;
