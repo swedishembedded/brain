@@ -34,3 +34,4 @@ tools/goldens/huginn_dump_reference.py	-:SEED=2027	python-const	frozen: the seed
 tools/goldens/lsa_dump_reference.py	main:manual_seed=20261030	python-rng	frozen: the parity fixture's keys, queries and positions are drawn under this seed, so a re-dump reproduces the same golden the model::lsa parity test reads
 tools/goldens/ripple_serve_fixture.py	scripted:random.Random=7	python-rng	test-double: the scripted tiny model is a fixed fixture, so every run serves the same weights and the same reply
 tools/goldens/ripple_serve_fixture.py	scripted_draft:random.Random=11	python-rng	test-double: the fixture's tiny random draft model is fixed, so every run serves the same weights and the same proposals
+tools/goldens/inkling2_dump_reference.py	-:SEED=20261121	python-const	frozen: the seed fixes the tiny reference checkpoint initialization, so the dumped per-visit states, router choices, conv states and logits are reproducible

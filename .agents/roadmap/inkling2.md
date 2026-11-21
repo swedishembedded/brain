@@ -298,6 +298,29 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
   Also a real-weight dump of the same tensors for 3 prompts, run once on the GH200 and
   kept under `testdata/`.
 
+  Done (2026-11-21): `tools/goldens/inkling2_dump_reference.py tiny|real` writes
+  `testdata/golden/inkling2/{tiny,real}` (`make testdata/fetch` links them from
+  `BRAIN_GOLDEN_MIRROR`). Tiny: 6 layers, block 2, core 2-3 x 3 passes (10 visits), sliding
+  and full layers in every segment, window 4, rel extent 6, log floor 4, caps chosen so
+  clips and softcaps fire (counts in the manifest); the checkpoint is f32 in the published
+  naming, proven by a round trip through the reference's own conversion mapping. Per visit:
+  `in/out`, `block_states`, `attn_in`, `mlp_in`, `messages`, `gated_{q,k,v,mlp}`, `attn`,
+  `attn_conv`, `mlp`, `mlp_conv`, `rel_states`, `position_bias`, router logits/indices/weights,
+  plus `relative_distance.{full,sliding}`, `final_in`, `final_norm`, `logits`, the conv
+  states after a cached prefill and four token-by-token decode steps (decode equals the
+  uncached forward within 2.5e-5). Real: bf16 reference on CPU, three chat prompts (22-27
+  tokens), per-visit `in/out` and router choices for all 48 visits, top-64 logits per
+  position and full rows at -1, -2, -4 (77 MB). Reference facts found on the way:
+  - the reference ignores `local_layer_ids` and derives layer kinds from `(i + 1) % 6`
+    (they agree for the published config); the tiny config writes both;
+  - the chat template has no generation prompt: after `<|end_message|>` the model itself
+    emits `<|message_model|>` (all three real prompts' argmax);
+  - the reference's cache slots are physical layers for the prelude, first core pass and
+    coda, then one appended copy of the core per extra pass (manifest `cache_slot`).
+
+  Left: a bf16-vs-f32 reference spread for the real thresholds (an f32 load needs about
+  110 GB of host RAM).
+
 ### Phase 1: shared ops (forward + backward + gradcheck, WGSL first, CUDA through the seam)
 
 - **I1.1** `kernels` + `model::hostmath`: `softcap` / `softcap_bwd`, `y = c tanh(x/c)`.

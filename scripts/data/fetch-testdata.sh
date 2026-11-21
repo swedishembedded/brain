@@ -315,6 +315,8 @@ ORIGIN="tools/goldens/timesfm3_dump_reference.py, against google/timesfm-3.0-pyt
 golden_tree "timesfm3"     "golden/timesfm3"
 ORIGIN="tools/goldens/qwen35moe_dump_reference.py, seed as its manifest records (needs no checkpoint: it writes its own tiny random weights in the release layout)"
 golden_tree "qwen35moe"    "golden/qwen35moe"
+ORIGIN="tools/goldens/inkling2_dump_reference.py tiny (needs no checkpoint: it writes its own tiny random weights in the published naming) and ... real <thinkingmachines/Inkling-2-Mini in the store> (about 60 GB of host RAM)"
+golden_tree "inkling2"     "golden/inkling2"
 
 # --- SAM 2.1 stage goldens (promptable segmentation, image path) -------------
 # The CHECKPOINTS come from the store above (`facebook/sam2.1-hiera-*`), which is
