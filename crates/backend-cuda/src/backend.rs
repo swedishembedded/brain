@@ -601,6 +601,19 @@ impl CudaBackend {
         self.ctx.stream()
     }
 
+    /// Device time of the work `enqueue` puts on this handle's stream: a timing event recorded before and after it,
+    /// read once `done` has seen the stream finish. The time the work took on the device, not the host's wait for it.
+    pub(crate) fn device_time(&self, enqueue: &mut dyn FnMut() -> Result<(), String>, done: &mut dyn FnMut() -> Result<(), String>) -> Result<std::time::Duration, String> {
+        let (start, end) = (self.ctx.event()?, self.ctx.event()?);
+        self.ctx.record(&start)?;
+        enqueue()?;
+        self.ctx.record(&end)?;
+        done()?;
+        end.synchronize()?;
+        let ms = self.ctx.elapsed_ms(&start, &end)?;
+        Ok(std::time::Duration::from_secs_f64(f64::from(ms) / 1e3))
+    }
+
     /// The CUDA ordinal of this handle's device.
     pub(crate) fn ordinal(&self) -> u32 {
         self.ordinal

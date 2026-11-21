@@ -2283,10 +2283,6 @@ impl PeerLink {
 pub trait DeviceCollective: Send + Sync {
     /// The library that moves the bytes, for reporting.
     fn provider(&self) -> &'static str;
-    /// The version of that library, for reporting; `None` when it does not say.
-    fn library_version(&self) -> Option<String> {
-        None
-    }
     /// Every rank's `bufs[i]` (its first `words` f32 words) becomes the element-wise sum over ranks.
     fn all_reduce_sum(&self, bufs: &[&DeviceBuffer], words: u64) -> Result<(), String>;
     /// Every rank's `recv[j]` (`ranks * words` f32 words) becomes the concatenation, in rank order, of every rank's
@@ -2343,6 +2339,12 @@ pub trait RankCollective: Send + Sync {
     /// The version of that library, for reporting; `None` when it does not say.
     fn library_version(&self) -> Option<String> {
         None
+    }
+    /// Run `enqueue` (operations on this communicator) and wait for it as [`RankCollective::wait`] does, returning
+    /// the time it took on the device when the backend can measure that (device timing events), else `None`.
+    fn timed(&self, enqueue: &mut dyn FnMut() -> Result<(), String>, timeout: std::time::Duration) -> Result<Option<std::time::Duration>, String> {
+        enqueue()?;
+        self.wait(timeout).map(|()| None)
     }
     /// How many ranks the communicator has.
     fn world(&self) -> usize;

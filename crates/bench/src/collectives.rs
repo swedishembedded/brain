@@ -12,8 +12,10 @@
 //!
 //! Every rank of the job runs it with the same plan and secret (`--job-plan`, `--job-rank`, `--job-secret`) on its own
 //! card. The ranks join the job's sealed host transport, form a device group over it ([`RankGroup`], NCCL on CUDA)
-//! the way a trainer does, and then, for every operation, dtype and size of the sweep, time each iteration from enqueue
-//! until the group has completed it. Sizes follow the usual collective-benchmark convention: the whole buffer of an
+//! the way a trainer does, and then, for every operation, dtype and size of the sweep, time each iteration on the
+//! device: CUDA events recorded on the communicator's stream around a batch of the operation run back to back (one
+//! for a large size), divided by the batch, so a small message's time is the collective's, not the host's polling or
+//! the ranks' arrival skew (`config.timing` says which clock a run used). Sizes follow the usual collective-benchmark convention: the whole buffer of an
 //! all-reduce or broadcast, the gathered (all-gather) or scattered (reduce-scatter) buffer of the others. Algorithm
 //! bandwidth is that size over the slowest rank's median time; bus bandwidth scales it by the bytes each link carries
 //! (`2 (n - 1) / n` for an all-reduce, `(n - 1) / n` for a gather or scatter, `1` for a broadcast), so it compares
@@ -217,15 +219,29 @@ fn shape(op: Op, dtype: CollectiveDtype, bytes: u64, world: u64) -> Option<Shape
     }
 }
 
-/// Run `op` once on `group` over the case's buffers and wait for it.
-fn run_op(group: &RankGroup, op: Op, dtype: CollectiveDtype, s: &Shape, send: &DeviceBuffer, recv: &DeviceBuffer, timeout: Duration) -> Result<(), String> {
-    let enqueued = match op {
-        Op::AllReduce => group.all_reduce_sum(&[(send, s.send)], dtype, 1.0),
-        Op::AllGather => group.all_gather(send, recv, s.send, dtype),
-        Op::ReduceScatter => group.reduce_scatter(send, recv, s.recv, dtype, 1.0),
-        Op::Broadcast => group.broadcast(send, s.send, dtype, 0),
+/// Run `op` `repeat` times back to back on `group` over the case's buffers and wait for them: the time they took on
+/// the device when the provider measures that (CUDA events around them on the communicator's stream), else `None`.
+fn run_op(group: &RankGroup, op: Op, dtype: CollectiveDtype, s: &Shape, send: &DeviceBuffer, recv: &DeviceBuffer, repeat: usize, timeout: Duration) -> Result<Option<Duration>, String> {
+    let mut enqueue = || {
+        for _ in 0..repeat {
+            match op {
+                Op::AllReduce => group.all_reduce_sum(&[(send, s.send)], dtype, 1.0),
+                Op::AllGather => group.all_gather(send, recv, s.send, dtype),
+                Op::ReduceScatter => group.reduce_scatter(send, recv, s.recv, dtype, 1.0),
+                Op::Broadcast => group.broadcast(send, s.send, dtype, 0),
+            }?;
+        }
+        Ok(())
     };
-    enqueued.and_then(|()| group.wait(timeout)).map_err(|e| format!("{} {}: {e}", op.name(), dtype_name(dtype)))
+    group.timed(&mut enqueue, timeout).map_err(|e| format!("{} {}: {e}", op.name(), dtype_name(dtype)))
+}
+
+/// Operations timed together as one sample, so the sample is the collective's own time: the first operation of a
+/// batch also waits for the slowest rank to reach it (the host's work between samples skews the ranks by tens of
+/// microseconds), the rest run back to back. Small operations take a batch of up to 32; large ones, whose time
+/// dwarfs the skew, one.
+fn batch_for(bytes: u64) -> usize {
+    (((64u64 << 20) / bytes.max(1)) as usize).clamp(1, 32)
 }
 
 /// What `op` must leave in the received buffer of `rank`, from every rank's [`inputs`].
@@ -369,18 +385,23 @@ pub fn run(ctx: &JobContext, gpu: &Gpu, cfg: &Config) -> Result<Option<Value>, S
     // The sweep: every rank times every case; the slowest rank's median sets the bandwidth.
     let mut cases = Vec::new();
     let mut timings = Vec::new();
+    let mut device_timed = true;
     for &dtype in &cfg.dtypes {
         for &op in &cfg.ops {
             for &bytes in &cfg.sizes {
                 let Some(s) = shape(op, dtype, bytes, world as u64) else { continue };
                 let send = upload(gpu, dtype, &inputs(rank, s.send as usize));
                 let recv = if matches!(op, Op::AllGather | Op::ReduceScatter) { gpu.storage(words(dtype, s.recv)) } else { gpu.storage(1) };
+                // The uploads above are on the device before the first timed operation starts.
+                gpu.flush();
                 let mut times = Vec::with_capacity(cfg.iters);
                 for i in 0..cfg.warmup + cfg.iters {
                     let t = Instant::now();
-                    run_op(&group, op, dtype, &s, &send, &recv, cfg.op_timeout)?;
+                    let batch = batch_for(bytes);
+                    let device = run_op(&group, op, dtype, &s, &send, &recv, batch, cfg.op_timeout)?;
+                    device_timed &= device.is_some();
                     if i >= cfg.warmup {
-                        times.push(t.elapsed().as_secs_f64() * 1e6);
+                        times.push(device.unwrap_or_else(|| t.elapsed()).as_secs_f64() * 1e6 / batch as f64);
                     }
                 }
                 times.sort_by(f64::total_cmp);
@@ -401,7 +422,7 @@ pub fn run(ctx: &JobContext, gpu: &Gpu, cfg: &Config) -> Result<Option<Value>, S
             let s = shape(op, dtype, check_elems * dtype.bytes(), world as u64).expect("a non-empty check");
             let send = upload(gpu, dtype, &inputs(rank, s.send as usize));
             let recv = if matches!(op, Op::AllGather | Op::ReduceScatter) { gpu.storage(words(dtype, s.recv)) } else { gpu.storage(1) };
-            run_op(&group, op, dtype, &s, &send, &recv, cfg.op_timeout)?;
+            run_op(&group, op, dtype, &s, &send, &recv, 1, cfg.op_timeout)?;
             let out_buf = if matches!(op, Op::AllGather | Op::ReduceScatter) { &recv } else { &send };
             let n = if matches!(op, Op::AllGather | Op::ReduceScatter) { s.recv } else { s.send } as usize;
             let got = download(gpu, dtype, out_buf, n);
@@ -511,6 +532,9 @@ pub fn run(ctx: &JobContext, gpu: &Gpu, cfg: &Config) -> Result<Option<Value>, S
             "warmup": cfg.warmup,
             "iters": cfg.iters,
             "op_timeout_ms": cfg.op_timeout.as_millis() as u64,
+            // How each iteration was timed: device events around the operation on the communicator's stream, or the
+            // host's wall clock from enqueue until it saw the operation complete (which includes its polling).
+            "timing": if device_timed { "device_events" } else { "host_wall" },
             "plan": ctx.plan(),
         },
         "transport": {

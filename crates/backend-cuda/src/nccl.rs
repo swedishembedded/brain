@@ -531,6 +531,11 @@ impl RankCollective for NcclRank {
         "nccl"
     }
 
+    fn timed(&self, enqueue: &mut dyn FnMut() -> Result<(), String>, timeout: Duration) -> Result<Option<Duration>, String> {
+        self.handle.bind_context()?;
+        self.handle.device_time(enqueue, &mut || self.wait(timeout)).map(Some)
+    }
+
     fn library_version(&self) -> Option<String> {
         let v = self.fns.version;
         Some(format!("{}.{}.{}", v / 10000, (v / 100) % 100, v % 100))

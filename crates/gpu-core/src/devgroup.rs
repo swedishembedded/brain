@@ -135,6 +135,13 @@ impl RankGroup {
         self.comm.provider()
     }
 
+    /// Run `enqueue` (operations on this group) and wait for it ([`RankGroup::wait`]); the time it took on the
+    /// device when the provider can measure it (CUDA events around the work on the communicator's stream), else
+    /// `None`.
+    pub fn timed(&self, enqueue: &mut dyn FnMut() -> Result<(), String>, timeout: Duration) -> Result<Option<Duration>, String> {
+        self.comm.timed(enqueue, timeout)
+    }
+
     /// The provider library's version (`"2.32.3"`), when it says.
     pub fn library_version(&self) -> Option<String> {
         self.comm.library_version()
