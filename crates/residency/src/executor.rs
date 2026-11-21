@@ -1395,7 +1395,11 @@ impl Dispatcher {
                 .zip(&excludes)
                 .filter(|(r, _)| !stalled.contains(&r.key))
                 .filter_map(|(r, ex)| ex.as_ref().map(|ex| (r, ex)))
-                .filter(|(r, ex)| if mgr.is_multi(&r.model) { mgr.placeable_multi(&r.key, &r.model, ex) } else { mgr.placeable(&r.key, &r.model, ex) })
+                .filter(|(r, ex)| match (mgr.is_multi(&r.model), mgr.spans_cards(&r.key, &r.model)) {
+                    (true, _) => mgr.placeable_multi(&r.key, &r.model, ex),
+                    (false, true) => mgr.placeable_cards(&r.key, &r.model, ex),
+                    (false, false) => mgr.placeable(&r.key, &r.model, ex),
+                })
                 .map(|(r, _)| r.summary.clone())
                 .collect();
             let (gid, batch) = match choose_next(&placeable, policy) {
@@ -1427,9 +1431,12 @@ impl Dispatcher {
                 Some(i) => i,
                 None => break,
             };
-            let is_multi = mgr.is_multi(&model);
-            let claim_result = if is_multi {
+            // A workload on several cards ([`ResidentModel::cards`]) runs as a multi-device group on the cards the
+            // manager chose.
+            let claim_result = if mgr.is_multi(&model) {
                 mgr.claim_multi(&model, &action, &inv, key.replica_index(), &exclude).map(|(w, d, k)| (ClaimOutcome::Multi(w, d), k))
+            } else if mgr.spans_cards(&key, &model) {
+                mgr.claim_cards(&model, &action, &inv, key.replica_index(), &exclude).map(|(w, d, k)| (ClaimOutcome::Multi(w, d), k))
             } else {
                 mgr.claim(&model, &action, &inv, key.replica_index(), &exclude).map(|(w, d, k)| (ClaimOutcome::Single(w, d), k))
             };
@@ -1505,7 +1512,7 @@ impl Dispatcher {
                     ClaimOutcome::Single(Claimed::Hot(_), _) | ClaimOutcome::Single(Claimed::Promote(_), _) => mgr.release(&ckey),
                     ClaimOutcome::Single(Claimed::Build(_), _) => mgr.build_failed(&ckey),
                     ClaimOutcome::Multi(ClaimedMulti::Hot(_), _) => mgr.release_multi(&ckey),
-                    ClaimOutcome::Multi(ClaimedMulti::Build(_), _) => mgr.build_failed_multi(&ckey),
+                    ClaimOutcome::Multi(ClaimedMulti::Build(_) | ClaimedMulti::Cards(_), _) => mgr.build_failed_multi(&ckey),
                 }
                 let msg = format!("{model}/{action}: no lane for device {home:?}");
                 let mut i = 0;
@@ -2067,6 +2074,19 @@ fn run_req(req: RunReq, done: &Sender<Msg>, failed_jobs: &mut Option<(Vec<Pendin
             }
             Err(e) => {
                 let msg = format!("activate_multi {key}: {e}");
+                *failed_jobs = Some((jobs, msg));
+                return (true, Ran::Multi(devices));
+            }
+        },
+        // A workload on the cards the manager chose: built here like any multi-device instance.
+        RunTarget::Multi { work: ClaimedMulti::Cards(m), devices } => match timed_build(&key, &devices.iter().map(|d| format!("{d:?}")).collect::<Vec<_>>().join("+"), || m.activate_cards(&key, &devices)) {
+            Ok(inst) => {
+                let h: InstanceHandle = Arc::new(Mutex::new(inst));
+                let _ = done.send(Msg::BuiltMulti { key: key.clone(), handle: h.clone() });
+                (h, Ran::Multi(devices))
+            }
+            Err(e) => {
+                let msg = format!("activate {key}: {e}");
                 *failed_jobs = Some((jobs, msg));
                 return (true, Ran::Multi(devices));
             }

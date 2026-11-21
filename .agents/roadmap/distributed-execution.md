@@ -745,12 +745,20 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         a one-kernel bucket gather. Revisit for full fine-tunes, where the
         payload is 30x larger.
       - [ ] The served `train` action on several cards of one server. Design:
-        a request field `cards` (default 1) with admission charging every card
-        through the residency multi-device path (`MultiDeviceResidentModel`),
-        then in-process ranks via `brain::DataParallel::in_process` on those
-        cards. Blocker: the multi-device path takes the device set from the
-        model's own estimate, while a train job must be placed on any `cards`
-        cards with room; the residency layer needs a "N of any devices" claim.
+        a request field `cards` (default 1), then in-process ranks via
+        `brain::DataParallel::in_process` on those cards. Residency half done
+        (2026-11-21): `ResidentModel::cards(key)` (default 1) and
+        `activate_cards(key, &[Device])` make a claim of "any N cards with
+        room" (`ResidencyManager::claim_cards`, `manager/cards.rs`): planned
+        before anything is evicted or charged, cards with room first, then
+        cards that evicting idle single-device residents frees (fewest victims
+        first), charged on every card and pinned as a multi-device group (busy
+        on every lane), dropped with every card returned on success, failure
+        and a failed build; a count no set of cards can ever hold is refused
+        at once (`TooLarge`), a count only busy residents block waits and
+        evicts nothing. The estimate-driven `MultiDeviceResidentModel` path is
+        untouched. Idle multi-device residents do not give way to such a
+        claim. Test: `residency` `workload_cards`.
         Cross-node served training would take a job plan in the request (the
         plan, this server's rank range and the secret's digest) and the
         server's own sealed coordinator address.

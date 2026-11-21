@@ -29,6 +29,12 @@
 //! a claim that still would not fit). A pinned instance, one a lane is running
 //! a job on, is never taken. `crate::executor` layers the async `Executor`
 //! dispatch this module's synchronous `claim_multi` needed on top.
+//!
+//! **A workload on any N cards.** A model whose [`ResidentModel::cards`] is
+//! above one (a data-parallel fine-tune, one rank per card) is placed by
+//! [`ResidencyManager::claim_cards`] (the `cards` submodule): the manager picks
+//! the cards, unlike `claim_multi`, whose model names its own device set, and
+//! the claim is then a multi-device entry like any other.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -41,6 +47,8 @@ use crate::multi::{pick_devices, MultiDeviceCost, MultiDeviceResidentModel};
 use crate::runplan::{Eviction, PlanError, Placement, RunPlan};
 use crate::place::{could_ever_fit, fits_when_empty, no_exclude, pick_device, plan_eviction_with, CostAware, EvictionPolicy};
 use crate::{Device, Instance, InstanceKey, MemCost, ResidentModel, Tier};
+
+mod cards;
 
 /// A hot instance handle: the (mutex-guarded) instance plus the device it lives on.
 /// The scheduler runs it outside the manager lock; the key stays pinned meanwhile.
@@ -129,6 +137,9 @@ pub enum Claimed {
 pub enum ClaimedMulti {
     Hot(InstanceHandle),
     Build(Arc<dyn MultiDeviceResidentModel>),
+    /// A [`ResidencyManager::claim_cards`] placement: build with [`ResidentModel::activate_cards`] across the cards
+    /// the manager chose.
+    Cards(Arc<dyn ResidentModel>),
 }
 
 /// One resident instance's placement - the per-model residency the stats
@@ -469,7 +480,16 @@ impl ResidencyManager {
     /// only as multi-device, whose placement this does not answer, and for an
     /// unregistered one.
     pub fn fits_outside(&self, key: &InstanceKey, model: &str, exclude: &HashSet<Device>) -> bool {
-        self.models.get(model).is_some_and(|m| crate::place::fits_when_empty_outside(&self.hot_cost(&**m, key), &self.budgets, exclude))
+        let Some(m) = self.models.get(model) else { return false };
+        let cost = self.hot_cost(&**m, key);
+        match m.cards(key) {
+            1 => crate::place::fits_when_empty_outside(&cost, &self.budgets, exclude),
+            // As many cards outside `exclude` as the run spans, each able to hold its share.
+            count => {
+                let cards = if cost.npu > 0 { self.budgets.npus() } else { self.budgets.gpus() };
+                cards.into_iter().filter(|d| !exclude.contains(d) && self.budgets.usable_on(*d) >= cost.resident_on(*d)).count() >= count
+            }
+        }
     }
 
     /// The devices a multi-device instance can run on: the ones it occupies
@@ -1461,10 +1481,14 @@ impl ResidencyManager {
         self.event(format!("build-failed {key} (multi-device)"));
     }
 
-    /// [`Self::release`]'s multi-device sibling.
+    /// [`Self::release`]'s multi-device sibling. An instance of a [transient](ResidentModel::transient) model (a
+    /// workload on several cards, [`Self::claim_cards`]) is dropped instead, returning every card's charge.
     pub fn release_multi(&mut self, key: &InstanceKey) {
         if let Some(entry) = self.multi_residents.get_mut(key) {
             entry.pinned = false;
+            if self.models.get(&key.model).is_some_and(|m| m.transient()) {
+                self.evict_multi(key);
+            }
         }
     }
 
@@ -2444,6 +2468,7 @@ mod tests {
                     return Err(e);
                 }
             },
+            ClaimedMulti::Cards(_) => unreachable!("claim_multi builds on the devices the model names, never on chosen cards"),
         };
         Ok((handle, key))
     }

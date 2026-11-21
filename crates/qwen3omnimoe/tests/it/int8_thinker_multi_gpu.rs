@@ -71,6 +71,7 @@ fn sharded_two_gpu_forward_matches_unsharded_single_gpu_forward() {
             let inst = m.activate_multi(&key, &devices).expect("activate_multi");
             mgr.adopt_multi(&key, Arc::new(std::sync::Mutex::new(inst)))
         }
+        ClaimedMulti::Cards(_) => unreachable!("claim_multi builds on the devices the model names, never on chosen cards"),
     };
 
     let n = 3u32;

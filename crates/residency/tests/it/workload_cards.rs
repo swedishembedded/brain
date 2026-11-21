@@ -82,7 +82,8 @@ impl ResidentModel for Workload {
     }
     fn instance_key(&self, _a: &str, inv: &Invocation) -> InstanceKey {
         let fail = inv.get_str("fail").unwrap_or_default();
-        InstanceKey::new("work", format!("fail={fail}"))
+        let cards = inv.params.get("cards").and_then(serde_json::Value::as_u64).unwrap_or(1);
+        InstanceKey::new("work", format!("fail={fail};cards={cards}"))
     }
     fn estimate(&self, _k: &InstanceKey) -> MemCost {
         match self.host {
@@ -96,8 +97,14 @@ impl ResidentModel for Workload {
     fn transient(&self) -> bool {
         true
     }
+    fn cards(&self, key: &InstanceKey) -> usize {
+        key.base().config.rsplit_once("cards=").and_then(|(_, n)| n.parse().ok()).unwrap_or(1)
+    }
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        self.built.lock().unwrap().push(vec![device]);
+        self.activate_cards(key, &[device])
+    }
+    fn activate_cards(&self, key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
+        self.built.lock().unwrap().push(devices.to_vec());
         if key.base().config.starts_with("fail=build") {
             return Err("the build failed".to_string());
         }
@@ -175,18 +182,24 @@ fn card_use(report: &ResidencyReport) -> Vec<u64> {
     cards.into_iter().map(|(_, used)| used).collect()
 }
 
-/// Waits (bounded) until no card or host byte is charged and nothing is placed: a job's reply comes before the
-/// dispatcher has processed its end.
-fn assert_all_returned(exec: &Executor) {
+/// Waits (bounded) until the residency report satisfies `settled`: a job's reply comes before the dispatcher has
+/// processed its end.
+fn wait_for(exec: &Executor, settled: impl Fn(&ResidencyReport) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let report = exec.residency();
-        if report.placements.is_empty() && report.multi_placements.is_empty() && report.budgets.iter().all(|b| b.used == 0) {
+        if settled(&report) {
             return;
         }
-        assert!(Instant::now() < deadline, "a finished workload still holds its reservation: {report:?}");
+        assert!(Instant::now() < deadline, "the residency never settled: {report:?}");
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// Waits (bounded) until no card or host byte is charged and nothing is placed: a job's reply comes before the
+/// dispatcher has processed its end.
+fn assert_all_returned(exec: &Executor) {
+    wait_for(exec, |r| r.placements.is_empty() && r.multi_placements.is_empty() && r.budgets.iter().all(|b| b.used == 0));
 }
 
 #[test]
@@ -236,3 +249,83 @@ fn a_workload_no_card_can_hold_is_refused_at_once_and_evicts_nothing() {
     assert!(rig.built.lock().unwrap().is_empty());
 }
 
+#[test]
+fn a_workload_on_several_cards_is_built_across_that_many_distinct_cards_charged_on_each_and_gives_all_back() {
+    let (busy, release_served) = Gate::new();
+    let served: Arc<dyn ResidentModel> = Arc::new(Served { name: "served", bytes: 20 * GIB, gate: busy.clone() });
+    let rig = rig(20 * GIB, false, gpus(3, 24 * GIB), vec![served]);
+    let done = train(&rig.exec, json!({"cards": 2, "wait": "yes"}));
+    rig.gate.wait_running();
+    let mut used = card_use(&rig.exec.residency());
+    used.sort_unstable();
+    assert_eq!(used, vec![0, 20 * GIB, 20 * GIB], "two cards are charged the run's footprint each");
+    let cards = rig.built.lock().unwrap()[0].clone();
+    assert_eq!(cards.len(), 2);
+    assert_ne!(cards[0], cards[1], "two distinct cards");
+
+    // The run holds both cards: a served model needing a whole card goes to the third.
+    let serving = submit(&rig.exec, "served", "generate", json!({"wait": "yes"}));
+    busy.wait_running();
+    let placed = rig.exec.residency().placements;
+    assert_eq!(placed.len(), 1);
+    assert!(!cards.contains(&placed[0].device), "served on {:?} while the run holds {cards:?}", placed[0].device);
+    release_served.send(()).unwrap();
+    answer(&serving).expect("served");
+
+    rig.release.send(()).unwrap();
+    answer(&done).expect("the run");
+    // Only the idle served model is left charged: the finished run is not kept resident.
+    let only_served = |r: &ResidencyReport| r.multi_placements.is_empty() && card_use(r).iter().filter(|&&b| b > 0).count() == 1;
+    wait_for(&rig.exec, only_served);
+
+    assert_eq!(answer(&train(&rig.exec, json!({"cards": 2, "fail": "run"}))).unwrap_err(), "the run failed");
+    wait_for(&rig.exec, only_served);
+    assert!(answer(&train(&rig.exec, json!({"cards": 3, "fail": "build"}))).unwrap_err().contains("the build failed"));
+    wait_for(&rig.exec, |r| r.multi_placements.is_empty() && r.budgets.iter().all(|b| b.used == 0));
+    assert_eq!(rig.built.lock().unwrap().last().unwrap().len(), 3, "a three-card run evicted the idle served model for its third card");
+}
+
+#[test]
+fn a_workload_needing_more_cards_than_can_ever_hold_it_is_refused_at_once() {
+    let rig = rig(20 * GIB, false, gpus(2, 24 * GIB), Vec::new());
+    let refused = answer(&train(&rig.exec, json!({"cards": 3}))).unwrap_err();
+    assert!(refused.contains("3 cards") && refused.contains("2 card"), "{refused}");
+
+    let mut uneven = gpus(1, 24 * GIB);
+    uneven.set(Device::Gpu(1), 16 * GIB, 0);
+    let rig = rig_with_budgets(20 * GIB, uneven);
+    let refused = answer(&train(&rig.exec, json!({"cards": 2}))).unwrap_err();
+    assert!(refused.contains("2 cards") && refused.contains("1 card"), "{refused}");
+    assert!(rig.built.lock().unwrap().is_empty());
+    assert_all_returned(&rig.exec);
+}
+
+fn rig_with_budgets(per_card: u64, budgets: Budgets) -> Rig {
+    rig(per_card, false, budgets, Vec::new())
+}
+
+#[test]
+fn only_idle_residents_give_way_and_none_is_evicted_while_another_card_is_still_busy() {
+    let (idle_gate, _never) = Gate::new();
+    let (busy_gate, release_busy) = Gate::new();
+    let idle: Arc<dyn ResidentModel> = Arc::new(Served { name: "idle", bytes: 20 * GIB, gate: idle_gate });
+    let busy: Arc<dyn ResidentModel> = Arc::new(Served { name: "busy", bytes: 20 * GIB, gate: busy_gate.clone() });
+    let rig = rig(20 * GIB, false, gpus(2, 24 * GIB), vec![idle, busy]);
+    answer(&submit(&rig.exec, "idle", "generate", json!({}))).expect("idle model built");
+    let serving = submit(&rig.exec, "busy", "generate", json!({"wait": "yes"}));
+    busy_gate.wait_running();
+    assert_eq!(rig.exec.residency().placements.len(), 2, "one served model on each card");
+
+    let done = train(&rig.exec, json!({"cards": 2}));
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(done.try_recv().is_err(), "the run cannot start while a card is busy");
+    assert_eq!(rig.exec.residency().placements.len(), 2, "the idle model was not evicted for a claim that cannot complete yet");
+    assert!(rig.built.lock().unwrap().is_empty());
+
+    release_busy.send(()).unwrap();
+    answer(&serving).expect("served");
+    answer(&done).expect("the run starts once both cards can be freed");
+    assert_eq!(rig.built.lock().unwrap()[0].len(), 2);
+    assert_all_returned(&rig.exec);
+    assert!(rig.exec.stats().evictions >= 2, "both idle residents gave way");
+}

@@ -69,6 +69,22 @@ pub trait ResidentModel: Send + Sync {
     /// has already reserved room for `estimate(key)` on `device`.
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String>;
 
+    /// How many accelerator cards one instance of `key` runs on at once: a workload that runs as ranks, one per card
+    /// (a data-parallel fine-tune). Each card is charged [`Self::estimate`] (one rank's footprint), the cards are any
+    /// of the class the estimate names that have room, and [`Self::activate_cards`] builds the instance across them.
+    /// This is not the [`crate::MultiDeviceResidentModel`] path, whose device set is the model's own choice: here the
+    /// manager chooses which cards. Defaulted to 1, the one card [`Self::activate`] is given.
+    fn cards(&self, _key: &InstanceKey) -> usize {
+        1
+    }
+
+    /// Build the instance of `key` across `devices`: [`Self::cards`] distinct cards, each already charged
+    /// [`Self::estimate`]. Called only for a key that runs on more than one card. Defaulted to a refusal: a model that
+    /// says it runs on several cards says how it is built on them.
+    fn activate_cards(&self, key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
+        Err(format!("{key}: this model cannot be built across the cards {devices:?}"))
+    }
+
     /// Estimated footprint at `tier` — what the manager would budget against
     /// *before* calling [`Instance::demote`]/[`promote`](Instance::promote).
     /// Defaulted to [`Self::estimate`] regardless of `tier`: a model that
@@ -174,6 +190,12 @@ macro_rules! forward_resident_model {
         }
         fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
             self.inner.activate(key, device)
+        }
+        fn cards(&self, key: &InstanceKey) -> usize {
+            self.inner.cards(key)
+        }
+        fn activate_cards(&self, key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
+            self.inner.activate_cards(key, devices)
         }
         fn stamp(&self, inv: &mut Invocation) {
             self.inner.stamp(inv)
