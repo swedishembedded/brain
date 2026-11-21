@@ -381,6 +381,29 @@ Scope: Running one training job as ranks across machines, and serving one model 
     about 530 ms (2 ranks) and 900 ms (4 ranks) of each step in 504
     per-tensor reductions.
 
+- **Data-parallel LoRA scaling across nodes (2026-11-21, GH200 nodes, NCCL
+  2.32.3 over the libfabric plugin with GPU Direct RDMA on cxi0-3, `alt_read`,
+  one srun step per run, one rank per card pinned to its NUMA node).** Fit-loop
+  step stage (`--kernel-profile`), median of steps 3 onward on rank 0; every
+  run's adapters byte-identical across all its ranks and nodes.
+  - Qwen3-4B LoRA r16 (`brain qwen3 lora_train --job-plan`, bf16 base, block
+    128, batch 1, 132 MB gradient): 1 / 2 / 4 / 8 / 12 cards = 110.5 / 118.2 /
+    ~120 / 128.9 / 130.1 ms per step; 128-token rows per second 1158 / 2166 /
+    ~4270 / 7944 / 11806; efficiency 93% / ~92% / 86% / 85%. The device
+    reduction grows from 3.0 ms (one node) to 8.4 ms (two) and 9.7 ms
+    (three), and the step-weight scalar over the host star, where ranks wait
+    for the slowest, takes 13-14 ms across nodes.
+  - 27B hybrid-attention LoRA r16 (Qwen3.8-27B FP8 checkpoint held bf16,
+    `brain finetune --lora 16 --job-plan`, 116.7 M trainable floats = 467 MB
+    gradient, rows of 111 tokens, batch 1, 57 GB on each card): 1 / 4 / 8 / 12
+    cards = 301.1 / 306.2 / 319.9 / 335.7 ms per step; tokens per second 369 /
+    1450 / 2776 / 3968; efficiency 98% / 94% / 90%. Device reduction 5.8 /
+    17.5 / 22.6 ms at 4 / 8 / 12. Rank 0 wrote `report.json` (the served job's
+    report) on every run.
+  - Load: the 27B base took about 4.5 minutes on one card from the shared
+    filesystem (whole one-card run 281 s for 6 steps); staging to node-local
+    NVMe was not measured.
+
 - **Slingshot settings sweep (2026-11-21, two GH200 nodes, NCCL 2.32.3,
   fp32 all-reduce, 20 iterations).** The same ranks under the site's injected
   defaults, the CSCS Alps set (larger CXI queues, no host registration), the
@@ -570,6 +593,12 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         it as `DIR/report.json` (rank 0 of a job). `brain finetune --lora`
         takes `--job-plan/--job-rank/--job-secret` and runs the SDK fine-tune as
         one rank (sft and policy gradient; the paired objectives are refused).
+      - [x] Gate: replicas bit-identical across nodes (2026-11-21: 8 ranks
+        on two nodes and 12 on three, Qwen3-4B and 27B LoRA; see Measured).
+      - [ ] Gate: the scaling table at 16 cards (measured to 12: 85% for the
+        4B LoRA, 90% for the 27B LoRA); the cross-node step-weight scalar
+        (13-14 ms, a host-star round that also absorbs straggling) is the
+        next cost to remove, by reducing it on the device with the gradients.
       - [ ] Overlap with backward. Not done: on the measured LoRA step the
         whole exposed reduction is 3.0 ms of 118 ms, so overlap could gain at
         most about 2.5%; it needs a per-layer gradient-ready hook in each backward and
