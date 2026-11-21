@@ -616,13 +616,22 @@ Scope: Running one training job as ranks across machines, and serving one model 
   n442): CUDA events around a batch of back-to-back operations (up to 32
   for small sizes) put every op at a floor of about 130 us p50 from 8 B to
   1 MiB (all-reduce 134.9 us at 8 B, 136.8 us at 1 MiB), with 1 GiB
-  all-reduce at 333.4 GB/s busbw. The floor is brain's enqueue, not NCCL:
-  each `RankGroup` op creates a pre-multiplied-sum reduction op, fences the
-  buffers in and out, and polls the nonblocking communicator until the
-  library accepts the call (50 us poll), so back-to-back ops leave the
-  stream idle between them. Open: an enqueue path without the per-op
-  polling and reduction-op creation, measured against NCCL's own small-
-  message latency.
+  all-reduce at 333.4 GB/s busbw. The floor was brain's communicator mode,
+  not the reduction op or the fences (a pre-multiplied sum is made only when
+  the scale is not 1, and the buffer fences return at once with one CUDA
+  context per process): nsys on rank 0 showed one `pthread_create` per op
+  (a nonblocking communicator launches every collective from a thread of its
+  own and reports it through polling) and 38072 `clock_nanosleep` calls of
+  104 us on average (the 50 us poll sleep). Fixed 2026-11-21: the job joins
+  with a nonblocking communicator (a peer that never arrives is still
+  bounded) and splits a blocking one for the collectives; a per-rank
+  watchdog thread aborts it when a call outlives its deadline, and waits
+  spin briefly before they sleep. Two GH200 ranks on n467 (cards 2-3),
+  f32 p50, before -> after: all-reduce 126.6 -> 5.7 us at 8 B, 126.8 -> 7.2
+  us at 64 KiB, 126.5 -> 29.5 us at 1 MiB; all-gather 125.7 -> 5.9 us,
+  reduce-scatter 125.6 -> 5.6 us, broadcast 125.3 -> 4.9 us at 8 B; at
+  256 MiB unchanged (all-reduce 106.4 -> 109.3 GB/s busbw, broadcast 122.3
+  -> 123.4). The bytes on the wire are the same.
 
 - **ZeRO-2 with the state on the card, Qwen3-4B full fine-tune, 4 GH200s
   (2026-11-21, brain 25e96b41a, same workload as above).** ZeRO-2 210 ms a step

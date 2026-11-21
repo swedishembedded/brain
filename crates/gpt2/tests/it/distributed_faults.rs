@@ -78,6 +78,8 @@ struct Job {
     data: PathBuf,
     /// Reduce on the cards over NCCL (one card per rank) instead of through the host transport.
     device: bool,
+    /// The plan's op timeout.
+    op_timeout_ms: u64,
 }
 
 impl Job {
@@ -94,7 +96,7 @@ impl Job {
             plan.collectives = model::CollectivePath::Device;
             plan.write(&dir.join("plan.json")).unwrap();
         }
-        Job { dir, data: data.to_path_buf(), device }
+        Job { dir, data: data.to_path_buf(), device, op_timeout_ms: plan.op_timeout_ms }
     }
 
     fn spawn(&self, rank: usize, attempt: u32, fault: Option<&str>) -> Child {
@@ -139,7 +141,10 @@ impl Job {
             if status.iter().all(Option::is_some) {
                 return status;
             }
-            let grace_over = first_end.is_some_and(|t| t.elapsed() > Duration::from_secs(30));
+            // A survivor notices a dead peer within the plan's op timeout: it gets that long and more before the
+            // launcher kills it.
+            let grace = Duration::from_millis(self.op_timeout_ms) + Duration::from_secs(30);
+            let grace_over = first_end.is_some_and(|t| t.elapsed() > grace);
             if grace_over || Instant::now() > deadline {
                 for (rank, child) in children.iter_mut().enumerate() {
                     if status[rank].is_none() {

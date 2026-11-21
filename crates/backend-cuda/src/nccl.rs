@@ -18,10 +18,17 @@
 //! - [`NcclRank`]: one rank per process, one card per process, as brain runs a
 //!   distributed job. Rank 0 creates the rendezvous id ([`unique_id`]), the
 //!   job hands it to every rank over its authenticated channel, and each rank
-//!   joins with `ncclCommInitRankConfig`. The communicator is nonblocking, so
-//!   neither its creation, a split, nor a collective can hang a rank on a peer
-//!   that never arrives: each is bounded by a deadline after which the
-//!   communicator is aborted (`ncclCommAbort`) and the call fails.
+//!   joins with `ncclCommInitRankConfig`. Joining is nonblocking, so a peer
+//!   that never arrives cannot hang a rank: the join is bounded by a deadline
+//!   after which the half-made communicator is aborted. The collectives then run
+//!   on a blocking communicator split from it: a nonblocking one launches every
+//!   collective from a thread of its own and reports it through polling, which
+//!   costs each small operation tens of microseconds more than the operation
+//!   itself. A blocking call that does not return by its deadline (a peer lost
+//!   while a connection is being made) is ended by the rank's watchdog thread,
+//!   which aborts the communicator (`ncclCommAbort`; NCCL's guide to error
+//!   handling names a second thread's abort as the way to end a hung call of a
+//!   blocking communicator); the call then fails like any other.
 //!
 //! Either way each rank owns a [`CudaBackend`] handle of its device with no
 //! kernels, so the collective runs on that handle's own stream and is ordered
@@ -34,7 +41,8 @@
 //! of it.
 
 use std::ffi::{c_char, c_int, c_void, CStr};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use backend_api::{CollectiveDtype, CollectiveId, DeviceBuffer, DeviceCollective, RankCollective};
@@ -94,13 +102,18 @@ struct Config {
 
 impl Config {
     /// The library's defaults, except that calls return at once and report completion through
-    /// `ncclCommGetAsyncError` (`blocking = 0`), which is what lets a deadline abort them.
+    /// `ncclCommGetAsyncError` (`blocking = 0`): how the join is bounded by its deadline.
     fn nonblocking() -> Config {
+        Config { blocking: 0, ..Config::blocking() }
+    }
+
+    /// The library's defaults: calls return when their work is enqueued, which a [`Watchdog`] bounds.
+    fn blocking() -> Config {
         Config {
             size: std::mem::size_of::<Config>(),
             magic: API_MAGIC,
             version: CONFIG_VERSION,
-            blocking: 0,
+            blocking: 1,
             cga_cluster_size: UNDEF,
             min_ctas: UNDEF,
             max_ctas: UNDEF,
@@ -376,9 +389,25 @@ impl DeviceCollective for NcclGroup {
 /// How often a deadline-bounded wait asks the library and the stream whether the work is done.
 const POLL: Duration = Duration::from_micros(50);
 
+/// How long a wait on the library or the stream spins before it sleeps between polls: a collective on one node
+/// completes in tens of microseconds, and a sleep of `POLL` lasts about twice that, which used to set the floor of
+/// every small operation.
+const SPIN: Duration = Duration::from_micros(500);
+
+/// One pause of a polling loop that began at `started`: a yield while the wait is young, a sleep once it has gone on
+/// long enough that it is not a small operation finishing.
+fn pause(started: Instant) {
+    if started.elapsed() < SPIN {
+        std::thread::yield_now();
+    } else {
+        std::thread::sleep(POLL);
+    }
+}
+
 /// Poll a nonblocking communicator until its pending call (`what`) has finished: `Ok` once the library reports
 /// success, the library's error when it fails, and an error naming the deadline when `deadline` passes first.
 fn settle(lib: &Lib, fns: &RankFns, comm: Comm, deadline: Instant, what: &str) -> Result<(), String> {
+    let started = Instant::now();
     loop {
         let mut state = SUCCESS;
         // SAFETY: `comm` is a live communicator of this library and `state` a writable result.
@@ -386,7 +415,7 @@ fn settle(lib: &Lib, fns: &RankFns, comm: Comm, deadline: Instant, what: &str) -
         match state {
             SUCCESS => return Ok(()),
             IN_PROGRESS if Instant::now() >= deadline => return Err(format!("{what} did not complete before its deadline: a peer did not take part")),
-            IN_PROGRESS => std::thread::sleep(POLL),
+            IN_PROGRESS => pause(started),
             failed => return lib.check(failed, what),
         }
     }
@@ -417,6 +446,71 @@ fn bounded_elems(buf: &DeviceBuffer, count: u64, dtype: CollectiveDtype, what: &
 }
 
 /// The communicator of a [`NcclRank`], and why it is gone once it is.
+/// A thread that aborts a communicator whose blocking call has not returned by its deadline.
+struct Watchdog {
+    shared: Arc<Watch>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+struct Watch {
+    /// The call under watch: its deadline and the communicator to abort, as an address.
+    armed: Mutex<Option<(Instant, usize)>>,
+    stop: AtomicBool,
+}
+
+/// How often the watchdog looks at the call it watches.
+const WATCH_TICK: Duration = Duration::from_millis(10);
+
+impl Watchdog {
+    fn start(abort: unsafe extern "C" fn(Comm) -> NcclResult) -> Watchdog {
+        let shared = Arc::new(Watch { armed: Mutex::new(None), stop: AtomicBool::new(false) });
+        let watch = Arc::clone(&shared);
+        let thread = std::thread::Builder::new()
+            .name("nccl-watchdog".into())
+            .spawn(move || {
+                while !watch.stop.load(Ordering::Acquire) {
+                    let expired = {
+                        let mut armed = watch.armed.lock().unwrap_or_else(|e| e.into_inner());
+                        match *armed {
+                            Some((deadline, comm)) if Instant::now() >= deadline => armed.take().map(|_| comm),
+                            _ => None,
+                        }
+                    };
+                    if let Some(comm) = expired {
+                        // SAFETY: the guarded call's communicator is live until the guard returns, and the guard,
+                        // seeing the watch taken, never aborts or uses it again.
+                        unsafe { abort(comm as Comm) };
+                    }
+                    std::thread::sleep(WATCH_TICK);
+                }
+            })
+            .ok();
+        Watchdog { shared, thread }
+    }
+
+    /// Run `call` on `comm`, aborting `comm` if it has not returned by `deadline`. Returns what it returned and
+    /// whether the watchdog aborted the communicator (it is then gone: the caller neither uses nor aborts it again).
+    fn guard<R>(&self, comm: Comm, deadline: Instant, call: impl FnOnce() -> R) -> (R, bool) {
+        if self.thread.is_none() {
+            // No watchdog thread could be started: the call runs unwatched rather than not at all.
+            return (call(), false);
+        }
+        *self.shared.armed.lock().unwrap_or_else(|e| e.into_inner()) = Some((deadline, comm as usize));
+        let out = call();
+        let aborted = self.shared.armed.lock().unwrap_or_else(|e| e.into_inner()).take().is_none();
+        (out, aborted)
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        self.shared.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 struct RankState {
     /// The live communicator as an address (so the rank is `Send`); `0` once aborted or destroyed.
     comm: usize,
@@ -434,12 +528,15 @@ impl RankState {
     }
 }
 
-/// One rank of a communicator whose ranks are separate processes, each on one card (`ncclCommInitRankConfig`,
-/// nonblocking). See the module documentation and [`RankCollective`] for the contract.
+/// One rank of a communicator whose ranks are separate processes, each on one card (joined nonblocking with
+/// `ncclCommInitRankConfig`, its collectives on a blocking split of it). See the module documentation and
+/// [`RankCollective`] for the contract.
 pub struct NcclRank {
     lib: &'static Lib,
     fns: &'static RankFns,
     state: Mutex<RankState>,
+    /// Ends a blocking call of the communicator that outlives its deadline.
+    watchdog: Watchdog,
     /// A kernel-less handle of this rank's device: its stream carries the collectives and its fences order them.
     handle: CudaBackend,
     world: usize,
@@ -481,7 +578,58 @@ impl NcclRank {
             }
             return Err(e);
         }
-        Ok(NcclRank { lib, fns, state: Mutex::new(RankState { comm: comm as usize, failed: None }), handle, world, rank, settle: timeout })
+        // The collectives' communicator: the same ranks, blocking (see the module documentation), split while the
+        // watchdog bounds the split by what is left of the deadline.
+        let watchdog = Watchdog::start(fns.comm_abort);
+        let mut ops: Comm = std::ptr::null_mut();
+        let mut blocking = Config::blocking();
+        // SAFETY: `comm` is live; `ops` receives the new communicator; `blocking` is valid for the call.
+        let (rc, aborted) = watchdog.guard(comm, deadline, || unsafe { (fns.comm_split)(comm, 0, rank as c_int, &mut ops, &mut blocking) });
+        let split = match (aborted, rc) {
+            (true, _) => Err(format!("splitting the collectives' communicator (rank {rank} of {world}) did not finish before its deadline")),
+            // The parent is nonblocking, so the split may finish (and fill in `ops`) after the call returns: the
+            // parent reports when it has.
+            (false, SUCCESS | IN_PROGRESS) => settle(lib, fns, if ops.is_null() { comm } else { ops }, deadline, "ncclCommSplit").and_then(|()| {
+                if ops.is_null() {
+                    Err("ncclCommSplit returned no communicator".to_string())
+                } else {
+                    Ok(())
+                }
+            }),
+            (false, failed) => lib.check(failed, "ncclCommSplit"),
+        };
+        // The joining communicator has done its part: free it (nonblocking, so bounded), or abort it.
+        if !aborted {
+            // SAFETY: `comm` is live and not used after this.
+            let closed = unsafe {
+                match (fns.comm_finalize)(comm) {
+                    SUCCESS | IN_PROGRESS => settle(lib, fns, comm, deadline, "ncclCommFinalize"),
+                    failed => lib.check(failed, "ncclCommFinalize"),
+                }
+            };
+            // SAFETY: as above, exactly once.
+            unsafe {
+                if closed.is_ok() {
+                    (lib.comm_destroy)(comm);
+                } else {
+                    (fns.comm_abort)(comm);
+                }
+            }
+        }
+        if let Err(e) = split {
+            if !ops.is_null() {
+                // SAFETY: `ops` was created by the split above and is not used again.
+                unsafe { (fns.comm_abort)(ops) };
+            }
+            return Err(e);
+        }
+        Ok(NcclRank { lib, fns, state: Mutex::new(RankState { comm: ops as usize, failed: None }), watchdog, handle, world, rank, settle: timeout })
+    }
+
+    /// The communicator the watchdog already aborted: forget it (it must not be aborted again) and remember why.
+    fn aborted(&self, state: &mut RankState, why: String) -> String {
+        state.comm = 0;
+        state.failed.get_or_insert(why).clone()
     }
 
     /// Abort the communicator (in-flight kernels stop, peers see the failure) and remember why.
@@ -501,9 +649,16 @@ impl NcclRank {
         let comm = state.live()?;
         self.handle.bind_context()?;
         self.handle.fence_collective_in(touched)?;
-        let rc = op(comm, self.handle.stream());
+        let deadline = Instant::now() + self.settle;
+        let stream = self.handle.stream();
+        let (rc, aborted) = self.watchdog.guard(comm, deadline, || op(comm, stream));
+        if aborted {
+            self.handle.fence_collective_out(touched);
+            return Err(self.aborted(&mut state, format!("{what} did not return within {:?}: a peer did not take part", self.settle)));
+        }
         let accepted = match rc {
-            SUCCESS | IN_PROGRESS => settle(self.lib, self.fns, comm, Instant::now() + self.settle, what),
+            SUCCESS => Ok(()),
+            IN_PROGRESS => settle(self.lib, self.fns, comm, deadline, what),
             failed => self.lib.check(failed, what),
         };
         self.handle.fence_collective_out(touched);
@@ -648,8 +803,11 @@ impl RankCollective for NcclRank {
         let deadline = Instant::now() + timeout;
         let mut child: Comm = std::ptr::null_mut();
         // SAFETY: `parent` is live; `child` receives the new communicator (NULL for no color); a NULL config
-        // inherits the parent's, nonblocking included.
-        let rc = unsafe { (self.fns.comm_split)(parent, color, key as c_int, &mut child, std::ptr::null_mut()) };
+        // inherits the parent's (blocking: the watchdog bounds the call).
+        let (rc, aborted) = self.watchdog.guard(parent, deadline, || unsafe { (self.fns.comm_split)(parent, color, key as c_int, &mut child, std::ptr::null_mut()) });
+        if aborted {
+            return Err(self.aborted(&mut state, "ncclCommSplit did not return before its deadline".into()));
+        }
         let settled = match rc {
             SUCCESS | IN_PROGRESS => settle(self.lib, self.fns, if child.is_null() { parent } else { child }, deadline, "ncclCommSplit"),
             failed => self.lib.check(failed, "ncclCommSplit"),
@@ -674,13 +832,14 @@ impl RankCollective for NcclRank {
             return Err(e);
         }
         let state = RankState { comm: child as usize, failed: None };
-        Ok(Some(Box::new(NcclRank { lib: self.lib, fns: self.fns, state: Mutex::new(state), handle, world: world as usize, rank: rank as usize, settle: self.settle })))
+        Ok(Some(Box::new(NcclRank { lib: self.lib, fns: self.fns, state: Mutex::new(state), watchdog: Watchdog::start(self.fns.comm_abort), handle, world: world as usize, rank: rank as usize, settle: self.settle })))
     }
 
     fn wait(&self, timeout: Duration) -> Result<(), String> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let comm = state.live()?;
-        let deadline = Instant::now() + timeout;
+        let started = Instant::now();
+        let deadline = started + timeout;
         loop {
             let mut async_state = SUCCESS;
             // SAFETY: `comm` is live and `async_state` writable.
@@ -694,7 +853,7 @@ impl RankCollective for NcclRank {
                 Ok(false) if Instant::now() >= deadline => {
                     return Err(self.fail(&mut state, format!("the collectives did not complete within {timeout:?}: a peer stopped taking part")));
                 }
-                Ok(false) => std::thread::sleep(POLL),
+                Ok(false) => pause(started),
                 Err(e) => return Err(self.fail(&mut state, e)),
             }
         }
@@ -722,10 +881,14 @@ impl Drop for NcclRank {
             }
         });
         // SAFETY: `comm` is live and used by nobody else; it is finalized and destroyed, or aborted, exactly once.
-        let closed = quiet.and_then(|()| unsafe {
-            match (self.fns.comm_finalize)(comm) {
-                SUCCESS | IN_PROGRESS => settle(self.lib, self.fns, comm, deadline, "ncclCommFinalize"),
-                failed => self.lib.check(failed, "ncclCommFinalize"),
+        let mut aborted = false;
+        let closed = quiet.and_then(|()| {
+            let (rc, gone) = self.watchdog.guard(comm, deadline, || unsafe { (self.fns.comm_finalize)(comm) });
+            aborted = gone;
+            match (gone, rc) {
+                (true, _) => Err("ncclCommFinalize did not return before its deadline".to_string()),
+                (false, SUCCESS | IN_PROGRESS) => settle(self.lib, self.fns, comm, deadline, "ncclCommFinalize"),
+                (false, failed) => self.lib.check(failed, "ncclCommFinalize"),
             }
         });
         match closed {
@@ -738,8 +901,10 @@ impl Drop for NcclRank {
             }
             Err(e) => {
                 tracing::warn!(reason = %e, "aborting the NCCL communicator instead of closing it");
-                // SAFETY: as above.
-                unsafe { (self.fns.comm_abort)(comm) };
+                if !aborted {
+                    // SAFETY: as above.
+                    unsafe { (self.fns.comm_abort)(comm) };
+                }
             }
         }
     }
@@ -769,5 +934,37 @@ impl Drop for NcclGroup {
                 tracing::warn!(rc, "ncclCommDestroy failed");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    static ABORTED: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn record_abort(comm: Comm) -> NcclResult {
+        ABORTED.store(comm as usize, Ordering::SeqCst);
+        SUCCESS
+    }
+
+    /// A call that returns in time is left alone; one that outlives its deadline has its communicator aborted, once,
+    /// and the guard reports it so the caller does not abort it again.
+    #[test]
+    fn watchdog_aborts_only_calls_past_their_deadline() {
+        let watchdog = Watchdog::start(record_abort);
+        let (out, aborted) = watchdog.guard(0x10 as Comm, Instant::now() + Duration::from_secs(5), || 7);
+        assert_eq!((out, aborted), (7, false));
+        assert_eq!(ABORTED.load(Ordering::SeqCst), 0);
+
+        let (_, aborted) = watchdog.guard(0x20 as Comm, Instant::now() + WATCH_TICK, || {
+            let until = Instant::now() + Duration::from_secs(5);
+            while ABORTED.load(Ordering::SeqCst) == 0 && Instant::now() < until {
+                std::thread::sleep(WATCH_TICK);
+            }
+        });
+        assert!(aborted);
+        assert_eq!(ABORTED.load(Ordering::SeqCst), 0x20);
     }
 }
