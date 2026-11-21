@@ -40,6 +40,7 @@ column: **open** unless stated.
 | G11 | Multi-request prefill is off by default (`batch_tokens = 0`, slice 512) because batching hurt early requests' latency in the measured workload | `PrefillPolicy::default` | wants a cost model, not a new constant |
 | G12 | The GGUF engine's decode window is 1 | `decode_window_capacity` | |
 | G13 | An adapter bank with fewer slots than adapters in use starves the non-resident ones silently: a swap waits for an idle resident adapter, which never comes while every resident one stays busy | knowledge #544 (18 arms on 8 slots: 12 arms 0 trials in 8 minutes, no error) | **defect, open**: refuse loudly, or evict at a step boundary and queue fairly so every adapter with work makes progress |
+| G14 | `serve` writes its ready file before the served model is sized; a model the configuration makes unservable (here `--adapter-slots 24` with `--max-batch 128`: 97 GB for a 4B) is reported once in the log and every request gets `500 failed_to_load` | knowledge #546 | **defect, open**: size each configured model before ready and refuse at startup, naming the term that does not fit |
 
 Not gaps (claims checked and found already in place): arrival-time continuous
 batching through `llmserve::run_open_scheduled`; prefix caches keyed by adapter
