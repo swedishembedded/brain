@@ -452,6 +452,40 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
       `--job-rank`, rank bound to its card's NUMA node, NCCL network plugin
       selected) and a cluster end-to-end suite that runs under the scheduler
       and skips by name without one.
+- [ ] **C6 versioned weight publication for live servers.** Rollout servers and
+      trainers as separate groups: a new policy (full weights or an adapter) is
+      staged into inactive buffers, verified by size and digest, and activated
+      atomically as version N+1; requests that started on N finish on N, and
+      KV/prefix-cache entries are keyed by weight version so none crosses
+      versions. Every generated sample records its policy version. Transfer by
+      NCCL broadcast inside one step, by file otherwise. Gate: publication time
+      per 27B full/LoRA update and zero mixed-version generations.
+- [ ] **C7 node-local model staging and sharded checkpoints.** Each node's
+      leader reads a base once from the shared filesystem into the node's
+      job-private NVMe (`/scratch/local`, 1.7 TB per node, host side), verifies
+      digests and serves its local ranks, instead of every rank reading the
+      shared filesystem; sharded runs read only their shards. Checkpoints keep
+      the committed-generation manifest and add the parallelism layout and
+      per-rank RNG state, with loading into a different layout as a separate
+      correctness test (logical tensor digests equal; training behaviour
+      compared, not bitwise). Gate: time until all 16 ranks hold a 27B base.
+- [ ] **C8 collective failure handling.** A communicator state machine
+      (active, suspect, aborting, rebuilding) driven by op deadlines and async
+      error polling; recovery is a job-level restart from the last committed
+      checkpoint first, shrink/regrow after the transactional step is proven.
+      Gate: fault injection that kills or stalls a rank during all-gather,
+      reduce-scatter, the optimizer step, weight publication and a checkpoint
+      write never leaves a partially applied step.
+- [ ] **C9 qualification suite and traces.** One machine-readable result per
+      run (hardware, every library version, configuration, p50/p99, algorithm
+      and bus bandwidth, NIC octets from CXI telemetry, correctness verdict;
+      unmeasured fields stay null) and a cross-node trace (per rank: forward,
+      backward, each collective with group, bytes, bucket and wait time,
+      optimizer, I/O; clock offsets recorded). Gates: every distributed test
+      uses the intended fabric path (a socket fallback fails the test),
+      collective results match a reference, multi-rank scaling reaches 80% of
+      the measured topology reference for large transfers, and gradient
+      overlap hides 70% of overlappable communication where compute allows.
 
 ## Open
 
