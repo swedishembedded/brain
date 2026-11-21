@@ -329,6 +329,22 @@ Scope: Running one training job as ranks across machines, and serving one model 
   The host star is 200-2000x slower and its time grows with the world; for
   the large payloads the device path's time falls with it.
 
+- **`brain qwen3 lora_train --job-plan`, device vs host star (2026-11-21,
+  one GH200 node, one card per rank).** Qwen3-4B, LoRA r16 on all seven
+  projections (33.0 M fp32 gradient elements, 132 MB per step), bf16 base,
+  block 128, batch 1, eval-free; per-step time by differencing a 6-step and a
+  2-step run's training call on rank 0 so the fixed setup cancels. The plan's
+  `collectives` was `auto` (every rank reported the device path over NCCL)
+  or `host`:
+  - 2 ranks: 108 ms/step on the device vs 719 ms through the host star (6.7x).
+  - 4 ranks: 154 ms/step vs 1128 ms (7.3x).
+  - The host star spends about 530 ms (2 ranks) and 1130 ms (4 ranks) of a
+    step in 1009 per-tensor reductions; the device path one grouped
+    reduction. Forming the device group (rendezvous and NCCL init) is a
+    one-off 2.0 s (2 ranks) and 3.1 s (4 ranks) on the first step.
+  - Every run's adapters were byte-identical across its ranks, device and
+    host alike.
+
 - **End to end through a durable job controller.** An orchestrator submitted
       two Qwen3-0.6B LoRA ranks on one machine (eval-free, 2 steps, one P40
       each); the job completed 6.6 s after launch with exit 0, the adapters in
@@ -392,9 +408,9 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
       node: every op, bf16, tp/dp splits against a host reference, identical
       bytes across ranks and repeats; a rank that dies, error in 5.5 s for a
       5 s op timeout; a rank without the secret never joins), the
-      `devcollective`, `grid` and `job` unit tests. Open: the qwen3/gpt2 verbs
-      were not run end to end on the device path (no Qwen3-0.6B in the node's
-      model store; see Measured), and no two-node run of the provider yet.
+      `devcollective`, `grid` and `job` unit tests; `brain qwen3 lora_train
+      --job-plan` on 2 and 4 cards (Measured). Open: no two-node run of the
+      provider yet (C2's scaling runs).
 - [ ] **C2 data parallelism for every trainer.** The plan-file data-parallel
       path moves from the GPT and Qwen3 LoRA bindings into the shared training
       capability, so any architecture with gradients trains as ranks; gradients
