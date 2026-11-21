@@ -368,6 +368,28 @@ Scope: Running one training job as ranks across machines, and serving one model 
   - Every run's adapters were byte-identical across its ranks, device and
     host alike.
 
+- **Slingshot settings sweep (2026-11-21, two GH200 nodes, NCCL 2.32.3,
+  fp32 all-reduce, 20 iterations).** The same ranks under the site's injected
+  defaults, the CSCS Alps set (larger CXI queues, no host registration), the
+  Isambard-AI set (hybrid matching, rendezvous from 0 bytes, `alt_read`), and
+  single changes. Bus bandwidth at 64 MiB / 1 GiB and 8-byte latency:
+  - 2 ranks (one card per node): site 13.0 / 12.6 GB/s, 15 us; CSCS 13.1 /
+    12.8 (all-gather), 130 us; Isambard 22.0 / 22.2, 79 us; Isambard with the
+    site's 16 KiB rendezvous threshold 20.0 / 22.8, 76 us; the site plus only
+    `FI_CXI_RDZV_PROTO=alt_read` 19.2 / 22.9, 28 us. More channels per network
+    peer (2, 4) change nothing (12.8-12.9).
+  - 8 ranks (4+4): site 39.2 / 72.4, CSCS 113.9 / 150.9, Isambard 116.5 /
+    151.3, site plus `alt_read` 104.6 / 147.5. These 8-rank rows ran while
+    another process kept n442's cards busy (98% utilisation), and the site row
+    measured 149.2 at 1 GiB alone earlier the same day, so they bound rather than
+    rank the settings.
+  The receiver-driven rendezvous is the one setting that matters here: it
+  takes a single card's stream from half to nearly all of one 200 Gb/s link,
+  without the small-message cost of the full Isambard set. The NIC octet
+  counters (`hni_sts_{tx,rx}_ok_octets`) read 2.0x the payload NCCL reports in
+  every configuration, so they are used for ratios, not absolute link rate,
+  until that factor is explained.
+
 - **End to end through a durable job controller.** An orchestrator submitted
       two Qwen3-0.6B LoRA ranks on one machine (eval-free, 2 steps, one P40
       each); the job completed 6.6 s after launch with exit 0, the adapters in
