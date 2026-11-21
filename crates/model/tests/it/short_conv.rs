@@ -19,19 +19,17 @@ use data::rng::{random_seed, Lcg};
 use gpu_core::{DeviceBuffer, Gpu};
 use model::short_conv::{conv_state_tail_step, short_conv_bwd, short_conv_fwd, short_conv_step, BaseLayout, DynTaps, ShortConvIds, ShortConvShape};
 
-const PIPES: &[(&str, &str)] = &[
-    ("dyn_group_conv1d", kernels::DYN_GROUP_CONV1D),
-    ("dyn_group_conv1d_dx", kernels::DYN_GROUP_CONV1D_DX),
-    ("dyn_group_conv1d_dbase", kernels::DYN_GROUP_CONV1D_DBASE),
-    ("dyn_group_conv1d_ddyn", kernels::DYN_GROUP_CONV1D_DDYN),
-    ("dyn_group_conv1d_step", kernels::DYN_GROUP_CONV1D_STEP),
-    ("conv_state_tail", kernels::CONV_STATE_TAIL),
-    ("causal_conv1d_step", kernels::CAUSAL_CONV1D_STEP),
-];
+fn pipes() -> &'static [(&'static str, &'static str)] {
+    static P: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
+    P.get_or_init(|| {
+        let mut v = model::short_conv::pipelines().to_vec();
+        v.push(("causal_conv1d_step", kernels::CAUSAL_CONV1D_STEP));
+        v
+    })
+}
 
 fn ids(g: &Gpu) -> ShortConvIds {
-    let k = |n: &str| g.kernel_index(n).unwrap_or_else(|| panic!("kernel {n} not registered"));
-    ShortConvIds { fwd: k("dyn_group_conv1d"), dx: k("dyn_group_conv1d_dx"), dbase: k("dyn_group_conv1d_dbase"), ddyn: k("dyn_group_conv1d_ddyn"), step: k("dyn_group_conv1d_step"), state_tail: k("conv_state_tail") }
+    ShortConvIds::resolve(g)
 }
 
 fn f64s(v: &[f32]) -> Vec<f64> {
@@ -166,7 +164,7 @@ fn matrix(rng: &mut Lcg) -> Vec<Case> {
 
 #[test]
 fn forward_matches_the_oracle_over_every_option() {
-    let g = gpu_core::testgpu::dev(PIPES);
+    let g = gpu_core::testgpu::dev(pipes());
     let ids = ids(&g);
     let mut rng = Lcg::new(random_seed());
     for cs in matrix(&mut rng) {
@@ -180,7 +178,7 @@ fn forward_matches_the_oracle_over_every_option() {
 
 #[test]
 fn backward_matches_finite_differences_of_the_oracle() {
-    let g = gpu_core::testgpu::dev(PIPES);
+    let g = gpu_core::testgpu::dev(pipes());
     let ids = ids(&g);
     let mut rng = Lcg::new(random_seed());
     for cs in matrix(&mut rng).into_iter().filter(|c| !c.shape.history) {
@@ -218,7 +216,7 @@ fn backward_matches_finite_differences_of_the_oracle() {
 
 #[test]
 fn stepping_token_by_token_equals_the_whole_block() {
-    let g = gpu_core::testgpu::dev(PIPES);
+    let g = gpu_core::testgpu::dev(pipes());
     let ids = ids(&g);
     let mut rng = Lcg::new(random_seed());
     for dynamic in [false, true] {
@@ -248,7 +246,7 @@ fn stepping_token_by_token_equals_the_whole_block() {
 
 #[test]
 fn a_chunked_prefill_over_the_carried_state_equals_the_unchunked_forward() {
-    let g = gpu_core::testgpu::dev(PIPES);
+    let g = gpu_core::testgpu::dev(pipes());
     let ids = ids(&g);
     let mut rng = Lcg::new(random_seed());
     let cs = case(&mut rng, true, BaseLayout::TapMajor, Some(1.0 / 3.0), false, false, N);
@@ -278,7 +276,7 @@ fn a_chunked_prefill_over_the_carried_state_equals_the_unchunked_forward() {
 
 #[test]
 fn packed_documents_and_blocks_never_see_each_other() {
-    let g = gpu_core::testgpu::dev(PIPES);
+    let g = gpu_core::testgpu::dev(pipes());
     let ids = ids(&g);
     let mut rng = Lcg::new(random_seed());
     for (segments, block) in [(true, N), (false, 1)] {
@@ -306,7 +304,7 @@ fn packed_documents_and_blocks_never_see_each_other() {
 
 #[test]
 fn the_static_family_equals_the_existing_static_step_when_no_option_is_on() {
-    let g = gpu_core::testgpu::dev(PIPES);
+    let g = gpu_core::testgpu::dev(pipes());
     let ids = ids(&g);
     let old = g.kernel_index("causal_conv1d_step").expect("registered");
     let mut rng = Lcg::new(random_seed());

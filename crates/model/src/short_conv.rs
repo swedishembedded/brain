@@ -40,6 +40,27 @@ pub struct ShortConvIds {
     pub state_tail: usize,
 }
 
+/// The kernels of the family, for a caller to register next to its own list (resolved by [`ShortConvIds::resolve`]).
+#[must_use]
+pub fn pipelines() -> [(&'static str, &'static str); 6] {
+    [
+        ("dyn_group_conv1d", kernels::DYN_GROUP_CONV1D),
+        ("dyn_group_conv1d_dx", kernels::DYN_GROUP_CONV1D_DX),
+        ("dyn_group_conv1d_dbase", kernels::DYN_GROUP_CONV1D_DBASE),
+        ("dyn_group_conv1d_ddyn", kernels::DYN_GROUP_CONV1D_DDYN),
+        ("dyn_group_conv1d_step", kernels::DYN_GROUP_CONV1D_STEP),
+        ("conv_state_tail", kernels::CONV_STATE_TAIL),
+    ]
+}
+
+impl ShortConvIds {
+    /// The indices of [`pipelines`] on `g`. Panics when one is not registered.
+    pub fn resolve(g: &Gpu) -> ShortConvIds {
+        let at = |name: &str| g.kernel_index(name).unwrap_or_else(|| panic!("{name} is not registered on this Gpu (see model::short_conv::pipelines)"));
+        ShortConvIds { fwd: at("dyn_group_conv1d"), dx: at("dyn_group_conv1d_dx"), dbase: at("dyn_group_conv1d_dbase"), ddyn: at("dyn_group_conv1d_ddyn"), step: at("dyn_group_conv1d_step"), state_tail: at("conv_state_tail") }
+    }
+}
+
 /// How the static taps are laid out in the base tensor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BaseLayout {
