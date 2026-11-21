@@ -1356,11 +1356,11 @@ impl ChatFineTune {
         let held_out_refs: Vec<&Path> = held_out_dirs.iter().map(PathBuf::as_path).collect();
         let (report, trained, scored, policy_gradient) = match self.policy_gradient {
             Some(config) => {
-                let (report, trained, stats, scored) = family.train_policy_gradient(&open, &prepared_dir, &opts, rank, alpha, self.tuning, self.continue_from.as_deref(), control, config, &held_out_refs, &self.modules_to_save).map_err(|e| Error::Backend(format!("training: {e}")))?;
+                let (report, trained, stats, scored) = family.train_policy_gradient(&open, &prepared_dir, &opts, rank, alpha, self.tuning, self.continue_from.as_deref(), control, config, &held_out_refs, &self.modules_to_save).map_err(|e| crate::error::training_error("training", e))?;
                 (report, trained, scored, Some(PolicyGradientOutcome { config, stats }))
             }
             None => {
-                let (report, trained, scored) = family.train(&open, &prepared_dir, &opts, rank, alpha, self.tuning, self.continue_from.as_deref(), control, &held_out_refs, &self.modules_to_save).map_err(|e| Error::Backend(format!("training: {e}")))?;
+                let (report, trained, scored) = family.train(&open, &prepared_dir, &opts, rank, alpha, self.tuning, self.continue_from.as_deref(), control, &held_out_refs, &self.modules_to_save).map_err(|e| crate::error::training_error("training", e))?;
                 (report, trained, scored, None)
             }
         };

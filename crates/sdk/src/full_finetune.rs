@@ -572,7 +572,7 @@ impl FullRun<'_> {
         let state = if self.opts.sharding.is_replicated() { optimizer_state_for(self.open, self.opts.block_size, self.set, self.precision)? } else { model::finetune::OptimizerState::HostOffload };
         let report = (self.chat.full)(self.open, self.prepared_dir, self.opts, &tuned, state, control).map_err(|e| match e.kind() {
             std::io::ErrorKind::InvalidData if self.resume_state.is_some_and(Path::exists) => Error::Backend(format!("the saved training state cannot be continued by this run: {e}")),
-            _ => Error::Backend(format!("training: {e}")),
+            _ => crate::error::training_error("training", e),
         })?;
         model::finetune::stage_time("sdk: train (open, upload, steps, save)", train_clock);
         let mut trained = FullTrained { status: FineTuneStatus::Completed, report, checkpoint: None, weights: None, weights_digest: None };

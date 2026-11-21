@@ -41,6 +41,34 @@ writes the job plan and secret, starts every card as one rank in one `srun`
 step pinned to its card's cores, and measures the fabric first with
 `brain bench collectives`; brain itself reads no scheduler variable.
 
+## When a rank fails
+
+A distributed run that saves its resume state (`brain finetune --lora R
+--checkpoint-every N` with `--job-plan`) survives losing a rank, whether the
+process was killed, crashed or stalled:
+
+- **No partial step.** Every rank reduces its gradients and then votes that
+  its reduction completed; only a rank that sees every vote applies the
+  optimizer step. A rank lost anywhere in the step leaves the vote
+  unfinished (a stalled one, past the plan's `op_timeout_ms`), so no rank
+  applies it.
+- **Committed generations.** Every N steps each rank writes its resume state
+  as a numbered generation beside the run's state file (`<state>.job/`), the
+  ranks vote that all are durable, and rank 0 then writes the generation's
+  commit. A crash before the commit leaves the previous generation the
+  newest, every rank's file of it intact.
+- **Exit status 75.** A rank whose job lost a peer stops, says which step and
+  phase failed and how its communicator went (`active -> suspect ->
+  aborting`), and exits with status 75.
+- **Restart contract.** A launcher that sees status 75 (or ranks killed by a
+  signal) starts every rank again with the same plan, secret and arguments.
+  Each resumes from the newest committed generation (the log says
+  `rebuilding from committed generation K`) and the run ends with the
+  weights the uninterrupted run would have had. The
+  [Slurm sample](../../../samples/shell/cluster/slurm/README.md)'s
+  `train.sh --restarts K` does this. Continuing with fewer ranks, or
+  replacing one in place, is not supported: every restart is the whole job.
+
 ## Which models support it
 
 Data-parallel training is generic — it's built once against the shared

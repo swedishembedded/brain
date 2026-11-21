@@ -77,7 +77,7 @@ fn run<M: Model>(name: &str, build: &(impl Fn() -> M + Sync), dir: &Path, world:
                     let err = |e: std::io::Error| format!("{name}: rank {rank}: {e}");
                     let (train, val, bcfg, _, itos) = crate::load_dataset_with_itos(dir, opts).map_err(err)?;
                     let objective = crate::causal_lm::<M>(train, val, bcfg, itos);
-                    let sync = GradSync { collective: &*coll, rank, checkpoint: None };
+                    let sync = GradSync { collective: &*coll, rank, checkpoint: None, observer: None };
                     let mut stop_at = |r: &crate::StepReport| stop.is_none_or(|n| r.step < n);
                     let path = state.map(|f| f(rank));
                     let control = FitControl { on_step: Some(&mut stop_at), state: path.as_deref(), state_every: 0, identity: serde_json::json!({ "test": name }), snapshots: None, grad_sync: Some(sync) };

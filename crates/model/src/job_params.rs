@@ -88,7 +88,7 @@ impl JobRequest {
             None => &collective,
         };
         let identity = context.plan().identity();
-        let sync = GradSync { collective: group, rank: context.rank(), checkpoint: Some(CheckpointIdentity { job: context.plan().job.as_str(), plan: &identity }) };
+        let sync = GradSync { collective: group, rank: context.rank(), checkpoint: Some(CheckpointIdentity { job: context.plan().job.as_str(), plan: &identity }), observer: None };
         let started = std::time::Instant::now();
         let result = train(sync);
         if let (Some(base), Some(timed)) = (&self.profile, &timed) {

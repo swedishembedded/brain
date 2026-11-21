@@ -557,6 +557,33 @@ Scope: Running one training job as ranks across machines, and serving one model 
   replicated run (0.0049 at step 6). At this row length the step is update- and
   communication-bound; a 4B fp32 full fine-tune fits one card replicated, so
   this run measures the saving, not the gate.
+- **Two nodes, fault and restart, 2026-11-21 20:14-20:17** (C5/C8/C9).
+  One card each on n442 (gpu0) and n445 (gpu1, by `train.sh --card-map`),
+  one srun step, the libfabric plugin env. `brain bench collectives`
+  (device-event timing): network Libfabric on both ranks, channels
+  `NET/Libfabric/<nic>/GDRDMA`, the transport gate passes; f32 busbw at
+  1 GiB all-reduce 23.0, all-gather 22.8, reduce-scatter 22.8, broadcast
+  24.2 GB/s (the C probe with the same settings measured 22.9 for
+  all-reduce); p50 8 B 123-126 us. A 2-rank Qwen3-4B LoRA (16 steps,
+  `--checkpoint-every 2`, `--collectives device`, `train.sh --restarts 2`):
+  rank 1 killed (SIGKILL) after generation 4 was committed; rank 0 failed
+  the step-8 reduction (`active -> aborting`) and exited 75, train.sh
+  restarted both ranks, they resumed from generation 6 and completed; the
+  adapter's sha256 equals that of an uninterrupted run with the same
+  arguments (`e7a691ff03fe...`). (This run used the generation layout before
+  per-rank directories; the NCCL fault test was rerun on the final layout on
+  n442 cards 2-3, all five faults passing.)
+- **Collective timing on the device, one node, 2026-11-21** (4 GH200 ranks,
+  n442): CUDA events around a batch of back-to-back operations (up to 32
+  for small sizes) put every op at a floor of about 130 us p50 from 8 B to
+  1 MiB (all-reduce 134.9 us at 8 B, 136.8 us at 1 MiB), with 1 GiB
+  all-reduce at 333.4 GB/s busbw. The floor is brain's enqueue, not NCCL:
+  each `RankGroup` op creates a pre-multiplied-sum reduction op, fences the
+  buffers in and out, and polls the nonblocking communicator until the
+  library accepts the call (50 us poll), so back-to-back ops leave the
+  stream idle between them. Open: an enqueue path without the per-op
+  polling and reduction-op creation, measured against NCCL's own small-
+  message latency.
 
 ## Plan: multi-node clusters (2026-11-21)
 
@@ -787,6 +814,31 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
       Gate: fault injection that kills or stalls a rank during all-gather,
       reduce-scatter, the optimizer step, weight publication and a checkpoint
       write never leaves a partially applied step.
+      Training jobs delivered 2026-11-21 (`crates/model/src/jobfault.rs`):
+      `CommHealth` moves active -> suspect (an op ten times slower than the
+      usual one, over 1 s) -> aborting (an op error or its deadline: the host
+      transport's op timeout, NCCL's async error, which aborts the
+      communicator) and starts a resumed run in rebuilding; every step votes
+      over the job's transport that every rank's reduction completed before
+      any rank applies it; with a state path the run's exact-resume state is
+      a committed generation (every rank's file, voted durable, then rank 0's
+      manifest), resumed from on restart; a `JobFailure` exits `brain
+      finetune` with status 75 (`RESTART_STATUS`) and `train.sh --restarts K`
+      restarts every rank with the same plan. The causal-LM objective now
+      carries its sharded stream position (it restarted its shard at record
+      0 on a resume before). Tests: `crates/gpt2/tests/it/distributed_faults.rs`
+      kills a rank in the all-reduce, after the agreement (the optimizer
+      step), after its state is durable (the commit), kills the coordinator,
+      and stalls a rank; in every case the survivor exits 75 having applied
+      nothing its peers did not agree to, the newest generation holds equal
+      weights on both ranks, and the restarted job ends bit-identical to the
+      uninterrupted run (host transport, CPU; the NCCL variant, run on n442
+      with two cards, passes all five). Validated across nodes (Measured).
+      The sharded (ZeRO) step is guarded too (a failure is a JobFailure and a
+      restart), but it reduces and updates in one call, so the agreement
+      before applying is not yet inside it: open, with fault tests for its
+      reduce-scatter and all-gather, weight publication faults (C6), and
+      shrink/regrow.
 - [ ] **C9 qualification suite and traces.** Communication part delivered
       2026-11-21: `brain bench collectives` (`crates/bench/src/collectives.rs`,
       `make bench/collectives`) joins a job plan as one rank, forms the device

@@ -40,6 +40,19 @@ port drawn once (`--port` to choose it); `--collectives device` makes a rank
 that cannot reduce on its card fail instead of falling back to the host
 transport.
 
+A job that commits its state survives losing a rank. With
+`finetune --checkpoint-every N`, every N steps each rank writes its exact-resume
+state and the job commits the generation once all are durable; a rank whose
+job loses a peer stops before applying the step it was in and exits with
+status 75. `train.sh --restarts K` then starts every rank again with the same
+plan and secret, and the run resumes from the newest committed generation
+with the weights the uninterrupted run would have had:
+
+```bash
+samples/shell/cluster/slurm/train.sh --nodes 2 --restarts 3 -- \
+    finetune Qwen/Qwen3-4B --dataset chat.jsonl --lora 8 --out /shared/adapter --checkpoint-every 50
+```
+
 The same launcher measures the fabric with the collective benchmark, which
 writes one result document (`brain bench collectives --help`):
 
@@ -64,6 +77,10 @@ servers once all are up, and stops everything on Ctrl-C. The router
 its prefix unless that one is far busier, keeps every server at most at its
 decode slots and queues the rest, and reports each server's load and token
 rate on `/v1/metrics`.
+
+On a node shared with someone else, claim the node's cards but use only yours:
+`--cards-per-node 1 --gpus-per-node 4 --card-map nodeA=0,nodeB=1` runs one rank
+per node, on card 0 of `nodeA` and card 1 of `nodeB`.
 
 ## Containers and site settings
 

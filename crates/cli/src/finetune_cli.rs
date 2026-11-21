@@ -29,6 +29,9 @@ brain finetune BASE --dataset FILE --out DIR [options]
   --arch ID          the base's architecture (default: what its config names).
   --models-dir DIR   where a vendor/repo base resolves.
   --steps N          optimizer steps (default 100).
+  --checkpoint-every N
+                     with --lora: save the exact-resume state every N steps (default: only when stopped), so a
+                     crash, or a lost rank of a job, costs at most N steps.
   --lr X             the peak learning rate.
   --weight-decay X   AdamW weight decay.
   --grad-accum N     micro-batches per step.
@@ -120,7 +123,10 @@ brain finetune BASE --dataset FILE --out DIR [options]
                      N): each rank trains on its own shard of the records and every step's gradients are reduced over
                      the job, on the cards when every rank can. The plan's `sharding` (optimizer|gradients) shards the
                      optimizer state, and the reduced gradients, across the ranks instead of replicating them. Without
-                     --seed every rank uses the plan's digest; rank 0 writes the result.
+                     --seed every rank uses the plan's digest; rank 0 writes the result. With --lora, every
+                     --checkpoint-every steps the job commits every rank's resume state; a rank whose job loses a
+                     peer stops before applying the step and exits with status 75, and the same command on every
+                     rank resumes from the newest commit.
 
 Run on a device with `--device` (default: every device brain finds).
 ";
@@ -141,6 +147,8 @@ struct Args {
     arch: Option<String>,
     models_dir: Option<String>,
     steps: Option<u32>,
+    /// `--checkpoint-every N`: save (and, in a job, commit) the exact-resume state every N steps.
+    checkpoint_every: Option<u32>,
     lr: Option<f32>,
     weight_decay: Option<f32>,
     grad_accum: Option<u32>,
@@ -218,6 +226,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--arch" => a.arch = Some(need(&mut i, &flag)?),
             "--models-dir" => a.models_dir = Some(need(&mut i, &flag)?),
             "--steps" => a.steps = Some(number(&need(&mut i, &flag)?, &flag)?),
+            "--checkpoint-every" => a.checkpoint_every = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--lr" => a.lr = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--weight-decay" => a.weight_decay = Some(number(&need(&mut i, &flag)?, &flag)?),
             "--grad-accum" => a.grad_accum = Some(number(&need(&mut i, &flag)?, &flag)?),
@@ -331,7 +340,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
     }
     if a.lora.is_none() {
         // Each of these shapes an adapter; a full fine-tune that was given one would silently ignore it.
-        for (flag, given) in [("--alpha", a.alpha.is_some()), ("--continue", a.continue_from.is_some()), ("--adapter-id", a.adapter_id.is_some()), ("--base-format", a.base_format.is_some()), ("--held-out", a.held_out.is_some()), ("--policy-gradient", a.policy_gradient), ("--modules-to-save", !a.modules_to_save.is_empty())] {
+        for (flag, given) in [("--checkpoint-every", a.checkpoint_every.is_some()), ("--alpha", a.alpha.is_some()), ("--continue", a.continue_from.is_some()), ("--adapter-id", a.adapter_id.is_some()), ("--base-format", a.base_format.is_some()), ("--held-out", a.held_out.is_some()), ("--policy-gradient", a.policy_gradient), ("--modules-to-save", !a.modules_to_save.is_empty())] {
             if given {
                 return Err(format!("brain finetune: {flag} applies to an adapter; give --lora RANK"));
             }
@@ -396,6 +405,9 @@ fn lora(a: &Args, rank: u32) -> brain::ChatFineTune {
     }
     if let Some(v) = a.steps {
         t = t.steps(v);
+    }
+    if let Some(n) = a.checkpoint_every {
+        t = t.checkpoint_every(n);
     }
     if let Some(v) = a.lr {
         t = t.lr(v);
@@ -558,6 +570,11 @@ pub fn run_finetune(argv: &[String]) -> ! {
                     0
                 }
             }
+            // A distributed job that lost a rank: a launcher restarts every rank, which resumes from the last commit.
+            Err(e @ brain::Error::JobFailed(_)) => {
+                eprintln!("brain finetune: {e}");
+                model::jobfault::RESTART_STATUS
+            }
             Err(e) => {
                 eprintln!("brain finetune: {e}");
                 1
@@ -570,6 +587,10 @@ pub fn run_finetune(argv: &[String]) -> ! {
                     println!("checkpoint: {}", p.display());
                 }
                 0
+            }
+            Err(e @ brain::Error::JobFailed(_)) => {
+                eprintln!("brain finetune: {e}");
+                model::jobfault::RESTART_STATUS
             }
             Err(e) => {
                 eprintln!("brain finetune: {e}");

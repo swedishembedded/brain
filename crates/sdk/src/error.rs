@@ -130,6 +130,20 @@ pub enum Error {
     /// The caller's [`capability::CancelToken`] fired before the call produced
     /// a result.
     Cancelled,
+    /// A distributed run lost a rank or its collective: this rank stopped before applying any part of the step it
+    /// failed in. Every rank started again with the same arguments resumes from the job's last committed generation;
+    /// the `brain` CLI exits with `model::jobfault::RESTART_STATUS` on it.
+    JobFailed(String),
+}
+
+/// A training error as an [`Error`]: a distributed job's collective failure ([`model::jobfault::JobFailure`]) is
+/// [`Error::JobFailed`], anything else [`Error::Backend`] with `context`.
+#[cfg(feature = "study")]
+pub(crate) fn training_error(context: &str, e: std::io::Error) -> Error {
+    match model::jobfault::job_failure(&e) {
+        Some(failure) => Error::JobFailed(failure.to_string()),
+        None => Error::Backend(format!("{context}: {e}")),
+    }
 }
 
 /// A model's `Result<_, String>` error as an [`Error`]: the contract's
@@ -172,6 +186,7 @@ impl std::fmt::Display for Error {
             Error::Download(m) => write!(f, "download failed: {m}"),
             Error::LicenseRequired(m) => write!(f, "license required: {m}"),
             Error::MissingArgument(m) => write!(f, "{m}"),
+            Error::JobFailed(m) => write!(f, "{m}"),
             Error::Forecast(e) => write!(f, "{e}"),
             Error::Backend(m) => write!(f, "{m}"),
             Error::Io(e) => write!(f, "{e}"),

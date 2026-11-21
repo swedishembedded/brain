@@ -97,6 +97,6 @@ impl DataParallel {
     /// The gradient group a trainer's fit loop reduces over.
     pub(crate) fn grad_sync(&self) -> model::GradSync<'_> {
         let checkpoint = self.job.as_ref().map(|(job, plan)| model::CheckpointIdentity { job, plan });
-        model::GradSync { collective: &*self.group, rank: self.rank, checkpoint }
+        model::GradSync { collective: &*self.group, rank: self.rank, checkpoint, observer: None }
     }
 }

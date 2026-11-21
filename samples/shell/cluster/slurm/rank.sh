@@ -34,8 +34,13 @@ shift 4
 
 rank=${SLURM_PROCID:?rank.sh runs as a task of a Slurm step (srun)}
 local_id=${SLURM_LOCALID:?rank.sh runs as a task of a Slurm step (srun)}
-card=$local_id
 host=$(hostname -s)
+card=$local_id
+# A node whose first cards are someone else's: the launcher's card map names this node's first card.
+if [ -r "$workdir/card-map" ]; then
+	first=$(awk -F= -v h="$host" '$1 == h { print $2 }' "$workdir/card-map")
+	[ -n "$first" ] && card=$((first + local_id))
+fi
 
 if [ -n "$rank_env" ]; then
 	# shellcheck disable=SC1090
@@ -93,4 +98,8 @@ serve)
 esac
 
 echo "rank.sh: rank $rank on $host card $card${pin:+ cores ${pin[2]}}" >&2
-exec "${pin[@]}" "$brain" --device "gpu$card" "${args[@]}" "${extra[@]}"
+# The status is recorded for the launcher: 75 is brain's "the job lost a rank, restart it from its last commit".
+status=0
+"${pin[@]}" "$brain" --device "gpu$card" "${args[@]}" "${extra[@]}" || status=$?
+echo "$status" >"$workdir/status.$rank"
+exit "$status"

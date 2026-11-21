@@ -23,7 +23,7 @@
 #   plan.json   the job plan every rank reads: world size, coordinator
 #               <first node of the step>:<port chosen once>, timeouts
 #   job.secret  64 hex digits, mode 0600: only processes that can read it join
-#   rank<N>.log, nccl.rank<N>.log   each rank's output and NCCL's log
+#   rank<N>.attempt<A>.log, nccl.rank<N>.log   each rank's output per attempt, NCCL's log
 # and runs `srun --ntasks-per-node=<cards> --gpus-per-node=<cards>` with
 # rank.sh as every task, which appends --job-plan/--job-rank/--job-secret to
 # BRAIN_ARGS and runs `brain --device gpu<local id> BRAIN_ARGS...` pinned to
@@ -43,6 +43,16 @@
 #   --op-timeout-ms N    the plan's per-operation timeout (default 600000)
 #   --workdir DIR        where the plan, secret and logs go (must be visible to every node)
 #   --srun-arg ARG       one more argument for srun (repeatable), e.g. --srun-arg --mem=64G
+#   --gpus-per-node N    cards the step claims per node (default: --cards-per-node)
+#   --card-map MAP       which card each node's tasks use, as node=first[,node=first...]:
+#                        task i on that node uses card first+i (default: card i), for a
+#                        node whose other cards are someone else's
+#   --restarts N         start the step again, up to N times, when it failed because the
+#                        job lost a rank: a rank exited with brain's restart status (75),
+#                        or was killed or crashed, and none failed for another reason.
+#                        The same plan and secret are reused, so a run that commits its
+#                        state (finetune --checkpoint-every N) resumes from its newest
+#                        commit (default 0)
 #
 # A step on one node gets a Slingshot VNI only with --network=single_node_vni,
 # which this script adds when the step has one node; without a VNI the NCCL
@@ -51,7 +61,7 @@
 set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
-nodes="" nodelist="" cards=4 brain=brain rank_env="" container="" port="" collectives=auto op_timeout_ms=600000 workdir=""
+nodes="" nodelist="" cards=4 brain=brain rank_env="" container="" port="" collectives=auto op_timeout_ms=600000 workdir="" restarts=0 gpus="" card_map=""
 srun_extra=()
 usage() {
 	sed -n '/^# Run one distributed/,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//'
@@ -70,6 +80,9 @@ while [ $# -gt 0 ]; do
 	--op-timeout-ms) op_timeout_ms=$2; shift 2 ;;
 	--workdir) workdir=$2; shift 2 ;;
 	--srun-arg) srun_extra+=("$2"); shift 2 ;;
+	--restarts) restarts=$2; shift 2 ;;
+	--gpus-per-node) gpus=$2; shift 2 ;;
+	--card-map) card_map=$2; shift 2 ;;
 	-h | --help) usage 0 ;;
 	--) shift; break ;;
 	*) echo "train.sh: unknown option $1" >&2; usage ;;
@@ -110,15 +123,33 @@ cat >"$workdir/plan.json" <<EOF
   "collectives": "$collectives"
 }
 EOF
-(umask 077 && openssl rand -hex 32 >"$workdir/job.secret")
+[ -e "$workdir/job.secret" ] || (umask 077 && openssl rand -hex 32 >"$workdir/job.secret")
+if [ -n "$card_map" ]; then tr ',' '\n' <<<"$card_map" >"$workdir/card-map"; fi
 
-step=(srun --overlap --nodes="$nodes" --nodelist="$nodelist" --ntasks-per-node="$cards" --gpus-per-node="$cards" --kill-on-bad-exit=1)
+step=(srun --overlap --nodes="$nodes" --nodelist="$nodelist" --ntasks-per-node="$cards" --gpus-per-node="${gpus:-$cards}" --kill-on-bad-exit=1)
 [ "$nodes" -eq 1 ] && step+=(--network=single_node_vni)
 step+=("${srun_extra[@]}")
 read -r -a prefix <<<"$container"
 
 echo "train.sh: $world ranks on ${step_nodes[*]} (coordinator ${step_nodes[0]}:$port), logs in $workdir" >&2
-status=0
-"${step[@]}" --output="$workdir/rank%t.log" "${prefix[@]}" "$here/rank.sh" job "$workdir" "$rank_env" "$brain" -- "$@" || status=$?
-echo "train.sh: the step ended with status $status; rank logs in $workdir" >&2
+# Whether the step that just ended failed only by losing ranks: every rank that reported a status exited 0, with
+# the restart status (75) or by a signal (killed, crashed); a rank with no status was killed with its task.
+restartable() {
+	local r s
+	for ((r = 0; r < world; r++)); do
+		[ -e "$workdir/status.$r" ] || continue
+		s=$(cat "$workdir/status.$r")
+		[ "$s" -eq 0 ] || [ "$s" -eq 75 ] || [ "$s" -ge 128 ] || return 1
+	done
+}
+attempt=0
+while :; do
+	rm -f "$workdir"/status.*
+	status=0
+	"${step[@]}" --output="$workdir/rank%t.attempt$attempt.log" "${prefix[@]}" "$here/rank.sh" job "$workdir" "$rank_env" "$brain" -- "$@" || status=$?
+	echo "train.sh: attempt $attempt ended with status $status; rank logs in $workdir/rank*.attempt$attempt.log" >&2
+	[ "$status" -ne 0 ] && [ "$attempt" -lt "$restarts" ] && restartable || break
+	attempt=$((attempt + 1))
+	echo "train.sh: the job lost a rank; restarting every rank (attempt $attempt of $restarts) from its last commit" >&2
+done
 exit "$status"

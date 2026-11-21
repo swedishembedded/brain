@@ -262,7 +262,7 @@ impl model::Objective<HostModel> for Nothing {
 fn fit_error(sharding: Sharding, group: bool, precision: &str) -> String {
     let coll = HostCollective::new(1);
     let opts = model::FitOpts { steps: 1, sharding, precision: if precision.is_empty() { model::TrainPrecision::default() } else { model::TrainPrecision::parse(precision).unwrap() }, ..Default::default() };
-    let control = model::FitControl { grad_sync: group.then(|| model::GradSync { collective: &*coll, rank: 0, checkpoint: None }), ..Default::default() };
+    let control = model::FitControl { grad_sync: group.then(|| model::GradSync { collective: &*coll, rank: 0, checkpoint: None, observer: None }), ..Default::default() };
     match model::fit_controlled(HostModel(HostCfg), Nothing, &opts, None, control) {
         Ok(_) => "trained".into(),
         Err(e) => e.to_string(),

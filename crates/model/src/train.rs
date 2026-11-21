@@ -770,10 +770,30 @@ impl<M: Model> Objective<M> for CausalLm {
     }
 
     fn begin(&mut self, seed: u64, draws_done: u64) {
-        // `draws_done` counts this rank's records; a sharded stream has consumed `world` times as many.
+        // A sharded stream consumes every rank's records, so the loop's count of this rank's draws is not its
+        // position. A resume restores the exact count from the cursor; without one (a state saved before the cursor
+        // existed) the count is rebuilt from the step, `world` records for each of this rank's.
         let world = self.shard.map_or(1, |(_, world)| world as u64);
-        self.drawn_records = draws_done * world;
-        self.order = self.train.example_count().filter(|&n| n > 0).map(|n| EpochOrder::new(seed, n, draws_done * world));
+        if self.drawn_records == 0 {
+            self.drawn_records = draws_done * world;
+        }
+        self.order = self.train.example_count().filter(|&n| n > 0).map(|n| EpochOrder::new(seed, n, self.drawn_records));
+    }
+
+    /// A sharded stream's position, the records consumed: a token stream draws a batch for every record, kept or
+    /// not, so only the exact count resumes it on the uninterrupted run's batches. An unsharded stream is positioned
+    /// by the loop's step count and keeps none.
+    fn cursor(&self) -> Option<serde_json::Value> {
+        self.shard.map(|_| serde_json::json!({ "drawn_records": self.drawn_records }))
+    }
+
+    fn restore_cursor(&mut self, cursor: &serde_json::Value) -> std::io::Result<()> {
+        let records = cursor.get("drawn_records").and_then(serde_json::Value::as_u64).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "the stream position names no drawn_records"))?;
+        if self.shard.is_none() {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "a sharded run's stream position cannot resume an unsharded run"));
+        }
+        self.drawn_records = records;
+        Ok(())
     }
 
     /// Shard the training-record stream. The stream itself is fixed by the
@@ -1764,6 +1784,9 @@ pub struct GradSync<'a> {
     /// Without it a distributed run still trains, but publishes no commit and
     /// cannot verify what it resumes from.
     pub checkpoint: Option<CheckpointIdentity<'a>>,
+    /// Told when each phase of a step completes on this rank ([`crate::jobfault::StepPhase`]) with the step's
+    /// number: what a caller watching the job's progress, or a test injecting a fault at an exact point, hooks.
+    pub observer: Option<&'a dyn Fn(crate::jobfault::StepPhase, u32)>,
 }
 
 /// What a checkpoint commit is filed under: the job's durable identity and the
@@ -1984,8 +2007,31 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
     let mut applied = 0u32;
     let mut resumed_at = None;
     let mut selection = Selection::new(opts);
-    if let Some(state) = control.state.filter(|p| p.exists()) {
-        if let (Some(sync), Some(path)) = (grad_sync.as_ref(), out) {
+    // A distributed run keeps its exact-resume state as committed generations, one file per rank
+    // (`crate::jobfault`): ranks hold different stream positions, and a restart must find every rank's state of
+    // the same step. It resumes from the newest generation every rank committed.
+    let generations = match (&grad_sync, control.state) {
+        (Some(sync), Some(state)) => {
+            let unnamed = CheckpointIdentity { job: "", plan: "" };
+            Some(crate::jobfault::Generations::new(state, sync.rank, sync.collective.world_size(), sync.checkpoint.unwrap_or(unnamed))?)
+        }
+        _ => None,
+    };
+    let resume_generation = match (&generations, &grad_sync) {
+        (Some(g), Some(sync)) => g.latest(sync.collective)?,
+        _ => None,
+    };
+    let mut health = match resume_generation {
+        Some(step) => crate::jobfault::CommHealth::rebuilding(step),
+        None => crate::jobfault::CommHealth::default(),
+    };
+    let resume_from: Option<std::path::PathBuf> = match (&generations, resume_generation) {
+        (Some(g), Some(step)) => Some(g.path(step)),
+        (Some(_), None) => None,
+        (None, _) => control.state.filter(|p| p.exists()).map(Path::to_path_buf),
+    };
+    if let Some(state) = resume_from.as_deref() {
+        if let (Some(sync), Some(path), None) = (grad_sync.as_ref(), out, generations.as_ref()) {
             if let Some(identity) = sync.checkpoint {
                 verify_resume(identity, path, sync.collective.world_size())?;
             }
@@ -2077,7 +2123,8 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
                 if let (Some(zero), Some(sync)) = (zero.as_mut(), &grad_sync) {
                     // A sharded step reduces, gates and updates in one: the ranks agree on skipping it.
                     let args = crate::zero::StepArgs { t: applied + 1, lr, wd: opts.weight_decay, adam: opts.adam, clip, extra_scale: scale };
-                    let outcome = zero.step(sync.collective, weight, step_loss.is_finite(), &args).map_err(std::io::Error::other)?;
+                    // A failure here is the job's (a lost or stalled rank): stop, and restart from the last commit.
+                    let outcome = health.guarded(step + 1, "sharded step", || zero.step(sync.collective, weight, step_loss.is_finite(), &args))?;
                     let why = match outcome {
                         crate::zero::StepOutcome::Applied { grad_norm } => {
                             applied += 1;
@@ -2091,7 +2138,13 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
                     }
                 } else {
                 if let Some(sync) = &grad_sync {
-                    crate::distributed::reduce_grads_weighted(&model, sync.collective, sync.rank, weight).map_err(std::io::Error::other)?;
+                    health.guarded(step + 1, "gradient reduction", || crate::distributed::reduce_grads_weighted(&model, sync.collective, sync.rank, weight))?;
+                    // The step is a transaction: it is applied only once every rank says its reduction completed. A
+                    // rank lost anywhere in the reduction leaves this vote unfinished, so no rank applies the step.
+                    crate::jobfault::agree(sync.collective, sync.rank, &mut health, step + 1, "agreement that every rank's reduction completed")?;
+                    if let Some(observe) = sync.observer {
+                        observe(crate::jobfault::StepPhase::Reduced, step + 1);
+                    }
                 }
                 // Moments, the applied-step count and the weights change only once the step passed the gate.
                 match gate.admit(&model, step_loss)? {
@@ -2100,6 +2153,9 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
                         applied += 1;
                         model.adamw_step(applied, lr, opts.weight_decay, opts.adam, clip, scale);
                         gate.verify_committed(model.last_grad_norm(), step + 1)?;
+                        if let Some(observe) = grad_sync.as_ref().and_then(|sync| sync.observer) {
+                            observe(crate::jobfault::StepPhase::Applied, step + 1);
+                        }
                     }
                 }
                 }
@@ -2256,7 +2312,19 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
             if !keep_going || periodic {
                 // The selection record holds the evaluations too: saved whether or not the run selects, so a resumed run
                 // reports every evaluation of the whole run, those before the resume included.
-                save_train_state(&model, state, completed, applied, &rng, opts, &identity, Some(&selection), obj.cursor(), zero.as_ref())?;
+                match (&generations, &grad_sync) {
+                    (Some(g), Some(sync)) => {
+                        save_train_state(&model, &g.path(completed), completed, applied, &rng, opts, &identity, Some(&selection), obj.cursor(), zero.as_ref())?;
+                        if let Some(observe) = sync.observer {
+                            observe(crate::jobfault::StepPhase::StateSaved, completed);
+                        }
+                        g.commit(sync.collective, &mut health, completed)?;
+                        if let Some(observe) = sync.observer {
+                            observe(crate::jobfault::StepPhase::Committed, completed);
+                        }
+                    }
+                    _ => save_train_state(&model, state, completed, applied, &rng, opts, &identity, Some(&selection), obj.cursor(), zero.as_ref())?,
+                }
             }
         }
         if !keep_going {
@@ -2443,6 +2511,21 @@ pub fn fit_distributed<M: Model>(
     let shard = (grad_sync.rank, grad_sync.collective.world_size());
     let write = if grad_sync.rank == 0 { out } else { None };
     fit_controlled_sharded(model, obj, opts, write, FitControl::default(), Some(grad_sync), Some(shard))
+}
+
+/// [`fit_distributed`] that survives losing a rank: every `state_every` steps each rank writes its exact-resume
+/// state as a generation beside `state` and the job commits the generation once every rank's is durable
+/// (`crate::jobfault`). A run started again with the same arguments resumes from the newest committed generation and
+/// ends with the weights the uninterrupted run would have. A failure of the job's collective is a
+/// [`crate::jobfault::JobFailure`]: no rank applies the step it failed in.
+pub fn fit_distributed_resumable<M: Model>(dir: &Path, cfg: M::Config, opts: &FitOpts, out: Option<&Path>, grad_sync: GradSync<'_>, state: &Path, state_every: u32) -> std::io::Result<(FitReport, M)> {
+    let (train, val, batch_cfg, vocab, itos) = load_dataset_with_itos(dir, opts)?;
+    let (model, _start) = build_or_warm_start::<M>(cfg, opts, None, vocab);
+    let obj = CausalLm::new(train, val, batch_cfg, itos);
+    let shard = (grad_sync.rank, grad_sync.collective.world_size());
+    let write = if grad_sync.rank == 0 { out } else { None };
+    let control = FitControl { state: Some(state), state_every, ..FitControl::default() };
+    fit_controlled_sharded(model, obj, opts, write, control, Some(grad_sync), Some(shard))
 }
 
 /// Generate `max_new` tokens continuing `prompt` for any token-head [`Model`].
@@ -3014,7 +3097,7 @@ mod tests {
         let model = Recorder::new(RecorderCfg, 1, 1, &HashMap::new());
         let indices = std::rc::Rc::clone(&model.indices);
         let coll = crate::HostCollective::new(1);
-        let sync = GradSync { collective: &*coll, rank: 0, checkpoint: None };
+        let sync = GradSync { collective: &*coll, rank: 0, checkpoint: None, observer: None };
         fit_controlled_sync(model, Verdicts(Default::default()), &opts, None, FitControl::default(), Some(sync)).expect("fit");
         assert_eq!(*indices.borrow(), vec![1, 2, 3]);
     }
@@ -3073,7 +3156,7 @@ mod tests {
         let sharded = Recorder::new(RecorderCfg, 1, 4, &HashMap::new());
         let sharded_drawn = std::rc::Rc::clone(&sharded.drawn);
         let coll = crate::HostCollective::new(1);
-        let sync = GradSync { collective: &*coll, rank: 0, checkpoint: None };
+        let sync = GradSync { collective: &*coll, rank: 0, checkpoint: None, observer: None };
         fit_controlled_sharded(sharded, examples_objective(&[4; 6], 4), &opts, None, FitControl::default(), Some(sync), Some((0, 1))).expect("fit");
         assert_eq!(*sharded_drawn.borrow(), *plain_drawn.borrow(), "a one-rank shard must draw the whole stream");
     }
@@ -3146,7 +3229,7 @@ mod tests {
         fit_controlled(plain, examples_objective_batched(&[4; 6], 4, 2), &opts, None, FitControl::default()).expect("fit");
 
         let coll = crate::HostCollective::new(1);
-        let control = FitControl { grad_sync: Some(GradSync { collective: &*coll, rank: 0, checkpoint: None }), ..Default::default() };
+        let control = FitControl { grad_sync: Some(GradSync { collective: &*coll, rank: 0, checkpoint: None, observer: None }), ..Default::default() };
         let sharded = Recorder::new(RecorderCfg, 2, 4, &HashMap::new());
         let sharded_drawn = std::rc::Rc::clone(&sharded.drawn);
         fit_controlled(sharded, examples_objective_batched(&[4; 6], 4, 2), &opts, None, control).expect("fit");
@@ -3201,7 +3284,7 @@ mod tests {
                     scope.spawn(move || {
                         let opts = eval_options();
                         let obj = EvalCurve { evals, next: 0, evals_run: count };
-                        let sync = GradSync { collective: &*coll, rank, checkpoint: None };
+                        let sync = GradSync { collective: &*coll, rank, checkpoint: None, observer: None };
                         fit_controlled_sharded(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), obj, &opts, None, FitControl::default(), Some(sync), Some((rank, 2)))
                             .expect("fit")
                             .0
@@ -3258,7 +3341,7 @@ mod tests {
     fn a_group_over_an_objective_that_cannot_shard_is_refused_by_name() {
         let opts = FitOpts { steps: 1, eval_interval: 0, ..Default::default() };
         let coll = crate::HostCollective::new(1);
-        let control = FitControl { grad_sync: Some(GradSync { collective: &*coll, rank: 0, checkpoint: None }), ..Default::default() };
+        let control = FitControl { grad_sync: Some(GradSync { collective: &*coll, rank: 0, checkpoint: None, observer: None }), ..Default::default() };
         let err = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Whole, &opts, None, control)
             .err()
             .expect("an objective with no shard must refuse");
@@ -4019,7 +4102,7 @@ mod tests {
                             let indices = std::rc::Rc::clone(&model.indices);
                             let mut stop = |s: &StepReport| s.step < stop_after;
                             let control = FitControl { on_step: Some(&mut stop), state: Some(&state), identity, ..Default::default() };
-                            let sync = GradSync { collective: &*coll, rank, checkpoint: None };
+                            let sync = GradSync { collective: &*coll, rank, checkpoint: None, observer: None };
                             fit_controlled_sharded(model, Verdicts(Default::default()), opts, None, control, Some(sync), None).map_err(|e| e.to_string())?;
                             let applied = indices.borrow().clone();
                             Ok(applied)
@@ -4032,14 +4115,13 @@ mod tests {
         // The caller names no world size: the run records it itself.
         assert_eq!(run(2, 2).expect("first half"), vec![vec![1, 2]; 2]);
         assert_eq!(run(2, 4).expect("the same world resumes"), vec![vec![3, 4]; 2]);
-        // A state written by a two-rank job is not resumed by a one-rank one.
-        std::fs::remove_file(dir.join("state0")).ok();
-        std::fs::rename(dir.join("state1"), dir.join("state0")).unwrap();
+        // A state written by a two-rank job is not resumed by a one-rank one: rank 0's committed generations name
+        // a world of two.
         let err = run(1, 4).expect_err("a different world must be refused");
         assert!(err.contains("different data or a different starting point") || err.contains("world"), "{err}");
         // A caller that names a world size must name the group's.
         let coll = crate::HostCollective::new(1);
-        let sync = GradSync { collective: &*coll, rank: 0, checkpoint: None };
+        let sync = GradSync { collective: &*coll, rank: 0, checkpoint: None, observer: None };
         let state = dir.join("named");
         let control = FitControl { state: Some(&state), identity: serde_json::json!({ "run": 1, "world_size": 3 }), ..Default::default() };
         let err = fit_controlled_sharded(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Verdicts(Default::default()), &opts, None, control, Some(sync), None).err().expect("a contradictory world size");

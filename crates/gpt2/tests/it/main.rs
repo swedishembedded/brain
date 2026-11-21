@@ -10,6 +10,7 @@
 mod convergence;
 mod cuda_backend_parity;
 mod device_memory;
+mod distributed_faults;
 mod distributed_train;
 mod dp_parity;
 mod kv_decode;

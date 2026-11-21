@@ -52,6 +52,21 @@ pub fn train_distributed(
     model::train::fit_distributed::<crate::model::Gpt>(dir, cfg, opts, out, sync)
 }
 
+/// [`train_distributed`] that survives losing a rank: the job commits its exact-resume state every `state_every`
+/// steps beside `state`, and the same command run again resumes from the newest commit. See
+/// [`model::train::fit_distributed_resumable`].
+pub fn train_distributed_resumable(
+    dir: &Path,
+    cfg: GptConfig,
+    opts: &TrainOpts,
+    out: Option<&Path>,
+    sync: model::GradSync<'_>,
+    state: &Path,
+    state_every: u32,
+) -> std::io::Result<(model::FitReport, crate::model::Gpt)> {
+    model::train::fit_distributed_resumable::<crate::model::Gpt>(dir, cfg, opts, out, sync, state, state_every)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
