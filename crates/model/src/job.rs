@@ -85,8 +85,8 @@ pub struct JobPlan {
 
 /// The bucket cap a plan that names none uses: none. Packing copies every small tensor into its bucket and back one
 /// copy at a time, and on a Qwen3-4B LoRA step (504 tensors, 132 MB, 4 GH200 ranks) that cost more than it saved:
-/// 5.2 ms per reduction at caps of 4-128 MiB against 3.0 ms for the tensors reduced as one NCCL group where they
-/// live. A cap pays once the packing is one gather kernel.
+/// every cap from 4 to 128 MiB reduced slower than the tensors reduced as one NCCL group where they live (the sweep
+/// is in the distributed-execution ledger's Measured section). A cap pays once the packing is one gather kernel.
 pub const DEFAULT_BUCKET_MIB: u32 = 0;
 
 fn default_bucket_mib() -> u32 {
