@@ -2120,8 +2120,9 @@ impl Qwen35 {
             // a free a bookkeeping entry, at the price of the garbage between two drains
             // staying reserved (about 14 GiB at 8K tokens through the 64 layers): taken
             // when the base leaves that room. A bf16 27B base takes 54 GB, and with the
-            // freed blocks held its 8K step peaks at about 81 GiB of the 95 (knowledge 311).
-            if o.base.want("blocks.0.mlp.gate.weight") != Dtype::F32 || cfg.n_layers <= 32 {
+            // freed blocks held its 8K step peaks at about 81 GiB of the 95 (knowledge 311). A resident full fine-tune
+            // holds its linears in its own low-precision state, not as an fp32 base, so it leaves that room too.
+            if o.base.want("blocks.0.mlp.gate.weight") != Dtype::F32 || cfg.n_layers <= 32 || resident_plan.is_some() {
                 for handle in [&gpu, ops.gpu()] {
                     handle.hold_freed_blocks(true);
                     // The step cycles tens of gigabytes: without this the pool hands everything above its
