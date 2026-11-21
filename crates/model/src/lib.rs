@@ -42,6 +42,8 @@ pub mod conformance_grad;
 pub mod conformance_head;
 pub mod conformance_trainable;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod conformance_zero;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod finetune;
 pub mod flow;
 pub mod session;
@@ -122,6 +124,7 @@ pub mod vlm;
 pub mod rope_scaling;
 pub mod rope_table;
 pub mod yarn;
+pub mod zero;
 
 pub use collective::{Collective, HostCollective};
 pub use collective::{payload_bytes, CollectiveProfile, OpKind, OpSnapshot, ShapedCollective, SimulatedLink, Snapshot, TimedCollective};
@@ -528,6 +531,17 @@ pub trait Model {
         let parts = self.optimizer_parts().ok_or("this model keeps no parameter store a reduction can reach")?;
         let names = self.param_names();
         DeviceGrads::from_store(parts.gpu, parts.store, &names)
+    }
+
+    /// Every optimised parameter's value and gradient where they live on the device, in [`Model::param_names`]
+    /// order: what a sharded optimizer ([`zero::ZeroOptimizer`]) reduces, updates and gathers back. The default
+    /// answers from the parameter store ([`Model::optimizer_parts`]) when it holds every one of them; a model whose
+    /// parameters live elsewhere answers why, and a sharded run of it is refused by that reason.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn device_params(&self) -> Result<zero::DeviceParams, String> {
+        let parts = self.optimizer_parts().ok_or("this model keeps no parameter store a sharded optimizer can reach")?;
+        let names = self.param_names();
+        zero::DeviceParams::from_store(parts.gpu, parts.store, &names)
     }
 
     /// `name`'s AdamW `(m, v)` moments; `None` when it has none to give.

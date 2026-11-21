@@ -123,6 +123,11 @@ pub struct FitOpts {
     /// [`crate::stepgate::MAX_CONSECUTIVE_NONFINITE`] in a row. Does not change what a healthy run computes,
     /// so it is not part of a run's identity.
     pub strict_updates: bool,
+    /// What a data-parallel run shards across its ranks ([`crate::zero`]): the default replicates everything; the
+    /// sharded stages need a [`FitControl::grad_sync`] group and a model whose parameters a sharded optimizer reaches
+    /// ([`Model::device_params`]), and are refused otherwise. Part of a run's identity: a state saved sharded is
+    /// resumed sharded.
+    pub sharding: crate::zero::Sharding,
     /// Batches the loss estimate taken before the first step averages ([`FitReport::initial_loss`]); `0` takes the
     /// first step's own loss instead, measured before its update by the forward the step runs anyway, so a run
     /// pays no extra forward for it (what a long run on a slow device wants: five probe forwards of 1024-token rows
@@ -214,6 +219,7 @@ impl Default for FitOpts {
             stages: 0,
             native_sparse: None,
             strict_updates: false,
+            sharding: crate::zero::Sharding::Replicated,
             initial_probe_batches: 5,
             exit_entropy: 0.0,
         }
@@ -764,7 +770,10 @@ impl<M: Model> Objective<M> for CausalLm {
     }
 
     fn begin(&mut self, seed: u64, draws_done: u64) {
-        self.order = self.train.example_count().filter(|&n| n > 0).map(|n| EpochOrder::new(seed, n, draws_done));
+        // `draws_done` counts this rank's records; a sharded stream has consumed `world` times as many.
+        let world = self.shard.map_or(1, |(_, world)| world as u64);
+        self.drawn_records = draws_done * world;
+        self.order = self.train.example_count().filter(|&n| n > 0).map(|n| EpochOrder::new(seed, n, draws_done * world));
     }
 
     /// Shard the training-record stream. The stream itself is fixed by the
@@ -914,27 +923,32 @@ impl CausalLm {
             // Record granularity: collect `batch_size` records whose stream
             // index belongs to this rank. Every rank consumes the same
             // `batch_size * world` records, so their orders advance together.
+            // A draw ends on a whole round of `world` records, so every rank stands at the same stream position
+            // between steps, the position a resumed run starts from.
             let mut picks: Vec<Option<usize>> = Vec::with_capacity(self.batch_cfg.batch_size);
-            while picks.len() < self.batch_cfg.batch_size {
+            while picks.len() < self.batch_cfg.batch_size || !self.drawn_records.is_multiple_of(world as u64) {
                 let index = self.drawn_records;
                 self.drawn_records += 1;
                 let pick = order.next();
-                if index % world as u64 == rank as u64 {
+                if index % world as u64 == rank as u64 && picks.len() < self.batch_cfg.batch_size {
                     picks.push(Some(pick));
                 }
             }
             return self.draw_examples(&picks).expect("a stream with an epoch order has example rows");
         }
         // A plain token stream has no record boundaries: its drawn batch is the
-        // record, so the rank keeps one batch out of every `world`.
-        loop {
+        // record, so the rank keeps one batch out of every `world`, and draws
+        // the whole round so every rank's generator stands at the same place.
+        let mut kept = None;
+        for _ in 0..world {
             let index = self.drawn_records;
             self.drawn_records += 1;
             let batch = self.draw_next(rng);
             if index % world as u64 == rank as u64 {
-                return batch;
+                kept = Some(batch);
             }
         }
+        kept.expect("one record of every round of `world` belongs to each rank")
     }
 
     /// Load a drawn batch into `model`: as [`Batch::LmExamples`] when the run names the examples, else [`Batch::Lm`].
@@ -1531,7 +1545,36 @@ fn schedule_fingerprint(opts: &FitOpts) -> serde_json::Value {
     if let Some(sparse) = &opts.native_sparse {
         fingerprint["native_sparse"] = serde_json::Value::String(format!("{sparse:?}"));
     }
+    if !opts.sharding.is_replicated() {
+        fingerprint["sharding"] = serde_json::json!(opts.sharding);
+    }
     fingerprint
+}
+
+/// The sharded optimizer a run with [`FitOpts::sharding`] trains through, built over `grad_sync`'s group: every
+/// rank's moments leave the device, since the sharded optimizer holds this rank's slice of them instead. `None` for
+/// a replicated run. Refused, with what is missing, without a group, for a model whose parameters a sharded optimizer
+/// cannot reach, and for an optimizer-state precision other than the default.
+fn sharded_optimizer<M: Model>(model: &mut M, opts: &FitOpts, grad_sync: Option<&GradSync<'_>>) -> std::io::Result<Option<crate::zero::ZeroOptimizer>> {
+    let sharding = opts.sharding;
+    if sharding.is_replicated() {
+        return Ok(None);
+    }
+    let refuse = |why: String| std::io::Error::new(std::io::ErrorKind::Unsupported, format!("sharded training ({sharding:?}): {why}"));
+    let sync = grad_sync.ok_or_else(|| refuse("it shards over a data-parallel group, and this run has none".into()))?;
+    // What the backward keeps of the forward is the model's business; how parameters and their state are held is the
+    // sharded optimizer's, and it holds f32 AdamW state.
+    let parameters = crate::TrainPrecision { activations: None, ..opts.precision.clone() };
+    if !parameters.is_default() {
+        return Err(refuse("the sharded optimizer state is f32 AdamW over the parameters as the model holds them; a run asking for another parameter or state precision is not sharded".into()));
+    }
+    if model.off_device_state().is_some() {
+        return Err(refuse("this model keeps its master copies and optimizer state in a state of its own, which is not sharded".into()));
+    }
+    let params = model.device_params().map_err(|why| refuse(format!("its parameters are not where a sharded optimizer reaches them: {why}")))?;
+    let zero = crate::zero::ZeroOptimizer::new(params, sharding, sync.collective, sync.rank, crate::zero::DEFAULT_UNIT_ELEMS).map_err(refuse)?;
+    crate::trainprec::release_device_moments(model);
+    Ok(Some(zero))
 }
 
 /// Where a model's [`crate::OffDeviceState`] is committed for the resume file at `path`.
@@ -1543,7 +1586,8 @@ fn off_device_dir(path: &Path) -> std::path::PathBuf {
 /// atomically: a crash mid-write leaves the previous state, never half of
 /// this one. A run selecting on held-out loss saves its selection with it:
 /// the watch, the curve and the best parameters so far.
-fn save_train_state<M: Model>(model: &M, path: &Path, step: u32, applied: u32, rng: &Rng, opts: &FitOpts, identity: &serde_json::Value, selection: Option<&Selection>, cursor: Option<serde_json::Value>) -> std::io::Result<()> {
+#[allow(clippy::too_many_arguments)] // the run's position, as `load_train_state` reads it back
+fn save_train_state<M: Model>(model: &M, path: &Path, step: u32, applied: u32, rng: &Rng, opts: &FitOpts, identity: &serde_json::Value, selection: Option<&Selection>, cursor: Option<serde_json::Value>, zero: Option<&crate::zero::ZeroOptimizer>) -> std::io::Result<()> {
     let names = model.optimized_params().ok_or_else(|| std::io::Error::other("exact resume: this model does not expose its optimizer state"))?;
     let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> = Vec::with_capacity(names.len() * 4);
     for name in &names {
@@ -1574,7 +1618,12 @@ fn save_train_state<M: Model>(model: &M, path: &Path, step: u32, applied: u32, r
     });
     // The off-device generation first: the resume file below names `applied`, so a crash between the two leaves
     // the previous resume file and a generation it does not use, never a file naming a state that is missing.
-    if let Some(off) = model.off_device_state() {
+    if let Some(zero) = zero {
+        // This rank's shard of the sharded optimizer state, beside its resume file; the weights every rank holds.
+        let dir = off_device_dir(path);
+        zero.save(&dir, serde_json::json!({ "rng": rng.state().to_string(), "step": step }))?;
+        zero.prune(&dir, 2)?;
+    } else if let Some(off) = model.off_device_state() {
         off.commit(&off_device_dir(path), applied)?;
     } else if let Some(host) = model.optimizer_parts().filter(|p| !p.store.offload.is_empty()) {
         // The moments of an offloaded store live in its host optimizer: committed beside the resume file the same way.
@@ -1615,7 +1664,7 @@ struct SavedState {
 }
 
 /// Restore the state [`save_train_state`] wrote into `model` and describe the rest of it.
-fn load_train_state<M: Model>(model: &M, path: &Path, opts: &FitOpts, identity: &serde_json::Value) -> std::io::Result<SavedState> {
+fn load_train_state<M: Model>(model: &M, path: &Path, opts: &FitOpts, identity: &serde_json::Value, zero: Option<(&mut crate::zero::ZeroOptimizer, &dyn crate::Collective)>) -> std::io::Result<SavedState> {
     let invalid = |why: String| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{}: {why}", path.display()));
     let path_str = path.to_str().ok_or_else(|| invalid("not a UTF-8 path".to_string()))?;
     let st = checkpoint::st::load_safetensors(path_str)?;
@@ -1653,7 +1702,9 @@ fn load_train_state<M: Model>(model: &M, path: &Path, opts: &FitOpts, identity: 
         model.write_weight(name, w);
         model.write_moments(name, m, v).map_err(std::io::Error::other)?;
     }
-    if let Some(off) = model.off_device_state() {
+    if let Some((zero, coll)) = zero {
+        zero.restore(coll, &off_device_dir(path), applied)?;
+    } else if let Some(off) = model.off_device_state() {
         off.restore(&off_device_dir(path), applied)?;
     } else if let Some(host) = model.optimizer_parts().filter(|p| !p.store.offload.is_empty()) {
         let dir = off_device_dir(path);
@@ -1916,6 +1967,8 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
     }
     obj.prepare(&mut model)?;
     obj.check_data(&model)?;
+    // A sharded run's optimizer takes the parameters over first: it refuses a parameter precision of its own accord.
+    let mut zero = sharded_optimizer(&mut model, opts, grad_sync.as_ref())?;
     // The run's optimizer-state precision reaches every model here, before any step or resume.
     crate::trainprec::apply_train_precision(&mut model, &opts.precision, std::any::type_name::<M>()).map_err(std::io::Error::other)?;
     model.set_exit_entropy(opts.exit_entropy).map_err(|why| std::io::Error::other(format!("{}: {why}", std::any::type_name::<M>())))?;
@@ -1937,7 +1990,8 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
                 verify_resume(identity, path, sync.collective.world_size())?;
             }
         }
-        let saved = load_train_state(&model, state, opts, &identity)?;
+        let sharded = zero.as_mut().zip(grad_sync.as_ref().map(|sync| sync.collective));
+        let saved = load_train_state(&model, state, opts, &identity, sharded)?;
         let step = saved.step;
         eprintln!("resuming at step {step} from {}", state.display());
         // The objective's stream position comes back before `begin`, which positions the loop's own shuffle.
@@ -1987,6 +2041,8 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
     let mut best_written = false;
     let mut stopped_early = false;
 
+    // The global norm of the latest applied sharded step, after its accumulation scale, when it clipped.
+    let mut sharded_norm: Option<f32> = None;
     for step in first_step..opts.steps {
         // The schedule counts applied updates (AdamW's `t` counts the same), so a step that applies none does not
         // consume warmup or shorten the decay. A cooldown is a window of loop steps with its own end, so it is
@@ -2012,13 +2068,29 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
                 // average grads over accumulation steps
                 let scale = 1.0 / opts.grad_accum.max(1) as f32;
                 let clip = (opts.grad_clip > 0.0).then_some(opts.grad_clip);
+                // A token objective's gradient is a mean over this rank's
+                // supervised positions, so ranks are weighted by them: the
+                // step then descends the per-token mean of the whole step,
+                // not the mean of the ranks' means. An objective that
+                // reports no count is weighted equally.
+                let weight = if work.supervised_positions > 0 { work.supervised_positions as f32 } else { 1.0 };
+                if let (Some(zero), Some(sync)) = (zero.as_mut(), &grad_sync) {
+                    // A sharded step reduces, gates and updates in one: the ranks agree on skipping it.
+                    let args = crate::zero::StepArgs { t: applied + 1, lr, wd: opts.weight_decay, adam: opts.adam, clip, extra_scale: scale };
+                    let outcome = zero.step(sync.collective, weight, step_loss.is_finite(), &args).map_err(std::io::Error::other)?;
+                    let why = match outcome {
+                        crate::zero::StepOutcome::Applied { grad_norm } => {
+                            applied += 1;
+                            sharded_norm = clip.map(|_| grad_norm * scale);
+                            None
+                        }
+                        crate::zero::StepOutcome::Skipped(why) => Some(why),
+                    };
+                    if let Some(why) = gate.verdict(why)? {
+                        eprintln!("step {:>6}: no optimiser step taken: {why}", step + 1);
+                    }
+                } else {
                 if let Some(sync) = &grad_sync {
-                    // A token objective's gradient is a mean over this rank's
-                    // supervised positions, so ranks are weighted by them: the
-                    // step then descends the per-token mean of the whole step,
-                    // not the mean of the ranks' means. An objective that
-                    // reports no count is weighted equally.
-                    let weight = if work.supervised_positions > 0 { work.supervised_positions as f32 } else { 1.0 };
                     crate::distributed::reduce_grads_weighted(&model, sync.collective, sync.rank, weight).map_err(std::io::Error::other)?;
                 }
                 // Moments, the applied-step count and the weights change only once the step passed the gate.
@@ -2030,6 +2102,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
                         gate.verify_committed(model.last_grad_norm(), step + 1)?;
                     }
                 }
+                }
             }
             StepVerdict::Skip(why) => eprintln!("step {:>6}: no optimiser step taken: {why}", step + 1),
             StepVerdict::Abort(e) => return Err(e),
@@ -2038,7 +2111,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         model.poll_wait();
         gpu_core::profile::stage_time("fit: step optimizer update", update_clock);
         gpu_core::profile::stage_time("fit: step total", step_clock);
-        let grad_norm = model.last_grad_norm();
+        let grad_norm = if zero.is_some() { sharded_norm } else { model.last_grad_norm() };
         let loss = step_loss / opts.grad_accum.max(1) as f32;
         // The first step's loss, measured before its update, when the run takes it as its initial estimate.
         initial.get_or_insert(loss);
@@ -2183,7 +2256,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
             if !keep_going || periodic {
                 // The selection record holds the evaluations too: saved whether or not the run selects, so a resumed run
                 // reports every evaluation of the whole run, those before the resume included.
-                save_train_state(&model, state, completed, applied, &rng, opts, &identity, Some(&selection), obj.cursor())?;
+                save_train_state(&model, state, completed, applied, &rng, opts, &identity, Some(&selection), obj.cursor(), zero.as_ref())?;
             }
         }
         if !keep_going {

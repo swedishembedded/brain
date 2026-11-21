@@ -81,6 +81,11 @@ pub struct JobPlan {
     /// which is why it is part of the plan.
     #[serde(default = "default_bucket_mib", skip_serializing_if = "is_default_bucket_mib")]
     pub bucket_mib: u32,
+    /// What the data-parallel group shards across its ranks ([`crate::zero::Sharding`]): nothing (`replicated`, the
+    /// default a plan leaves out), the optimizer state (`optimizer`), or the optimizer state and the reduced gradients
+    /// (`gradients`). Every rank must shard alike, which is why it is part of the plan.
+    #[serde(default, skip_serializing_if = "crate::zero::Sharding::is_replicated")]
+    pub sharding: crate::zero::Sharding,
 }
 
 /// The bucket cap a plan that names none uses: none. Packing copies every small tensor into its bucket and back one
@@ -111,6 +116,7 @@ impl JobPlan {
             op_timeout_ms: DEFAULT_OP_TIMEOUT_MS,
             collectives: CollectivePath::Auto,
             bucket_mib: DEFAULT_BUCKET_MIB,
+            sharding: crate::zero::Sharding::Replicated,
         }
     }
 

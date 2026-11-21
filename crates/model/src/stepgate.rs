@@ -79,6 +79,12 @@ impl UpdateGate {
                 Some(true) | None => None,
             }
         };
+        self.verdict(why)
+    }
+
+    /// [`Self::admit`] for a step whose finiteness was decided elsewhere (a sharded optimizer agrees on it across
+    /// its group): `why` is the reason it was skipped, `None` when it was applied. Counts skips in a row the same way.
+    pub fn verdict(&mut self, why: Option<String>) -> std::io::Result<Option<String>> {
         let Some(why) = why else {
             self.consecutive = 0;
             return Ok(None);

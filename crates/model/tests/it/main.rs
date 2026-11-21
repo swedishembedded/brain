@@ -163,3 +163,5 @@ mod upload_mixed_release;
 mod vit_bwd_kernels;
 mod vit_windowed;
 mod weight_round_trip;
+mod zero_job;
+mod zero_shard;
