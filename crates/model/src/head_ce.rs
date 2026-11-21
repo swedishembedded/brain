@@ -38,6 +38,7 @@
 
 use gpu_core::{DeviceBuffer, Dispatch, Gpu, Step};
 
+use crate::head_transform::HeadTransform;
 use crate::ops::{tile_rows, Act, GradDtype, Ops, Weight};
 
 pub use crate::train::IGNORE;
@@ -58,6 +59,8 @@ pub fn kernels() -> &'static [(&'static str, &'static str)] {
         ("grad_scale_buf", kernels::GRAD_SCALE_BUF),
         ("scale_row", kernels::SCALE_ROW),
         ("matmul_dw_reg", kernels::MATMUL_DW_REG),
+        ("logit_cap_mask", kernels::LOGIT_CAP_MASK),
+        ("logit_cap_mask_bwd", kernels::LOGIT_CAP_MASK_BWD),
     ]
 }
 
@@ -198,6 +201,9 @@ pub struct HeadCe {
     argmax: Option<(usize, usize)>,
     /// The scratch of a bf16 weight gradient ([`Self::bf16_dw_scratch`]), allocated on first use.
     bf16_dw: std::cell::RefCell<Option<(DeviceBuffer, DeviceBuffer)>>,
+    /// The declared transform of the head's logits and the `(logit_cap_mask, logit_cap_mask_bwd)` kernels that apply it
+    /// ([`Self::set_head_transform`]); `None` is the identity, which dispatches nothing.
+    transform: Option<(HeadTransform, usize, usize)>,
 }
 
 /// Partial `(value, index)` pairs per row the argmax readout reduces a logits row
@@ -316,7 +322,39 @@ impl HeadCe {
             scale_buf: None,
             argmax: gpu.kernel_index("argmax_part").zip(gpu.kernel_index("argmax_final")),
             bf16_dw: std::cell::RefCell::new(None),
+            transform: None,
         })
+    }
+
+    /// Declare the transform between the head's raw logits and the logits the loss reads: a soft cap
+    /// `c * tanh(x / c)` (applied after the logit scale) and a bound on the valid vocabulary, whose padding columns are
+    /// excluded from the softmax (they carry probability exactly zero and receive no gradient). The backward chains
+    /// through both: the gradient is multiplied by the cap's derivative before it reaches the head. Labels must be below
+    /// the valid vocabulary ([`Self::forward`] and [`Self::backward`] check; a recorded tape cannot). The identity
+    /// (`HeadTransform::NONE`) is the default and records nothing; re-record any tape after changing this.
+    ///
+    /// Needs the `logit_cap_mask` kernels registered ([`kernels`] lists them); an `Err` names what is missing or invalid.
+    pub fn set_head_transform(&mut self, gpu: &Gpu, t: HeadTransform) -> Result<(), String> {
+        t.validate(self.vocab)?;
+        if t.is_identity() {
+            self.transform = None;
+            return Ok(());
+        }
+        let find = |name: &str| gpu.kernel_index(name).ok_or_else(|| format!("HeadCe::set_head_transform: kernel '{name}' is not registered on this Gpu (append model::head_ce::kernels())"));
+        self.transform = Some((t, find("logit_cap_mask")?, find("logit_cap_mask_bwd")?));
+        Ok(())
+    }
+
+    /// The head's declared transform (`HeadTransform::NONE` unless [`Self::set_head_transform`] set one).
+    #[must_use]
+    pub fn head_transform(&self) -> HeadTransform {
+        self.transform.map_or(HeadTransform::NONE, |(t, _, _)| t)
+    }
+
+    /// Panic if a label names a padded column: its logit is the mask floor, so a loss over it would be meaningless.
+    fn check_labels(&self, labels: &[u32]) {
+        let valid = self.head_transform().served_vocab(self.vocab as usize);
+        assert!(labels.iter().all(|&l| l == IGNORE || (l as usize) < valid), "HeadCe: a label names a column at or beyond the valid vocabulary {valid}");
     }
 
     /// Words of device memory this head allocates beyond the weight: the logits
@@ -393,6 +431,9 @@ impl HeadCe {
         }
         if let Some(buf) = &self.scale_buf {
             s.push(gpu.step(self.k.grad_scale_buf, &[&self.logits, buf], &[rows * v], rows * v));
+        }
+        if let Some((t, fwd, _)) = self.transform {
+            s.extend(t.step(gpu, fwd, &self.logits, rows, v));
         }
     }
 
@@ -483,6 +524,11 @@ impl HeadCe {
                 s.push(gpu.step_sliced(self.k.ce_stats, &[&self.logits, b.labels, &self.stats], &[(0, 0), at, (0, 0)], &[rows, v, IGNORE], rows));
             }
             s.push(gpu.step_sliced(self.k.ce_grad_stats, &[&self.logits, b.labels, &self.stats, &self.d_logits], &[(0, 0), at, (0, 0), (0, 0)], &[rows, v, IGNORE, 1f32.to_bits()], rows * v));
+            // The gradient so far is with respect to the transformed logits: through the soft cap (and the padding
+            // mask) first, then through the logit scale below.
+            if let Some((t, _, bwd)) = self.transform {
+                s.extend(t.bwd_step(gpu, bwd, &self.d_logits, &self.logits, rows, v));
+            }
             // Chain rule through `logits = logit_scale * (h W^T)`, then the caller's scale.
             let mut host_coef = if b.logit_scale == 1.0 { None } else { Some(b.logit_scale) };
             match b.grad_scale {
@@ -576,6 +622,7 @@ impl HeadCe {
     /// than one chunk of logits. `weights` scale each token's loss term.
     pub fn forward(&self, ops: &Ops, hidden: &DeviceBuffer, n: u32, labels: &[u32], weights: Option<&[f32]>, logit_scale: f32) -> HeadLoss {
         assert_eq!(labels.len(), n as usize, "HeadCe::forward: {} labels for {n} tokens", labels.len());
+        self.check_labels(labels);
         let gpu = ops.gpu();
         let (lab, nll) = (self.upload_labels(gpu, labels), gpu.storage(n as u64));
         let mut s = Vec::new();
@@ -596,6 +643,7 @@ impl HeadCe {
     #[allow(clippy::too_many_arguments)]
     pub fn backward(&self, ops: &Ops, hidden: &DeviceBuffer, d_hidden: &DeviceBuffer, n: u32, labels: &[u32], weights: Option<&[f32]>, d_scale: f32, logit_scale: f32, dw: Option<&DeviceBuffer>) {
         assert_eq!(labels.len(), n as usize, "HeadCe::backward: {} labels for {n} tokens", labels.len());
+        self.check_labels(labels);
         let gpu = ops.gpu();
         let lab = self.upload_labels(gpu, labels);
         let wbuf = weights.map(|ws| gpu.storage_init("row_weights", ws));

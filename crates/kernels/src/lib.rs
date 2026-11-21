@@ -816,6 +816,10 @@ pub const LN_HEAD_DX: &str = include_str!("../wgsl/ln_head_dx.wgsl");
 pub const LN_STATS: &str = include_str!("../wgsl/ln_stats.wgsl");
 /// `wgsl/ln_stats_rows.wgsl`
 pub const LN_STATS_ROWS: &str = include_str!("../wgsl/ln_stats_rows.wgsl");
+/// `wgsl/logit_cap_mask.wgsl`
+pub const LOGIT_CAP_MASK: &str = include_str!("../wgsl/logit_cap_mask.wgsl");
+/// `wgsl/logit_cap_mask_bwd.wgsl`
+pub const LOGIT_CAP_MASK_BWD: &str = include_str!("../wgsl/logit_cap_mask_bwd.wgsl");
 /// `wgsl/lora_delta.wgsl`
 pub const LORA_DELTA: &str = include_str!("../wgsl/lora_delta.wgsl");
 /// `wgsl/lora_delta_rows.wgsl`
@@ -2166,6 +2170,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("ln_head_dx", LN_HEAD_DX),
     ("ln_stats", LN_STATS),
     ("ln_stats_rows", LN_STATS_ROWS),
+    ("logit_cap_mask", LOGIT_CAP_MASK),
+    ("logit_cap_mask_bwd", LOGIT_CAP_MASK_BWD),
     ("lora_delta", LORA_DELTA),
     ("lora_delta_rows", LORA_DELTA_ROWS),
     ("lora_delta_rows_multi", LORA_DELTA_ROWS_MULTI),

@@ -89,8 +89,24 @@ pub trait PagedDecoder {
     fn max_seq_len(&self) -> usize;
 
     /// Vocabulary size — prompt tokens at or above this are rejected at
-    /// admission rather than gathered out of bounds.
+    /// admission rather than gathered out of bounds. For a decoder that declares a
+    /// [`head_transform`](Self::head_transform) with a valid-vocabulary bound it is that bound, not the (padded) row
+    /// count of the unembedding table.
     fn vocab(&self) -> usize;
+
+    /// The declared transform between the head's raw logits and the logits this decoder serves: a soft cap and a bound
+    /// on the valid vocabulary ([`crate::head_transform`]). The default is the identity.
+    ///
+    /// A decoder that declares one serves the TRANSFORMED values from every readout this trait defines: `logits`, the
+    /// admission picks, the candidate lists and keyed draws of a decode step, the full rows
+    /// ([`forward_batched_logit_rows`](Self::forward_batched_logit_rows), verify rows) and the rows
+    /// [`score_continuation`](Self::score_continuation) scores over. A served row has exactly [`vocab`](Self::vocab)
+    /// entries (the padding is cut, never merely unlikely), so no token at or above `vocab()` can be picked, drawn or
+    /// assigned probability. [`crate::head_transform::HeadTransform`] has the host and device steps that produce them; the
+    /// conformance suite checks the declaration against what the decoder returns.
+    fn head_transform(&self) -> crate::head_transform::HeadTransform {
+        crate::head_transform::HeadTransform::NONE
+    }
 
     /// KV blocks needed to hold `tokens` cached positions.
     fn blocks_for(&self, tokens: u32) -> u32;

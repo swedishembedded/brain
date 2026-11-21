@@ -155,6 +155,43 @@ pub fn run_all<D: PagedDecoder>(c: &Conformance<D>) {
     scoring_is_declared_exactly_when_it_works(c);
     full_rows_rank_what_the_candidate_list_ranks(c);
     keyed_draws_are_the_rows_draws(c);
+    a_declared_head_transform_is_honoured(c);
+}
+
+/// A decoder that declares a head transform ([`PagedDecoder::head_transform`]) serves only its transformed logits: with a
+/// valid-vocabulary bound `vocab()` is the bound, and every readout stays inside it (the admission picks, the candidate
+/// lists, the full rows, whose length is `vocab()`); with a soft cap no served logit exceeds the cap in magnitude. A
+/// decoder that declares nothing passes trivially.
+pub fn a_declared_head_transform_is_honoured<D: PagedDecoder>(c: &Conformance<D>) {
+    let mut d = (c.make)();
+    let t = d.head_transform();
+    if t.is_identity() {
+        return;
+    }
+    let vocab = d.vocab();
+    if let Some(n) = t.valid_vocab {
+        assert_eq!(vocab, n as usize, "a decoder with a valid-vocabulary bound reports it as vocab()");
+    }
+    let prompt = tokens(vocab, 3, 9);
+    let mut table = crate::paged::BlockTable::new();
+    let hidden = d.prefill(&mut table, &prompt);
+    let within = |what: &str, token: u32| assert!((token as usize) < vocab, "{what} returned token {token}, outside the served vocabulary of {vocab}");
+    within("admit_greedy", d.admit_greedy(&hidden));
+    let k = d.topk_capacity().clamp(1, 8);
+    d.admit_topk(&hidden, k).iter().for_each(|&(token, _)| within("admit_topk", token));
+    let capped = |what: &str, row: &[f32]| {
+        assert_eq!(row.len(), vocab, "{what}: a served row has one logit per served token");
+        if let Some(cap) = t.softcap {
+            assert!(row.iter().all(|v| v.abs() <= cap * (1.0 + 1e-5)), "{what}: a served logit exceeds the soft cap {cap}");
+        }
+    };
+    capped("logits", &d.logits(&hidden));
+    let next = tokens(vocab, 4, 1)[0];
+    d.forward_batched_topk(&mut [&mut table], &[next], k).remove(0).iter().for_each(|&(token, _)| within("forward_batched_topk", token));
+    if d.full_row_readback() {
+        capped("forward_batched_logit_rows", &d.forward_batched_logit_rows(&mut [&mut table], &[next]).remove(0));
+    }
+    d.release_table(&mut table);
 }
 
 /// A decoder that declares [`PagedDecoder::scores_continuations`] returns one finite, non-positive log-probability for

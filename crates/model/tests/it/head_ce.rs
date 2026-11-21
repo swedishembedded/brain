@@ -21,6 +21,7 @@ use data::rng::Lcg;
 use gpu_core::select::Dtype;
 use gpu_core::Gpu;
 use model::head_ce::{HeadCe, HeadCeConfig, HeadKernels, IGNORE};
+use model::head_transform::HeadTransform;
 use model::lut4::{dequantize_weight_lut4, quantize_weight_lut4, NF4_LUT};
 use gpu_core::provider::library::GemmPrecision;
 use model::ops::{training_kernel_list, Ops, Weight};
@@ -409,4 +410,117 @@ fn bf16_head_at_real_width_runs_4096_tokens_and_reports_its_time() {
         sums.push(loss.loss_sum);
     }
     assert!((sums[0] - sums[1]).abs() <= 1e-4 * sums[0].abs(), "chunk size changed the loss: {sums:?}");
+}
+
+/// f64 loss of `sum_i CE(softcap(scale * h_i W^T) over the first `valid` columns, y_i) * d_scale` (the columns
+/// at and beyond `valid` are padding and take no part), and its gradient with respect to the hidden states by the chain
+/// rule through the cap: `d/dz (c tanh(z / c)) = 1 - tanh^2(z / c)`.
+#[allow(clippy::too_many_arguments)]
+fn transformed_reference(p: &Problem, w: &[f32], valid: usize, cap: Option<f32>, logit_scale: f32, d_scale: f32) -> (Vec<f64>, Vec<f64>) {
+    let (n, d) = (p.n, p.d);
+    let mut nll = vec![0f64; n];
+    let mut d_hidden = vec![0f64; n * d];
+    for i in 0..n {
+        if p.labels[i] == IGNORE {
+            continue;
+        }
+        let z: Vec<f64> = (0..valid).map(|j| f64::from(logit_scale) * (0..d).map(|c| f64::from(p.hidden[i * d + c]) * f64::from(w[j * d + c])).sum::<f64>()).collect();
+        let y: Vec<f64> = z.iter().map(|&v| cap.map_or(v, |c| f64::from(c) * (v / f64::from(c)).tanh())).collect();
+        let mx = y.iter().cloned().fold(f64::MIN, f64::max);
+        let sum: f64 = y.iter().map(|&v| (v - mx).exp()).sum();
+        nll[i] = mx + sum.ln() - y[p.labels[i] as usize];
+        for j in 0..valid {
+            let dy = (y[j] - mx).exp() / sum - if j as u32 == p.labels[i] { 1.0 } else { 0.0 };
+            let dz = dy * cap.map_or(1.0, |c| 1.0 - (z[j] / f64::from(c)).tanh().powi(2));
+            for c in 0..d {
+                d_hidden[i * d + c] += dz * f64::from(d_scale) * f64::from(logit_scale) * f64::from(w[j * d + c]);
+            }
+        }
+    }
+    (nll, d_hidden)
+}
+
+/// A soft cap and a valid-vocabulary bound on the head: the loss, the log-probabilities and the hidden gradient equal
+/// the f64 reference over the valid columns only (padding rows holding the largest logits of all must not matter), the
+/// reference's gradient equals finite differences of its own loss, chunking and windowing change nothing, and a label
+/// in the padding is refused.
+#[test]
+fn softcap_and_valid_vocab_enter_the_loss_and_its_gradient() {
+    let ops = ops();
+    let (valid, cap, logit_scale, d_scale) = (900usize, 3.0f32, 0.8f32, 1.0 / 140.0);
+    let mut p = problem(150, 96, 1000);
+    // Padding rows 900.. aligned with the hidden states so their logits would dominate every softmax.
+    for j in valid..p.v {
+        for c in 0..p.d {
+            p.raw[j * p.d + c] = 3.0 * p.hidden[(j % p.n) * p.d + c].signum();
+        }
+    }
+    p.labels.iter_mut().for_each(|l| {
+        if *l != IGNORE {
+            *l %= valid as u32;
+        }
+    });
+    let t = HeadTransform { softcap: Some(cap), valid_vocab: Some(valid as u32) };
+    for tier in held_tiers(&ops).into_iter().filter(|t| matches!(t, Dtype::F32 | Dtype::BF16)) {
+        let w = head(&ops, &p, tier);
+        let eff = effective(&p.raw, p.v, p.d, tier);
+        let (nll, d_hidden) = transformed_reference(&p, &eff, valid, Some(cap), logit_scale, d_scale);
+        for windows in [false, true] {
+            let mut hc = build(&ops, &p, &w, 64, windows);
+            hc.set_head_transform(ops.gpu(), t).expect("the transform kernels are registered");
+            assert_eq!(hc.head_transform(), t);
+            let (loss, got) = run(&ops, &hc, &p, None, logit_scale, d_scale);
+            let what = format!("{tier:?} windows={windows}");
+            let sum: f64 = nll.iter().sum();
+            assert!((loss.loss_sum - sum).abs() <= 1e-4 * sum.abs(), "{what}: loss {} vs {sum}", loss.loss_sum);
+            assert_close(&loss.logprobs.iter().map(|l| -l).collect::<Vec<_>>(), &nll, 1e-4, &format!("{what} logprobs"));
+            assert_close(&got, &d_hidden, 1e-4, &format!("{what} d_hidden"));
+        }
+        // The reference gradient is the true derivative: central differences of its own f64 loss.
+        let loss_at = |hidden: &[f32]| {
+            let q = Problem { n: p.n, d: p.d, v: p.v, hidden: hidden.to_vec(), raw: Vec::new(), labels: p.labels.clone() };
+            transformed_reference(&q, &eff, valid, Some(cap), logit_scale, d_scale).0.iter().sum::<f64>() * f64::from(d_scale)
+        };
+        for k in [0usize, 7, 95, p.d + 3, 5 * p.d + 60, 140 * p.d + 1] {
+            if p.labels[k / p.d] == IGNORE {
+                continue;
+            }
+            let h = 1e-2f32;
+            let (mut up, mut dn) = (p.hidden.clone(), p.hidden.clone());
+            up[k] += h;
+            dn[k] -= h;
+            let fd = (loss_at(&up) - loss_at(&dn)) / (2.0 * f64::from(h));
+            assert!((fd - d_hidden[k]).abs() <= 2e-3 * (1e-3 + fd.abs().max(d_hidden[k].abs())), "{tier:?}: d_hidden[{k}] {} vs finite difference {fd}", d_hidden[k]);
+        }
+    }
+}
+
+#[test]
+#[should_panic(expected = "valid vocabulary")]
+fn a_label_in_the_padding_is_refused() {
+    let ops = ops();
+    let mut p = problem(70, 64, 300);
+    let w = head(&ops, &p, Dtype::F32);
+    let mut hc = build(&ops, &p, &w, 64, false);
+    hc.set_head_transform(ops.gpu(), HeadTransform { softcap: None, valid_vocab: Some(250) }).expect("registered");
+    p.labels[0] = 280;
+    let hidden = ops.gpu().storage_init("hidden", &p.hidden);
+    let _ = hc.forward(&ops, &hidden, p.n as u32, &p.labels, None, 1.0);
+}
+
+#[test]
+fn an_invalid_declaration_is_an_error_naming_it() {
+    let ops = ops();
+    let p = problem(64, 64, 300);
+    let w = head(&ops, &p, Dtype::F32);
+    let mut hc = build(&ops, &p, &w, 64, false);
+    for (t, needle) in [
+        (HeadTransform { softcap: Some(0.0), valid_vocab: None }, "softcap"),
+        (HeadTransform { softcap: Some(f32::NAN), valid_vocab: None }, "softcap"),
+        (HeadTransform { softcap: None, valid_vocab: Some(301) }, "exceeds"),
+        (HeadTransform { softcap: None, valid_vocab: Some(0) }, "positive"),
+    ] {
+        let err = hc.set_head_transform(ops.gpu(), t).expect_err("must refuse");
+        assert!(err.contains(needle), "{t:?}: {err}");
+    }
 }

@@ -160,7 +160,7 @@ fn matrix(rng: &mut Lcg) -> Vec<Case> {
             }
         }
     }
-    out.push(case(rng, true, BaseLayout::TapMajor, None, false, false, 1 + 0 * N)); // blocks of one row: no history at all
+    out.push(case(rng, true, BaseLayout::TapMajor, None, false, false, 1)); // blocks of one row: no history at all
     out
 }
 
@@ -195,8 +195,8 @@ fn backward_matches_finite_differences_of_the_oracle() {
         let (dx, dbase, ddyn) = (g.read(&dx, (N * C) as usize), g.read(&dbase, cs.base.len()), g.read(&ddyn, (N * STRIDE) as usize));
         let (x64, d64, b64) = (f64s(&cs.x), f64s(&cs.dyn_taps), f64s(&cs.base));
         let loss = |y: Vec<f64>| y.iter().zip(&dy64).map(|(a, b)| a * b).sum::<f64>();
-        for i in 0..dx.len() {
-            near(dx[i], fd(&|p| loss(oracle(&cs, p, &d64, &b64)), &x64, i), &format!("dx {:?}", cs.shape), i);
+        for (i, &got) in dx.iter().enumerate() {
+            near(got, fd(&|p| loss(oracle(&cs, p, &d64, &b64)), &x64, i), &format!("dx {:?}", cs.shape), i);
         }
         let used: Vec<usize> = (0..b64.len()).filter(|&i| i >= cs.shape.base_off as usize).collect();
         for &i in &used {

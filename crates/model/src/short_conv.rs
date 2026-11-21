@@ -118,7 +118,7 @@ impl ShortConvShape {
         assert!(self.taps >= 1 && self.c >= 1 && self.block >= 1, "short conv: taps, c and block must be positive");
         assert_eq!(self.n % self.block, 0, "short conv: n ({}) is not a whole number of blocks of {}", self.n, self.block);
         if let Some(d) = self.dynamic {
-            assert!(d.group_size >= 1 && self.c % d.group_size == 0, "short conv: group_size {} does not divide c {}", d.group_size, self.c);
+            assert!(d.group_size >= 1 && self.c.is_multiple_of(d.group_size), "short conv: group_size {} does not divide c {}", d.group_size, self.c);
         }
         assert!(!self.history || self.block == self.n, "short conv: a carried history belongs to one sequence, so block must equal n");
     }

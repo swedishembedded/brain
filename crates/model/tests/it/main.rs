@@ -75,6 +75,7 @@ mod gqa_decode_prep_native;
 mod gqa_fwd_win;
 mod gqa_mixer_windowed;
 mod head_ce;
+mod head_transform;
 mod interleaved_rope_theta;
 mod kquant_group16_knobs;
 mod kv_bf16_roundtrip;

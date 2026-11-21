@@ -452,6 +452,22 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
   in the chunked CE (forward and backward) and in every serving readout path (`logits`,
   top-k, keyed draws, full rows, `score_continuation`). `vocab()` reports the valid size.
   Gate: the serve conformance full-row and keyed-draw tests.
+  Done (2026-11-21): kernels `logit_cap_mask` / `logit_cap_mask_bwd` (in place on a `[rows, vocab]` block: soft cap on
+  the valid columns, a `-1e30` floor on the padding columns; the backward reads the transformed logits, since the cap's
+  derivative is `1 - (y/c)^2`) and `model::head_transform::HeadTransform { softcap, valid_vocab }` with the device
+  steps (`step`, `bwd_step`), the host forms (`served`, `trim`, `logprob_at`, `served_vocab`) and validation.
+  `HeadCe::set_head_transform` applies it in the chunked CE forward and backward (cap after the logit scale; the
+  gradient passes through the cap and a padded column carries probability exactly 0 and no gradient; labels in the
+  padding are refused). `PagedDecoder::head_transform()` (default identity) declares it: such a decoder serves
+  transformed values from `logits`, the admission picks, candidates, keyed draws, full rows and the rows it scores
+  over, with `vocab()` the valid size and rows of exactly that length; new conformance property
+  `a_declared_head_transform_is_honoured` (in `run_all`). No engine declares a transform yet: each engine opts in by
+  applying `HeadTransform::step` to its device logits block before `readout` reads it. Specs: `head_ce.rs`
+  (softcap + mask vs an f64 reference and finite differences, padding rows dominating the raw logits),
+  `head_transform.rs` (padded columns never picked, drawn or returned on the device or host; a scheduler run with a
+  declaring decoder; the conformance property accepts an honest decoder and refuses one that serves raw rows).
+  CPU backend verified; CUDA not exercised (the native top-k / draw launches read the transformed block like any
+  other, but were not run).
 
 ### Phase 2: the model (inkling2)
 

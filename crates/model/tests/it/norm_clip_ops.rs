@@ -125,13 +125,13 @@ fn l2clip_scale_forward_dx_and_ds() {
         }
         let s_oracle = with_scale.then_some(&s64[..]);
         let loss_x = |p: &[f64]| clip_loss(p, s_oracle, &dy64, heads, d, f64::from(thr));
-        for i in 0..x.len() {
-            close(dx[i], fd(&loss_x, &x64, i), if with_scale { "dx(scaled)" } else { "dx" }, i);
+        for (i, &got) in dx.iter().enumerate() {
+            close(got, fd(&loss_x, &x64, i), if with_scale { "dx(scaled)" } else { "dx" }, i);
         }
         if with_scale {
             let loss_s = |p: &[f64]| clip_loss(&x64, Some(p), &dy64, heads, d, f64::from(thr));
-            for i in 0..scale.len() {
-                close(ds[i], fd(&loss_s, &s64, i), "ds", i);
+            for (i, &got) in ds.iter().enumerate() {
+                close(got, fd(&loss_s, &s64, i), "ds", i);
             }
         }
     }
