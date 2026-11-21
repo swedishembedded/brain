@@ -12,6 +12,7 @@ mod audio;
 mod backpressure;
 mod callers;
 mod connections;
+mod edge;
 mod seams;
 mod shutdown;
 mod speech;

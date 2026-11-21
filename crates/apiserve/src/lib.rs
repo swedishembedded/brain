@@ -93,7 +93,7 @@ use residency::Executor;
 
 /// The edge concurrency ceiling — see `residency::admission`'s doc (shared
 /// with `crates/dbus` so both transports gate identically).
-pub use residency::admission::EDGE_CONCURRENCY;
+pub use residency::admission::{edge_concurrency, EDGE_CONCURRENCY};
 
 /// The default maximum request-body size (8 MiB), applied to the whole router. The
 /// video routes and the generic `/v1/run` routes override it with their own 64 MiB
@@ -118,7 +118,8 @@ pub fn router(state: AppState) -> Router {
     };
 
     // Edge backpressure on the chat/embeddings/image routes only (NOT `/models`):
-    // a global concurrency limit + load-shed. When `EDGE_CONCURRENCY` requests are
+    // a global concurrency limit + load-shed. When `state.edge_concurrency` requests
+    // (twice the served models' decode slots, at least `EDGE_CONCURRENCY`) are
     // already in flight, the overflow is shed IMMEDIATELY as a 503 ("saturated,
     // rejected at the edge") — a distinct signal from the admit-timeout 429
     // ("accepted, but couldn't start a lane in time"). `HandleErrorLayer` turns the
@@ -130,7 +131,7 @@ pub fn router(state: AppState) -> Router {
             ApiError::saturated(provider, "server saturated: request rejected at the edge").into_response()
         }))
         .layer(LoadShedLayer::new())
-        .layer(GlobalConcurrencyLimitLayer::new(EDGE_CONCURRENCY))
+        .layer(GlobalConcurrencyLimitLayer::new(state.edge_concurrency))
         .into_inner();
 
     Router::new()
@@ -334,6 +335,11 @@ pub fn serve_all(exec: Executor, surfaces: Vec<Surface>, opts: ServeOpts) -> any
             }
         }
     }
+    let slots = exec.decode_slots();
+    eprintln!(
+        "brain serve: edge concurrency {}: the served models carry {slots} sequences at once, and as many requests again may wait for a free one; past that a request is refused with 503 (at least {EDGE_CONCURRENCY})",
+        edge_concurrency(slots)
+    );
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let published = publication.clone();
     let result = rt.block_on(async move {

@@ -41,7 +41,7 @@ use qwen3::chat::{parse_request_as, sampling_params, text_outcome, ChatFormat};
 
 mod plan;
 use plan::QwenPlan;
-use crate::serve_defaults::{given_or_chosen, DEFAULT_CONTEXT_FLOOR, MAX_BATCH_DEFAULTS};
+use crate::serve_defaults::{given_or_chosen_ranked, max_batch_ranking, published_rates, DEFAULT_CONTEXT_FLOOR};
 
 // ---------------------------------------------------------------- shared
 
@@ -369,7 +369,7 @@ pub struct QwenServeConfig {
     /// ([`QwenResident::resolve_kv_tokens`]).
     pub card_budget_bytes: Option<u64>,
     /// `--max-batch N`. `None` (the default) is planned from the card when its budget is known
-    /// ([`QwenResident::resolve_max_batch`]: the widest of [`MAX_BATCH_DEFAULTS`] that fits beside the weights
+    /// ([`QwenResident::resolve_max_batch`]: the widest of [`max_batch_ranking`] that fits beside the weights
     /// with one sequence at the context floor), and [`FALLBACK_MAX_BATCH`] when no budget is.
     pub max_batch: Option<u32>,
     /// `--kv-cache f32` (presence opts OUT), default `true` (int8 KV is the
@@ -776,9 +776,10 @@ fn auto_ctx_for_budget(weight_bytes: u64, budget_bytes: u64, cfg: &qwen3::config
 }
 
 /// [`QwenResident::resolve_max_batch`]'s decision for a checkpoint on a card with `budget` bytes of room: the operator's
-/// `--max-batch`, else the widest of [`MAX_BATCH_DEFAULTS`] the planner places beside `weights`, the adapter bank and
+/// `--max-batch`, else the widest of [`max_batch_ranking`] (from the cards' decode operating point, else
+/// [`crate::serve_defaults::MAX_BATCH_DEFAULTS`]) the planner places beside `weights`, the adapter bank and
 /// the activations of that many rows, with a KV pool for one sequence at the context floor, recorded in `chosen`.
-fn planned_max_batch(checkpoint: &qwen3::config::QwenConfig, weights: &model::ops::TierPolicy, cfg: &QwenServeConfig, budget: u64, chosen: &mut Vec<String>) -> u32 {
+fn planned_max_batch(checkpoint: &qwen3::config::QwenConfig, weights: &model::ops::TierPolicy, cfg: &QwenServeConfig, budget: u64, cards: &[&gpu_core::published_peak::PublishedPeak], chosen: &mut Vec<String>) -> u32 {
     let weight_bytes = weights_bytes_for(checkpoint, weights);
     let floor = cfg.ctx.unwrap_or_else(|| DEFAULT_CONTEXT_FLOOR.min(checkpoint.max_position_embeddings)).max(1);
     let kv_int8 = cfg.kv_int8 && qwen3::serve::kv_int8_supported(checkpoint);
@@ -793,7 +794,8 @@ fn planned_max_batch(checkpoint: &qwen3::config::QwenConfig, weights: &model::op
         }
         profile.plan(weight_bytes, bank_bytes, budget).map(|_| ()).map_err(|e| e.to_string())
     };
-    given_or_chosen(cfg.max_batch.map(|b| b.max(1)), "--max-batch", MAX_BATCH_DEFAULTS, gpu_core::defaults::Hardware::detected(), chosen, fits)
+    let (ranked, why) = max_batch_ranking(cards, weights.default_dtype());
+    given_or_chosen_ranked(cfg.max_batch.map(|b| b.max(1)), "--max-batch", &ranked, &why, chosen, fits)
 }
 
 /// The Qwen3 BPE decoder behind the scheduler ([`QwenServeConfig`] names
@@ -947,7 +949,7 @@ impl QwenResident {
         &self.chosen
     }
 
-    /// `--max-batch` as given; else, when a card budget is known, the widest of [`MAX_BATCH_DEFAULTS`] whose plan
+    /// `--max-batch` as given; else, when a card budget is known, the widest of [`max_batch_ranking`] whose plan
     /// the planner places in it: weights, the adapter bank, the activations of a batch that wide, and a KV pool
     /// for one sequence at the context floor (the operator's `--ctx` when named, else [`DEFAULT_CONTEXT_FLOOR`]
     /// within the checkpoint's window). The context and the fleet pool are then sized for that batch. A narrower
@@ -958,7 +960,7 @@ impl QwenResident {
         let budget = cfg.card_budget_bytes.or(cfg.auto_budget_bytes);
         let checkpoint = qwen3::checkpoint_config(path).ok();
         match (budget, checkpoint.as_ref()) {
-            (Some(budget), Some(checkpoint)) => planned_max_batch(checkpoint, weights, cfg, budget, chosen),
+            (Some(budget), Some(checkpoint)) => planned_max_batch(checkpoint, weights, cfg, budget, &published_rates(gpu_core::defaults::Hardware::detected()), chosen),
             _ => cfg.batch(),
         }
     }
@@ -2346,13 +2348,16 @@ mod tests {
     fn an_unset_max_batch_is_planned_from_the_card() {
         let cfg = qwen3::config::QwenConfig { n_layers: 36, d_model: 2560, n_heads: 32, n_kv_heads: 8, head_dim: 128, d_ff: 9728, max_position_embeddings: 40960, ..qwen3::config::QwenConfig::qwen3_0_6b() };
         let weights = model::ops::TierPolicy::uniform(qwen3::Dtype::BF16);
-        let plan = |budget_gib: f64, given: Option<u32>| {
+        let gh200 = gpu_core::published_peak::lookup("NVIDIA GH200 120GB").unwrap();
+        let plan_on = |cards: &[&gpu_core::published_peak::PublishedPeak], budget_gib: f64, given: Option<u32>| {
             let mut chosen = Vec::new();
             let serve = QwenServeConfig { max_batch: given, ..QwenServeConfig::default() };
-            let batch = planned_max_batch(&cfg, &weights, &serve, (budget_gib * (1u64 << 30) as f64) as u64, &mut chosen);
+            let batch = planned_max_batch(&cfg, &weights, &serve, (budget_gib * (1u64 << 30) as f64) as u64, cards, &mut chosen);
             (batch, chosen)
         };
-        let widest = MAX_BATCH_DEFAULTS[0].ranked[0];
+        let plan = |budget_gib: f64, given: Option<u32>| plan_on(&[gh200], budget_gib, given);
+        // A GH200's decode operating point at bf16 weights (knowledge 538: 7.6k tok/s at 256 rows against 5.4k at 64).
+        let widest = 256;
         let (roomy, said) = plan(94.0, None);
         assert_eq!(roomy, widest, "a 94 GiB card holds the widest batch beside Qwen3-4B");
         assert_eq!(said.len(), 1);
@@ -2363,6 +2368,9 @@ mod tests {
         assert!(said[0].contains("passed over"), "the narrower choice says what was passed over: {said:?}");
         let (asked, said) = plan(94.0, Some(8));
         assert_eq!((asked, said.len()), (8, 0), "an explicit --max-batch is taken as given and not recorded");
+        let (unknown, said) = plan_on(&[], 94.0, None);
+        assert_eq!(unknown, crate::serve_defaults::MAX_BATCH_DEFAULTS[0].ranked[0], "a card without published rates keeps the fixed ranking");
+        assert!(said[0].contains("no published rates"), "{said:?}");
     }
 
     /// The resident carries the planned batch into its plan, sizes its context and pool for it, and says so; with no
@@ -2373,7 +2381,8 @@ mod tests {
         let path = path.to_str().unwrap();
         let card = checkpoint::st::ModelCard::new("brain/qwen3", "qwen");
         let live = QwenResident::from_card_configured(path, &card, None, QwenServeConfig { card_budget_bytes: Some(u64::MAX / 4), ..QwenServeConfig::default() });
-        assert_eq!(live.plan.max_batch, MAX_BATCH_DEFAULTS[0].ranked[0]);
+        let dtype = qwen3_weight_policy(path, None, None).default_dtype();
+        assert_eq!(live.plan.max_batch, max_batch_ranking(&published_rates(gpu_core::defaults::Hardware::detected()), dtype).0[0]);
         assert!(live.chosen_defaults().iter().any(|l| l.starts_with(&format!("--max-batch {}", live.plan.max_batch))), "{:?}", live.chosen_defaults());
         let blind = QwenResident::from_card_configured(path, &card, None, QwenServeConfig::default());
         assert_eq!(blind.plan.max_batch, FALLBACK_MAX_BATCH);

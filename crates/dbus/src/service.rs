@@ -51,7 +51,7 @@ pub struct Manager {
     /// model is a plain `"no model '…'"` reply with zero I/O, exactly today's
     /// behavior. Set only via [`Manager::with_supplier`] (`crate::serve`'s `ServeOpts::supplier`).
     supplier: Option<Arc<dyn ModelSupplier>>,
-    /// Edge concurrency ceiling (`residency::admission::EDGE_CONCURRENCY`) --
+    /// Edge concurrency ceiling (`residency::admission::edge_concurrency` of the executor's decode slots) --
     /// the SAME gate `crates/apiserve`'s HTTP surfaces apply, so a saturated
     /// server sheds identically over either transport. A `Run`/`Subscribe`
     /// that can't acquire a permit immediately is shed, not queued.
@@ -74,13 +74,14 @@ pub struct Manager {
 
 impl Manager {
     pub fn new(executor: Executor) -> Manager {
+        let edge = residency::admission::edge_concurrency(executor.decode_slots());
         Manager {
             executor,
             version: env!("CARGO_PKG_VERSION").to_string(),
             jobs: JobRegistry::new(),
             next_job: AtomicU64::new(0),
             supplier: None,
-            edge_permits: Arc::new(tokio::sync::Semaphore::new(residency::admission::EDGE_CONCURRENCY)),
+            edge_permits: Arc::new(tokio::sync::Semaphore::new(edge)),
             admit_deadline: residency::admission::DEFAULT_ADMIT_DEADLINE,
             cold_build_admit_deadline: residency::admission::DEFAULT_COLD_BUILD_ADMIT_DEADLINE,
             training: false,

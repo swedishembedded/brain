@@ -77,12 +77,14 @@ pub struct AppState {
     /// What the host knows of its devices beyond what the executor budgets ([`DeviceInventory`]); `None` reports
     /// the budgets alone.
     pub devices: Option<Arc<dyn DeviceInventory>>,
+    /// Requests the router lets in at once before it sheds with 503: every decode slot of the models registered
+    /// when the state was made, and as many again waiting for one ([`residency::admission::edge_concurrency`]).
+    pub edge_concurrency: usize,
 }
 
 impl AppState {
     pub fn new(exec: Executor, key: impl Into<String>, provider: Provider) -> AppState {
         AppState {
-            exec,
             jobs: JobRegistry::new(),
             async_jobs: Arc::default(),
             videos: Arc::default(),
@@ -96,6 +98,8 @@ impl AppState {
             supplier: None,
             training: false,
             devices: None,
+            edge_concurrency: residency::admission::edge_concurrency(exec.decode_slots()),
+            exec,
         }
     }
 

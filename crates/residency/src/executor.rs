@@ -603,6 +603,14 @@ impl Executor {
         let _ = self.tx.send(Msg::Unregister(model.to_string()));
     }
 
+    /// The sequences the registered single-device models carry at once: each one's
+    /// [`ResidentModel::batch_limit`] (1 when it declares none) on each of its
+    /// [`ResidentModel::replicas`]. What a transport sizes its edge ceiling from
+    /// ([`crate::admission::edge_concurrency`]).
+    pub fn decode_slots(&self) -> usize {
+        self.models.read().unwrap().values().map(|m| m.batch_limit().unwrap_or(1).max(1) * m.replicas().max(1)).sum()
+    }
+
     /// Whether the registered model `model` would accept the job `(action, inv)`
     /// ([`ResidentModel::check_job`]), asked without queueing it: what a front end checks before it accepts a
     /// call, so a request that can never run is refused to its caller at once (HTTP 400, a bus error) instead
@@ -2602,6 +2610,40 @@ mod tests {
             let err = rx.recv_timeout(Duration::from_secs(10)).expect("both jobs are answered").unwrap_err();
             assert!(err.contains("the checkpoint has no weights"), "{err}");
         }
+    }
+
+    /// The decode slots an executor carries are every registered model's batch times its replicas (a model that
+    /// declares no batch runs one job at a time): what the transports size their edge from.
+    #[test]
+    fn decode_slots_count_every_models_batch_on_every_replica() {
+        struct Slots(&'static str, Option<usize>, usize);
+        impl ResidentModel for Slots {
+            fn manifest(&self) -> Manifest {
+                Manifest::new(self.0, "slots", vec![ActionSpec::new("run", "run")])
+            }
+            fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+                InstanceKey::new(self.0, "default")
+            }
+            fn replicas(&self) -> usize {
+                self.2
+            }
+            fn estimate(&self, _k: &InstanceKey) -> MemCost {
+                MemCost::new(GB, 0)
+            }
+            fn batch_limit(&self) -> Option<usize> {
+                self.1
+            }
+            fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+                Err("never built".into())
+            }
+        }
+        let exec = Executor::start(vec![Arc::new(Slots("wide", Some(256), 1)), Arc::new(Slots("pair", Some(8), 2))], Budgets::new(), Policy::default());
+        assert_eq!(exec.decode_slots(), 256 + 16);
+        exec.register(Arc::new(Slots("single", None, 1)));
+        assert_eq!(exec.decode_slots(), 256 + 16 + 1, "a model registered later counts too");
+        exec.unregister("wide");
+        assert_eq!(exec.decode_slots(), 16 + 1);
+        exec.shutdown();
     }
 
     /// **Replicas of a continuously batching model decode concurrently.** `n` requests streaming in over two replicas finish in

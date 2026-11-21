@@ -46,5 +46,10 @@ the run; the sandbox start was. Chat-scan anomalies: 22 `discarded_tool_call_tai
 - Serve a small model to many agents as one instance with `--max-batch 256` and keep clients at or below 256.
 - KV spill to host (`--kv-offload-gb`, over C2C on a GH200) would not help this load: the int8 pool already holds
   about 1M tokens, several times what 256 agent conversations need. It is for preempted long contexts.
-- Open: `MAX_BATCH_DEFAULTS` stops at 64 although the 4B fits 256 with the same pool; the edge cap is a constant
-  not tied to `--max-batch`, so a wider batch is refused at the edge instead of at startup.
+- Fixed after this measurement: an unset `--max-batch` now starts from the cards' decode operating point
+  (`serve_defaults::decode_operating_point`: `bytes_per_weight * tensor_rate / (2 * memory_bandwidth)`, nearest power of
+  two; 256 on a GH200 at bf16, int8 and fp8 weights) and halves until the plan fits; a card without published rates
+  keeps the fixed 64..1 ranking. Wired for the Qwen3 resident; the Qwen3.8 and MoE residents still rank 64..1 (an MoE
+  reads every expert but multiplies only the active ones, so its point needs its own ratio). The edge ceiling is now
+  `admission::edge_concurrency`: twice the served models' decode slots, at least 256, reported at startup, so requests
+  past the batch queue for a slot instead of being shed. Re-measure on GPU pending.

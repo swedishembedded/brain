@@ -13,12 +13,21 @@ use std::time::Duration;
 
 use crate::Executor;
 
-/// The concurrency ceiling at the edge: at most this many requests are
-/// admitted to a transport at once. Overflow is load-shed fast rather than
-/// queued, so a saturated server sheds instead of building unbounded latency.
-/// Well above the executor's lane count — this guards the transport edge, not
-/// the lanes.
+/// The floor of the edge ceiling ([`edge_concurrency`]): a server whose models
+/// carry few decode slots still admits this many requests at once. Overflow
+/// past the ceiling is load-shed fast rather than queued, so a saturated server
+/// sheds instead of building unbounded latency.
 pub const EDGE_CONCURRENCY: usize = 256;
+
+/// The concurrency ceiling at the edge for an executor whose models carry
+/// `decode_slots` sequences at once ([`crate::Executor::decode_slots`]): every
+/// slot, and as many requests again waiting in the scheduler for a slot to free
+/// (they are admitted as running sequences end, under the admit deadline), never
+/// below [`EDGE_CONCURRENCY`]. A constant ceiling below the slots shed requests
+/// with 503 while the batch had room for them (knowledge 538).
+pub fn edge_concurrency(decode_slots: usize) -> usize {
+    EDGE_CONCURRENCY.max(decode_slots.saturating_mul(2))
+}
 
 /// Default bounded wait for a request to be ADMITTED (work started on a lane)
 /// before it is shed. A running job may then take much longer — only the
@@ -29,7 +38,7 @@ pub const EDGE_CONCURRENCY: usize = 256;
 /// and a seconds-long limit turned ordinary queueing into HTTP 429 for the
 /// third and fourth concurrent long request. The default is therefore long;
 /// it still bounds a wait that never ends (a wedged lane). Real overload is
-/// shed separately, at the edge, by [`EDGE_CONCURRENCY`]. Operators who want
+/// shed separately, at the edge, by [`edge_concurrency`]. Operators who want
 /// fast shedding set `--admit-deadline-ms`.
 pub const DEFAULT_ADMIT_DEADLINE: Duration = Duration::from_secs(15 * 60);
 
@@ -146,6 +155,19 @@ pub fn model_is_cold_building(exec: &Executor, model: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The edge holds every decode slot the served models carry and as many again waiting behind them (they queue
+    /// in the scheduler and start as slots free, under the admit deadline), never fewer than the floor: a server
+    /// whose models carry 256 rows sheds at 512, not at 256 with its batch half full of nothing (knowledge 538).
+    #[test]
+    fn the_edge_ceiling_derives_from_the_decode_slots_and_never_falls_below_them() {
+        assert_eq!(edge_concurrency(0), EDGE_CONCURRENCY);
+        assert_eq!(edge_concurrency(64), EDGE_CONCURRENCY);
+        assert_eq!(edge_concurrency(256), 512);
+        for slots in [1, 100, 256, 1000, 5000] {
+            assert!(edge_concurrency(slots) >= 2 * slots, "{slots}");
+        }
+    }
 
     #[test]
     fn a_refusal_names_the_model_the_queue_depth_the_deadline_and_the_wait() {

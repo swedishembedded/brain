@@ -194,8 +194,14 @@ pub fn candidates<T>(rules: &[Rule<T>], hw: &Hardware) -> (&'static [T], &'stati
 
 /// The best-ranked candidate of the rule that holds on `hw` that `fits`
 /// accepts; `Err` lists why each was refused.
-pub fn choose<T: Copy + Display>(rules: &[Rule<T>], hw: &Hardware, mut fits: impl FnMut(T) -> Result<(), String>) -> Result<Chosen<T>, String> {
+pub fn choose<T: Copy + Display>(rules: &[Rule<T>], hw: &Hardware, fits: impl FnMut(T) -> Result<(), String>) -> Result<Chosen<T>, String> {
     let (ranked, why) = candidates(rules, hw);
+    choose_from(ranked, why, fits)
+}
+
+/// [`choose`] over a ranking the caller computed for the device (`ranked`, best first, for reason `why`) instead
+/// of a fixed rule's.
+pub fn choose_from<T: Copy + Display>(ranked: &[T], why: &str, mut fits: impl FnMut(T) -> Result<(), String>) -> Result<Chosen<T>, String> {
     let mut passed = Vec::new();
     for &value in ranked {
         match fits(value) {
@@ -210,9 +216,14 @@ pub fn choose<T: Copy + Display>(rules: &[Rule<T>], hw: &Hardware, mut fits: imp
 /// [`choose`], settling on the rule's last (leanest) candidate when none fits,
 /// with why each was refused - the caller's own checks then say what to change.
 pub fn choose_or_leanest<T: Copy + Display>(rules: &[Rule<T>], hw: &Hardware, fits: impl FnMut(T) -> Result<(), String>) -> Chosen<T> {
-    choose(rules, hw, fits).unwrap_or_else(|refused| {
-        let (ranked, why) = candidates(rules, hw);
-        let value = *ranked.last().expect("a rule ranks at least one candidate");
+    let (ranked, why) = candidates(rules, hw);
+    choose_or_leanest_from(ranked, why, fits)
+}
+
+/// [`choose_or_leanest`] over a ranking the caller computed ([`choose_from`]).
+pub fn choose_or_leanest_from<T: Copy + Display>(ranked: &[T], why: &str, fits: impl FnMut(T) -> Result<(), String>) -> Chosen<T> {
+    choose_from(ranked, why, fits).unwrap_or_else(|refused| {
+        let value = *ranked.last().expect("a ranking holds at least one candidate");
         Chosen { value, why: format!("{why}; none fits, so the leanest: {refused}") }
     })
 }
