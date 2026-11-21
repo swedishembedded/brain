@@ -3,7 +3,7 @@
 
 # distributed-execution - roadmap
 
-Scope: Running one training job as ranks across machines - the job plan every rank agrees on, the process group it joins, the transport's failure semantics, and the tests that start a cluster as real processes (`crates/model`: `job`, `collective`, `netcollective`, `distributed`, `grid`).
+Scope: Running one training job as ranks across machines, and serving one model fleet across machines - the job plan every rank agrees on, the process group it joins, the transport's failure semantics, device-resident collectives across nodes, the request router over several servers, the cluster launch sample, and the tests that start a cluster as real processes (`crates/model`: `job`, `collective`, `netcollective`, `distributed`, `grid`; `backend_cuda::nccl`, `gpu_core::devgroup`).
 
 ## Delivered
 
@@ -283,6 +283,53 @@ Scope: Running one training job as ranks across machines - the job plan every ra
       16.57 req/s and 265.2 tok/s combined, 2.0x one replica. Both servers
       list the adapter id. This is replica distribution, not model sharding:
       no request spans cards and no routing layer is implied.
+
+## Plan: multi-node clusters (2026-11-21)
+
+Target machine class: Slurm allocations of GH200 nodes, 4 cards per node on
+NVLink (NV6, about 127 GB/s card to card measured), 4 Slingshot-11 NICs per
+node (`/dev/cxi0-3`, about 25 GB/s each), hosts with libfabric (CXI provider,
+CUDA and GDRCopy enabled) but no NCCL network plugin. Every launched step gets
+its own fabric VNI, so fabric traffic must come from scheduler-launched ranks.
+brain stays scheduler-agnostic: a launcher maps the scheduler's rank and
+addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
+
+- [ ] **C0 fabric baseline.** NCCL all-reduce/all-gather/reduce-scatter bus
+      bandwidth within a node, across 2 nodes and across 16 cards, over the
+      libfabric network plugin and over NCCL's socket fallback, recorded under
+      Measured. This is the ceiling every later item is judged against.
+- [ ] **C1 NCCL across processes and nodes.** `backend_cuda::nccl` gains
+      `ncclGetUniqueId`/`ncclCommInitRank` (one rank per process, one card per
+      process) and `ncclCommSplit` for the tp/dp groups `Grid` addresses, plus
+      reduce-scatter and broadcast over fp32/bf16. The unique id travels over
+      the authenticated, sealed control channel, so the job secret still gates
+      membership. `model::collective` gets a device-resident provider on that
+      communicator, so gradients never stage through host fp32; a fall back to
+      the host star names its reason. NCCL payloads on the fabric are not
+      encrypted (decided 2026-11-21: the per-step VNI isolates them; the control
+      channel stays sealed).
+- [ ] **C2 data parallelism for every trainer.** The plan-file data-parallel
+      path moves from the GPT and Qwen3 LoRA bindings into the shared training
+      capability, so any architecture with gradients trains as ranks; gradients
+      are reduced in buckets overlapped with backward; exact resume carries the
+      world size. Gates: replicas bit-identical across 2 nodes; scaling
+      efficiency at 4, 8 and 16 cards on Qwen3-0.6B LoRA and 27B LoRA.
+- [ ] **C3 sharded training.** Optimizer state and gradient sharding over the dp
+      group (reduce-scatter + all-gather), then parameter sharding; tensor
+      parallelism inside a node over NVLink, sharded data parallelism across
+      nodes. Gate: a full-parameter 27B fine-tune step that does not fit one card.
+- [ ] **C4 serving across nodes.** A router capability in front of several
+      `brain serve` endpoints, reusing `residency::affinity` (longest cached
+      prefix, then least loaded), with health, drain and model listing merged,
+      so a client sees one OpenAI-compatible URL for every card of an
+      allocation. Tensor-parallel serving inside a node for a model that does
+      not fit one card; a cross-node layer split only for one that does not fit
+      a node.
+- [ ] **C5 cluster launch sample and gates.** `samples/` gains a Slurm launch
+      sample (job plan and secret written once, scheduler rank mapped onto
+      `--job-rank`, rank bound to its card's NUMA node, NCCL network plugin
+      selected) and a cluster end-to-end suite that runs under the scheduler
+      and skips by name without one.
 
 ## Open
 
