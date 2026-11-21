@@ -70,6 +70,9 @@ rollouts) and in its guide to training as a served job.
 - `baseline_only: true` (with `reward` and `group`) marks a rollout that sets its group's baseline and is never
   trained: no message `"train": true`, no `behavior_logprobs`, `token_ids`, `teacher_context` or `truncated`
   (`baseline_trains`).
+- `loss_weight` (message, optional, default 1.0): a finite number above 0 on a supervised message (`"train": true`),
+  the weight of its tokens in the loss; on any other message, out of range, or on a rollout record it is refused
+  (`loss_weight`).
 - `behavior_logprobs`, `token_ids`, `truncated`, `rollout` and `tokenizer_digest` belong to a rollout: a record
   carrying any of them carries a `reward` and `group` (or a `teacher_context`).
 - A preference candidate (`chosen`, `rejected`) and a feedback `completion` is one assistant turn or a continuation: a
@@ -80,7 +83,7 @@ rollouts) and in its guide to training as a served job.
 
 A refusal of one of these rules is reported typed: `rule` and `field` (a JSON path into the record, such as
 `messages[1].behavior_logprobs`), beside the message. The rules: `behavior_logprob_count`, `token_ids_mismatch`,
-`missing_reward`, `missing_group`, `advantage_removed`, `baseline_trains`, `rollout_mismatch`, `group_of_one`,
+`missing_reward`, `missing_group`, `advantage_removed`, `baseline_trains`, `loss_weight`, `rollout_mismatch`, `group_of_one`,
 `mixed_tokenizer_digest`, `tokenizer_mismatch`. A record that breaks a rule of its own is refused for that; the last
 four hold between records, over the whole file
 (`check_dataset`) or every set a run trains on together (the dataset and its replay sets). Other refusals carry the

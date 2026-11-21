@@ -90,6 +90,7 @@ mod shard_microbatch;
 mod shard_parity;
 mod sft_golden;
 mod sft_learning;
+mod sft_loss_weights;
 mod slice;
 mod split_encode;
 mod step_parity;

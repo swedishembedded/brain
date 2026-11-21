@@ -2302,6 +2302,11 @@ impl Asked<'_> {
         if record.rollout.as_ref().is_some_and(|r| r.baseline_only) {
             return Ok(vec![record.clone()]);
         }
+        // A record that supervises observations (tool results, user turns) trains their contents in place, in one
+        // rendering of the conversation; it never reaches the answer paths below.
+        if let Some(observed) = record.observations_in_place(self.tmpl, self.no_think.is_none()).map_err(|e| invalid(&e))? {
+            return Ok(vec![observed]);
+        }
         // Whole-record masking is exact for plain answers in thinking mode
         // and refuses tool turns; everywhere else each answer is asked for,
         // and a record supervising only its last message has one boundary.
@@ -2335,6 +2340,10 @@ impl Asked<'_> {
     /// tools or that supervises only its last message after tool turns
     /// (whole-record masking refuses those); any other record keeps its shape,
     /// its answers following the no-think block when there is one.
+    /// A record that supervises messages other than assistant answers (a
+    /// tool's observations) is one example that trains those messages'
+    /// contents where one rendering of the conversation places them
+    /// ([`ChatSample::observations_in_place`]).
     pub(crate) fn read(&self, path: &Path) -> Result<Vec<ChatSample>> {
         let summary = crate::chat_dataset::validate_chat_dataset_with(path, self.images).map_err(Error::Backend)?;
         if summary.trained_messages == 0 {
@@ -2821,6 +2830,30 @@ mod tests {
         assert_eq!(plain.len(), 1);
         assert!(plain[0].rendered.is_none(), "thinking-mode plain answers are encoded as the record");
         assert_eq!(read_lines(&[DIALOGUE], true).unwrap().len(), 2);
+    }
+
+    /// A record that supervises a tool's results, two of them in a row, is one
+    /// example in every mode, whatever packing asks for, and it trains exactly
+    /// the results' contents; one that also supervises an answer is refused
+    /// naming the record.
+    #[test]
+    fn supervised_tool_results_are_one_example_of_their_contents() {
+        const OBSERVED: &str = r#"{"messages":[{"role":"user","content":"w","train":false},{"role":"assistant","content":"","train":false,"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}},{"id":"c2","type":"function","function":{"name":"g","arguments":"{}"}}]},{"role":"tool","content":"first result","tool_call_id":"c1","train":true,"loss_weight":0.3},{"role":"tool","content":"second result","tool_call_id":"c2","train":true},{"role":"assistant","content":"done","train":false}]}"#;
+        let chars: String = (32u8..127).map(char::from).chain(['\n']).collect();
+        let tok = data::tokenizer::CharTokenizer::from_corpus(&chars);
+        let tmpl = ChatTemplate::compile(&std::fs::read_to_string(brain_testutil::testdata("qwen3/chat_template.jinja")).unwrap()).unwrap();
+        for (no_think, pack) in [(false, false), (true, false), (false, true), (true, true)] {
+            let samples = read_lines_packing(&[OBSERVED], no_think, pack).unwrap();
+            assert_eq!(samples.len(), 1, "no_think={no_think} pack={pack}");
+            let encoded = samples[0].encode_rollout(&tok, &tmpl, data::chat::RenderOpts::default()).unwrap();
+            let supervised: Vec<u32> = encoded.ids.iter().zip(&encoded.mask).filter(|(_, m)| **m).map(|(&id, _)| id).collect();
+            assert_eq!(data::tokenizer::Tokenizer::decode(&tok, &supervised), "first resultsecond result");
+            let weights = encoded.loss_weights.unwrap();
+            assert_eq!(weights.iter().filter(|&&w| w == 0.3).count(), "first result".len());
+        }
+        let mixed = OBSERVED.replace(r#""content":"done","train":false"#, r#""content":"done","train":true"#);
+        let err = read_lines(&[&mixed], false).unwrap_err().to_string();
+        assert!(err.contains("record 1") && err.contains("not both"), "{err}");
     }
 
     /// Packing turns a record of several supervised answers into one example

@@ -39,6 +39,14 @@ adapters, and the per-token controls that agent trajectories need.
   - Acceptance: tiny-model CPU gradcheck that a masked span contributes zero gradient and the
     unmasked span's gradient equals training on that span alone with the masked prefix as context;
     red on HEAD. `make test/gradcheck`.
+  - Partly done (2026-11-22): per-message weights. A chat record's `messages[].loss_weight`
+    reaches every supervised token of the message, through every encoding path, as
+    `<split>.weight.bin`. The shared causal-LM objective trains and evaluates the weighted loss
+    over the plain denominator. A record may also supervise tool results in place
+    (`ChatSample::observations_in_place`). Specs: `crates/qwen3/tests/it/sft_loss_weights.rs`
+    (weights of one train as no weights; a weight scales its share) and
+    `crates/data/tests/it/chat_supervised_observations.rs`. Still open: spans inside a message
+    and compacted-prefix trajectories.
 - [ ] RS-B4 (S) Verifier scoring call: given a prompt and a set of candidate answer tokens,
   return their log-probabilities at the answer position (for continuous verifier scores).
   - Acceptance: equals the log-softmax of the logits from a plain forward pass at tolerance on

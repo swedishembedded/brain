@@ -10,6 +10,8 @@
 //! - `y`: next-token targets (`i32`); masked positions are [`IGNORE`] (`-1`),
 //!   the cross-entropy ignore index.
 
+use std::path::{Path, PathBuf};
+
 use crate::rng::Rng;
 
 /// Target value for positions excluded from the loss.
@@ -95,6 +97,45 @@ impl std::fmt::Display for ExampleTooLong {
 }
 
 impl std::error::Error for ExampleTooLong {}
+
+/// The per-token loss-weight file of `split` in a prepared dataset directory: `<split>.weight.bin`, one `f32` per
+/// token of `<split>.u32.bin` ([`crate::binio::write_f32_bin`]). Absent, every position weighs 1.0 and the split
+/// trains the plain loss.
+pub fn split_weights_path(dir: &Path, split: &str) -> PathBuf {
+    dir.join(format!("{split}.weight.bin"))
+}
+
+/// Write (`Some`) or remove (`None`) the weight file of `split`, so a directory prepared again never keeps the
+/// weights of an earlier preparation.
+pub fn write_split_weights(dir: &Path, split: &str, weights: Option<&[f32]>) -> std::io::Result<()> {
+    let path = split_weights_path(dir, split);
+    match weights {
+        Some(weights) => crate::binio::write_f32_bin(&path, weights),
+        None => match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        },
+    }
+}
+
+/// The weights of `split` (see [`split_weights_path`]): `None` when the split has no weight file. A file that cannot
+/// be read, holds a weight that is not a finite number, or does not hold one weight per token of the split's
+/// `tokens` is refused, naming the file: training would otherwise weigh positions it was not given weights for.
+pub fn read_split_weights(dir: &Path, split: &str, tokens: usize) -> std::io::Result<Option<Vec<f32>>> {
+    let path = split_weights_path(dir, split);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let refuse = |why: String| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{}: {why}", path.display()));
+    let weights = crate::binio::read_f32_bin(&path).map_err(|e| refuse(format!("unreadable loss weights: {e}")))?;
+    if weights.len() != tokens {
+        return Err(refuse(format!("{} loss weights for the {tokens} tokens of the {split} split; the file holds one f32 per token", weights.len())));
+    }
+    if let Some(at) = weights.iter().position(|w| !w.is_finite()) {
+        return Err(refuse(format!("loss weight {at} is {}, not a finite number", weights[at])));
+    }
+    Ok(Some(weights))
+}
 
 impl TokenDataset {
     /// Wrap a token array; precomputes line starts when `align_to_lines` is set.
@@ -252,6 +293,33 @@ impl TokenDataset {
         Some((x, y))
     }
 
+    /// The per-position loss weights of the batch [`Self::example_batch`] lays out for `picks`, aligned with its
+    /// targets (`w[b*block + t]` is the weight of target `t + 1` of row `b`'s example, 1.0 past the example and on
+    /// padding rows). `None` when the dataset carries no weights or is a plain token stream.
+    pub fn example_weights(&self, cfg: &BatchConfig, picks: &[Option<usize>]) -> Option<Vec<f32>> {
+        let (ex, weights) = (self.examples.as_ref()?, self.weights.as_ref()?);
+        let bl = cfg.block_size;
+        let mut w = vec![1.0f32; picks.len() * bl];
+        for (b, pick) in picks.iter().enumerate() {
+            let Some(&(a, e)) = pick.and_then(|p| ex.bounds.get(p)) else { continue };
+            for t in 0..bl.min((e - a).saturating_sub(1)) {
+                w[b * bl + t] = weights[a + 1 + t];
+            }
+        }
+        Some(w)
+    }
+
+    /// The dataset without its per-token weights: every position weighs 1.0 again.
+    pub fn without_weights(mut self) -> Self {
+        self.weights = None;
+        self
+    }
+
+    /// Whether the dataset carries per-token weights ([`Self::with_weights`]).
+    pub fn has_weights(&self) -> bool {
+        self.weights.is_some()
+    }
+
     /// Wrap a token array with an explicit per-token reward/advantage weight
     /// (see [`TokenDataset::weights`]). `weights.len()` must equal
     /// `data.len()`. Composable with [`TokenDataset::new_with_mask`]'s
@@ -335,12 +403,39 @@ impl TokenDataset {
     /// [`TokenDataset::get_batch`], plus the example each row holds (`None` for every row of a plain token stream,
     /// whose rows are windows of no example).
     pub fn get_batch_examples(&self, cfg: &BatchConfig, rng: &mut Rng) -> (Vec<u32>, Vec<i32>, Vec<Option<usize>>) {
+        let (x, y, picks, _) = self.get_batch_examples_weighted(cfg, rng);
+        (x, y, picks)
+    }
+
+    /// [`TokenDataset::get_batch_examples`], plus each position's weight laid out as
+    /// [`TokenDataset::get_batch_weighted`] lays it out when the dataset carries weights (`None` when it does not).
+    /// Draws exactly what `get_batch_examples` draws from `rng`.
+    #[allow(clippy::type_complexity)]
+    pub fn get_batch_examples_weighted(&self, cfg: &BatchConfig, rng: &mut Rng) -> (Vec<u32>, Vec<i32>, Vec<Option<usize>>, Option<Vec<f32>>) {
         let (x, y, starts) = self.sample_windows(cfg, rng);
         let picks = match &self.examples {
             Some(ex) => starts.iter().map(|start| ex.bounds.binary_search_by_key(start, |&(a, _)| a).ok()).collect(),
             None => vec![None; cfg.batch_size],
         };
-        (x, y, picks)
+        let weights = self.weights.as_ref().map(|_| self.window_weights(cfg, &starts));
+        (x, y, picks, weights)
+    }
+
+    /// The weight of every position of the windows starting at `starts`, aligned with their targets; 1.0 everywhere
+    /// when the dataset carries no weights.
+    fn window_weights(&self, cfg: &BatchConfig, starts: &[usize]) -> Vec<f32> {
+        let bl = cfg.block_size;
+        let mut w = vec![1.0f32; starts.len() * bl];
+        if let Some(weights) = &self.weights {
+            for (b, &start) in starts.iter().enumerate() {
+                for t in 0..bl {
+                    if let Some(&weight) = weights.get(start + 1 + t) {
+                        w[b * bl + t] = weight;
+                    }
+                }
+            }
+        }
+        w
     }
 
     /// [`TokenDataset::get_batch`], plus the per-position reward/advantage
@@ -352,15 +447,7 @@ impl TokenDataset {
     /// method reproduces `get_batch`'s gradient exactly.
     pub fn get_batch_weighted(&self, cfg: &BatchConfig, rng: &mut Rng) -> (Vec<u32>, Vec<i32>, Vec<f32>) {
         let (x, y, starts) = self.sample_windows(cfg, rng);
-        let bl = cfg.block_size;
-        let mut w = vec![1.0f32; x.len()];
-        if let Some(weights) = &self.weights {
-            for (b, &start) in starts.iter().enumerate() {
-                for t in 0..bl {
-                    w[b * bl + t] = weights[start + 1 + t];
-                }
-            }
-        }
+        let w = self.window_weights(cfg, &starts);
         (x, y, w)
     }
 

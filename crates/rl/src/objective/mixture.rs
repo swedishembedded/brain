@@ -31,7 +31,7 @@ use model::training::Unsupported;
 
 /// i32 targets from the loader (`-1` = ignore) reinterpreted as the model's
 /// `u32` IGNORE sentinel. Mirrors the same one-line helper already
-/// duplicated in `model::train` and `rl::load_weighted` - not worth a
+/// duplicated in `model::train` and this crate's root - not worth a
 /// shared crate for one line copied a third time.
 fn targets_to_u32(y: &[i32]) -> Vec<u32> {
     y.iter().map(|&v| if v < 0 { IGNORE } else { v as u32 }).collect()

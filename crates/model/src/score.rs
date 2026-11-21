@@ -38,10 +38,12 @@ pub struct ScoredSet {
 /// The mean cross-entropy of `m` over every supervised position of the
 /// prepared dataset in `set` (its validation split). The scoring row is the
 /// training row: `opts.block_size` must hold the longest example. `None` when
-/// the split holds nothing to score.
+/// the split holds nothing to score. The score is the plain, unweighted
+/// cross-entropy even when the set carries per-token loss weights: it measures
+/// the model, not the run's training objective.
 pub fn score_dataset<M: Model>(m: &M, set: &Path, opts: &FitOpts) -> std::io::Result<Option<f32>> {
     let (train, records, cfg, _, itos) = load_dataset_with_itos(set, opts)?;
-    let mut obj = causal_lm::<M>(train, records, cfg, itos);
+    let mut obj = causal_lm::<M>(train.without_weights(), records.without_weights(), cfg, itos);
     Ok(obj.eval(m, &mut data::rng::Rng::new(data::rng::random_seed()), 0))
 }
 

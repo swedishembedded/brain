@@ -567,9 +567,17 @@ fn load(dir: &Path, opts: &FitOpts) -> std::io::Result<Loaded> {
             _ => TokenDataset::new(tok, &batch_cfg),
         })
     };
+    // Per-token loss weights (`<split>.weight.bin`, [`data::loader::split_weights_path`]): a split without the file
+    // weighs every position 1.0, and a dataset with neither trains the plain loss.
+    let weighed = |ds: TokenDataset, weights: Option<Vec<f32>>| match weights {
+        Some(w) => ds.with_weights(w),
+        None => ds,
+    };
+    let train_weights = data::loader::read_split_weights(dir, "train", train_tok.len())?;
+    let val_weights = data::loader::read_split_weights(dir, "val", val_tok.len())?;
     Ok(Loaded {
-        train: mk("train", train_tok, train_mask, train_starts)?,
-        val: mk("validation", val_tok, val_mask, val_starts)?,
+        train: weighed(mk("train", train_tok, train_mask, train_starts)?, train_weights),
+        val: weighed(mk("validation", val_tok, val_mask, val_starts)?, val_weights),
         vocab,
         batch_cfg,
         itos,
@@ -660,6 +668,16 @@ pub fn build_for<M: Model>(cfg: M::Config, opts: &FitOpts, init: &std::collectio
 /// backwards; eval samples the held-out val split the same way, forward-only.
 /// This is exactly the step body `fit` used to run inline, unchanged, now
 /// behind the [`Objective`] seam so it is not the fourth copy-paste of it.
+///
+/// A dataset that carries per-token loss weights (either split's
+/// `<split>.weight.bin`) trains and evaluates the weighted loss instead:
+/// every batch is a [`Batch::LmWeighted`] (or [`Batch::LmExamples`] followed
+/// by its weights), whose loss is `sum(w_t * CE_t)` over the supervised
+/// positions divided by their count - the denominator plain SFT uses, so a
+/// weight scales its position's share of the gradient and nothing else. The
+/// model must provide [`crate::training::TokenObjectives`]; one that does not
+/// is refused in [`Objective::prepare`]. A dataset without weights takes the
+/// unweighted path unchanged.
 #[cfg(not(target_arch = "wasm32"))]
 struct CausalLm {
     train: TokenDataset,
@@ -683,6 +701,8 @@ struct CausalLm {
     work: Option<StepWork>,
     /// Send each batch as [`Batch::LmExamples`], naming the example in every row, instead of [`Batch::Lm`].
     tag_examples: bool,
+    /// The dataset carries per-token loss weights: every batch is uploaded with its weights.
+    weighted: bool,
 }
 
 /// One drawn training batch: its rows, their targets, and how many of the rows'
@@ -695,6 +715,8 @@ struct Drawn {
     useful_tokens: u64,
     /// The example laid out in each row; `None` for a row of padding or of a stream that has no examples.
     picks: Vec<Option<usize>>,
+    /// The loss weight of each position, aligned with `y`, when the run trains a weighted loss.
+    weights: Option<Vec<f32>>,
 }
 
 /// The token half of a micro-step's [`StepWork`]: what the drawn batch holds.
@@ -790,6 +812,15 @@ impl<M: Model> Objective<M> for CausalLm {
         "causal_lm"
     }
 
+    /// A weighted dataset needs the model's per-token weighted loss; a model without it is refused here, before a
+    /// step, rather than trained on the plain loss.
+    fn prepare(&mut self, model: &mut M) -> Result<(), crate::training::Unsupported> {
+        if self.weighted {
+            crate::training::require_token_objectives(model)?.enable_weighted_loss();
+        }
+        Ok(())
+    }
+
     fn begin(&mut self, seed: u64, draws_done: u64) {
         // A sharded stream consumes every rank's records, so the loop's count of this rank's draws is not its
         // position. A resume restores the exact count from the cursor; without one (a state saved before the cursor
@@ -846,7 +877,7 @@ impl<M: Model> Objective<M> for CausalLm {
         let clock = std::time::Instant::now();
         let drawn = self.draw(rng);
         let targets = targets_to_u32(&drawn.y);
-        self.upload(model, Split::Train, &drawn.x, &targets, &drawn.picks);
+        self.upload(model, Split::Train, &drawn.x, &targets, &drawn.picks, drawn.weights.as_deref());
         let mut work = work_of(&drawn, &targets);
         work.prepare_secs = clock.elapsed().as_secs_f64();
         let pass = std::time::Instant::now();
@@ -877,7 +908,14 @@ impl<M: Model> Objective<M> for CausalLm {
         let mean_supervised = work.supervised_positions as f32 / k.max(1) as f32;
         let denominator = (mean_supervised > 0.0 && model.token_objectives().is_some()).then_some(mean_supervised);
         if k > 1 && !self.tag_examples {
-            let batches: Vec<Batch> = drawn.iter().zip(&targets).map(|(d, y)| Batch::Lm { tokens: &d.x, targets: y }).collect();
+            let batches: Vec<Batch> = drawn
+                .iter()
+                .zip(&targets)
+                .map(|(d, y)| match &d.weights {
+                    Some(weights) => Batch::LmWeighted { tokens: &d.x, targets: y, weights },
+                    None => Batch::Lm { tokens: &d.x, targets: y },
+                })
+                .collect();
             let drew = clock.elapsed().as_secs_f64();
             let pass = std::time::Instant::now();
             if let Some(total) = model.accumulate_overlapped(&batches, denominator) {
@@ -894,7 +932,7 @@ impl<M: Model> Objective<M> for CausalLm {
         let mut total = 0.0;
         for (drawn, targets) in drawn.iter().zip(&targets) {
             let pass = std::time::Instant::now();
-            self.upload(model, Split::Train, &drawn.x, targets, &drawn.picks);
+            self.upload(model, Split::Train, &drawn.x, targets, &drawn.picks, drawn.weights.as_deref());
             if let (Some(tokens), Some(objectives)) = (denominator, model.token_objectives()) {
                 objectives.set_loss_denominator(tokens);
             }
@@ -916,9 +954,10 @@ impl<M: Model> Objective<M> for CausalLm {
     }
 
     fn loss_probe(&mut self, model: &M, rng: &mut Rng) -> f32 {
-        let (x, y, picks) = self.train.get_batch_examples(&self.batch_cfg, rng);
+        let (x, y, picks, weights) = self.train.get_batch_examples_weighted(&self.batch_cfg, rng);
         let targets = targets_to_u32(&y);
-        self.upload(model, Split::Train, &x, &targets, &picks);
+        let weights = self.run_weights(weights, x.len());
+        self.upload(model, Split::Train, &x, &targets, &picks, weights.as_deref());
         model.forward()
     }
 
@@ -934,9 +973,10 @@ impl<M: Model> Objective<M> for CausalLm {
         }
         let mut total = 0.0;
         for _ in 0..batches.max(1) {
-            let (x, y, picks) = self.val.get_batch_examples(&self.batch_cfg, rng);
+            let (x, y, picks, weights) = self.val.get_batch_examples_weighted(&self.batch_cfg, rng);
             let targets = targets_to_u32(&y);
-            self.upload(model, Split::Val, &x, &targets, &picks);
+            let weights = self.run_weights(weights, x.len());
+            self.upload(model, Split::Val, &x, &targets, &picks, weights.as_deref());
             total += model.forward();
         }
         Some(total / batches.max(1) as f32)
@@ -950,7 +990,14 @@ impl<M: Model> Objective<M> for CausalLm {
 #[cfg(not(target_arch = "wasm32"))]
 impl CausalLm {
     fn new(train: TokenDataset, val: TokenDataset, batch_cfg: BatchConfig, itos: Option<Vec<char>>) -> CausalLm {
-        CausalLm { train, val, batch_cfg, itos, order: None, shard: None, drawn_records: 0, work: None, tag_examples: false }
+        let weighted = train.has_weights() || val.has_weights();
+        CausalLm { train, val, batch_cfg, itos, order: None, shard: None, drawn_records: 0, work: None, tag_examples: false, weighted }
+    }
+
+    /// The weights a batch is uploaded with: `None` for an unweighted run, else the batch's own (1.0 everywhere for
+    /// a split that carries none, while the other split does).
+    fn run_weights(&self, weights: Option<Vec<f32>>, positions: usize) -> Option<Vec<f32>> {
+        self.weighted.then(|| weights.unwrap_or_else(|| vec![1.0; positions]))
     }
 
     /// This rank's next training batch: `batch_size` records of the stream that
@@ -992,12 +1039,18 @@ impl CausalLm {
         kept.expect("one record of every round of `world` belongs to each rank")
     }
 
-    /// Load a drawn batch into `model`: as [`Batch::LmExamples`] when the run names the examples, else [`Batch::Lm`].
-    fn upload<M: Model>(&self, model: &M, split: Split, tokens: &[u32], targets: &[u32], picks: &[Option<usize>]) {
-        if self.tag_examples {
-            model.set_batch(Batch::LmExamples { split, tokens, targets, examples: picks });
-        } else {
-            model.set_batch(Batch::Lm { tokens, targets });
+    /// Load a drawn batch into `model`: as [`Batch::LmExamples`] when the run names the examples, else [`Batch::Lm`],
+    /// or [`Batch::LmWeighted`] when it carries `weights` (a named batch takes them after it is set).
+    fn upload<M: Model>(&self, model: &M, split: Split, tokens: &[u32], targets: &[u32], picks: &[Option<usize>], weights: Option<&[f32]>) {
+        match (self.tag_examples, weights) {
+            (true, weights) => {
+                model.set_batch(Batch::LmExamples { split, tokens, targets, examples: picks });
+                if let Some(weights) = weights {
+                    crate::training::objectives(model).set_loss_weights(weights);
+                }
+            }
+            (false, Some(weights)) => model.set_batch(Batch::LmWeighted { tokens, targets, weights }),
+            (false, None) => model.set_batch(Batch::Lm { tokens, targets }),
         }
     }
 
@@ -1011,10 +1064,11 @@ impl CausalLm {
                 return drawn;
             }
         }
-        let (x, y, picks) = self.train.get_batch_examples(&self.batch_cfg, rng);
+        let (x, y, picks, weights) = self.train.get_batch_examples_weighted(&self.batch_cfg, rng);
+        let weights = self.run_weights(weights, x.len());
         // A window drawn from a token stream is all real tokens: the stream has
         // no record boundary to pad at.
-        Drawn { useful_tokens: x.len() as u64, x, y, picks }
+        Drawn { useful_tokens: x.len() as u64, x, y, picks, weights }
     }
 
     /// The example batch `picks` names, with the number of its rows' own tokens.
@@ -1022,7 +1076,8 @@ impl CausalLm {
     fn draw_examples(&self, picks: &[Option<usize>]) -> Option<Drawn> {
         let (x, y) = self.train.example_batch(&self.batch_cfg, picks)?;
         let useful_tokens = self.train.example_lengths(picks)?.iter().sum::<usize>() as u64;
-        Some(Drawn { x, y, useful_tokens, picks: picks.to_vec() })
+        let weights = self.run_weights(self.train.example_weights(&self.batch_cfg, picks), x.len());
+        Some(Drawn { x, y, useful_tokens, picks: picks.to_vec(), weights })
     }
 
     /// The mean per-position loss over every supervised position of the
@@ -1040,7 +1095,8 @@ impl CausalLm {
             if supervised > 0 {
                 let targets = targets_to_u32(&y);
                 let picks: Vec<Option<usize>> = (first..first + rows).map(Some).collect();
-                self.upload(model, Split::Val, &x, &targets, &picks);
+                let weights = self.run_weights(self.val.example_weights(&self.batch_cfg, &picks), x.len());
+                self.upload(model, Split::Val, &x, &targets, &picks, weights.as_deref());
                 sum += f64::from(model.forward()) * supervised as f64;
                 positions += supervised;
             }
@@ -3877,6 +3933,22 @@ mod tests {
         }
         let dataset = || TokenDataset::new_examples(data.clone(), vec![true; data.len()], &starts, 0, &cfg).unwrap();
         CausalLm::new(dataset(), dataset(), cfg.clone(), None)
+    }
+
+    /// A dataset with per-token loss weights needs the model's weighted loss:
+    /// a model without token objectives is refused before a step with the
+    /// typed capability, never trained on the plain loss; without weights the
+    /// same model trains as it always did.
+    #[test]
+    fn a_weighted_dataset_refuses_a_model_without_token_objectives_at_configuration() {
+        let mut model = Recorder::new(RecorderCfg, 1, 1, &HashMap::new());
+        let mut plain = examples_objective(&[4, 4], 4);
+        assert!(Objective::<Recorder>::prepare(&mut plain, &mut model).is_ok());
+
+        let weighted = examples_objective(&[4, 4], 4);
+        let mut weighted = CausalLm::new(weighted.train.with_weights(vec![0.3; 8]), weighted.val, weighted.batch_cfg, None);
+        let refused = Objective::<Recorder>::prepare(&mut weighted, &mut model).expect_err("a weighted run on a model without the weighted loss");
+        assert_eq!(refused.capability, crate::training::Capability::TokenObjectives, "{refused}");
     }
 
     /// A pass over the data takes every example once before any is taken

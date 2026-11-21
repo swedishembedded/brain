@@ -697,6 +697,13 @@ impl ChatTemplate {
         }
     }
 
+    /// Render the whole conversation `messages` as a training record, without a generation prompt, under the
+    /// reasoning switches inference uses (`thinking` false turns them off, as [`Self::render_no_think`] does).
+    pub fn render_conversation(&self, messages: Value, tools: Option<Value>, thinking: bool) -> Result<String, TemplateError> {
+        let switches = if thinking { BTreeMap::new() } else { no_think_switches() };
+        self.render(messages, tools, false, &switches)
+    }
+
     /// Render a conversation whose LAST message is the one supervised, and
     /// find the single byte boundary between what a model is asked from and
     /// what it is trained to generate.

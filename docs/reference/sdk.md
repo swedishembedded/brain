@@ -291,6 +291,22 @@ serving reads them, with a frozen tower, and a record the base cannot read is re
 text ([Qwen3.8-27B: fine-tuning on conversations with images](models/qwen35.md#fine-tuning-on-conversations-with-images)).
 `validate_chat_dataset_for` checks such a file against the base, and `ChatDatasetSummary` counts its images.
 
+`train` may mark any message, not only an assistant answer. A record whose supervised messages are tool results (or
+user turns) trains a model to predict them: the conversation through the last supervised message is rendered once
+through the base's template, and exactly each supervised message's content, where the template places it, is the
+target; its framing (the role header, a `<tool_response>` wrapper), everything before it and the earlier assistant
+turns (rendered as middle turns) are context, and nothing after the last supervised content is kept. Such a record may
+not also supervise an assistant answer (split it in two) and may not be a rollout; a template that does not place a
+supervised content unchanged and exactly once is refused, naming the message. A message may also carry
+`"loss_weight"` (only with `"train": true`, a finite number above 0, default 1.0): its supervised tokens weigh that
+much in the loss, which is `sum(w * CE)` over the supervised tokens divided by their count, the plain loss's
+denominator, so `0.3` gives the message 0.3 of the gradient it would otherwise get, beside answers at 1.0 in the same
+dataset. The monitoring loss that early stopping reads is weighted the same way; the held-out scores stay the plain
+cross-entropy. A dataset without weights (or with weights of 1.0 only) trains exactly as before, and one with weights
+on an architecture without token objectives is refused before the first step with `Error::Unsupported`'s
+capability. A weight on an unsupervised message, out of range, or on a rollout record is refused by rule
+`loss_weight`, naming the field.
+
 The three fine-tuners (`ChatFineTune`, `ChatFullFineTune`,
 `PreferenceFineTune`) take `.arch("qwen3")` or `.arch("qwen35")`, the
 architecture's `brain_arch` id. `ChatFineTune` on `qwen35`, the Qwen3.8-27B

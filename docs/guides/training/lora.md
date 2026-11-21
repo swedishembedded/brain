@@ -32,7 +32,10 @@ brain qwen3 lora_train --rank RANK --adapter-name OWNER/NAME[:TAG] --dataset tra
   assistant, and optionally tool calls/results), rendered through the base
   model's own chat template. Only the messages marked as trainable in a given
   example contribute to the loss, so a dataset can mix turns you want the
-  model to learn from with context turns it shouldn't be scored against.
+  model to learn from with context turns it shouldn't be scored against. A
+  trainable tool result trains the model to predict that result's content,
+  and a message's optional `"loss_weight"` scales its share of the loss (see
+  the chat dataset format in [the SDK reference](../../reference/sdk.md#fine-tuning-a-chat-model)).
 - `--activations keep|recompute` - what the backward keeps of the forward. A
   Qwen3 decoder always recomputes each layer, so `recompute` is accepted and
   `keep` is refused by name before the first step. `brain qwen3 train` and

@@ -62,7 +62,7 @@ fn encoded(row: &Row) -> data::chat::EncodedSample {
         assert_eq!(b.len(), row.ids.len() - row.answer_from);
         behavior[row.answer_from..].copy_from_slice(b);
     }
-    data::chat::EncodedSample { ids: row.ids.clone(), mask, behavior, teacher: None, truncated: row.truncated }
+    data::chat::EncodedSample { ids: row.ids.clone(), mask, behavior, loss_weights: None, teacher: None, truncated: row.truncated }
 }
 
 /// The dataset of `rows` as the record contract lays it out. A row with an advantage and no group of its own is a
@@ -511,7 +511,7 @@ fn the_advantages_are_each_groups_rewards_under_the_runs_normalisation() {
         let ids: Vec<u32> = (0..6).map(|i| 1 + ((k + i) % 20) as u32).collect();
         let mask = (0..6).map(|i| i >= 3).collect();
         let outcome = Outcome { reward, group: group.to_string(), member: Member::Named(rollout.to_string()) };
-        split.push_rollout(&data::chat::EncodedSample { ids, mask, behavior: vec![f32::NAN; 6], teacher: None, truncated }, &[], Some(Some(outcome)));
+        split.push_rollout(&data::chat::EncodedSample { ids, mask, behavior: vec![f32::NAN; 6], loss_weights: None, teacher: None, truncated }, &[], Some(Some(outcome)));
     }
     data::chat::write_split(dir.path(), "train", &split).unwrap();
     data::chat::write_split(dir.path(), "val", &split).unwrap();
@@ -569,7 +569,7 @@ fn a_baseline_only_outcome_sets_its_groups_baseline_and_is_never_trained() {
     for (k, (group, reward)) in [("a", 1.0), ("b", 0.5)].into_iter().enumerate() {
         let ids: Vec<u32> = (0..6).map(|i| 1 + ((k + i) % 20) as u32).collect();
         let outcome = Outcome { reward, group: group.to_string(), member: Member::Named(format!("{group}-trained")) };
-        split.push_rollout(&data::chat::EncodedSample { ids, mask: (0..6).map(|i| i >= 3).collect(), behavior: vec![f32::NAN; 6], teacher: None, truncated: false }, &[], Some(Some(outcome)));
+        split.push_rollout(&data::chat::EncodedSample { ids, mask: (0..6).map(|i| i >= 3).collect(), behavior: vec![f32::NAN; 6], loss_weights: None, teacher: None, truncated: false }, &[], Some(Some(outcome)));
     }
     for (group, rollout, reward) in [("a", "a-base", 0.0), ("b", "b-base0", 0.2), ("b", "b-base1", 0.8)] {
         split.baselines.push(Outcome { reward, group: group.to_string(), member: Member::Named(rollout.to_string()) });

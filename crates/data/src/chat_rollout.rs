@@ -102,6 +102,9 @@ pub enum RecordRule {
     BaselineTrains,
     /// The record's `tokenizer_digest` is not the digest of the tokenizer of the base the run trains.
     TokenizerMismatch,
+    /// A message's `loss_weight` is not a finite number above 0, sits on a message that is not supervised
+    /// (`"train": false`), or on a rollout record, whose tokens a policy gradient weighs by their advantage.
+    LossWeight,
 }
 
 impl RecordRule {
@@ -119,6 +122,7 @@ impl RecordRule {
             RecordRule::MixedTokenizerDigest => "mixed_tokenizer_digest",
             RecordRule::BaselineTrains => "baseline_trains",
             RecordRule::TokenizerMismatch => "tokenizer_mismatch",
+            RecordRule::LossWeight => "loss_weight",
         }
     }
 }

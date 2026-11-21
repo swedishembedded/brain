@@ -113,25 +113,29 @@ pub struct ChatMessage {
     /// result turns, and any assistant turn a producer excluded from
     /// training).
     pub train: bool,
+    /// The weight of this message's supervised tokens in the loss (`1.0`, the
+    /// default, is plain cross-entropy). Meaningful only when `train` is set;
+    /// the wire format refuses it anywhere else.
+    pub loss_weight: f32,
 }
 
 impl ChatMessage {
     pub fn system(content: impl Into<String>) -> ChatMessage {
-        ChatMessage { role: "system".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, reasoning_content: None, train: false }
+        ChatMessage { role: "system".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, reasoning_content: None, train: false, loss_weight: 1.0 }
     }
     pub fn user(content: impl Into<String>) -> ChatMessage {
-        ChatMessage { role: "user".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, reasoning_content: None, train: false }
+        ChatMessage { role: "user".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, reasoning_content: None, train: false, loss_weight: 1.0 }
     }
     pub fn assistant(content: impl Into<String>, train: bool) -> ChatMessage {
-        ChatMessage { role: "assistant".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, reasoning_content: None, train }
+        ChatMessage { role: "assistant".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, reasoning_content: None, train, loss_weight: 1.0 }
     }
     pub fn assistant_tool_calls(content: impl Into<String>, tool_calls: Vec<ToolCall>, train: bool) -> ChatMessage {
-        ChatMessage { role: "assistant".into(), content: content.into(), tool_calls, tool_call_id: None, reasoning_content: None, train }
+        ChatMessage { role: "assistant".into(), content: content.into(), tool_calls, tool_call_id: None, reasoning_content: None, train, loss_weight: 1.0 }
     }
     /// A tool result. Never trainable; the template merges consecutive
     /// `"tool"`-role messages into one wrapping turn on its own.
     pub fn tool_result(content: impl Into<String>) -> ChatMessage {
-        ChatMessage { role: "tool".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, reasoning_content: None, train: false }
+        ChatMessage { role: "tool".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, reasoning_content: None, train: false, loss_weight: 1.0 }
     }
 
     /// This message as the JSON-shaped value a chat template reads
@@ -233,11 +237,13 @@ pub struct RenderedSegment {
     /// The index of the record's message this supervised segment renders (0 for context), so a refusal names the
     /// field (`messages[i].behavior_logprobs`).
     pub message: usize,
+    /// The loss weight of this segment's supervised tokens: its message's `loss_weight` (1.0 for context).
+    pub loss_weight: f32,
 }
 
 impl RenderedSegment {
     fn context(text: &str) -> RenderedSegment {
-        RenderedSegment { text: text.to_string(), supervised: false, behavior_logprobs: None, token_ids: None, message: 0 }
+        RenderedSegment { text: text.to_string(), supervised: false, behavior_logprobs: None, token_ids: None, message: 0, loss_weight: 1.0 }
     }
 }
 
@@ -280,17 +286,19 @@ fn check_sampled(tok: &dyn Tokenizer, tmpl: &ChatTemplate, before: &[u32], text:
 }
 
 /// What a collector recorded about one answer's sampled tokens: their log-probabilities and ids.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct Sampled {
     behavior_logprobs: Option<Vec<f32>>,
     token_ids: Option<SampledIds>,
     /// The index of the message the answer is.
     message: usize,
+    /// The answer's loss weight.
+    loss_weight: f32,
 }
 
 impl Rendered {
     fn answer(prompt: &str, completion: &str, sampled: Sampled) -> Self {
-        Self { segments: vec![RenderedSegment::context(prompt), RenderedSegment { text: completion.to_string(), supervised: true, behavior_logprobs: sampled.behavior_logprobs, token_ids: sampled.token_ids, message: sampled.message }] }
+        Self { segments: vec![RenderedSegment::context(prompt), RenderedSegment { text: completion.to_string(), supervised: true, behavior_logprobs: sampled.behavior_logprobs, token_ids: sampled.token_ids, message: sampled.message, loss_weight: sampled.loss_weight }] }
     }
 
     /// [`Self::answer`] for a rollout: the whitespace the template writes after the end-of-turn marker (Qwen's
@@ -367,8 +375,8 @@ impl ChatSample {
     /// and an answer that is last with it, so one rendering of the whole
     /// conversation cannot show every answer the way it is asked for; and its
     /// message boundaries are refused as not prefix-stable. `None` when a
-    /// supervised message is not an assistant turn (a supervised prompt
-    /// turn): such a sample is encoded as a whole.
+    /// supervised message is not an assistant turn: such a record trains
+    /// through [`ChatSample::observations_in_place`].
     ///
     /// # Errors
     /// The template renders an answer that does not follow its prompt.
@@ -397,7 +405,7 @@ impl ChatSample {
         let tools = (!self.tools.is_empty()).then(|| minijinja::Value::from(self.tools.clone()));
         let (full, answer) = tmpl.render_with_supervised_suffix(&values, tools, thinking)?;
         let (prompt, completion) = full.split_at(answer.start);
-        let sampled = Sampled { behavior_logprobs: self.rollout.as_ref().and_then(|r| r.behavior_logprobs.last().cloned().flatten()), token_ids: self.rollout.as_ref().and_then(|r| r.token_ids.last().cloned().flatten()), message: self.messages.len().saturating_sub(1) };
+        let sampled = Sampled { behavior_logprobs: self.rollout.as_ref().and_then(|r| r.behavior_logprobs.last().cloned().flatten()), token_ids: self.rollout.as_ref().and_then(|r| r.token_ids.last().cloned().flatten()), message: self.messages.len().saturating_sub(1), loss_weight: self.messages.last().map_or(1.0, |m| m.loss_weight) };
         let teacher = match self.rollout.as_ref().and_then(|r| r.teacher.as_ref()) {
             Some(t) => Some(Teacher { sample: Box::new(t.sample.rendered_final_turn(tmpl, thinking, is_rollout)?), inserted: t.inserted }),
             None => None,
@@ -465,12 +473,12 @@ impl ChatSample {
                 // The text after the marker is context (see `Rendered::rollout_answer`).
                 let tail = &end[end.trim_end().len()..];
                 let sampled = completion.strip_suffix(tail).unwrap_or(completion);
-                segments.push(RenderedSegment { text: sampled.to_string(), supervised: true, behavior_logprobs: behavior, token_ids, message: at });
+                segments.push(RenderedSegment { text: sampled.to_string(), supervised: true, behavior_logprobs: behavior, token_ids, message: at, loss_weight: self.messages[at].loss_weight });
                 if !tail.is_empty() {
                     segments.push(RenderedSegment::context(tail));
                 }
             } else {
-                segments.push(RenderedSegment { text: completion.to_string(), supervised: true, behavior_logprobs: behavior, token_ids, message: at });
+                segments.push(RenderedSegment { text: completion.to_string(), supervised: true, behavior_logprobs: behavior, token_ids, message: at, loss_weight: self.messages[at].loss_weight });
             }
             previous_prompt = prompt.to_string();
         }
@@ -483,6 +491,88 @@ impl ChatSample {
         };
         let rollout = self.rollout.as_ref().map(|r| r.derived(Vec::new(), Vec::new(), teacher));
         Ok(Some(ChatSample { messages: Vec::new(), tools: self.tools.clone(), rendered: Some(Rendered { segments }), media: self.media.clone(), rollout }))
+    }
+
+    /// This sample as ONE example that supervises messages other than
+    /// assistant answers (a tool's observations, a user turn): the
+    /// conversation through the last supervised message is rendered once
+    /// (without a generation prompt, under the no-think switches when
+    /// `thinking` is `false`), and exactly each supervised message's content,
+    /// where the template places it, is trained. The template's framing of the
+    /// message (its role header, a `<tool_response>` wrapper) is context, so
+    /// is everything before, and nothing after the last supervised content is
+    /// kept. Earlier assistant turns are context in the form the template
+    /// gives a middle turn.
+    ///
+    /// A template's framing of a message can depend on its neighbours
+    /// (Qwen3's joins consecutive tool results into one turn), so no message
+    /// boundary is probed. Each content is found by rendering the conversation
+    /// with a unique sentinel in its place; the real contents substituted back
+    /// must reproduce the real rendering byte for byte.
+    ///
+    /// `None` when no supervised message is a non-assistant one.
+    ///
+    /// # Errors
+    /// The record also supervises an assistant answer (a record supervises
+    /// one or the other), carries rollout data (a policy gradient trains only
+    /// the actions a policy sampled), a supervised message is empty, or the
+    /// template does not place a supervised content verbatim and exactly once:
+    /// no boundary is guessed.
+    pub fn observations_in_place(&self, tmpl: &ChatTemplate, thinking: bool) -> Result<Option<ChatSample>, TemplateError> {
+        let supervised: Vec<usize> = (0..self.messages.len()).filter(|&at| self.messages[at].train).collect();
+        let Some(&observation) = supervised.iter().find(|&&at| self.messages[at].role != "assistant") else { return Ok(None) };
+        let role = &self.messages[observation].role;
+        if let Some(&answer) = supervised.iter().find(|&&at| self.messages[at].role == "assistant") {
+            return Err(TemplateError::new(format!(
+                "messages[{observation}] is a supervised \"{role}\" message and messages[{answer}] a supervised \"assistant\" answer: a record supervises its assistant answers or other messages, not both; split it into two records"
+            )));
+        }
+        if self.rollout.is_some() {
+            return Err(TemplateError::new(format!(
+                "messages[{observation}]: the record supervises a \"{role}\" message and carries rollout data (a reward, a teacher context, behaviour log-probabilities or sampled ids); a policy gradient trains only the actions a policy sampled, never another message"
+            )));
+        }
+        self.validate().map_err(TemplateError::new)?;
+        if let Some(&empty) = supervised.iter().find(|&&at| self.messages[at].content.is_empty()) {
+            return Err(TemplateError::new(format!("messages[{empty}]: a supervised message has no content to train")));
+        }
+        let last = *supervised.last().expect("a supervised message was found");
+        let messages = &self.messages[..=last];
+        let tools = (!self.tools.is_empty()).then(|| minijinja::Value::from(self.tools.clone()));
+        let render = |messages: &[ChatMessage]| {
+            let values: Vec<minijinja::Value> = messages.iter().map(|m| m.to_template_value(tmpl.reads_argument_objects())).collect();
+            tmpl.render_conversation(minijinja::Value::from(values), tools.clone(), thinking)
+        };
+        let real = render(messages)?;
+        // Sentinels that occur nowhere the record's text or the template's own text could put them.
+        let sentinels: Vec<String> = (0u64..)
+            .map(|salt| supervised.iter().map(|at| format!("\u{F8FF}brain-supervised-{at}-{salt}\u{F8FF}")).collect::<Vec<_>>())
+            .find(|candidates| !candidates.iter().any(|c| real.contains(c.as_str()) || messages.iter().any(|m| m.content.contains(c.as_str()))))
+            .expect("some salt is absent from a finite text");
+        let mut probed = messages.to_vec();
+        for (&at, sentinel) in supervised.iter().zip(&sentinels) {
+            probed[at].content = sentinel.clone();
+        }
+        let probe = render(&probed)?;
+        let not_verbatim = |at: usize| TemplateError::new(format!("messages[{at}]: the template does not place the message's content verbatim (unchanged and exactly once) in the conversation it renders, so its supervised span cannot be located; no boundary is guessed"));
+        let (mut segments, mut rebuilt, mut from) = (Vec::with_capacity(2 * supervised.len()), String::with_capacity(real.len()), 0);
+        for (&at, sentinel) in supervised.iter().zip(&sentinels) {
+            if probe.matches(sentinel.as_str()).count() != 1 {
+                return Err(not_verbatim(at));
+            }
+            let start = from + probe[from..].find(sentinel.as_str()).ok_or_else(|| not_verbatim(at))?;
+            let (context, content) = (&probe[from..start], &messages[at].content);
+            rebuilt.push_str(context);
+            rebuilt.push_str(content);
+            segments.push(RenderedSegment::context(context));
+            segments.push(RenderedSegment { text: content.clone(), supervised: true, behavior_logprobs: None, token_ids: None, message: at, loss_weight: messages[at].loss_weight });
+            from = start + sentinel.len();
+        }
+        rebuilt.push_str(&probe[from..]);
+        if rebuilt != real {
+            return Err(not_verbatim(supervised.iter().copied().find(|&at| !real.contains(messages[at].content.as_str())).unwrap_or(observation)));
+        }
+        Ok(Some(ChatSample { messages: Vec::new(), tools: self.tools.clone(), rendered: Some(Rendered { segments }), media: self.media.clone(), rollout: None }))
     }
 
     /// Whether the last message is the only supervised one and it is an
@@ -594,10 +684,10 @@ impl ChatSample {
     /// [`ChatSample::encode_rollout`] of this sample's own conversation, without its teacher.
     fn encode_own(&self, tok: &dyn Tokenizer, tmpl: &ChatTemplate, opts: RenderOpts) -> Result<EncodedSample, TemplateError> {
         if let Some(Rendered { segments }) = &self.rendered {
-            let (mut ids, mut mask, mut behavior) = (Vec::new(), Vec::new(), Vec::new());
+            let (mut ids, mut mask, mut behavior, mut weights) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
             let mut answer = 0;
             let mut context = "";
-            for RenderedSegment { text, supervised, behavior_logprobs, token_ids, message } in segments {
+            for RenderedSegment { text, supervised, behavior_logprobs, token_ids, message, loss_weight } in segments {
                 let encoded = match token_ids {
                     Some(sampled) => {
                         let thinking_open = context.ends_with("<think>\n");
@@ -624,9 +714,11 @@ impl ChatSample {
                 }
                 answer += usize::from(*supervised);
                 mask.extend(std::iter::repeat_n(*supervised, encoded.len()));
+                weights.extend(std::iter::repeat_n(if *supervised { *loss_weight } else { 1.0 }, encoded.len()));
                 ids.extend(encoded);
             }
-            return Ok(EncodedSample { ids, mask, behavior, teacher: None, truncated: self.rollout.as_ref().is_some_and(|r| r.truncated) });
+            let loss_weights = weights.iter().any(|&w| w != 1.0).then_some(weights);
+            return Ok(EncodedSample { ids, mask, behavior, loss_weights, teacher: None, truncated: self.rollout.as_ref().is_some_and(|r| r.truncated) });
         }
         if self.rollout.as_ref().is_some_and(Rollout::has_behavior) {
             return Err(TemplateError::new("\"behavior_logprobs\" are placed on an answer rendered as the model is asked for it; this sample still holds whole messages (render it with answers_as_asked or answers_packed)".to_string()));
@@ -646,14 +738,17 @@ impl ChatSample {
 
         let mut ids = Vec::new();
         let mut mask = Vec::new();
+        let mut weights = Vec::new();
         for (m, range) in self.messages.iter().zip(ranges) {
             let text = &full[range];
             let tid = if opts.keep_reasoning { tok.encode(&text.replace(THINK_END_SENTINEL, THINK_END)) } else { tok.encode(text) };
             mask.extend(std::iter::repeat_n(m.train, tid.len()));
+            weights.extend(std::iter::repeat_n(if m.train { m.loss_weight } else { 1.0 }, tid.len()));
             ids.extend(tid);
         }
         let behavior = vec![f32::NAN; ids.len()];
-        Ok(EncodedSample { ids, mask, behavior, teacher: None, truncated: self.rollout.as_ref().is_some_and(|r| r.truncated) })
+        let loss_weights = weights.iter().any(|&w| w != 1.0).then_some(weights);
+        Ok(EncodedSample { ids, mask, behavior, loss_weights, teacher: None, truncated: self.rollout.as_ref().is_some_and(|r| r.truncated) })
     }
 
     /// Whether any message carries behaviour log-probabilities, which only an answer rendered as asked can place.
@@ -681,6 +776,17 @@ impl ChatSample {
     /// enforces the SAME schema before writing
     /// (`benchlib/datasets/formats/schema.py`, `validate_record`), so a
     /// malformed export fails the bench build, not just the brain read.
+    ///
+    /// `train` may mark any message, not only an assistant answer: a record
+    /// that supervises other messages (a tool's results, a user turn) trains
+    /// their contents where the template places them
+    /// ([`ChatSample::observations_in_place`]), and may not also supervise an
+    /// answer. `messages[].loss_weight` (optional, only on a message whose
+    /// `train` is true, a finite number above 0, default 1.0) weighs that
+    /// message's supervised tokens in the loss: the run's loss is
+    /// `sum(w * CE)` over the supervised tokens divided by their count, so 0.3
+    /// gives the message 0.3 of the gradient it would otherwise get. It is
+    /// refused elsewhere and on a rollout record (rule `loss_weight`).
     pub fn from_jsonl(path: &Path) -> io::Result<Vec<ChatSample>> {
         Self::from_jsonl_with(path, &TextOnly::TRAINER)
     }
@@ -816,6 +922,9 @@ pub(crate) struct WireMessage {
     /// Only beside `token_ids`: the ids the sampler was given before the answer ([`crate::chat_rollout`]).
     #[serde(default)]
     pub(crate) prompt_token_ids: Option<Vec<u32>>,
+    /// Only on a supervised message: the weight of its tokens in the loss ([`ChatMessage::loss_weight`]).
+    #[serde(default)]
+    pub(crate) loss_weight: Option<f32>,
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -859,6 +968,7 @@ fn sample_from_wire(record: WireRecord, reader: &dyn ImageReader) -> Result<Chat
     if record.messages.is_empty() {
         return Err("\"messages\" is empty".to_string().into());
     }
+    let weighted = check_loss_weights(&record.messages)?;
     let (messages, media, behavior_logprobs, token_ids) = messages_from_wire_with(record.messages, reader)?;
     reader.check_record(&media)?;
     let teacher = record.teacher_context.map(|context| teacher_view(&messages, &record.tools, &media, context)).transpose()?;
@@ -924,7 +1034,30 @@ fn sample_from_wire(record: WireRecord, reader: &dyn ImageReader) -> Result<Chat
         // A teacher context alone trains on its per-token advantage: the scalar part is 0.
         (outcome, teacher) => Some(Rollout { outcome, truncated, behavior_logprobs, token_ids, teacher, tokenizer_digest: record.tokenizer_digest, baseline_only: record.baseline_only }),
     };
+    if let (Some(_), Some(at)) = (&rollout, weighted) {
+        let field = format!("messages[{at}].loss_weight");
+        return Err(RecordError::of(RecordFault::new(RecordRule::LossWeight, &field), format!("{field}: the record is a rollout, whose supervised tokens a policy gradient weighs by the rollout's advantage; a loss weight belongs to a supervised (imitation) record")));
+    }
     Ok(ChatSample { messages, tools: record.tools, rendered: None, media, rollout })
+}
+
+/// Refuse a `loss_weight` that is not a finite number above 0 or that sits on a message that is not supervised; the
+/// index of the first message that carries one, if any.
+fn check_loss_weights(messages: &[WireMessage]) -> Result<Option<usize>, RecordError> {
+    let mut first = None;
+    for (at, m) in messages.iter().enumerate() {
+        let Some(weight) = m.loss_weight else { continue };
+        let field = format!("messages[{at}].loss_weight");
+        let refuse = |why: String| Err(RecordError::of(RecordFault::new(RecordRule::LossWeight, &field), format!("{field}: {why}")));
+        if !m.train {
+            return refuse("the message is not supervised (\"train\" is false), so it has no loss to weigh".to_string());
+        }
+        if !(weight.is_finite() && weight > 0.0) {
+            return refuse(format!("{weight} is not a finite number above 0; leave a message out of the loss with \"train\": false"));
+        }
+        first.get_or_insert(at);
+    }
+    Ok(first)
 }
 
 /// The teacher's view of a record: its conversation with the privileged messages inserted before message `at`.
@@ -950,7 +1083,7 @@ fn teacher_view(messages: &[ChatMessage], tools: &[minijinja::Value], media: &[I
         if m.content.trim().is_empty() {
             return refuse(format!("messages[{k}]: \"content\" is empty"));
         }
-        inserted.push(ChatMessage { role: role.to_string(), content: m.content, tool_calls: Vec::new(), tool_call_id: None, reasoning_content: None, train: false });
+        inserted.push(ChatMessage { role: role.to_string(), content: m.content, tool_calls: Vec::new(), tool_call_id: None, reasoning_content: None, train: false, loss_weight: 1.0 });
     }
     let count = inserted.len();
     let mut seen = messages.to_vec();
@@ -1019,7 +1152,7 @@ fn messages_from_wire_with(wire: Vec<WireMessage>, reader: &dyn ImageReader) -> 
         }
         token_ids.push(m.token_ids.clone().map(|answer| SampledIds { answer, prompt: m.prompt_token_ids.clone() }));
         let content = m.content.into_text(reader, m.train, &mut media).map_err(|e| format!("messages[{i}]: {e}"))?;
-        messages.push(ChatMessage { role: role.to_string(), content, tool_calls, tool_call_id: m.tool_call_id, reasoning_content: m.reasoning_content, train: m.train });
+        messages.push(ChatMessage { role: role.to_string(), content, tool_calls, tool_call_id: m.tool_call_id, reasoning_content: m.reasoning_content, train: m.train, loss_weight: m.loss_weight.unwrap_or(1.0) });
     }
     check_tool_pairing(&messages)?;
     Ok((messages, media, behavior, token_ids))
@@ -1244,6 +1377,9 @@ pub struct EncodedSample {
     pub ids: Vec<u32>,
     pub mask: Vec<bool>,
     pub behavior: Vec<f32>,
+    /// The loss weight of each token, aligned with `ids`: its message's `loss_weight` on a supervised token, 1.0
+    /// elsewhere. `None` when every weight is 1.0, the plain cross-entropy a run without weights trains.
+    pub loss_weights: Option<Vec<f32>>,
     /// The teacher's rendering of the same conversation (tokens and supervision mask), when the record carries a
     /// teacher context ([`crate::chat_rollout`]).
     pub teacher: Option<(Vec<u32>, Vec<bool>)>,
@@ -1265,6 +1401,8 @@ pub struct EncodedSplit {
     pub rollouts: Vec<Option<Option<chat_rollout::Outcome>>>,
     /// The behaviour log-probability of each token, aligned with `ids`; NaN where none was recorded.
     pub behavior: Vec<f32>,
+    /// The loss weight of each token, aligned with `ids` (1.0 unless a supervised message carries a `loss_weight`).
+    pub loss_weights: Vec<f32>,
     /// The teacher's rendering of each example, aligned with `starts`; `None` for an example without a teacher context.
     pub teacher: Vec<Option<(Vec<u32>, Vec<bool>)>>,
     /// Whether each example's rollout did not reach an outcome, aligned with `starts`.
@@ -1288,9 +1426,10 @@ impl EncodedSplit {
     /// [`Self::push_with_media`] for an example of a rollout: its `rollout` (`None` for an imitation example,
     /// `Some(None)` for one without a reward of its own) and the behaviour log-probabilities `encoded` carries.
     pub fn push_rollout(&mut self, encoded: &EncodedSample, media: &[ImageBytes], rollout: Option<Option<chat_rollout::Outcome>>) {
-        let EncodedSample { ids, mask, behavior, teacher, truncated } = encoded;
+        let EncodedSample { ids, mask, behavior, loss_weights, teacher, truncated } = encoded;
         assert_eq!(ids.len(), mask.len(), "EncodedSplit::push: ids and mask differ in length");
         assert_eq!(ids.len(), behavior.len(), "EncodedSplit::push: ids and behaviour log-probabilities differ in length");
+        assert!(loss_weights.as_ref().is_none_or(|w| w.len() == ids.len()), "EncodedSplit::push: ids and loss weights differ in length");
         if ids.is_empty() {
             return;
         }
@@ -1302,6 +1441,10 @@ impl EncodedSplit {
         self.ids.extend_from_slice(ids);
         self.mask.extend_from_slice(mask);
         self.behavior.extend_from_slice(behavior);
+        match loss_weights {
+            Some(weights) => self.loss_weights.extend_from_slice(weights),
+            None => self.loss_weights.extend(std::iter::repeat_n(1.0, ids.len())),
+        }
     }
 
     /// The longest example, in tokens; a teacher's rendering counts, since the row must hold it too.
@@ -1338,6 +1481,9 @@ pub fn write_split(dir: &Path, split: &str, data: &EncodedSplit) -> io::Result<(
     let starts: Vec<u64> = data.starts.iter().map(|&s| s as u64).collect();
     binio::write_u64_bin(&dir.join(format!("{split}.ex.bin")), &starts)?;
     chat_rollout::write(dir, split, &data.rollouts, &data.baselines, &data.behavior, &data.truncated)?;
+    // A split whose every weight is 1.0 writes no weight file, so its run trains the plain loss, as before weights.
+    let weighted = data.loss_weights.iter().any(|&w| w != 1.0);
+    crate::loader::write_split_weights(dir, split, weighted.then_some(data.loss_weights.as_slice()))?;
     chat_rollout::write_teacher(dir, split, &data.teacher)?;
     crate::chat_media::write(dir, split, &data.media)
 }
@@ -1429,7 +1575,7 @@ mod tests {
 
 
     fn answering(content: &str, train: bool) -> ChatMessage {
-        ChatMessage { role: "assistant".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, reasoning_content: None, train }
+        ChatMessage { role: "assistant".into(), content: content.into(), tool_calls: Vec::new(), tool_call_id: None, reasoning_content: None, train, loss_weight: 1.0 }
     }
 
     /// A model asked not to reason is trained on what it is asked from: each
@@ -1460,7 +1606,7 @@ mod tests {
     #[test]
     fn each_answer_of_a_dialogue_is_trained_as_the_model_is_asked_for_it() {
         let tmpl = ChatTemplate::compile(&std::fs::read_to_string(brain_testutil::testdata("qwen3/chat_template.jinja")).unwrap()).unwrap();
-        let turn = |role: &str, text: &str, train: bool| ChatMessage { role: role.into(), content: text.into(), tool_calls: Vec::new(), tool_call_id: None, reasoning_content: None, train };
+        let turn = |role: &str, text: &str, train: bool| ChatMessage { role: role.into(), content: text.into(), tool_calls: Vec::new(), tool_call_id: None, reasoning_content: None, train, loss_weight: 1.0 };
         let dialogue = ChatSample {
             messages: vec![turn("system", "s", false), turn("user", "q1", false), turn("assistant", "a1", true), turn("user", "q2", false), turn("assistant", "a2", true)],
             ..ChatSample::default()

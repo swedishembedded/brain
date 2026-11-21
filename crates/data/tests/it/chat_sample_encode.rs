@@ -118,3 +118,67 @@ fn encode_fails_loudly_rather_than_mismask_a_tool_call_then_final_answer_convers
     let err = sample.encode(&tok, &tmpl).unwrap_err();
     assert!(err.to_string().contains("not prefix-stable"), "got: {err}");
 }
+
+/// A tool result answering call `id`.
+fn tool_result(id: &str, content: &str, train: bool) -> ChatMessage {
+    ChatMessage { tool_call_id: Some(id.into()), train, ..ChatMessage::tool_result(content) }
+}
+
+/// The real Qwen3 template and tokenizer (`QWEN3_DIR`), on an editor session whose assistant turns reason before
+/// each call: the supervised results train exactly their contents, the conversation before them is the template's
+/// own rendering, and the weight reaches only the weighted result.
+#[test]
+fn qwen3_supervised_observations_are_their_contents_in_the_real_rendering() {
+    let Some(dir) = qwen3_dir() else {
+        brain_testutil::skip("QWEN3_DIR unset (needs a real Qwen3 tokenizer.json + tokenizer_config.json)");
+        return;
+    };
+    let tok = QwenBpe::from_file(dir.join("tokenizer.json").to_str().unwrap()).expect("load tokenizer");
+    let tmpl = load_template(&dir);
+    let keys = |id: &str, keys: &str| vec![ToolCall { id: Some(id.into()), name: "vim_keys".into(), arguments: format!(r#"{{"keys": "{keys}"}}"#) }];
+    let reasoned = |m: ChatMessage, why: &str| ChatMessage { reasoning_content: Some(why.into()), ..m };
+    let screen = "  1 fn main() {\n  2     println!(\"hi\");\n  3 }\n~\n-- NORMAL --";
+    let edited = "  1 fn main() {\n  2     println!(\"hello\");\n  3 }\n~\n-- INSERT --";
+    let record = ChatSample {
+        messages: vec![
+            ChatMessage::system("You edit files with vim."),
+            ChatMessage::user("Make main print hello."),
+            reasoned(ChatMessage::assistant_tool_calls("", keys("k1", ":e main.rs<CR>"), false), "Open the file first."),
+            ChatMessage { loss_weight: 0.3, ..tool_result("k1", screen, true) },
+            reasoned(ChatMessage::assistant_tool_calls("", keys("k2", "2Gfhcwhello<Esc>"), false), "Change the word on line 2."),
+            tool_result("k2", edited, true),
+            reasoned(ChatMessage::assistant("Done.", false), "It prints hello now."),
+        ],
+        ..Default::default()
+    };
+    let observed = record.observations_in_place(&tmpl, true).expect("render").expect("observations");
+    let encoded = observed.encode_rollout(&tok, &tmpl, data::chat::RenderOpts::default()).expect("encode");
+    let weights = encoded.loss_weights.clone().expect("a weighted result");
+    let (mut runs, mut previous): (Vec<(Vec<u32>, f32)>, bool) = (Vec::new(), false);
+    for ((&id, &m), &w) in encoded.ids.iter().zip(&encoded.mask).zip(&weights) {
+        if m && !previous {
+            runs.push((Vec::new(), w));
+        }
+        if let (true, Some(run)) = (m, runs.last_mut()) {
+            assert_eq!(run.1, w);
+            run.0.push(id);
+        }
+        previous = m;
+    }
+    let runs: Vec<(String, f32)> = runs.into_iter().map(|(ids, w)| (tok.decode(&ids), w)).collect();
+    assert_eq!(runs, [(screen.to_string(), 0.3), (edited.to_string(), 1.0)]);
+
+    // The oracle: the template's own rendering of the conversation through the last result, as JSON turns.
+    let turns: Vec<serde_json::Value> = record.messages[..=5]
+        .iter()
+        .map(|m| {
+            let calls: Vec<serde_json::Value> = m.tool_calls.iter().map(|c| serde_json::json!({"id": c.id, "type": "function", "function": {"name": c.name, "arguments": c.arguments}})).collect();
+            serde_json::json!({"role": m.role, "content": m.content, "tool_calls": calls, "tool_call_id": m.tool_call_id, "reasoning_content": m.reasoning_content})
+        })
+        .collect();
+    let full = tmpl.render(tmpl.conversation(&turns).unwrap(), None, false, &Default::default()).unwrap();
+    let decoded = tok.decode(&encoded.ids);
+    assert_eq!(decoded, &full[..full.rfind(edited).unwrap() + edited.len()]);
+    assert!(decoded.ends_with(&format!("<tool_response>\n{edited}")), "the framing before the content is context: {decoded:?}");
+    assert!(!decoded.contains("Done."), "nothing after the last supervised result");
+}
