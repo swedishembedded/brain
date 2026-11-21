@@ -398,7 +398,7 @@ impl PreferenceFineTune {
         arch.require(Capability::TokenObjectives)?;
         let chat = arch.chat.ok_or_else(|| Error::Unsupported(model::training::Unsupported::new(arch.id, Capability::ChatFineTune)))?;
         if self.native_sparse.is_some() && !chat.native_sparse {
-            return Err(Error::Backend("PreferenceFineTune: native sparse attention training is not available for this architecture".to_string()));
+            return Err(Error::InvalidRequest("PreferenceFineTune: native sparse attention training is not available for this architecture".to_string()));
         }
         if self.stages > 0 && !chat.pipelined {
             return Err(Error::Backend(format!("{}: {} stages asked for, and this architecture's trainer lays itself out over the cards and takes no stage count", "PreferenceFineTune", self.stages)));
@@ -406,15 +406,15 @@ impl PreferenceFineTune {
         let dataset = self.dataset.as_deref().ok_or_else(|| Error::MissingArgument("PreferenceFineTune: no dataset; call .dataset(path)".to_string()))?;
         let out_dir = self.out_dir.as_deref().ok_or_else(|| Error::MissingArgument("PreferenceFineTune: no out directory; call .out_dir(path)".to_string()))?;
         if !(self.nll_weight.is_finite() && self.nll_weight >= 0.0) {
-            return Err(Error::Backend(format!("PreferenceFineTune: nll_weight must be zero or positive, got {}", self.nll_weight)));
+            return Err(Error::InvalidRequest(format!("PreferenceFineTune: nll_weight must be zero or positive, got {}", self.nll_weight)));
         }
         if self.grad_accum == 0 {
-            return Err(Error::Backend("PreferenceFineTune: grad_accum must be at least 1".to_string()));
+            return Err(Error::InvalidRequest("PreferenceFineTune: grad_accum must be at least 1".to_string()));
         }
         // The cheap numeric refusals first, before the base is read; the plan below re-checks them with the row length.
         rl::objective::dpo::DpoConfig { beta: self.beta, seq_len: 2, nll_weight: self.nll_weight, beta_ablation: self.beta_ablation, loss: self.loss }
             .validate()
-            .map_err(|why| Error::Backend(format!("PreferenceFineTune: invalid dpo configuration: {why}")))?;
+            .map_err(|why| Error::InvalidRequest(format!("PreferenceFineTune: invalid dpo configuration: {why}")))?;
         // Every file is checked against the base's own template before a
         // device is claimed.
         let (tok, tmpl) = tokenizer_and_template(&model_dir)?;
@@ -449,7 +449,7 @@ impl PreferenceFineTune {
         // Both rows of a pair share one forward.
         let requested = model::FitOpts { batch_size: PAIR_ROWS, grad_accum: self.grad_accum, strict_updates: self.strict_updates, stages: self.stages, native_sparse: self.native_sparse, precision: model::TrainPrecision { activations: self.activations, ..Default::default() }, ..fit_opts(self.steps, block, self.lr, seed) };
         let dpo = rl::objective::dpo::DpoConfig { beta: self.beta, seq_len, nll_weight: self.nll_weight, beta_ablation: self.beta_ablation, loss: self.loss };
-        let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &[&dpo]).map_err(|e| Error::Backend(format!("PreferenceFineTune: {e}")))?.into_opts();
+        let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &[&dpo]).map_err(|e| Error::InvalidRequest(format!("PreferenceFineTune: {e}")))?.into_opts();
         let base_digest = base_digest(&weights)?;
         let dataset_id = digest(dataset)?;
         let identity = serde_json::json!({

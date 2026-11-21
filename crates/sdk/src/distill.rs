@@ -275,10 +275,10 @@ impl DistillFineTune {
         let dataset = self.dataset.as_deref().ok_or_else(|| Error::MissingArgument("DistillFineTune: no dataset; call .dataset(path)".to_string()))?;
         let out_dir = self.out_dir.as_deref().ok_or_else(|| Error::MissingArgument("DistillFineTune: no out directory; call .out_dir(path)".to_string()))?;
         if self.top_k == 0 {
-            return Err(Error::Backend("DistillFineTune: top_k must be at least 1".to_string()));
+            return Err(Error::InvalidRequest("DistillFineTune: top_k must be at least 1".to_string()));
         }
         if self.grad_accum == 0 {
-            return Err(Error::Backend("DistillFineTune: grad_accum must be at least 1".to_string()));
+            return Err(Error::InvalidRequest("DistillFineTune: grad_accum must be at least 1".to_string()));
         }
         let teacher_adapter = match &self.teacher {
             DistillTeacher::Base => None,
@@ -317,7 +317,7 @@ impl DistillFineTune {
         // One record per row: the teacher reads whole-row logits, and the student trains one example per micro-step.
         let requested = model::FitOpts { batch_size: 1, grad_accum: self.grad_accum, strict_updates: self.strict_updates, ..fit_opts(self.steps, block, self.lr, seed) };
         let cfg = DistillConfig { seq_len: block as usize };
-        let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &[&cfg]).map_err(|e| Error::Backend(format!("DistillFineTune: {e}")))?.into_opts();
+        let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &[&cfg]).map_err(|e| Error::InvalidRequest(format!("DistillFineTune: {e}")))?.into_opts();
         let fp32 = model::ops::TierPolicy::uniform(gpu_core::select::Dtype::F32);
         let (examples, teacher_digest) = match &teacher_adapter {
             None => ((chat.teacher)(&open, &prepared_dir, &opts, self.top_k).map_err(|e| Error::Backend(format!("the teacher: {e}")))?, None),

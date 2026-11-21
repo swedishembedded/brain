@@ -696,8 +696,12 @@ fn distill_summary(outcome: &brain::DistillFineTuneOutcome) -> Value {
 
 /// Maps the SDK's error to the job's: a full card is a condition the caller can act on, with nothing wrong in the request.
 pub(crate) fn trainer_failure(e: brain::Error) -> String {
+    use capability::failure::{tag, FailureClass};
     match e {
-        brain::Error::DeviceOutOfMemory { .. } => capability::failure::tag(capability::failure::FailureClass::Unavailable, format!("train: {e}")),
+        brain::Error::DeviceOutOfMemory { .. } | brain::Error::JobFailed(_) => tag(FailureClass::Unavailable, format!("train: {e}")),
+        // The trainer's refusals of what the request asked for name the setting: the caller reads them.
+        brain::Error::InvalidRequest(_) | brain::Error::MissingArgument(_) => tag(FailureClass::InvalidRequest, format!("train: {e}")),
+        brain::Error::Unsupported(_) => tag(FailureClass::UnsupportedCapability, format!("train: {e}")),
         e => format!("train: {e}"),
     }
 }
@@ -906,3 +910,22 @@ mod tests {
         assert!(!dir.exists(), "the partial staging is removed when the job ends");
     }
 }
+
+#[cfg(test)]
+mod failure_tests {
+    use super::trainer_failure;
+    use capability::failure::{FailureClass, ReplyError};
+
+    #[test]
+    fn a_refused_request_stays_readable_and_an_internal_failure_stays_hidden() {
+        let refused = trainer_failure(brain::Error::InvalidRequest("ChatFineTune: selecting on the monitoring loss needs eval_every > 0".into()));
+        let reply = ReplyError::of(&refused);
+        assert_eq!(reply, ReplyError::Classified(FailureClass::InvalidRequest, "train: ChatFineTune: selecting on the monitoring loss needs eval_every > 0".into()));
+        assert!(!reply.hides_detail());
+        let missing = ReplyError::of(&trainer_failure(brain::Error::MissingArgument("a data-parallel rank needs the seed".into())));
+        assert!(matches!(missing, ReplyError::Classified(FailureClass::InvalidRequest, _)));
+        let internal = ReplyError::of(&trainer_failure(brain::Error::Backend("training: /models/x: read failed".into())));
+        assert!(internal.hides_detail(), "{internal:?}");
+    }
+}
+

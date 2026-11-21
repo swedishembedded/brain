@@ -349,7 +349,7 @@ impl ChatFullFineTune {
     /// Refuses, by name, an option the architecture's trainer does not take.
     fn refuse_options(&self, chat: &crate::chat_trainer::ChatEntry) -> Result<()> {
         if self.native_sparse.is_some() && !chat.native_sparse {
-            return Err(Error::Backend("ChatFullFineTune: native sparse attention training is not available for this architecture".to_string()));
+            return Err(Error::InvalidRequest("ChatFullFineTune: native sparse attention training is not available for this architecture".to_string()));
         }
         if self.stages > 0 && !chat.pipelined {
             return Err(Error::Backend(format!("{}: {} stages asked for, and this architecture's trainer lays itself out over the cards and takes no stage count", "ChatFullFineTune", self.stages)));
@@ -395,20 +395,20 @@ impl ChatFullFineTune {
         let chat = chat_entry(self.arch_of(model_dir))?;
         self.refuse_options(&chat)?;
         if self.grad_accum == 0 {
-            return Err(Error::Backend("ChatFullFineTune: grad_accum must be at least 1".to_string()));
+            return Err(Error::InvalidRequest("ChatFullFineTune: grad_accum must be at least 1".to_string()));
         }
         Ok(chat)
     }
 
     /// The optimiser's validated options for rows of `block` tokens, and the exit-entropy weight they carry.
     fn plan(&self, chat: &crate::chat_trainer::ChatEntry, block: u32, seed: u64) -> Result<(model::FitOpts, f32)> {
-        chat.train_precision.check(&self.precision).map_err(|why| Error::Backend(format!("ChatFullFineTune: {why}")))?;
+        chat.train_precision.check(&self.precision).map_err(|why| Error::InvalidRequest(format!("ChatFullFineTune: {why}")))?;
         let exit_entropy = exit_entropy_for(chat, self.exit_entropy, FINE_TUNE_EXIT_ENTROPY)?;
         let sharding = self.parallel.as_ref().map_or(model::zero::Sharding::Replicated, crate::DataParallel::sharding);
         // A parameter-sharded run builds its resident state over the group.
         let parameter_group = self.parallel.as_ref().filter(|p| p.sharding() == model::zero::Sharding::Parameters).map(crate::DataParallel::shard_group);
         let requested = model::FitOpts { grad_accum: self.grad_accum, strict_updates: self.strict_updates, sharding, parameter_group, weight_decay: self.weight_decay, precision: self.precision.clone(), stages: self.stages, native_sparse: self.native_sparse, exit_entropy, ..fit_opts(self.steps, block, self.lr, seed) };
-        let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &[]).map_err(|e| Error::Backend(format!("ChatFullFineTune: {e}")))?.into_opts();
+        let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &[]).map_err(|e| Error::InvalidRequest(format!("ChatFullFineTune: {e}")))?.into_opts();
         Ok((opts, exit_entropy))
     }
 

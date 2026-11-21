@@ -187,6 +187,22 @@ async fn the_capabilities_declare_the_defaults_the_trainer_applies() {
     assert_eq!(declared["clip_eps"], json!(0.2), "a decimal, not the widened f32");
 }
 
+/// A setting that needs another is refused at submission naming both, not failed once queued as a model fault the
+/// caller cannot read.
+#[tokio::test(flavor = "multi_thread")]
+async fn selecting_without_evaluations_is_refused_at_submission_naming_the_setting() {
+    let rig = rig_qwen3("http-select-needs-eval", 16 << 30);
+    let app = router(AppState::new(rig.exec.clone(), KEY, Provider::OpenAI).with_training(true));
+    let train = data_digest(&rig, &plain());
+    let data = json!({"train": {"digest": train.hex()}}).to_string();
+    let body = json!({"model": trainjob::MODEL, "action": "train", "params": {"base": BASE, "data": data, "steps": 2, "patience": 2}});
+    let (status, refused) = call(&app, Method::POST, "/v1/run", Some(KEY), Some(body)).await;
+    let text = String::from_utf8_lossy(&refused);
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{text}");
+    assert!(text.contains("patience") && text.contains("eval_every"), "{text}");
+    assert!(work_is_clean(&rig.work_root));
+}
+
 /// A full fine-tune whose precision its architecture does not run is a 400 at submission, not a job that fails once
 /// queued; `validate_only` answers the settings the run would train with.
 #[tokio::test(flavor = "multi_thread")]

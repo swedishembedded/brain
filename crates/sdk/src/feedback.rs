@@ -277,10 +277,10 @@ impl FeedbackFineTune {
         let dataset = self.dataset.as_deref().ok_or_else(|| Error::MissingArgument("FeedbackFineTune: no dataset; call .dataset(path)".to_string()))?;
         let out_dir = self.out_dir.as_deref().ok_or_else(|| Error::MissingArgument("FeedbackFineTune: no out directory; call .out_dir(path)".to_string()))?;
         if self.grad_accum == 0 {
-            return Err(Error::Backend("FeedbackFineTune: grad_accum must be at least 1".to_string()));
+            return Err(Error::InvalidRequest("FeedbackFineTune: grad_accum must be at least 1".to_string()));
         }
         let config = |seq_len: usize| FeedbackConfig { beta: self.beta, desirable_weight: self.desirable_weight, undesirable_weight: self.undesirable_weight, seq_len };
-        config(2).validate().map_err(|why| Error::Backend(format!("FeedbackFineTune: {why}")))?;
+        config(2).validate().map_err(|why| Error::InvalidRequest(format!("FeedbackFineTune: {why}")))?;
         let (tok, tmpl) = tokenizer_and_template(&model_dir)?;
         let render = RenderOpts { keep_reasoning: self.keep_reasoning };
         let examples = check_feedback(dataset, &tok, &tmpl, self.max_block, render).map_err(Error::Backend)?;
@@ -313,7 +313,7 @@ impl FeedbackFineTune {
         let seed = resolve_seed(self.seed, Some(&state_path))?;
         let requested = model::FitOpts { batch_size: FEEDBACK_ROWS, grad_accum: self.grad_accum, strict_updates: self.strict_updates, ..fit_opts(self.steps, block, self.lr, seed) };
         let cfg = config(seq_len);
-        let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &[&cfg]).map_err(|e| Error::Backend(format!("FeedbackFineTune: {e}")))?.into_opts();
+        let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &[&cfg]).map_err(|e| Error::InvalidRequest(format!("FeedbackFineTune: {e}")))?.into_opts();
         let base_digest = base_digest(&weights)?;
         let dataset_id = digest(dataset)?;
         let identity = serde_json::json!({

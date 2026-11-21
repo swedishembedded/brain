@@ -134,6 +134,10 @@ pub enum Error {
     /// failed in. Every rank started again with the same arguments resumes from the job's last committed generation;
     /// the `brain` CLI exits with `model::jobfault::RESTART_STATUS` on it.
     JobFailed(String),
+    /// The request asks for something the run cannot do as given: a setting out of range, two settings that
+    /// contradict each other, a dataset the objective refuses. The message names the setting and is safe to show the
+    /// caller; a served surface reports it as an invalid request rather than hiding it as a model failure.
+    InvalidRequest(String),
 }
 
 /// A training error as an [`Error`]: a distributed job's collective failure ([`model::jobfault::JobFailure`]) is
@@ -187,6 +191,7 @@ impl std::fmt::Display for Error {
             Error::LicenseRequired(m) => write!(f, "license required: {m}"),
             Error::MissingArgument(m) => write!(f, "{m}"),
             Error::JobFailed(m) => write!(f, "{m}"),
+            Error::InvalidRequest(m) => write!(f, "{m}"),
             Error::Forecast(e) => write!(f, "{e}"),
             Error::Backend(m) => write!(f, "{m}"),
             Error::Io(e) => write!(f, "{e}"),

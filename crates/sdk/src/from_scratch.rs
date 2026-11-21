@@ -648,10 +648,10 @@ impl Pretrain {
         let corpus = self.corpus.as_deref().ok_or_else(|| Error::MissingArgument("Pretrain: no corpus; call .corpus(path)".to_string()))?;
         let out_dir = self.out_dir.as_deref().ok_or_else(|| Error::MissingArgument("Pretrain: no out directory; call .out_dir(path)".to_string()))?;
         if self.eval_every > 0 && self.held_out.is_none() {
-            return Err(Error::Backend("Pretrain: eval_every needs a held-out corpus".to_string()));
+            return Err(Error::InvalidRequest("Pretrain: eval_every needs a held-out corpus".to_string()));
         }
         if self.batch == 0 || self.block < 2 || self.grad_accum == 0 {
-            return Err(Error::Backend("Pretrain: batch and grad_accum must be at least 1 and block at least 2".to_string()));
+            return Err(Error::InvalidRequest("Pretrain: batch and grad_accum must be at least 1 and block at least 2".to_string()));
         }
         let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
         let (weights, model_dir, _) = loader::model_dir::resolve_base(&self.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
@@ -663,13 +663,13 @@ impl Pretrain {
         let open = (chat.checkpoint_path)(&weights, &model_dir);
         if let Some(positions) = positions_of(&open) {
             if u64::from(self.block) > positions {
-                return Err(Error::Backend(format!("Pretrain: block {} is longer than the model's {positions} positions", self.block)));
+                return Err(Error::InvalidRequest(format!("Pretrain: block {} is longer than the model's {positions} positions", self.block)));
             }
         }
         let tok_path = model_dir.join("tokenizer.json");
         let tok = data::qwen_tokenizer::QwenBpe::from_file(crate::finetune::utf8(&tok_path)?).map_err(|e| Error::Backend(format!("{}: {e}", tok_path.display())))?;
         let separator = self.separator.clone().unwrap_or_else(|| DEFAULT_SEPARATOR.to_string());
-        let separator_id = tok.special_id(&separator).ok_or_else(|| Error::Backend(format!("Pretrain: the vocabulary has no special token {separator:?} to separate documents with; name one with separator")))?;
+        let separator_id = tok.special_id(&separator).ok_or_else(|| Error::InvalidRequest(format!("Pretrain: the vocabulary has no special token {separator:?} to separate documents with; name one with separator")))?;
         let vocab = (chat.vocab)(&open).map_err(Error::Backend)?;
         let encode = |path: &Path| -> Result<(usize, Vec<u32>)> {
             let docs = read_text_corpus(path, None)?;
@@ -719,7 +719,7 @@ impl Pretrain {
             initial_probe_batches: 0,
             ..fit_opts(self.steps, self.block, self.lr, seed)
         };
-        let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &[]).map_err(|e| Error::Backend(format!("Pretrain: {e}")))?.into_opts();
+        let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &[]).map_err(|e| Error::InvalidRequest(format!("Pretrain: {e}")))?.into_opts();
         let base_digest = base_digest(&open)?;
         let mut identity = serde_json::json!({
             "objective": "pretrain",

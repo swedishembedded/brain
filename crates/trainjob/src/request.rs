@@ -468,6 +468,9 @@ impl Request {
         if params.keep_evaluations && params.eval_every == 0 {
             return refused("keep_evaluations needs eval_every > 0");
         }
+        if params.patience > 0 && params.eval_every == 0 {
+            return refused("patience stops on the evaluations, so it needs eval_every > 0");
+        }
         if params.eval_every > 0 && params.steps.div_ceil(params.eval_every) > MAX_EVALUATIONS {
             return refused(&format!("{} steps evaluated every {} is more than {MAX_EVALUATIONS} evaluations; raise eval_every", params.steps, params.eval_every));
         }

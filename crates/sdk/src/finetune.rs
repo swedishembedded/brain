@@ -191,7 +191,7 @@ impl ChatFamily {
             other => return Err(Error::Unsupported(model::training::Unsupported::new(other, Capability::ChatLoraFineTune))),
         };
         let dtype = match format {
-            Some(_) if bf16 || int8 || nf4 => return Err(Error::Backend("ChatFineTune: base_format and the bf16_base, int8_base and nf4_base switches name the same setting; give one".to_string())),
+            Some(_) if bf16 || int8 || nf4 => return Err(Error::InvalidRequest("ChatFineTune: base_format and the bf16_base, int8_base and nf4_base switches name the same setting; give one".to_string())),
             Some(spec) => bases.parse(spec).map_err(Error::Backend)?,
             None => {
                 let narrowest = if nf4 {
@@ -203,7 +203,7 @@ impl ChatFamily {
                 } else {
                     qwen3::Dtype::F32
                 };
-                bases.check(narrowest).map_err(|why| Error::Backend(format!("ChatFineTune: {why}")))?
+                bases.check(narrowest).map_err(|why| Error::InvalidRequest(format!("ChatFineTune: {why}")))?
             }
         };
         Ok(match arch_id {
@@ -1089,7 +1089,7 @@ impl ChatFineTune {
     /// The settings a policy-gradient run cannot honour, refused before any file is read.
     fn check_policy_gradient_setup(&self, arch_id: &str) -> Result<()> {
         let Some(config) = &self.policy_gradient else { return Ok(()) };
-        let refuse = |why: String| Err(Error::Backend(format!("ChatFineTune: policy_gradient: {why}")));
+        let refuse = |why: String| Err(Error::InvalidRequest(format!("ChatFineTune: policy_gradient: {why}")));
         config.validate().or_else(refuse)?;
         let generic = crate::study::arch(arch_id).ok().and_then(|a| a.chat).is_some_and(|chat| chat.policy_gradient);
         if !generic {
@@ -1117,10 +1117,10 @@ impl ChatFineTune {
             },
             Some(_) => {
                 if let Some(name) = ["held-out", "held-out text", "monitoring"].into_iter().find(|n| carrying(n)) {
-                    return Err(Error::Backend(format!("ChatFineTune: policy_gradient: the {name} records carry a \"reward\"; that set is scored without one")));
+                    return Err(Error::InvalidRequest(format!("ChatFineTune: policy_gradient: the {name} records carry a \"reward\"; that set is scored without one")));
                 }
                 if !carrying("dataset") && !carrying("replay") {
-                    return Err(Error::Backend("ChatFineTune: policy_gradient: no record of the dataset carries a \"reward\" or a \"teacher_context\"; this would be supervised training (drop .policy_gradient(..))".to_string()));
+                    return Err(Error::InvalidRequest("ChatFineTune: policy_gradient: no record of the dataset carries a \"reward\" or a \"teacher_context\"; this would be supervised training (drop .policy_gradient(..))".to_string()));
                 }
                 Ok(())
             }
@@ -1158,14 +1158,14 @@ impl ChatFineTune {
         let weights_str = utf8(&open)?;
         let family = ChatFamily::of(arch.id, self.bf16_base, self.int8_base, self.nf4_base, self.base_format.as_deref())?;
         if self.stages > 0 && !matches!(family, ChatFamily::Ripple(_)) {
-            return Err(Error::Backend(format!("ChatFineTune: {} stages asked for, and {} lays itself out over the cards and takes no stage count", self.stages, arch.id)));
+            return Err(Error::InvalidRequest(format!("ChatFineTune: {} stages asked for, and {} lays itself out over the cards and takes no stage count", self.stages, arch.id)));
         }
         if self.native_sparse.is_some() && !matches!(family, ChatFamily::Qwen3(_) | ChatFamily::Ripple(_)) {
-            return Err(Error::Backend(format!("ChatFineTune: native sparse attention training is not available for {}", arch.id)));
+            return Err(Error::InvalidRequest(format!("ChatFineTune: native sparse attention training is not available for {}", arch.id)));
         }
         self.check_policy_gradient_setup(arch.id)?;
         if !self.modules_to_save.is_empty() && !arch.chat.is_some_and(|chat| chat.modules_to_save) {
-            return Err(Error::Backend(format!("ChatFineTune: {} does not train base tensors in full beside an adapter (modules_to_save)", arch.id)));
+            return Err(Error::InvalidRequest(format!("ChatFineTune: {} does not train base tensors in full beside an adapter (modules_to_save)", arch.id)));
         }
 
         // Every file is checked against the base's own template before a
@@ -1202,10 +1202,10 @@ impl ChatFineTune {
             check_rollouts_together(&train_samples, &replay_samples, &weighted_samples, config.truncated, tok.digest())?;
         }
         if self.eval_every == 0 && self.evaluations_dir.is_some() {
-            return Err(Error::Backend("ChatFineTune: keeping the evaluations needs eval_every > 0".to_string()));
+            return Err(Error::InvalidRequest("ChatFineTune: keeping the evaluations needs eval_every > 0".to_string()));
         }
         if self.eval_every == 0 && (self.patience > 0 || self.keep_best) {
-            return Err(Error::Backend("ChatFineTune: selecting on the monitoring loss needs eval_every > 0".to_string()));
+            return Err(Error::InvalidRequest("ChatFineTune: selecting on the monitoring loss needs eval_every > 0".to_string()));
         }
 
         let (rank, alpha, parent) = lora_shape(self.continue_from.as_deref(), self.rank, self.alpha, self.tuning)?;
@@ -1265,7 +1265,7 @@ impl ChatFineTune {
         let base_text_score = held_out_text.as_ref().zip(scoring_tier).map(|(records, tier)| score_records(weights_str, None, &tok, &tmpl, records, block, tier, render));
 
         if self.grad_accum == 0 {
-            return Err(Error::Backend("ChatFineTune: grad_accum must be at least 1".to_string()));
+            return Err(Error::InvalidRequest("ChatFineTune: grad_accum must be at least 1".to_string()));
         }
         let state_path = self.resume_state.clone().unwrap_or_else(|| out_dir.join(STATE_FILE));
         if self.parallel.is_some() && self.seed.is_none() {
@@ -1291,7 +1291,7 @@ impl ChatFineTune {
             ..fit_opts(self.steps, block, self.lr, seed)
         };
         let checks: Vec<&dyn model::training_plan::PlanCheck> = self.policy_gradient.iter().map(|c| c as &dyn model::training_plan::PlanCheck).collect();
-        let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &checks).map_err(|e| Error::Backend(format!("ChatFineTune: {e}")))?.into_opts();
+        let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &checks).map_err(|e| Error::InvalidRequest(format!("ChatFineTune: {e}")))?.into_opts();
         let base_digest = base_digest(&open)?;
         let identity = serde_json::json!({
             "base": base_digest,
@@ -2390,7 +2390,7 @@ pub(crate) fn image_reader(arch_id: &str, model_dir: &Path) -> Result<Box<dyn da
 /// pictures would report a number about a different task. The monitoring set reads them.
 fn refuse_images_in(records: Option<&[ChatSample]>, what: &str) -> Result<()> {
     match records {
-        Some(records) if records.iter().any(|r| !r.media.is_empty()) => Err(Error::Backend(format!("ChatFineTune: the {what} records hold images, and a held-out set is scored without them; pass them as .monitor(..), which reads images"))),
+        Some(records) if records.iter().any(|r| !r.media.is_empty()) => Err(Error::InvalidRequest(format!("ChatFineTune: the {what} records hold images, and a held-out set is scored without them; pass them as .monitor(..), which reads images"))),
         _ => Ok(()),
     }
 }
@@ -2474,12 +2474,12 @@ fn mix_repeats(groups: &[(usize, f32)]) -> Result<Vec<usize>> {
     let mut total = 0.0f64;
     for &(_, share) in replays {
         if !(share > 0.0 && share < 1.0) {
-            return Err(Error::Backend(format!("ChatFineTune: a replay share must be between 0 and 1, got {share}")));
+            return Err(Error::InvalidRequest(format!("ChatFineTune: a replay share must be between 0 and 1, got {share}")));
         }
         total += f64::from(share);
     }
     if total >= 1.0 {
-        return Err(Error::Backend(format!("ChatFineTune: the replay shares add up to {total}, leaving the dataset no draws")));
+        return Err(Error::InvalidRequest(format!("ChatFineTune: the replay shares add up to {total}, leaving the dataset no draws")));
     }
     let shares: Vec<(usize, f64)> = std::iter::once((*dataset, 1.0 - total)).chain(replays.iter().map(|&(n, s)| (n, f64::from(s)))).collect();
     // Only a group with records is weighted; one without is listed once and adds nothing.
@@ -2611,7 +2611,7 @@ fn check_rollouts_together(dataset: &[ChatSample], replay: &[ChatSample], weight
         Some((at, refusal)) => {
             let (name, index, _) = records[at];
             let rule = refusal.fault().map_or("", |f| f.rule.name());
-            Err(Error::Backend(format!("ChatFineTune: policy_gradient: example {} of the {name} breaks the training-record rule {rule}: {refusal}", index + 1)))
+            Err(Error::InvalidRequest(format!("ChatFineTune: policy_gradient: example {} of the {name} breaks the training-record rule {rule}: {refusal}", index + 1)))
         }
     }
 }
