@@ -66,7 +66,7 @@ The model catalog contains the complete architecture-by-architecture list, inclu
 
 ### 1. Build and inspect the engine
 
-You need a Rust toolchain, CMake and a C compiler. A GPU is optional; the CPU backend can run the engine and its tests.
+You need a Rust toolchain, CMake and a C compiler (on x86_64 Linux, also the `mold` linker: `sudo apt install mold`). A GPU is optional; the CPU backend can run the engine and its tests.
 
 ```bash
 git clone https://github.com/swedishembedded/brain.git

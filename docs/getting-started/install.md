@@ -4,7 +4,9 @@
 
 The hard prerequisites are a **Rust toolchain** (install via
 [rustup](https://rustup.rs)) and **CMake with a C compiler** (Debian/Ubuntu:
-`sudo apt install cmake build-essential`). brain is a self-contained Cargo
+`sudo apt install cmake build-essential`). On x86_64 Linux the workspace also
+links with the **mold** linker (`.cargo/config.toml`; `sudo apt install mold`),
+so a build without it fails with `cannot find 'ld'`. brain is a self-contained Cargo
 workspace: no Python, no PyTorch, and one C library, libopus, which the
 build compiles from its bundled source so the speech-to-text API can decode
 Opus recordings (the format browsers record) and generated video carries Opus
