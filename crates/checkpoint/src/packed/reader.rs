@@ -19,7 +19,7 @@ use std::path::Path;
 
 use super::codec::TileBuf;
 use super::encoding::{Element, FloatFormat, QuantEncoding, ScaleGranularity, TensorDescriptor, INT8_SCALE_SUFFIX};
-use super::hfquant::{DeclaredWeight, HfQuant};
+use super::hfquant::{DeclaredWeight, HfQuant, Nvfp4Global, TensorDeclaration};
 use crate::gguf::GgmlType;
 use crate::weightio::WeightReader;
 
@@ -56,21 +56,36 @@ pub struct PackedReader {
     fp8_block: Option<u32>,
     /// What the release declares about its quantization (`config.json`, `hf_quant_config.json`).
     declared: Option<HfQuant>,
+    /// Scale sidecars the file does not store but declares how to compute, computed once when the declaration is
+    /// adopted and served like stored ones: the NVFP4 `<w>_scale_2` of a release storing `<w>_amax` and
+    /// `<w>_outer_scale_denominator` (little-endian f32 `amax / denominator`, per slab or per tensor).
+    derived: HashMap<String, Vec<u8>>,
 }
 
-/// The quantization sidecars of `reader`'s checkpoint: every `<w>_scale_inv`, `<w>_scale` and `<w>_scale_2` whose
-/// payload `<w>` is stored, and the `input_scale` of every such module. They describe the payload they sit beside
-/// and are never parameters of a model, so an importer that walks tensor names skips them (and reads the payload
-/// through [`PackedReader`], which applies the scales).
+/// The suffixes of an NVFP4 second level declared as `amax / outer_scale_denominator`.
+const AMAX_SUFFIX: &str = "_amax";
+const DENOMINATOR_SUFFIX: &str = "_outer_scale_denominator";
+/// The suffix of the f32 second level of NVFP4, stored (ModelOpt) or derived from the amax sidecars.
+const GLOBAL_SUFFIX: &str = "_scale_2";
+
+/// The quantization sidecars of `reader`'s checkpoint: every `<w>_scale_inv`, `<w>_scale`, `<w>_scale_2`, `<w>_amax`
+/// and `<w>_outer_scale_denominator` whose payload `<w>` (named `<module>.weight` or `<base>_weight`) is stored with a
+/// scale, and the `input_scale` of every such module. They describe the payload they sit beside and are never
+/// parameters of a model, so an importer that walks tensor names skips them (and reads the payload through
+/// [`PackedReader`], which applies the scales).
 pub fn quant_sidecars(reader: &WeightReader) -> HashSet<String> {
     let names: HashSet<&str> = reader.names().collect();
     let mut out = HashSet::new();
     for n in &names {
-        let Some(stem) = n.strip_suffix(".weight") else { continue };
+        if !n.ends_with(".weight") && !n.ends_with("_weight") {
+            continue;
+        }
         let has_scale = ["_scale_inv", "_scale"].iter().any(|s| names.contains(format!("{n}{s}").as_str()));
         if has_scale {
-            out.extend(["_scale_inv", "_scale", "_scale_2"].iter().map(|s| format!("{n}{s}")));
-            out.insert(format!("{stem}.input_scale"));
+            out.extend(["_scale_inv", "_scale", GLOBAL_SUFFIX, AMAX_SUFFIX, DENOMINATOR_SUFFIX].iter().map(|s| format!("{n}{s}")));
+            if let Some(stem) = n.strip_suffix(".weight") {
+                out.insert(format!("{stem}.input_scale"));
+            }
         }
     }
     out.retain(|n| names.contains(n.as_str()));
@@ -95,7 +110,7 @@ impl PackedReader {
 
     pub fn new(inner: WeightReader) -> PackedReader {
         let overrides = Self::declared_in_files(&inner);
-        let mut r = PackedReader { inner, overrides, hidden: HashSet::new(), fp8_block: None, declared: None };
+        let mut r = PackedReader { inner, overrides, hidden: HashSet::new(), fp8_block: None, declared: None, derived: HashMap::new() };
         r.hide_sidecars();
         r
     }
@@ -140,20 +155,84 @@ impl PackedReader {
         self
     }
 
-    /// Adopt the quantization the release declares: its FP8 block size, and which tensors are quantized.
+    /// Adopt the quantization the release declares: its FP8 block size, which tensors are quantized, and the scale
+    /// levels it declares as computed from other sidecars (computed here, once).
     pub fn with_declaration(mut self, declared: Option<HfQuant>) -> PackedReader {
         if let Some(b) = declared.as_ref().and_then(HfQuant::fp8_block) {
             self.fp8_block.get_or_insert(b);
         }
         self.declared = declared;
+        self.derive_globals();
         self.hide_sidecars();
         self
+    }
+
+    /// Fold every NVFP4 `amax / outer_scale_denominator` pair into the f32 `_scale_2` level it declares. A pair whose
+    /// shapes do not fit is left underived: [`PackedTensorReader::descriptor`] names the problem.
+    fn derive_globals(&mut self) {
+        self.derived.clear();
+        let Some(q) = self.declared.as_ref().filter(|q| q.explicit()) else { return };
+        let mut derived = HashMap::new();
+        for n in self.inner.names() {
+            if !matches!(q.declared(n), DeclaredWeight::Nvfp4 { global: Nvfp4Global::AmaxOverDenominator, .. }) {
+                continue;
+            }
+            let Some(shape) = self.shape_of(n) else { continue };
+            if self.amax_granularity(n, &shape).is_err() {
+                continue;
+            }
+            let (Some((amax, _)), Some((den, _))) = (self.stored(&format!("{n}{AMAX_SUFFIX}")), self.stored(&format!("{n}{DENOMINATOR_SUFFIX}"))) else { continue };
+            let den = f32::from_le_bytes(den[..4].try_into().expect("a validated one-element f32 denominator"));
+            let global: Vec<u8> = amax.as_chunks::<4>().0.iter().flat_map(|a| (f32::from_le_bytes(*a) / den).to_le_bytes()).collect();
+            derived.insert(format!("{n}{GLOBAL_SUFFIX}"), global);
+        }
+        self.derived = derived;
+    }
+
+    /// The granularity of the NVFP4 second level of `name` (stored shape `shape`) declared as `amax / denominator`:
+    /// one amax for the tensor, or one per index of its leading axis; one f32 denominator; no stored `_scale_2` beside
+    /// them (two sources for one level would be a guess).
+    fn amax_granularity(&self, name: &str, shape: &[u64]) -> Result<ScaleGranularity, String> {
+        let (amax, den) = (format!("{name}{AMAX_SUFFIX}"), format!("{name}{DENOMINATOR_SUFFIX}"));
+        for side in [&amax, &den] {
+            match self.dtype_of(side).as_deref() {
+                Some("F32") => {}
+                Some(other) => return Err(format!("{name}: {side} is stored as {other}, the declaration needs F32")),
+                None => return Err(format!("{name}: declared amax_denominator but {side} is missing")),
+            }
+        }
+        if self.dtype_of(&format!("{name}{GLOBAL_SUFFIX}")).is_some() {
+            return Err(format!("{name}: stores both {name}{GLOBAL_SUFFIX} and the {AMAX_SUFFIX}/{DENOMINATOR_SUFFIX} pair declared to replace it"));
+        }
+        let numel = |s: &str| self.shape_of(s).map(|v| v.iter().product::<u64>()).unwrap_or(0);
+        if numel(&den) != 1 {
+            return Err(format!("{name}: {den} has shape {:?}, expected one value", self.shape_of(&den).unwrap_or_default()));
+        }
+        let amax_shape = self.shape_of(&amax).unwrap_or_default();
+        match amax_shape.iter().product::<u64>() {
+            1 => Ok(ScaleGranularity::Tensor),
+            _ if shape.len() >= 2 && amax_shape == shape[..1] => Ok(ScaleGranularity::Slab),
+            _ => Err(format!("{name}: {amax} has shape {amax_shape:?}, expected one value or one per index of the leading axis of {shape:?}")),
+        }
     }
 
     fn hide_sidecars(&mut self) {
         let mut hidden = HashSet::new();
         let names: Vec<String> = self.inner.names().map(str::to_string).collect();
         for n in &names {
+            // The sidecars of a tensor declared by name belong to it, whether or not it reads cleanly: an error is the
+            // tensor's, never a stray parameter's.
+            match self.declared.as_ref().filter(|q| q.explicit()).map(|q| q.declared(n)) {
+                Some(DeclaredWeight::Nvfp4 { .. }) => {
+                    hidden.extend(["_scale", GLOBAL_SUFFIX, AMAX_SUFFIX, DENOMINATOR_SUFFIX].iter().map(|s| format!("{n}{s}")));
+                    continue;
+                }
+                Some(DeclaredWeight::Mxfp8 { .. }) => {
+                    hidden.insert(format!("{n}_scale"));
+                    continue;
+                }
+                _ => {}
+            }
             match self.descriptor_unchecked(n) {
                 Ok(d) => {
                     hidden.extend(d.encoding.scales.iter().map(|l| format!("{n}{}", l.suffix)));
@@ -202,6 +281,10 @@ impl PackedReader {
         }
         let dtype = self.dtype_of(name).unwrap_or_default();
         let dtype = dtype.as_str();
+        if let Some(q) = self.declared.as_ref().filter(|q| q.explicit()) {
+            let decl = q.declaration(name).ok_or_else(|| format!("{name}: not declared by the release's hf_quant_config.json parameter_groups"))?;
+            return self.declared_descriptor(name, shape, dtype, decl);
+        }
         self.check_declaration(name, dtype)?;
         let has = |suffix: &str, want: &str| self.dtype_of(&format!("{name}{suffix}")).as_deref() == Some(want);
         let enc = match dtype {
@@ -221,10 +304,12 @@ impl PackedReader {
             "F8_E4M3" => QuantEncoding::fp8(FloatFormat::E4M3Fn),
             "F8_E5M2" => QuantEncoding::fp8(FloatFormat::E5M2),
             "U8" if has("_scale", "F8_E4M3") && has("_scale_2", "F32") => {
-                // NVFP4: two E2M1 codes per stored byte, so the logical row is twice as long.
+                // NVFP4: two E2M1 codes per stored byte, so the logical row is twice as long. A stacked tensor may carry
+                // one second-level scale per leading index (per expert).
                 let mut logical = shape.clone();
                 *logical.last_mut().ok_or_else(|| format!("{name}: scalar NVFP4 tensor"))? *= 2;
-                return Ok(TensorDescriptor::new(name, logical, QuantEncoding::nvfp4()));
+                let per_slab = logical.len() >= 2 && self.shape_of(&format!("{name}_scale_2")).is_some_and(|g| g == logical[..1] && g[0] > 1);
+                return Ok(TensorDescriptor::new(name, logical, if per_slab { QuantEncoding::nvfp4_per_slab() } else { QuantEncoding::nvfp4() }));
             }
             "U8" => QuantEncoding { element: Element::Int { bits: 8, signed: false }, scales: Vec::new() },
             "U32" if has(INT8_SCALE_SUFFIX, "F32") => {
@@ -248,9 +333,80 @@ impl PackedReader {
             DeclaredWeight::Fp8 { .. } if dtype != "F8_E4M3" && dtype != "F8_E5M2" && self.dtype_of(&format!("{name}_scale")).is_some() => {
                 Err(format!("{name}: declared FP8 but stored as {dtype}"))
             }
-            DeclaredWeight::Nvfp4 { group } if dtype == "U8" && group != 16 => Err(format!("{name}: NVFP4 group size {group} is not supported (16)")),
+            DeclaredWeight::Nvfp4 { group, .. } if dtype == "U8" && group != 16 => Err(format!("{name}: NVFP4 group size {group} is not supported (16)")),
             _ => Ok(()),
         }
+    }
+
+    /// The descriptor of a tensor an explicit (`parameter_groups`) release declares: the declared encoding, checked
+    /// against the stored dtype, the declared block shape and every scale sidecar's dtype and shape.
+    fn declared_descriptor(&self, name: &str, shape: Vec<u64>, dtype: &str, decl: &TensorDeclaration) -> Result<TensorDescriptor, String> {
+        if let DeclaredWeight::Unsupported(why) = &decl.weight {
+            return Err(format!("{name}: {why} is not supported"));
+        }
+        if dtype != decl.stored_dtype {
+            return Err(format!("{name}: declared {:?}, stored as {} but the file has {dtype}", decl.weight, decl.stored_dtype));
+        }
+        let mut logical = shape.clone();
+        let enc = match decl.weight {
+            DeclaredWeight::Cast(f) => QuantEncoding { element: Element::Float(f), scales: Vec::new() },
+            DeclaredWeight::Nvfp4 { group, global } => {
+                *logical.last_mut().ok_or_else(|| format!("{name}: scalar NVFP4 tensor"))? *= 2;
+                self.check_block_scale(name, &logical, decl, group, &["F8_E4M3"])?;
+                let mut enc = QuantEncoding::nvfp4();
+                enc.scales[1].granularity = ScaleGranularity::Block(group);
+                enc.scales[0].granularity = match global {
+                    Nvfp4Global::AmaxOverDenominator => {
+                        let g = self.amax_granularity(name, &shape)?;
+                        if !self.derived.contains_key(&format!("{name}{GLOBAL_SUFFIX}")) {
+                            return Err(format!("{name}: its amax / denominator second level was not derived when the declaration was adopted"));
+                        }
+                        g
+                    }
+                    Nvfp4Global::Stored => match self.shape_of(&format!("{name}{GLOBAL_SUFFIX}")) {
+                        Some(g) if g.iter().product::<u64>() == 1 => ScaleGranularity::Tensor,
+                        Some(g) if g == logical[..1] => ScaleGranularity::Slab,
+                        g => return Err(format!("{name}: {name}{GLOBAL_SUFFIX} has shape {g:?}, expected one value or one per leading index")),
+                    },
+                };
+                enc
+            }
+            DeclaredWeight::Mxfp8 { block } => {
+                self.check_block_scale(name, &logical, decl, block, &["U8", "F8_E8M0"])?;
+                let mut enc = QuantEncoding::mxfp8();
+                enc.scales[0].granularity = ScaleGranularity::Block(block);
+                enc
+            }
+            DeclaredWeight::Native | DeclaredWeight::Fp8 { .. } | DeclaredWeight::Undeclared | DeclaredWeight::Unsupported(_) => {
+                return Err(format!("{name}: {:?} is not a parameter_groups declaration", decl.weight))
+            }
+        };
+        Ok(TensorDescriptor::new(name, logical, enc))
+    }
+
+    /// The `<name>_scale` sidecar of a block-scaled declaration: one of `dtypes`, shaped like the logical tensor with
+    /// its rows cut into `block`-wide blocks. The declared block shape's leading extents (the producer's tile) must
+    /// divide the corresponding axes; the stored grid, one scale per row and block, is what is read.
+    fn check_block_scale(&self, name: &str, logical: &[u64], decl: &TensorDeclaration, block: u32, dtypes: &[&str]) -> Result<(), String> {
+        let side = format!("{name}_scale");
+        let stored = self.dtype_of(&side).ok_or_else(|| format!("{name}: declared block scales but {side} is missing"))?;
+        if !dtypes.contains(&stored.as_str()) {
+            return Err(format!("{name}: {side} is stored as {stored}, the declaration needs one of {dtypes:?}"));
+        }
+        let inner = *logical.last().unwrap_or(&0);
+        let mut want = logical.to_vec();
+        if let Some(l) = want.last_mut() {
+            *l = inner / block as u64;
+        }
+        let got = self.shape_of(&side).unwrap_or_default();
+        if !inner.is_multiple_of(block as u64) || got != want {
+            return Err(format!("{name}: {side} has shape {got:?}, but {block}-wide blocks of logical shape {logical:?} need {want:?}"));
+        }
+        let fits = decl.block_shape.iter().rev().zip(logical.iter().rev()).all(|(b, d)| d.is_multiple_of(*b));
+        if decl.block_shape.len() > logical.len() || !fits {
+            return Err(format!("{name}: declared weight_block_shape {:?} does not tile logical shape {logical:?}", decl.block_shape));
+        }
+        Ok(())
     }
 
     /// An FP8 weight with a `<name>_scale` sibling: the ModelOpt / compressed-tensors layout (`weight_scale`).
@@ -286,8 +442,11 @@ impl PackedReader {
         format!("{}{}", desc.name, desc.encoding.scales[level].suffix)
     }
 
-    /// Whole payload bytes of `name` in storage, whichever file holds it.
+    /// Whole payload bytes of `name` in storage, whichever file holds it (or as derived from the declaration).
     fn stored(&self, name: &str) -> Option<(&[u8], &str)> {
+        if let Some(d) = self.derived.get(name) {
+            return Some((d.as_slice(), "F32"));
+        }
         let (holder, held) = self.inner.resolve(name);
         if let Some(g) = holder.gguf() {
             return g.raw_tensor_bytes(&held).map(|(b, _)| (b, "GGUF"));
@@ -574,5 +733,76 @@ mod tests {
         assert_eq!(r.descriptor("c.weight").unwrap().encoding.scales[0].granularity, ScaleGranularity::Row);
         assert_eq!(r.descriptor("b.weight").unwrap().encoding.scales[0].granularity, ScaleGranularity::Tile2d { rows: 16, cols: 16 });
         assert!(r.descriptor("q.qweight").unwrap_err().contains("gptq"));
+    }
+
+    fn parameter_groups(dir: &TmpDir, mx_scale: Vec<u64>, n_dtype: &str) {
+        write_safetensors(
+            &dir.join("model.safetensors"),
+            &[
+                RawTensor { name: "e.w13_weight", dtype: "U8", shape: vec![2, 4, 16], bytes: bytes(1, 128) },
+                RawTensor { name: "e.w13_weight_scale", dtype: "F8_E4M3", shape: vec![2, 4, 2], bytes: e4m3_bytes(2, 16) },
+                RawTensor { name: "e.w13_weight_amax", dtype: "F32", shape: vec![2], bytes: f32_bytes(&[3.0, 0.7]) },
+                RawTensor { name: "e.w13_weight_outer_scale_denominator", dtype: "F32", shape: vec![1], bytes: f32_bytes(&[2688.0]) },
+                RawTensor { name: "m.w13_weight", dtype: "F8_E4M3", shape: vec![2, 4, 32], bytes: e4m3_bytes(3, 256) },
+                RawTensor { name: "m.w13_weight_scale", dtype: "U8", shape: mx_scale.clone(), bytes: vec![126; mx_scale.iter().product::<u64>() as usize] },
+                RawTensor { name: "n", dtype: n_dtype, shape: vec![4], bytes: bf16_bytes(&[1.0; 4]) },
+                RawTensor { name: "stray", dtype: "BF16", shape: vec![2], bytes: bf16_bytes(&[1.0; 2]) },
+            ],
+        );
+        let g = |t: &str, c: &str, o: &str, block: serde_json::Value, extra: serde_json::Value, tensors: &[&str]| {
+            let mut v = serde_json::json!({"compute_dtype": c, "output_dtype": o, "required_activation_quantization": null, "weight_block_shape": block, "weight_transform": t, "tensors": tensors});
+            if let Some(f) = extra.as_str() {
+                v["weight_scale_format"] = f.into();
+            }
+            v
+        };
+        let hf = serde_json::json!({"quant_method": "vendor", "model": {"parameter_groups": [
+            g("cast", "bfloat16", "bfloat16", serde_json::json!([]), serde_json::Value::Null, &["n"]),
+            g("nvfp4_nearest", "nvfp4", "uint8", serde_json::json!([1, 16]), "amax_denominator".into(), &["e.w13_weight"]),
+            g("mxfp8_nearest", "mxfp8", "float8_e4m3fn", serde_json::json!([4, 32]), serde_json::Value::Null, &["m.w13_weight"])]}});
+        std::fs::write(dir.join("hf_quant_config.json"), hf.to_string()).unwrap();
+        std::fs::write(dir.join("config.json"), serde_json::json!({"quantization_config": {"quant_method": "modelopt", "quant_algo": "NVFP4"}}).to_string()).unwrap();
+    }
+
+    /// Spec: a `parameter_groups` release reads each tensor as declared: NVFP4 experts with their per-expert second
+    /// level folded from `amax / denominator`, MXFP8 with a `U8`-stored E8M0 scale, casts in their dtype; sidecars are
+    /// not listed, and a stored tensor the release does not declare is refused by name.
+    #[test]
+    fn a_parameter_groups_release_reads_each_tensor_as_declared() {
+        use crate::packed::codec::{CodecRegistry, Tile};
+        let dir = TmpDir::new("pgroups");
+        parameter_groups(&dir, vec![2, 4, 1], "BF16");
+        let r = PackedReader::open(&dir.0).unwrap();
+        let mut names = r.names();
+        names.sort();
+        assert_eq!(names, ["e.w13_weight", "m.w13_weight", "n", "stray"]);
+        assert!(r.descriptor("stray").unwrap_err().contains("not declared"));
+        assert_eq!(r.descriptor("n").unwrap().encoding, QuantEncoding::bf16());
+        let e = r.descriptor("e.w13_weight").unwrap();
+        assert_eq!((e.shape.clone(), e.encoding.clone()), (vec![2, 4, 32], QuantEncoding::nvfp4_per_slab()));
+        let mut buf = TileBuf::default();
+        r.read_blocks(&e, &(128..256), &mut buf).unwrap();
+        assert_eq!(buf.scales[0], f32_bytes(&[0.7f32 / 2688.0]), "expert 1's second level is its amax over the denominator");
+        let m = r.descriptor("m.w13_weight").unwrap();
+        assert_eq!(m.encoding, QuantEncoding::mxfp8());
+        let all = read_all(&r, &m);
+        let tile = Tile { elems: 0..m.numel(), payload: &all.payload, scales: vec![&all.scales[0]] };
+        let mut out = Vec::new();
+        CodecRegistry::reference().decoder(&m.encoding).unwrap().decode_tile(&m, &tile, &mut out).unwrap();
+        let want: Vec<f32> = all.payload.iter().map(|&c| crate::safetensors::e4m3fn_to_f32(c) * 0.5).collect();
+        assert_eq!(out, want, "E8M0 code 126 is a scale of 1/2");
+    }
+
+    /// Spec: a declaration contradicting what is stored is an error naming both, never a reinterpretation.
+    #[test]
+    fn a_stored_dtype_or_scale_shape_contradicting_the_declaration_is_an_error() {
+        let dir = TmpDir::new("pgroups-scale");
+        parameter_groups(&dir, vec![2, 4, 2], "BF16");
+        let err = PackedReader::open(&dir.0).unwrap().descriptor("m.w13_weight").unwrap_err();
+        assert!(err.contains("m.w13_weight_scale has shape [2, 4, 2]"), "{err}");
+        let dir = TmpDir::new("pgroups-dtype");
+        parameter_groups(&dir, vec![2, 4, 1], "F16");
+        let err = PackedReader::open(&dir.0).unwrap().descriptor("n").unwrap_err();
+        assert!(err.contains("BF16") && err.contains("F16"), "{err}");
     }
 }

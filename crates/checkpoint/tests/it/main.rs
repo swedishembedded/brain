@@ -13,6 +13,7 @@ mod e4m3_decode_bench;
 mod gguf_read_mapped;
 mod gguf_split;
 mod mmap_decode_parallel;
+mod parameter_groups_release;
 mod quantize_to_gguf;
 mod renamed_view;
 mod torch_hf_dir;

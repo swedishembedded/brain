@@ -250,6 +250,10 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
   - Cross-check every declaration against the stored dtype and the shape of the scale
     sibling. A mismatch is an error, never a reinterpretation.
   - Gate: unit tests on the real sidecar plus the real header, red today.
+  - Done (2026-11-21): `HfQuant` parses the `parameter_groups` shape strictly (`TensorDeclaration`,
+    `DeclaredWeight::{Cast, Nvfp4 { global }, Mxfp8, Undeclared}`, `Nvfp4Global`, `ActivationQuant`); `PackedReader`
+    reads each tensor as declared and refuses undeclared tensors and dtype/scale-shape contradictions
+    (`tests/it/parameter_groups_release.rs`, finding #549).
 - **I0.2** `checkpoint::packed::{encoding,codec,reader}`:
   - A `QuantEncoding::mxfp8()` constructor.
   - An NVFP4 second level derived from `amax / denominator` sidecars, folded to the
@@ -259,6 +263,10 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
     naming, hidden from the parameter list.
   - Gate: decode of a real expert slab equals the reference dequant formula, bit-exact in
     f32, for one NVFP4 layer and one MXFP8 layer.
+  - Done (2026-11-21): `QuantEncoding::{mxfp8, nvfp4_per_slab}`, `ScaleGranularity::Slab`, the `_scale_2` level
+    folded once from `_amax / _outer_scale_denominator`, sidecars hidden; scale levels apply finest first. Gate:
+    `a_decoded_expert_slab_equals_the_reference_dequantization_bit_for_bit` (golden from
+    `tools/goldens/inkling2_expert_dequant_reference.py` in `testdata/golden/inkling2/experts/`).
 - **I0.3** `checkpoint::packed::slice` (+concat):
   - Per-expert 2-D views of stacked scaled and sub-byte tensors.
   - A stride-2 row view that splits interleaved gate/up for both the payload and the

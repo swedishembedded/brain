@@ -99,6 +99,9 @@ pub enum ScaleGranularity {
     /// One scale per `rows x cols` tile of a rank-2 tensor (DeepSeek/Qwen FP8
     /// `weight_block_size`); edge tiles are partial.
     Tile2d { rows: u32, cols: u32 },
+    /// One scale per index of the leading axis: per expert of a stacked
+    /// `[experts, rows, cols]` tensor (an NVFP4 second level per expert).
+    Slab,
 }
 
 /// One level of the scale hierarchy: a sidecar tensor of `format` values.
@@ -195,6 +198,22 @@ impl QuantEncoding {
             ],
         }
     }
+    /// NVFP4 of a stacked tensor (`[slabs, rows, cols]`): E2M1 codes, an E4M3
+    /// scale per 16 elements, and an f32 second level per slab (per expert)
+    /// in the `_scale_2` sidecar.
+    pub fn nvfp4_per_slab() -> QuantEncoding {
+        let mut e = Self::nvfp4();
+        e.scales[0].granularity = ScaleGranularity::Slab;
+        e
+    }
+    /// MXFP8 (OCP microscaling): E4M3 codes, an E8M0 power-of-two scale per
+    /// 32 elements of a row.
+    pub fn mxfp8() -> QuantEncoding {
+        QuantEncoding {
+            element: Element::Float(FloatFormat::E4M3Fn),
+            scales: vec![ScaleLevel { granularity: ScaleGranularity::Block(32), format: FloatFormat::E8M0, suffix: "_scale".into() }],
+        }
+    }
     /// MXFP4: E2M1 codes, an E8M0 power-of-two scale per 32 elements.
     pub fn mxfp4() -> QuantEncoding {
         QuantEncoding {
@@ -278,6 +297,7 @@ impl QuantEncoding {
                 ScaleGranularity::Block(n) => format!("block:{n}"),
                 ScaleGranularity::Row => "row".to_string(),
                 ScaleGranularity::Tile2d { rows, cols } => format!("tile:{rows}x{cols}"),
+                ScaleGranularity::Slab => "slab".to_string(),
             };
             out.push_str(&format!(";{g}:{}:{}", s.format.tag(), s.suffix));
         }
@@ -302,6 +322,7 @@ impl QuantEncoding {
             let (granularity, fmt, suffix) = match l.as_slice() {
                 ["tensor", fmt, suffix] => (ScaleGranularity::Tensor, fmt, suffix),
                 ["row", fmt, suffix] => (ScaleGranularity::Row, fmt, suffix),
+                ["slab", fmt, suffix] => (ScaleGranularity::Slab, fmt, suffix),
                 ["block", n, fmt, suffix] => (ScaleGranularity::Block(n.parse().map_err(|_| bad())?), fmt, suffix),
                 ["tile", rc, fmt, suffix] => {
                     let (r, c) = rc.split_once('x').ok_or_else(bad)?;
@@ -329,6 +350,7 @@ impl fmt::Display for QuantEncoding {
                 ScaleGranularity::Block(n) => write!(f, " x {:?}/{n}", s.format)?,
                 ScaleGranularity::Row => write!(f, " x {:?}/row", s.format)?,
                 ScaleGranularity::Tile2d { rows, cols } => write!(f, " x {:?}/{rows}x{cols}", s.format)?,
+                ScaleGranularity::Slab => write!(f, " x {:?}/slab", s.format)?,
             }
         }
         Ok(())
@@ -370,6 +392,11 @@ impl TensorDescriptor {
         self.numel() / self.inner().max(1)
     }
 
+    /// Elements per index of the leading axis (one slab of a stacked tensor).
+    pub fn slab_numel(&self) -> u64 {
+        self.numel() / self.shape.first().copied().unwrap_or(1).max(1)
+    }
+
     /// Check that the shape and encoding are mutually consistent: the payload
     /// must be a whole number of blocks, block scales must not straddle rows,
     /// and tile scales need a rank-2 tensor.
@@ -393,6 +420,9 @@ impl TensorDescriptor {
                 ScaleGranularity::Tile2d { rows, cols } if rows == 0 || cols == 0 || self.shape.len() != 2 => {
                     return Err(format!("{name}: {rows}x{cols} tile scales need a rank-2 tensor, got shape {:?}", self.shape));
                 }
+                ScaleGranularity::Slab if self.shape.len() < 2 => {
+                    return Err(format!("{name}: per-slab scales need a leading axis over at least a row, got shape {:?}", self.shape));
+                }
                 _ => {}
             }
         }
@@ -412,6 +442,7 @@ impl TensorDescriptor {
             ScaleGranularity::Block(n) => self.numel() / n as u64,
             ScaleGranularity::Row => self.rows(),
             ScaleGranularity::Tile2d { rows, cols } => self.shape[0].div_ceil(rows as u64) * self.shape[1].div_ceil(cols as u64),
+            ScaleGranularity::Slab => self.shape[0],
         }
     }
 
@@ -427,7 +458,8 @@ impl TensorDescriptor {
         let mut q = self.encoding.block_geometry().elems;
         for s in &self.encoding.scales {
             q = match s.granularity {
-                ScaleGranularity::Tensor => q,
+                // A tile may straddle slabs: its scale range then covers each slab it touches.
+                ScaleGranularity::Tensor | ScaleGranularity::Slab => q,
                 ScaleGranularity::Block(n) => lcm(q, n as u64),
                 ScaleGranularity::Row | ScaleGranularity::Tile2d { .. } => lcm(q, self.inner()),
             };
@@ -461,6 +493,7 @@ impl TensorDescriptor {
             ScaleGranularity::Tensor => 0..1,
             ScaleGranularity::Block(n) => elems.start / n as u64..elems.end.div_ceil(n as u64),
             ScaleGranularity::Row => elems.start / self.inner()..elems.end.div_ceil(self.inner()),
+            ScaleGranularity::Slab => elems.start / self.slab_numel()..elems.end.div_ceil(self.slab_numel()),
             ScaleGranularity::Tile2d { rows, cols } => {
                 let band = |row: u64| row / rows as u64;
                 let r0 = elems.start / self.inner();
@@ -482,7 +515,7 @@ mod tests {
 
     #[test]
     fn every_non_ggml_encoding_round_trips_through_its_spec() {
-        for e in [QuantEncoding::f32(), QuantEncoding::bf16(), QuantEncoding::fp8_e4m3_tiled(128), QuantEncoding::int8_blocked(32), QuantEncoding::nf4_blocked(32), QuantEncoding::nvfp4(), QuantEncoding::mxfp4(), QuantEncoding::fp8(FloatFormat::E5M2)] {
+        for e in [QuantEncoding::f32(), QuantEncoding::bf16(), QuantEncoding::fp8_e4m3_tiled(128), QuantEncoding::int8_blocked(32), QuantEncoding::nf4_blocked(32), QuantEncoding::nvfp4(), QuantEncoding::nvfp4_per_slab(), QuantEncoding::mxfp8(), QuantEncoding::mxfp4(), QuantEncoding::fp8(FloatFormat::E5M2)] {
             let spec = e.spec().expect("a non-ggml encoding has a spec");
             assert_eq!(QuantEncoding::from_spec(&spec).unwrap(), e, "{spec}");
         }
@@ -500,6 +533,17 @@ mod tests {
         assert_eq!((d.scale_numel(1), d.scale_bytes(1)), (n / 16, n / 16));
         assert_eq!(d.encoding.payload_bits_per_elem(), 4.0);
         assert_eq!(d.encoding.packing(), Packing::SubByteLsbFirst);
+    }
+
+    #[test]
+    fn a_per_slab_level_has_one_scale_per_leading_index_and_a_tile_covers_the_slabs_it_touches() {
+        let d = desc(&[4, 8, 32], QuantEncoding::nvfp4_per_slab());
+        d.validate().unwrap();
+        assert_eq!((d.scale_numel(0), d.scale_bytes(0), d.slab_numel()), (4, 16, 256));
+        assert_eq!(d.scale_range(0, &(256..512)), 1..2);
+        assert_eq!(d.scale_range(0, &(240..528)), 0..3);
+        assert_eq!(d.scale_range(1, &(256..512)), 16..32);
+        assert!(desc(&[32], QuantEncoding::nvfp4_per_slab()).validate().is_err(), "a rank-1 tensor has no slabs of rows");
     }
 
     #[test]

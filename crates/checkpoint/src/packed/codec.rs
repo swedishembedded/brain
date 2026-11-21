@@ -223,10 +223,12 @@ fn decode_nibbles(payload: &[u8], n: usize, table: &[f32; 16], out: &mut Vec<f32
     out.extend((0..n).map(|i| table[((payload[i / 2] >> (4 * (i % 2))) & 0xF) as usize]));
 }
 
-/// Multiply the decoded tile by every scale level covering it.
+/// Multiply the decoded tile by every scale level covering it, finest level first: a code times its block scale is
+/// exact for the narrow formats (E2M1 x E4M3, E4M3 x E8M0), so the only rounding is the coarse f32 level's, the order
+/// reference dequantizers use (`(code * block) * global`).
 fn apply_scales(desc: &TensorDescriptor, tile: &Tile<'_>, out: &mut [f32]) {
     let inner = *desc.shape.last().unwrap_or(&1) as usize;
-    for (l, level) in desc.encoding.scales.iter().enumerate() {
+    for (l, level) in desc.encoding.scales.iter().enumerate().rev() {
         let bytes = tile.scales[l];
         let first = desc.scale_range(l, &tile.elems).start as usize;
         let at = |abs: usize| scale_at(level.format, bytes, abs - first);
@@ -247,6 +249,18 @@ fn apply_scales(desc: &TensorDescriptor, tile: &Tile<'_>, out: &mut [f32]) {
                 for (r, c) in out.chunks_mut(inner).enumerate() {
                     let s = at(base + r);
                     c.iter_mut().for_each(|v| *v *= s);
+                }
+            }
+            ScaleGranularity::Slab => {
+                let slab = desc.slab_numel() as usize;
+                let start = tile.elems.start as usize;
+                let mut i = 0;
+                while i < out.len() {
+                    let abs = start + i;
+                    let end = ((abs / slab + 1) * slab - start).min(out.len());
+                    let s = at(abs / slab);
+                    out[i..end].iter_mut().for_each(|v| *v *= s);
+                    i = end;
                 }
             }
             ScaleGranularity::Tile2d { rows, cols } => {
