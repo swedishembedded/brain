@@ -1521,6 +1521,8 @@ pub const ROUTER_BWD: &str = include_str!("../wgsl/router_bwd.wgsl");
 pub const ROUTER_BWD_SIGMOID: &str = include_str!("../wgsl/router_bwd_sigmoid.wgsl");
 /// `wgsl/router_gate.wgsl`
 pub const ROUTER_GATE: &str = include_str!("../wgsl/router_gate.wgsl");
+/// `wgsl/router_gate_replay.wgsl`
+pub const ROUTER_GATE_REPLAY: &str = include_str!("../wgsl/router_gate_replay.wgsl");
 /// `wgsl/router_gate_sigmoid.wgsl`
 pub const ROUTER_GATE_SIGMOID: &str = include_str!("../wgsl/router_gate_sigmoid.wgsl");
 /// `wgsl/router_gate_train.wgsl`
@@ -2527,6 +2529,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("router_bwd", ROUTER_BWD),
     ("router_bwd_sigmoid", ROUTER_BWD_SIGMOID),
     ("router_gate", ROUTER_GATE),
+    ("router_gate_replay", ROUTER_GATE_REPLAY),
     ("router_gate_sigmoid", ROUTER_GATE_SIGMOID),
     ("router_gate_train", ROUTER_GATE_TRAIN),
     ("router_topk_compact", ROUTER_TOPK_COMPACT),

@@ -119,6 +119,7 @@ pub mod resident_ft;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod resident_shard;
 pub mod rollout;
+pub mod routing;
 pub mod saved;
 pub mod segmented;
 #[cfg(not(target_arch = "wasm32"))]

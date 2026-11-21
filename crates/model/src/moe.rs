@@ -187,6 +187,41 @@ pub fn router_fwd_kind(
     }
 }
 
+/// The replay kernel a model registers to force recorded routing ([`router_fwd_replay`]).
+pub const ROUTER_REPLAY_KERNEL: (&str, &str) = ("router_gate_replay", kernels::ROUTER_GATE_REPLAY);
+
+/// A recorded expert selection forced on one MoE call (routing replay, [`crate::routing`]): `experts` is the call's
+/// `[rows, top_k]` u32 ids ([`crate::routing::RoutingReplay::upload_call`]), [`crate::routing::UNRECORDED`] on a row
+/// the router keeps routing itself; `kernel` is [`ROUTER_REPLAY_KERNEL`]'s index in the model's pipeline list.
+#[derive(Clone, Copy)]
+pub struct RouterOverride<'a> {
+    pub kernel: usize,
+    pub experts: &'a DeviceBuffer,
+}
+
+/// Force a recorded selection onto the gate [`router_fwd_kind`] just wrote: on every recorded row the gate becomes the
+/// router's own weights (`kind`'s formula over the current `logits`, with its `norm_topk_prob`/`routed_scaling`) at
+/// the recorded experts and zero elsewhere, so [`router_bwd`] (which reads the selection as the gate's nonzero
+/// pattern) differentiates it unchanged; unrecorded rows are left as the router wrote them. Replaying the router's own
+/// selection reproduces its gate to the bit. `bias` is the sigmoid router's selection bias (it orders the
+/// renormalising sum as the router's greedy top-k did), required for `SigmoidNoAuxTc` and unused for `Softmax`.
+/// Dispatch it after [`router_fwd_kind`], on the same `gate`.
+pub fn router_fwd_replay(g: &Gpu, over: RouterOverride<'_>, kind: RouterKind, shape: &MoeShape, logits: &DeviceBuffer, bias: Option<&DeviceBuffer>, gate: &DeviceBuffer) -> Step {
+    assert!(
+        (1..=crate::routing::MAX_REPLAY_TOP_K).contains(&shape.top_k),
+        "router_fwd_replay: router_gate_replay.wgsl replays 1..={} experts per row, the call keeps {}",
+        crate::routing::MAX_REPLAY_TOP_K,
+        shape.top_k
+    );
+    let (kind_id, norm, scale, bias) = match kind {
+        RouterKind::Softmax { norm_topk_prob, routed_scaling, .. } => (0u32, norm_topk_prob, routed_scaling, logits),
+        RouterKind::SigmoidNoAuxTc { norm_topk_prob, routed_scaling, .. } => {
+            (1u32, norm_topk_prob, routed_scaling, bias.expect("router_fwd_replay: RouterKind::SigmoidNoAuxTc orders its replay by the selection bias; pass it"))
+        }
+    };
+    g.step(over.kernel, &[logits, over.experts, bias, gate], &[shape.rows, shape.n_experts, shape.top_k, kind_id, norm as u32, gpu_core::f(scale)], shape.rows)
+}
+
 /// Kernel indices [`router_bwd`] dispatches, resolved by the calling model
 /// against its own registered pipeline list.
 #[derive(Clone, Copy)]
