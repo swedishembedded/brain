@@ -37,6 +37,8 @@ pub const MAX_DATA_DOCUMENT_BYTES: usize = 64 * 1024;
 pub const MAX_EVALUATIONS: u32 = 1024;
 /// The longest adapter id accepted.
 pub const MAX_ADAPTER_ID_LEN: usize = 200;
+/// The most cards one run trains on at once.
+pub const MAX_CARDS: u32 = 64;
 
 /// What the trainer applies to each LoRA and objective setting a request omits, by param name, read from the trainer's
 /// own defaults: [`brain::PolicyGradientConfig::default`] for the policy gradient, the preference trainer's and the
@@ -110,6 +112,7 @@ fn spec_without_defaults() -> ActionSpec {
         .param(ParamSpec::new("grad_accum", ParamType::Int, "records averaged into one optimiser step").default(json!(1)).min(1.0).max(4096.0).step(1.0))
         .param(ParamSpec::new("strict_updates", ParamType::Bool, "abort at the first optimiser step whose loss or gradient is not finite (off: such a step is skipped, and the run aborts on the third in a row); the adapter is never updated with a non-finite value").default(json!(false)))
         .param(ParamSpec::new("seed", ParamType::Int, "seed of a fresh adapter's initialisation and the batch order (random when omitted; the report carries the one used)").min(0.0))
+        .param(ParamSpec::new("cards", ParamType::Int, "how many of the server's cards the run trains on at once: one data-parallel rank per card, each holding the run's whole footprint, training its own share of the records with the same seed, with every step's gradients reduced over the cards (sft and policy_gradient only; at most the cards the server has)").default(json!(1)).min(1.0).max(MAX_CARDS as f64).step(1.0))
         .param(ParamSpec::new("max_block", ParamType::Int, "the longest training row in tokens: the memory reserved for the run is sized to it, and a record longer than it is refused by name").default(json!(8192)).min(64.0).max(1_048_576.0).step(1.0))
         .param(ParamSpec::new("thinking", ParamType::Bool, "train the model to reason before it answers (off: trained for no-think mode); sft and policy_gradient only").default(json!(true)))
         .param(ParamSpec::new("pack_answers", ParamType::Bool, "train a record that supervises several turns as one sequence; sft and policy_gradient only").default(json!(false)))
@@ -340,6 +343,7 @@ pub struct Params {
     pub grad_accum: u32,
     pub strict_updates: bool,
     pub seed: Option<u64>,
+    pub cards: u32,
     pub max_block: u32,
     pub thinking: bool,
     pub pack_answers: bool,
@@ -465,6 +469,9 @@ impl Request {
             crate::job::policy_gradient_config(&params)?.validate().map_err(|why| format!("train: {why}"))?;
         }
         crate::consolidate::check_resume(ACTION, params.resume_key.as_deref(), params.checkpoint_every)?;
+        if params.cards > 1 && !matches!(params.objective, Objective::Sft | Objective::PolicyGradient) {
+            return refused(&format!("cards {} trains data-parallel, one rank per card, and the {} objective trains on one card; sft and policy_gradient train on several", params.cards, params.objective.name()));
+        }
         if params.keep_evaluations && params.eval_every == 0 {
             return refused("keep_evaluations needs eval_every > 0");
         }
@@ -612,6 +619,7 @@ mod tests {
         assert_eq!((r.params.rank, r.params.lr, r.params.seed), (None, None, None), "what the caller does not name stays the trainer's own default");
         assert_eq!(r.data.digests().len(), 1);
         assert!(!r.params.strict_updates, "a non-finite step is skipped by default");
+        assert_eq!(r.params.cards, 1, "a run trains on one card unless it asks for more");
         let strict = request(json!({"base": "Qwen/Qwen3.8-27B-FP8", "data": json!({"train": {"digest": digest(1)}}).to_string(), "strict_updates": true}), &[]).unwrap();
         assert!(strict.params.strict_updates);
     }

@@ -221,6 +221,8 @@ impl Run {
         write_atomic(&path, &serde_json::to_vec_pretty(&self.record).map_err(|e| e.to_string())?).map_err(|e| refuse(&self.record.key, format!("cannot write its run record: {e}")))?;
         std::fs::remove_file(self.state_path()).ok();
         std::fs::remove_dir_all(self.state_path().with_extension("offdevice")).ok();
+        // A run on several cards keeps each rank's state in numbered generations beside the state path.
+        std::fs::remove_dir_all(self.state_path().with_extension("safetensors.job")).ok();
         std::fs::remove_dir_all(self.evaluations_dir()).ok();
         Ok(())
     }

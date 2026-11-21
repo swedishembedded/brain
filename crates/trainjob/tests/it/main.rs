@@ -14,6 +14,7 @@ mod fixture;
 
 #[cfg(target_os = "linux")]
 mod dbus;
+mod cards;
 mod consolidate;
 mod create;
 mod dryrun;

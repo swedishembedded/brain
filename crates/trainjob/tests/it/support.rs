@@ -79,7 +79,9 @@ fn rig_budgeted(tag: &str, budgets: Budgets, store: bool, card: Option<u64>, ext
     std::fs::create_dir_all(&artifacts).unwrap();
     let store_handle = ArtifactStore::open(&artifacts).unwrap();
     let work_root = dir.join("work");
-    let config = TrainConfig { models_dir: Some(models.clone()), store: store.then(|| store_handle.clone()), work_root: work_root.clone(), largest_card_bytes: card, devices: 1, quotas: trainjob::Quotas::default(), free_space: Arc::new(trainjob::DiskFree) };
+    // As a server counts them: one run in flight per card, and at least one.
+    let devices = budgets.gpus().len().max(1);
+    let config = TrainConfig { models_dir: Some(models.clone()), store: store.then(|| store_handle.clone()), work_root: work_root.clone(), largest_card_bytes: card, devices, quotas: trainjob::Quotas::default(), free_space: Arc::new(trainjob::DiskFree) };
     let mut served = vec![trainjob::resident(config)];
     served.extend(extra);
     let exec = Executor::start(served, budgets, Policy::default());

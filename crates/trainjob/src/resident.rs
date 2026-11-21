@@ -30,6 +30,11 @@
 //!   serving is using - the caller retries;
 //! * one run holds one device at a time (the executor's device lane), and a
 //!   run needing more than the largest card holds is refused at the door;
+//! * a `train` run asking for `cards` N > 1 holds N cards at once, each
+//!   charged one rank's footprint ([`residency::ResidentModel::cards`]): the
+//!   cards with room, else ones that evicting idle residents frees, all of
+//!   them or none; a request for more cards than the server has is refused at
+//!   the door;
 //! * when the run ends, its instance is dropped and its reservation
 //!   returned at once ([`residency::ResidentModel::transient`]).
 
@@ -116,9 +121,13 @@ impl TrainResident {
         }
         self.check_digests(&request.data.digests())?;
         let base_dir = job::resolve_base(self.env.models_dir.as_deref(), &request.params.base)?;
+        let cards = request.params.cards;
+        if cards as usize > self.devices {
+            return Err(format!("train: cards {cards}: this server trains on at most {} card(s) at once", self.devices));
+        }
         let footprint = self.footprints.of(&base_dir, &request, self.largest_card_bytes)?;
         self.fits_a_card("train", footprint.device_bytes, &format!("{}: {}", footprint.reason, footprint.breakdown), request.params.max_block)?;
-        Ok(Reservation::Card(footprint.device_bytes))
+        Ok(Reservation::Card(footprint.device_bytes, cards))
     }
 
     fn admit_full(&self, inv: &Invocation) -> Result<Reservation, String> {
@@ -140,7 +149,7 @@ impl TrainResident {
         if p.validate_only {
             return Ok(Reservation::Host(64 << 20));
         }
-        Ok(Reservation::Card(footprint.device_bytes))
+        Ok(Reservation::Card(footprint.device_bytes, 1))
     }
 
     fn admit_merge(&self, inv: &Invocation) -> Result<Reservation, String> {
@@ -173,7 +182,7 @@ impl TrainResident {
         let base_dir = job::resolve_base(self.env.models_dir.as_deref(), &p.base)?;
         let footprint = pretrain::footprint(&request, &base_dir)?;
         self.fits_a_card(pretrain::ACTION, footprint.device_bytes, &footprint.reason, p.block)?;
-        Ok(Reservation::Card(footprint.device_bytes))
+        Ok(Reservation::Card(footprint.device_bytes, 1))
     }
 
     fn admit_init(&self, inv: &Invocation) -> Result<Reservation, String> {
@@ -203,7 +212,7 @@ impl TrainResident {
         if self.largest_card_bytes.is_some_and(|card| timeline::DEVICE_BUDGET > card) {
             return Err(format!("timeline_train: a run is budgeted {} bytes of device memory and the largest card has less", timeline::DEVICE_BUDGET));
         }
-        Ok(Reservation::Card(timeline::DEVICE_BUDGET))
+        Ok(Reservation::Card(timeline::DEVICE_BUDGET, 1))
     }
 
     fn admit_check(&self, inv: &Invocation) -> Result<Reservation, String> {
@@ -260,11 +269,20 @@ impl TrainResident {
     }
 }
 
-/// What a run reserves: bytes on a card, or bytes of host memory for work that takes no card.
+/// What a run reserves: bytes on each of a number of cards, or bytes of host memory for work that takes no card.
 #[derive(Clone, Copy)]
 enum Reservation {
-    Card(u64),
+    Card(u64, u32),
     Host(u64),
+}
+
+/// The bytes and the card count of a card key: `train:<bytes>` is one card, `train:<bytes>x<cards>` several.
+fn card_key(config: &str) -> Option<(u64, usize)> {
+    let rest = config.strip_prefix(CARD_PREFIX)?;
+    match rest.split_once('x') {
+        Some((bytes, cards)) => Some((bytes.parse().ok()?, cards.parse().ok()?)),
+        None => Some((rest.parse().ok()?, 1)),
+    }
 }
 
 impl ResidentModel for TrainResident {
@@ -276,7 +294,8 @@ impl ResidentModel for TrainResident {
         // `check_job` has already refused a job this cannot size; a model that vanished since reads as no room needed
         // and the run fails by name when it starts.
         let key = match self.admit(action, inv) {
-            Ok(Reservation::Card(bytes)) => format!("{CARD_PREFIX}{bytes}"),
+            Ok(Reservation::Card(bytes, 1)) => format!("{CARD_PREFIX}{bytes}"),
+            Ok(Reservation::Card(bytes, cards)) => format!("{CARD_PREFIX}{bytes}x{cards}"),
             Ok(Reservation::Host(bytes)) => format!("{HOST_PREFIX}{bytes}"),
             Err(_) => format!("{CARD_PREFIX}0"),
         };
@@ -285,14 +304,19 @@ impl ResidentModel for TrainResident {
 
     fn estimate(&self, key: &InstanceKey) -> MemCost {
         let config = &key.base().config;
-        let bytes = |prefix: &str| config.strip_prefix(prefix).and_then(|b| b.parse().ok());
-        match (bytes(CARD_PREFIX), bytes(HOST_PREFIX)) {
+        let host = config.strip_prefix(HOST_PREFIX).and_then(|b| b.parse().ok());
+        match (card_key(config), host) {
             // Host-side work: placed on the host whatever accelerators `--device` names.
             (_, Some(host)) => MemCost::host_work(host),
-            // The footprint is the whole run's, its activations included: no fallback is charged beside it.
-            (Some(card), None) => MemCost::new(card, 0).with_activation(0),
+            // The footprint is one rank's whole run, its activations included: no fallback is charged beside it, and
+            // a run on several cards is charged it on each.
+            (Some((card, _)), None) => MemCost::new(card, 0).with_activation(0),
             (None, None) => MemCost::new(0, 0),
         }
+    }
+
+    fn cards(&self, key: &InstanceKey) -> usize {
+        card_key(&key.base().config).map_or(1, |(_, cards)| cards)
     }
 
     fn replicas(&self) -> usize {
@@ -312,22 +336,27 @@ impl ResidentModel for TrainResident {
     }
 
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        Ok(Box::new(TrainInstance { env: self.env.clone(), device }))
+        Ok(Box::new(TrainInstance { env: self.env.clone(), devices: vec![device] }))
+    }
+
+    fn activate_cards(&self, _key: &InstanceKey, devices: &[Device]) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(TrainInstance { env: self.env.clone(), devices: devices.to_vec() }))
     }
 }
 
-/// A run's claim on a device. It holds no memory itself: the trainer builds its model inside [`Instance::run`], on
-/// the device the manager placed it on, and frees it before the run returns.
+/// A run's claim on its devices. It holds no memory itself: the trainer builds its model inside [`Instance::run`], on
+/// the devices the manager placed it on (one rank per card when there are several), and frees it before the run
+/// returns.
 struct TrainInstance {
     env: JobEnv,
-    device: Device,
+    devices: Vec<Device>,
 }
 
 impl Instance for TrainInstance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let env = &self.env;
         let work: &mut dyn FnMut() -> ActionResult = match action {
-            request::ACTION => &mut || job::run(env, inv, progress),
+            request::ACTION => &mut || job::run(env, inv, &self.devices, progress),
             consolidate::FULL_ACTION => &mut || consolidate::run_full(env, inv, progress),
             consolidate::MERGE_ACTION => &mut || consolidate::run_merge(env, inv, progress),
             create::ACTION => &mut || create::run(env, inv, progress),
@@ -343,7 +372,8 @@ impl Instance for TrainInstance {
         // The trainer reports a device failure (an allocation the card cannot hold) as a panic. One run's failure is
         // that run's error, not the server's.
         let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            residency::on_device(self.device, || {
+            // A run on several cards scopes each rank to its own card; the first card is where it is checked.
+            residency::on_device(self.devices[0], || {
                 if trains {
                     cpu_admission(action, allow_cpu, residency::build_target())?;
                 }

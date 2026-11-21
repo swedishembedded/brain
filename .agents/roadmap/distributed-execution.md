@@ -744,10 +744,26 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         most about 2.5%; it needs a per-layer gradient-ready hook in each backward and
         a one-kernel bucket gather. Revisit for full fine-tunes, where the
         payload is 30x larger.
-      - [ ] The served `train` action on several cards of one server. Design:
-        a request field `cards` (default 1), then in-process ranks via
-        `brain::DataParallel::in_process` on those cards. Residency half done
-        (2026-11-21): `ResidentModel::cards(key)` (default 1) and
+      - [ ] The served `train` action on several cards of one server
+        (2026-11-21; open: the measured comparison). The request field `cards`
+        (default 1, at most the server's cards, refused by name for the
+        preference, feedback and distill objectives) runs the `sft` and
+        `policy_gradient` job as `brain::DataParallel::in_process` ranks, one
+        per card, same seed (drawn once when the request names none), rank 0
+        streaming the steps and answering with the one-card `report()`; the
+        ranks' adapter digests are compared before anything is published. A
+        cancel stops every rank after the same step (the first rank to see it
+        names the next step, which every rank reaches in lockstep), a failed
+        rank aborts the in-process group (`DataParallel::abort`; the host
+        star's barrier is breakable) so the others fail with its reason, and a
+        resumable run keeps every rank's state in the trainer's generations
+        beside the run's state path, removed on completion. Tests: `trainjob`
+        `cards` (two cards held, same report keys as one card, byte-identical
+        adapters across a repeat, cancel, resume to the uninterrupted adapter,
+        door refusals), `sdk` `chat_finetune_data_parallel` (agreed cancel,
+        abort). Open: a rank blocked in an NCCL reduction learns of a failed
+        peer only at the group's op timeout (600 s in-process), not at once.
+        Residency half (2026-11-21): `ResidentModel::cards(key)` (default 1) and
         `activate_cards(key, &[Device])` make a claim of "any N cards with
         room" (`ResidencyManager::claim_cards`, `manager/cards.rs`): planned
         before anything is evicted or charged, cards with room first, then

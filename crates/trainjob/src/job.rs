@@ -324,6 +324,17 @@ pub struct RunFiles {
 }
 
 impl RunFiles {
+    /// Where rank `rank` of a data-parallel run writes: rank 0 where the run does, every other rank in a directory of
+    /// its own in the job's directory `work`. A resumable run's state path is the run's for every rank: the trainer
+    /// keeps each rank's state apart beside it, in numbered generations the ranks agree on.
+    fn for_rank(&self, rank: usize, work: &Path) -> RunFiles {
+        if rank == 0 {
+            return RunFiles { out_dir: self.out_dir.clone(), resumable: self.resumable.clone(), evaluations: self.evaluations.clone() };
+        }
+        let out_dir = work.join(format!("rank-{rank}"));
+        RunFiles { evaluations: out_dir.join("evaluations"), out_dir, resumable: self.resumable.clone() }
+    }
+
     fn of(run: Option<&crate::runs::Run>, request: &Request, out_dir: PathBuf) -> RunFiles {
         match run {
             Some(run) => RunFiles { resumable: Some((run.state_path(), run.seed(), request.params.checkpoint_every.unwrap_or(crate::runs::DEFAULT_CHECKPOINT_EVERY))), evaluations: run.evaluations_dir(), out_dir },
@@ -709,6 +720,88 @@ pub(crate) fn trainer_failure(e: brain::Error) -> String {
 fn train_chat(request: &Request, base_dir: &Path, staged: &Staged, files: &RunFiles, cancel: &capability::CancelToken, began: Instant, progress: &mut dyn FnMut(Progress)) -> Result<Trained, String> {
     let fine_tune = build_fine_tune(request, base_dir, staged, files)?;
     let outcome = fine_tune.run_with(cancel, |step| progress(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64())))).map_err(trainer_failure)?;
+    trained_chat(request, files, outcome)
+}
+
+/// [`train_chat`] as one data-parallel rank per card of `devices` ([`brain::DataParallel::in_process`]): every rank
+/// trains the same request with the same seed on its own card and shard of the records, and every step's gradients
+/// are reduced over the group, so every rank ends with the same adapter (checked). Rank 0 streams the steps and its
+/// outcome is the run's; the ranks share the run's cancellation and stop after the same step; a rank that fails
+/// breaks the group, so the others fail instead of waiting for it, and the job fails with the first rank's reason.
+#[allow(clippy::too_many_arguments)]
+fn train_chat_ranks(request: &Request, base_dir: &Path, staged: &Staged, files: &RunFiles, work: &Workdir, devices: &[residency::Device], cancel: &capability::CancelToken, began: Instant, progress: &mut dyn FnMut(Progress)) -> Result<Trained, String> {
+    let p = &request.params;
+    // Every rank must draw the same batch order and initialisation: the resumable run's seed, the request's, or one
+    // drawn here for all of them.
+    let seed = files.resumable.as_ref().map(|(_, seed, _)| *seed).or(p.seed).unwrap_or_else(brain::random_seed);
+    let ranks = brain::DataParallel::in_process(devices.len()).map_err(trainer_failure)?;
+    let rank_files: Vec<RunFiles> = (0..devices.len()).map(|r| files.for_rank(r, work.path())).collect();
+    let (frames, steps) = std::sync::mpsc::channel::<Progress>();
+    let results: Vec<Result<Trained, String>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = ranks
+            .into_iter()
+            .zip(devices.iter().copied())
+            .zip(&rank_files)
+            .map(|((rank, device), files)| {
+                let frames = (rank.rank() == 0).then(|| frames.clone());
+                scope.spawn(move || {
+                    let breaker = rank.clone();
+                    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        residency::on_device(device, || -> Result<Trained, String> {
+                            let fine_tune = build_fine_tune(request, base_dir, staged, files)?.seed(seed).data_parallel(rank);
+                            let outcome = fine_tune
+                                .run_with(cancel, |step| {
+                                    if let Some(frames) = &frames {
+                                        let _ = frames.send(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64())));
+                                    }
+                                })
+                                .map_err(trainer_failure)?;
+                            trained_chat(request, files, outcome)
+                        })
+                    }));
+                    let result = match run {
+                        Ok(placed) => placed.and_then(|trained| trained),
+                        Err(panic) => {
+                            let why = panic.downcast_ref::<String>().cloned().or_else(|| panic.downcast_ref::<&str>().map(|s| (*s).to_string())).unwrap_or_default();
+                            eprintln!("brain train: a rank on {device:?} panicked: {why}");
+                            Err("train: the device failed during the run (see the server log)".to_string())
+                        }
+                    };
+                    if let Err(why) = &result {
+                        breaker.abort(why);
+                    }
+                    result
+                })
+            })
+            .collect();
+        drop(frames);
+        // Rank 0's steps reach the caller on this thread, as they arrive; the channel closes when rank 0 ends.
+        for frame in steps.iter() {
+            progress(frame);
+        }
+        handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("train: a rank's thread ended abnormally".to_string()))).collect()
+    });
+    let mut ranks_trained = Vec::with_capacity(results.len());
+    for result in results {
+        match result {
+            Ok(trained) => ranks_trained.push(trained),
+            // The rank that failed first names the reason; the ones it broke say only that the group was aborted.
+            Err(why) if why.contains("group was aborted") => continue,
+            Err(why) => return Err(why),
+        }
+    }
+    if ranks_trained.len() != devices.len() {
+        return Err("train: a rank failed and the others stopped with it (see the server log)".to_string());
+    }
+    let first = ranks_trained.swap_remove(0);
+    if let Some(other) = ranks_trained.iter().find(|t| t.adapter_sha256 != first.adapter_sha256) {
+        return Err(format!("train: the ranks ended with different adapters ({} and {}); the run is not published", first.adapter_sha256, other.adapter_sha256));
+    }
+    Ok(first)
+}
+
+/// What a completed chat fine-tune produced, from the trainer's `outcome`; a cancelled one is the error "cancelled".
+fn trained_chat(request: &Request, files: &RunFiles, outcome: brain::ChatFineTuneOutcome) -> Result<Trained, String> {
     if outcome.status != brain::FineTuneStatus::Completed {
         return Err("cancelled".into());
     }
@@ -751,7 +844,8 @@ fn train_distill(request: &Request, base_dir: &Path, staged: &Staged, teacher_ad
 /// Runs the job `inv` on the device this thread is scoped to, reporting each step as a frame. With a `resume_key`
 /// the run is resumable ([`crate::runs`]): its training state and evaluation adapters live in the run's directory of
 /// the artifact store, and a completed run answers with the result it recorded.
-pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+/// On several cards (`devices`, one per rank of [`Request`]'s `cards`) the run trains data-parallel, one rank per card.
+pub fn run(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let request = Request::from_invocation(inv)?;
     let p = &request.params;
     let run = match crate::consolidate::open_run(env, ACTION, p.resume_key.as_deref(), inv, p.seed)? {
@@ -788,6 +882,7 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
             };
             train_distill(&request, &base_dir, &staged, teacher.as_deref(), &files, &inv.cancel, began, progress)?
         }
+        Objective::Sft | Objective::PolicyGradient if devices.len() > 1 => train_chat_ranks(&request, &base_dir, &staged, &files, &work, devices, &inv.cancel, began, progress)?,
         Objective::Sft | Objective::PolicyGradient => train_chat(&request, &base_dir, &staged, &files, &inv.cancel, began, progress)?,
     };
     work.ensure_within_quota()?;

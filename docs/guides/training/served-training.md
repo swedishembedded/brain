@@ -235,6 +235,7 @@ No dataset or adapter travels through the API as a message body.
 | `steps`, `grad_accum`, `rank`, `alpha`, `lr`, `weight_decay`, `seed` | the optimiser's settings; what is not named is the trainer's own default, which `GET /v1/capabilities` lists as the param's `implied_default` |
 | `strict_updates` | abort at the first optimiser step whose loss or gradient is not finite (default off: such a step is skipped, the weights untouched, and the run aborts on the third in a row) |
 | `max_block` | the longest training row in tokens (default 8192). The memory reserved for the run is sized to it and a longer record is refused by name |
+| `cards` | how many of the server's cards the run trains on at once (default 1, at most the cards the server has). Each card runs one data-parallel rank holding the run's whole footprint and its own share of the records, all with the same `seed` (one is drawn for all of them when the request names none), and every step's gradients are reduced over the cards, so each step sees `cards` times the records of a one-card step. The result is the same document as on one card, from rank 0; the same request trains the same adapter, byte for byte, though not the adapter of a one-card run. `sft` and `policy_gradient` only: another objective naming more than one card is refused by name |
 | `thinking`, `pack_answers` | how records are rendered |
 | `base_format` | how the frozen base is held: `bf16`, `fp8`, `nf4`, ...; default the tier that fits the card |
 | `eval_every`, `patience`, `replay_share`, `keep_evaluations` | monitoring and early stopping |
@@ -333,11 +334,17 @@ and gives them back:
   deadline (`--admit-deadline-ms`; a card another process filled, say) it is
   refused (HTTP 429, a bus `error` frame), the hold ends, and the client
   retries.
-- One run holds one card at a time, and several runs use several cards. The
-  trainer is one card per run; a run that needs more than the largest card
-  holds is refused at once, with what it needs.
-- When a run ends, by completion, failure or cancel, it gives its card back at
-  once, and its files are removed.
+- A run holds the cards it asked for (`cards`, default one), and several runs
+  use several cards. Each card must hold the run's whole footprint; a run that
+  needs more than the largest card holds is refused at once, with what it
+  needs, and so is one asking for more cards than the server has. A run on
+  several cards takes them all at once: the cards with room, then cards that
+  evicting idle instances frees, and nothing is evicted while the cards it
+  needs cannot all be had (a card busy serving); it waits as a one-card run
+  waits.
+- When a run ends, by completion, failure or cancel, it gives its cards back at
+  once, and its files are removed. On several cards a cancel stops every rank
+  after the same step, and a rank that fails fails the run.
 - A `train`, `full_train` or `pretrain` run never lands on the CPU backend
   silently. On a server started on the CPU (`--device cpu`, `--backend cpu`) it
   trains there and says so in the server log. Where the CPU would only be the
