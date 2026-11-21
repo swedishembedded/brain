@@ -15,7 +15,7 @@
 //! ([`DataParallel::join_job`]) or threads of one process, one per card ([`DataParallel::in_process`]).
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use model::{Collective, CollectivePath, HostCollective, JobCollective, JobContext};
@@ -35,6 +35,15 @@ pub struct DataParallel {
     job: Option<(String, String)>,
     /// What the group shards across its ranks: the plan's for a launched job, [`Self::sharded`]'s otherwise.
     sharding: model::zero::Sharding,
+    /// What the ranks of an in-process group share ([`Self::in_process`]).
+    local: Option<Arc<LocalGroup>>,
+}
+
+/// What the threads of one in-process group share: the host transport (so a failed rank can break it) and the step
+/// the ranks agreed to stop after.
+struct LocalGroup {
+    host: Arc<HostCollective>,
+    stop_after: Mutex<Option<u32>>,
 }
 
 impl std::fmt::Debug for DataParallel {
@@ -51,7 +60,7 @@ impl DataParallel {
         let context = JobContext::from_plan_file(plan, rank, secret).map_err(Error::MissingArgument)?;
         let group = context.job_collective().map_err(|e| Error::Backend(format!("joining the job: {e}")))?;
         let job = Some((context.plan().job.clone(), context.plan().identity()));
-        Ok(DataParallel { group: Arc::new(group), rank, job, sharding: context.plan().sharding })
+        Ok(DataParallel { group: Arc::new(group), rank, job, sharding: context.plan().sharding, local: None })
     }
 
     /// `world` ranks that are threads of this process, one per card: hand rank `r` to the trainer that runs on card
@@ -61,12 +70,38 @@ impl DataParallel {
             return Err(Error::MissingArgument("a data-parallel group needs at least one rank".into()));
         }
         let host = HostCollective::new(world);
+        let local = Arc::new(LocalGroup { host: Arc::clone(&host), stop_after: Mutex::new(None) });
         Ok((0..world)
             .map(|rank| {
                 let group = JobCollective::new(Arc::clone(&host), CollectivePath::Auto, IN_PROCESS_JOIN, IN_PROCESS_OP).with_bucket_bytes(u64::from(model::job::DEFAULT_BUCKET_MIB) << 20);
-                DataParallel { group: Arc::new(group), rank, job: None, sharding: model::zero::Sharding::Replicated }
+                DataParallel { group: Arc::new(group), rank, job: None, sharding: model::zero::Sharding::Replicated, local: Some(Arc::clone(&local)) }
             })
             .collect())
+    }
+
+    /// Break an in-process group because this rank failed and will not take part again: every other rank waiting in
+    /// a reduction through host memory, and every later one, fails with `why` instead of waiting for it. A reduction
+    /// on the cards ends within the group's op timeout. Nothing for a rank of a launched job, whose launcher sees the
+    /// process end.
+    pub fn abort(&self, why: &str) {
+        if let Some(local) = &self.local {
+            local.host.abort(&format!("rank {} failed: {why}", self.rank));
+        }
+    }
+
+    /// Whether this rank goes on after completing step `completed`, given whether its run was `cancelled`. The ranks
+    /// of a group must stop after the same step, or the ones that went on wait in the next reduction for the ones that
+    /// stopped. In-process ranks share a cancellation that each sees at its own moment, so the first rank to see it
+    /// names a step every rank still reaches: the steps run in lockstep (a step completes only once every rank has
+    /// entered its reduction), so no rank has completed more than `completed + 1`, and every rank stops after that
+    /// one. A rank of a launched job stops when it is cancelled, as before.
+    pub(crate) fn keep_going(&self, completed: u32, cancelled: bool) -> bool {
+        let Some(local) = &self.local else { return !cancelled };
+        let mut stop_after = local.stop_after.lock().unwrap_or_else(|e| e.into_inner());
+        if stop_after.is_none() && cancelled {
+            *stop_after = Some(completed + 1);
+        }
+        stop_after.is_none_or(|last| completed < last)
     }
 
     /// Shard `sharding` across the group ([`model::zero`]): every rank of the group must ask for the same. A job a

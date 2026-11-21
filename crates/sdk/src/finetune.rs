@@ -1342,7 +1342,11 @@ impl ChatFineTune {
         let mut on_step = |s: &model::StepReport| {
             step_work.push(s.work);
             on_progress(&FineTuneProgress::of(s));
-            !cancel.is_cancelled()
+            // The ranks of a group stop after the same step.
+            match &self.parallel {
+                Some(rank) => rank.keep_going(s.step, cancel.is_cancelled()),
+                None => !cancel.is_cancelled(),
+            }
         };
         let snapshot_card = format!("{base_id}:local:chat:step");
         let snapshots = match &self.evaluations_dir {

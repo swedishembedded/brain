@@ -62,3 +62,80 @@ fn a_rank_without_a_shared_seed_is_refused() {
     let err = ChatFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap()).dataset(&train).out_dir(model.join("out")).steps(1).device(cpu()).data_parallel(rank).run().expect_err("no seed");
     assert!(err.to_string().contains("seed"), "{err}");
 }
+
+/// Runs `body` for every rank of a fresh in-process group of `world` on its own thread and returns what each returned,
+/// in rank order. A group that has not finished within `limit` is aborted (so no thread is left waiting) and the test
+/// fails: the ranks did not agree.
+fn ranks_within<T: Send + 'static>(world: usize, limit: std::time::Duration, body: impl Fn(DataParallel) -> T + Send + Sync + 'static) -> Vec<T> {
+    let ranks = DataParallel::in_process(world).expect("a group");
+    let breaker = ranks[0].clone();
+    let body = std::sync::Arc::new(body);
+    let (tx, rx) = std::sync::mpsc::channel();
+    for rank in ranks {
+        let (tx, body) = (tx.clone(), std::sync::Arc::clone(&body));
+        std::thread::spawn(move || {
+            let r = rank.rank();
+            let _ = tx.send((r, body(rank)));
+        });
+    }
+    drop(tx);
+    let deadline = std::time::Instant::now() + limit;
+    let mut out: Vec<Option<T>> = (0..world).map(|_| None).collect();
+    for _ in 0..world {
+        match rx.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())) {
+            Ok((r, value)) => out[r] = Some(value),
+            Err(_) => {
+                breaker.abort("the test's time limit");
+                panic!("the ranks did not finish within {limit:?}: they disagreed on where to stop");
+            }
+        }
+    }
+    out.into_iter().map(|v| v.expect("every rank answered")).collect()
+}
+
+#[test]
+fn a_cancellation_one_rank_sees_first_stops_every_rank_after_the_same_step() {
+    let model = chat_model_dir("data-parallel-cancel");
+    let train = write_chat_dataset(&model, &TRAIN);
+    let cancel = brain::CancelToken::armed();
+    let shared = (model.to_path_buf(), train.clone(), cancel.clone());
+    let outcomes = ranks_within(2, std::time::Duration::from_secs(120), move |rank| {
+        let (model, train, cancel) = &shared;
+        let r = rank.rank();
+        let out = model.join(format!("cancel-rank{r}"));
+        let fine_tune = tune(model, train, &out).steps(200).data_parallel(rank);
+        // Rank 0 cancels late in its step 2, after rank 1 has looked and gone on into step 3's reduction.
+        fine_tune
+            .run_with(cancel, |p| {
+                if r == 0 && p.step == 2 {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    cancel.cancel();
+                }
+            })
+            .expect("a cancelled rank answers")
+    });
+    for o in &outcomes {
+        assert_eq!(o.status, FineTuneStatus::Cancelled);
+    }
+    assert_eq!(outcomes[0].steps_completed, outcomes[1].steps_completed, "both ranks stopped after the same step");
+    assert!(outcomes[0].steps_completed <= 3, "{}", outcomes[0].steps_completed);
+}
+
+#[test]
+fn a_rank_that_fails_breaks_the_group_and_the_others_fail_instead_of_waiting() {
+    let model = chat_model_dir("data-parallel-abort");
+    let train = write_chat_dataset(&model, &TRAIN);
+    let shared = (model.to_path_buf(), train.clone());
+    let started = std::time::Instant::now();
+    let results = ranks_within(2, std::time::Duration::from_secs(120), move |rank| {
+        let (model, train) = &shared;
+        if rank.rank() == 1 {
+            rank.abort("its dataset could not be read");
+            return Err("rank 1 never trained".to_string());
+        }
+        tune(model, train, &model.join("abort-rank0")).data_parallel(rank).run().map(drop).map_err(|e| e.to_string())
+    });
+    let why = results[0].as_ref().expect_err("rank 0 cannot train without its peer");
+    assert!(why.contains("rank 1 failed: its dataset could not be read"), "{why}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(60));
+}

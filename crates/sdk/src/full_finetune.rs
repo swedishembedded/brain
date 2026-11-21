@@ -557,7 +557,11 @@ impl FullRun<'_> {
     pub(crate) fn train_and_export(&self, cancel: &CancelToken, on_progress: &mut dyn FnMut(&FineTuneProgress)) -> Result<FullTrained> {
         let mut on_step = |s: &model::StepReport| {
             on_progress(&FineTuneProgress::of(s));
-            !cancel.is_cancelled()
+            // The ranks of a group stop after the same step.
+            match self.parallel {
+                Some(rank) => rank.keep_going(s.step, cancel.is_cancelled()),
+                None => !cancel.is_cancelled(),
+            }
         };
         let control = model::FitControl {
             on_step: Some(&mut on_step),

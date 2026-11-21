@@ -47,7 +47,7 @@
 //! `pollster::block_on` (see `backend_wgpu::WgpuBackend::new` wrapping
 //! `new_async`) - rather than pulling in a second async runtime.
 //!
-//! `HostCollective`'s exchange itself is still `Barrier`-blocking internally
+//! `HostCollective`'s exchange itself is still barrier-blocking internally
 //! (each rank is a real OS thread; there is nothing to yield to), and
 //! `NetworkCollective`'s I/O is still blocking `std::net::TcpStream` reads. The
 //! `async` signature makes `Collective` *composable* with other async work and
@@ -283,17 +283,65 @@ pub(crate) fn check_equal_lengths(slots: &[Payload]) -> CollectiveResult<usize> 
 
 // ---- in-process, host-staged implementation ------------------------------------
 
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 /// In-process [`Collective`]: ranks are threads, exchange is via a shared host
 /// staging area guarded by a barrier. This is the local (single-box, multi-GPU)
 /// transport - each rank reads its shard off its GPU to host, calls the op, and
 /// writes the result back to its GPU. A networked transport would implement the
 /// same trait by exchanging the staged bytes over the wire instead.
+///
+/// A rank that will never arrive (its thread failed) is announced with
+/// [`HostCollective::abort`]: the ranks waiting at the barrier return an error
+/// naming why, and every later op fails the same way, so a group whose rank
+/// died fails instead of waiting for it forever.
 pub struct HostCollective {
     world: usize,
     slots: Mutex<Vec<Payload>>,
-    barrier: Barrier,
+    barrier: Gate,
+}
+
+/// A reusable barrier that can be broken: the ranks waiting and every later
+/// wait return the reason.
+struct Gate {
+    state: Mutex<GateState>,
+    turned: Condvar,
+}
+
+struct GateState {
+    arrived: usize,
+    generation: u64,
+    aborted: Option<String>,
+}
+
+impl Gate {
+    fn wait(&self, world: usize) -> CollectiveResult<()> {
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(why) = &st.aborted {
+            return Err(CollectiveError::Transport(format!("the in-process group was aborted: {why}")));
+        }
+        st.arrived += 1;
+        if st.arrived == world {
+            st.arrived = 0;
+            st.generation += 1;
+            self.turned.notify_all();
+            return Ok(());
+        }
+        let generation = st.generation;
+        while st.generation == generation && st.aborted.is_none() {
+            st = self.turned.wait(st).unwrap_or_else(|e| e.into_inner());
+        }
+        match (&st.aborted, st.generation == generation) {
+            (Some(why), true) => Err(CollectiveError::Transport(format!("the in-process group was aborted: {why}"))),
+            _ => Ok(()),
+        }
+    }
+
+    fn abort(&self, why: &str) {
+        let mut st = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.aborted.get_or_insert_with(|| why.to_string());
+        self.turned.notify_all();
+    }
 }
 
 impl HostCollective {
@@ -302,8 +350,14 @@ impl HostCollective {
         Arc::new(HostCollective {
             world: world_size,
             slots: Mutex::new(vec![Payload::f32(Vec::new()); world_size]),
-            barrier: Barrier::new(world_size),
+            barrier: Gate { state: Mutex::new(GateState { arrived: 0, generation: 0, aborted: None }), turned: Condvar::new() },
         })
+    }
+
+    /// Break the group: every rank waiting in an op, and every later op, returns an error naming `why`. For a rank
+    /// that failed and will not arrive; the first reason given is the one reported.
+    pub fn abort(&self, why: &str) {
+        self.barrier.abort(why);
     }
 
     /// Publish `local` into this rank's slot, barrier, run `combine` over all
@@ -313,24 +367,21 @@ impl HostCollective {
     /// same published slots, so a validation failure is the same `Err` on every
     /// rank, not a divergence).
     ///
-    /// An out-of-range `rank` is rejected up front, before either barrier wait -
-    /// same as the old code's out-of-bounds index would have panicked before
-    /// reaching the barrier. Neither behavior rescues *other* ranks that were
-    /// genuinely waiting on this one to show up; that would need a
-    /// poisonable/timeout-aware barrier, real follow-up work, not this
-    /// signature's job.
+    /// An out-of-range `rank` is rejected up front, before either barrier wait.
+    /// A rank that never arrives holds the others at the barrier until the
+    /// group is [aborted](Self::abort).
     fn exchange<T>(&self, rank: usize, local: Payload, combine: impl Fn(&[Payload]) -> CollectiveResult<T>) -> CollectiveResult<T> {
         check_rank(rank, self.world)?;
         {
             let mut slots = self.slots.lock().unwrap();
             slots[rank] = local;
         }
-        self.barrier.wait();
+        self.barrier.wait(self.world)?;
         let out = {
             let slots = self.slots.lock().unwrap();
             combine(&slots)
         };
-        self.barrier.wait();
+        self.barrier.wait(self.world)?;
         out
     }
 }
@@ -949,6 +1000,29 @@ mod tests {
         for row in &out {
             assert_eq!(row.data, vec![7.0, 8.0, 9.0]);
         }
+    }
+
+    /// A rank that will never arrive (its thread failed) is announced with `abort`: the ranks waiting for it return
+    /// an error naming why at once instead of waiting forever, and every later op fails the same way.
+    #[test]
+    fn an_abort_releases_the_ranks_waiting_for_one_that_will_never_arrive() {
+        let c = HostCollective::new(3);
+        let started = std::time::Instant::now();
+        let errors: Vec<CollectiveError> = thread::scope(|s| {
+            let waiting: Vec<_> = (0..2).map(|r| {
+                let c = &c;
+                s.spawn(move || pollster::block_on(c.all_reduce(r, Payload::f32(vec![1.0]))).expect_err("rank 2 never arrives"))
+            }).collect();
+            thread::sleep(std::time::Duration::from_millis(50));
+            c.abort("rank 2 failed: out of memory");
+            waiting.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        for e in &errors {
+            assert!(e.to_string().contains("rank 2 failed: out of memory"), "{e}");
+        }
+        let later = pollster::block_on(c.all_reduce(2, Payload::f32(vec![1.0]))).expect_err("an aborted group takes no further op");
+        assert!(later.to_string().contains("rank 2 failed"), "{later}");
     }
 
     #[test]
