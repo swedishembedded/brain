@@ -162,6 +162,27 @@ fn the_step_guard_skips_a_step_over_its_kl_or_gradient_norm_bound_and_ends_a_run
     assert!(matches!(Objective::<Qwen35>::step_verdict(&mut obj), StepVerdict::Abort(_)));
 }
 
+/// A run whose every step the guard skips (fewer than the abort count) leaves every parameter bit for bit, weight decay
+/// on; the same run without the guard moves them, so the run had something to apply.
+#[test]
+fn a_run_whose_steps_the_guard_skips_leaves_every_parameter_unchanged() {
+    let bits = |m: &Qwen35| m.param_names().iter().map(|n| m.read_weight(n).iter().map(|v| v.to_bits()).collect::<Vec<u32>>()).collect::<Vec<_>>();
+    let run = |cfg: PolicyGradientConfig| {
+        let m = lora_model(7);
+        let before = bits(&m);
+        let dir = tempfile::tempdir().unwrap();
+        super::external_policy_gradient::write_dataset(dir.path(), &[Row::new(&IDS, 3, Some(1.0))]);
+        let opts = model::FitOpts { weight_decay: 0.1, ..super::external_policy_gradient::opts(3, 1, 1e-2) };
+        let mut obj = ExternalPolicyGradient::open(dir.path(), &opts, cfg).unwrap();
+        let (report, m) = model::fit_controlled(m, &mut obj, &opts, None, model::FitControl::default()).unwrap();
+        (before == bits(&m), report.applied_steps, obj.stats().steps_skipped_guard)
+    };
+    let base = PolicyGradientConfig { behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() };
+    assert_eq!(run(PolicyGradientConfig { max_step_grad_norm: Some(1e-9), ..base }), (true, 0, 3), "(unchanged, applied, skipped) under a gradient-norm bound every step exceeds");
+    assert_eq!(run(PolicyGradientConfig { max_step_kl: Some(1e-9), ..base }), (true, 0, 3), "(unchanged, applied, skipped) under a KL bound every step exceeds");
+    assert_eq!(run(base), (false, 3, 0), "(unchanged, applied, skipped) without a bound");
+}
+
 #[test]
 fn the_stability_settings_are_validated_by_name() {
     let dir = tempfile::tempdir().unwrap();
