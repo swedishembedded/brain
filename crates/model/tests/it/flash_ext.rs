@@ -9,7 +9,9 @@
 //!   differences of the f64 oracle, so the backward is the gradient of the REFERENCE forward and not merely of
 //!   the kernels' own;
 //! * one whole-sequence pass == a chunked prefill through a paged cache == token-by-token decode through the same
-//!   cache, and == decode through a ring of `window` rows for a window layer, on f32 and bf16 planes.
+//!   cache, and == decode through a ring of `window` rows for a window layer, on f32 and bf16 planes;
+//! * packed rows (several documents per row): the oracle and finite differences above, and every output and input
+//!   gradient of each packed document equal to that document run alone.
 //!
 //! The kernels are the barrier-free reference tier, so these run on every backend, the CPU JIT included.
 //!
@@ -57,6 +59,8 @@ struct Case {
     rel: Vec<f32>,
     bank: Vec<f32>,
     d_out: Vec<f32>,
+    /// With `opts.documents`: each row's position inside its packed document.
+    doc_pos: Vec<u32>,
 }
 
 impl Case {
@@ -77,7 +81,17 @@ impl Case {
             rel: rng.vec_scaled(rows * nh * d_rel, 0.7),
             bank: rng.vec_scaled(d_rel * extent, 1.0),
             d_out: rng.vec_scaled(rows * nh * hd, 1.0),
+            doc_pos: Vec::new(),
         }
+    }
+
+    /// A packed case: every sequence of `t` rows holds the documents `docs[b]` (lengths summing to `t`).
+    fn packed(docs: &[&[u32]], heads: HeadShape, opts: AttnOptions, rng: &mut Lcg) -> Case {
+        let t = docs[0].iter().sum::<u32>();
+        assert!(docs.iter().all(|d| d.iter().sum::<u32>() == t), "every packed row has t tokens");
+        let mut c = Case::new(docs.len() as u32, t, 0, heads, AttnOptions { documents: true, ..opts }, rng);
+        c.doc_pos = docs.iter().flat_map(|d| d.iter().flat_map(|&n| 0..n)).collect();
+        c
     }
 
     fn rows(&self) -> usize {
@@ -105,7 +119,13 @@ fn host_fwd(c: &Case, x: &Host) -> (Vec<f64>, Vec<f64>) {
     for b in 0..c.b as usize {
         for i in 0..t {
             let row = b * t + i;
-            let pos = c.pos0 + i as u32;
+            // A packed row's query sees its own document only, at its position inside it.
+            let (first, pos) = if c.opts.documents {
+                let dp = (c.doc_pos[row] as usize).min(i);
+                (i - dp, dp as u32)
+            } else {
+                (0, c.pos0 + i as u32)
+            };
             let (tq, tb) = match c.opts.tau {
                 Some(tau) => {
                     let f = 1.0 + f64::from(tau.alpha) * ((f64::from(pos) + 1.0) / f64::from(tau.n_floor)).max(1.0).ln();
@@ -117,7 +137,7 @@ fn host_fwd(c: &Case, x: &Host) -> (Vec<f64>, Vec<f64>) {
                 let hkv = h / group;
                 let qr = &x.q[(row * nh + h) * hd..][..hd];
                 let mut logits = Vec::new();
-                for j in 0..=i {
+                for j in first..=i {
                     let dist = i - j;
                     if c.opts.window.is_some_and(|w| dist >= w as usize) {
                         continue;
@@ -224,7 +244,8 @@ fn run_device(g: &Gpu, ids: &FlashExtIds, c: &Case) -> DeviceRun {
     let (nh, nkv, hd) = (u64::from(c.heads.n_heads), u64::from(c.heads.n_kv_heads), u64::from(c.heads.head_dim));
     let (q, k, v, d_out) = (upload(g, "q", &c.q), upload(g, "k", &c.k), upload(g, "v", &c.v), upload(g, "d_out", &c.d_out));
     let (sink, rel, bank) = (upload(g, "sink", &c.sink), upload(g, "rel", &c.rel), upload(g, "bank", &c.bank));
-    let inputs = AttnInputs { sink: c.opts.sink.then_some(&sink), rel: c.opts.bias.map(|_| &rel), bank: c.opts.bias.map(|_| &bank) };
+    let doc_pos = if c.doc_pos.is_empty() { g.storage(1) } else { u32s(g, &c.doc_pos) };
+    let inputs = AttnInputs { sink: c.opts.sink.then_some(&sink), rel: c.opts.bias.map(|_| &rel), bank: c.opts.bias.map(|_| &bank), doc_pos: c.opts.documents.then_some(&doc_pos) };
     let layout = Contiguous { b: c.b, t: c.t, pos0: c.pos0 };
     let out = g.storage(rows * nh * hd);
     let lse = g.storage(rows * nh);
@@ -264,7 +285,7 @@ fn check_case(g: &Gpu, ids: &FlashExtIds, c: &Case, tag: &str) {
 }
 
 fn opts(scale: f32, window: Option<u32>, sink: bool, bias: Option<DistanceBias>, tau: Option<LogPositionScale>) -> AttnOptions {
-    AttnOptions { scale, window, sink, bias, tau }
+    AttnOptions { scale, window, sink, bias, tau, documents: false }
 }
 
 /// Every combination of window, sink, bias (extent inside and beyond the sequence) and tau (with and without
@@ -333,7 +354,7 @@ fn a_sink_buffer_without_the_option_is_refused() {
     let heads = HeadShape { n_heads: 2, n_kv_heads: 1, head_dim: 4 };
     let x = g.storage(64);
     let (out, lse) = (g.storage(64), g.storage(8));
-    let inputs = AttnInputs { sink: Some(&x), rel: None, bank: None };
+    let inputs = AttnInputs { sink: Some(&x), ..AttnInputs::default() };
     let _ = flash_ext_fwd(&g, &ids, &heads, &AttnOptions::plain(0.5), &inputs, Contiguous { b: 1, t: 4, pos0: 0 }, &x, &x, &x, &out, &lse);
 }
 
@@ -374,7 +395,7 @@ fn paged_rows(g: &Gpu, ids: &FlashExtIds, c: &Case, layer: &KvLayer, seq: PagedS
     let d_rel = c.opts.bias.map_or(0, |b| b.d_rel as usize);
     let rel = upload(g, "rel.rows", if c.rel.is_empty() { &[] } else { &c.rel[r0 * nh * d_rel..][..n * nh * d_rel] });
     let bank = upload(g, "bank", &c.bank);
-    let inputs = AttnInputs { sink: c.opts.sink.then_some(&sink), rel: c.opts.bias.map(|_| &rel), bank: c.opts.bias.map(|_| &bank) };
+    let inputs = AttnInputs { sink: c.opts.sink.then_some(&sink), rel: c.opts.bias.map(|_| &rel), bank: c.opts.bias.map(|_| &bank), doc_pos: None };
     let index = u32s(g, &paged_index(&[PagedSeq { q_row0: 0, ..seq }], &[table], table.len() as u32));
     let paged = PagedKv { index: &index, n_seqs: 1, max_q: seq.n_q, n_rows: seq.n_q, block_size, max_bt: table.len() as u32, ring };
     let (out, lse) = (g.storage((n * nh * hd) as u64), g.storage((n * nh) as u64));
@@ -478,7 +499,7 @@ fn a_mixed_batch_reads_each_sequence_through_its_own_table() {
     let index = u32s(&g, &paged_index(&seqs, &[&ta, &tb], 4));
     let paged = PagedKv { index: &index, n_seqs: 2, max_q: 3, n_rows: 4, block_size: bs, max_bt: 4, ring: 0 };
     let (out, lse) = (g.storage((4 * nh * hd) as u64), g.storage((4 * nh) as u64));
-    let inputs = AttnInputs { sink: Some(&sb), rel: Some(&rb), bank: Some(&bk) };
+    let inputs = AttnInputs { sink: Some(&sb), rel: Some(&rb), bank: Some(&bk), doc_pos: None };
     g.submit(&[], &flash_ext_paged_fwd(&g, &ids, &heads, &o, &inputs, &paged, &qb, KvPlanes::of(&layer), &out, &lse));
     let got = g.read(&out, 4 * nh * hd);
     let (wa, _) = eval(&a, &host_of(&a));
@@ -513,7 +534,7 @@ fn ring_chunked_prefill_with_every_option_equals_the_whole_pass() {
             let (q, k, v) = (rows(&c.q, nh * hd), rows(&c.k, kvd), rows(&c.v, kvd));
             let (sink, rel, bank) = (rows(&c.sink, nh), rows(&c.rel, nh * 2), upload(&g, "bank", &c.bank));
             let ring = RingChunk { layer: &layer, row0: w, window: w, start, flash: ids, copy: RingCopyIds::resolve(&g), ring_attn: None };
-            let inputs = AttnInputs { sink: Some(&sink), rel: Some(&rel), bank: Some(&bank) };
+            let inputs = AttnInputs { sink: Some(&sink), rel: Some(&rel), bank: Some(&bank), doc_pos: None };
             let ctx = ring_chunk_attend(&g, &ring, &heads, &o, &inputs, &q, &k, &v, n);
             assert_close(&format!("{tier}: ring chunk at {start}"), &g.read(&ctx, n as usize * nh * hd), &want[r * nh * hd..][..n as usize * nh * hd], 2e-5);
             start += n;
@@ -523,4 +544,126 @@ fn ring_chunked_prefill_with_every_option_equals_the_whole_pass() {
         let (out, _) = paged_rows(&g, &ids, &c, &layer, PagedSeq { q_row0: p, n_q: 1, q_pos0: p, kv_pos0: 0 }, &[1], w, w);
         assert_close(&format!("{tier}: decode over the prefilled ring"), &out, &want[p as usize * nh * hd..][..nh * hd], 2e-5);
     }
+}
+
+// ---- packed rows -----------------------------------------------------------------------------------------------
+
+/// Document `d` of packed sequence `b` as a case of its own: its rows of every per-row input, the shared bank.
+fn document_alone(c: &Case, b: usize, first: usize, len: usize) -> Case {
+    let (nh, nkv, hd) = (c.heads.n_heads as usize, c.heads.n_kv_heads as usize, c.heads.head_dim as usize);
+    let d_rel = c.opts.bias.map_or(0, |b| b.d_rel as usize);
+    let r0 = b * c.t as usize + first;
+    let rows = |x: &[f32], width: usize| if x.is_empty() { Vec::new() } else { x[r0 * width..][..len * width].to_vec() };
+    Case {
+        b: 1,
+        t: len as u32,
+        pos0: 0,
+        heads: c.heads,
+        opts: AttnOptions { documents: false, ..c.opts },
+        q: rows(&c.q, nh * hd),
+        k: rows(&c.k, nkv * hd),
+        v: rows(&c.v, nkv * hd),
+        sink: rows(&c.sink, nh),
+        rel: rows(&c.rel, nh * d_rel),
+        bank: c.bank.clone(),
+        d_out: rows(&c.d_out, nh * hd),
+        doc_pos: Vec::new(),
+    }
+}
+
+/// A packed row holds several documents; with every option on (window, sink, bias, tau scaling the bias) and with
+/// all off, the packed forward and backward match the f64 oracle and its finite differences, and each document's
+/// outputs, lse and per-row gradients (`d_q`, `d_k`, `d_v`, `d_sink`, `d_rel`) equal those of the document run alone,
+/// while `d_bank` (a layer parameter) is the sum of the documents' own.
+#[test]
+fn a_packed_row_computes_each_document_as_it_computes_alone() {
+    let (g, ids) = device();
+    let mut rng = Lcg::random();
+    let heads = HeadShape { n_heads: 4, n_kv_heads: 2, head_dim: 6 };
+    let scale = 6f32.powf(-0.5);
+    let every = opts(scale, Some(3), true, Some(DistanceBias { extent: 4, d_rel: 3 }), Some(LogPositionScale { alpha: 0.3, n_floor: 2.0, scales_bias: true }));
+    let no_window = AttnOptions { window: None, ..every };
+    // Documents shorter than, equal to and longer than the window; a one-token document; a row of one document.
+    let docs: [&[u32]; 3] = [&[4, 1, 5, 2], &[3, 3, 6], &[12]];
+    for o in [every, no_window, AttnOptions::plain(scale)] {
+        let packed = Case::packed(&docs, heads, o, &mut rng);
+        check_case(&g, &ids, &packed, &format!("packed {o:?}"));
+        let got = run_device(&g, &ids, &packed);
+        let (nh, nkv, hd) = (heads.n_heads as usize, heads.n_kv_heads as usize, heads.head_dim as usize);
+        let d_rel = o.bias.map_or(0, |b| b.d_rel as usize);
+        let mut bank_sum = vec![0f64; packed.bank.len()];
+        for (b, lens) in docs.iter().enumerate() {
+            let mut first = 0usize;
+            for &len in lens.iter() {
+                let len = len as usize;
+                let alone = run_device(&g, &ids, &document_alone(&packed, b, first, len));
+                let r0 = b * packed.t as usize + first;
+                let tag = format!("{o:?}: sequence {b} document at {first}");
+                let rows = |x: &[f32], width: usize| -> Vec<f64> { wide(&x[r0 * width..][..len * width]) };
+                assert_close(&format!("{tag} out"), &alone.out, &rows(&got.out, nh * hd), 1e-6);
+                assert_close(&format!("{tag} lse"), &alone.lse, &rows(&got.lse, nh), 1e-6);
+                for (which, (name, width)) in [("d_q", nh * hd), ("d_k", nkv * hd), ("d_v", nkv * hd), ("d_sink", nh), ("d_rel", nh * d_rel)].into_iter().enumerate() {
+                    if !got.grads[which].is_empty() {
+                        assert_close(&format!("{tag} {name}"), &alone.grads[which], &rows(&got.grads[which], width), 1e-6);
+                    }
+                }
+                for (s, x) in bank_sum.iter_mut().zip(&alone.grads[5]) {
+                    *s += f64::from(*x);
+                }
+                first += len;
+            }
+        }
+        if o.bias.is_some() {
+            assert_close(&format!("{o:?}: d_bank is the sum of the documents'"), &got.grads[5], &bank_sum, 1e-5);
+        }
+    }
+}
+
+/// A sequence that opens mid-document (its first position is not 0) continues that document's positions, and a
+/// following document still restarts at 0: the oracle and finite differences hold.
+#[test]
+fn a_sequence_opening_mid_document_keeps_its_positions() {
+    let (g, ids) = device();
+    let mut rng = Lcg::random();
+    let heads = HeadShape { n_heads: 2, n_kv_heads: 1, head_dim: 4 };
+    let o = opts(0.5, Some(4), true, Some(DistanceBias { extent: 3, d_rel: 2 }), Some(LogPositionScale { alpha: 0.4, n_floor: 2.0, scales_bias: false }));
+    let mut c = Case::packed(&[&[7]], heads, o, &mut rng);
+    c.doc_pos = vec![5, 6, 7, 0, 1, 2, 3];
+    check_case(&g, &ids, &c, "mid-document start");
+}
+
+/// The documents option needs its positions, runs at `pos0 == 0` on the contiguous layout only, and is refused on
+/// the paged layout.
+#[test]
+#[should_panic(expected = "the documents option and the doc_pos buffer must come together")]
+fn documents_without_their_positions_are_refused() {
+    let (g, ids) = device();
+    let heads = HeadShape { n_heads: 2, n_kv_heads: 1, head_dim: 4 };
+    let x = g.storage(64);
+    let (out, lse) = (g.storage(64), g.storage(8));
+    let o = AttnOptions { documents: true, ..AttnOptions::plain(0.5) };
+    let _ = flash_ext_fwd(&g, &ids, &heads, &o, &AttnInputs::default(), Contiguous { b: 1, t: 4, pos0: 0 }, &x, &x, &x, &out, &lse);
+}
+
+#[test]
+#[should_panic(expected = "pos0 must be 0")]
+fn documents_at_a_nonzero_pos0_are_refused() {
+    let (g, ids) = device();
+    let heads = HeadShape { n_heads: 2, n_kv_heads: 1, head_dim: 4 };
+    let x = g.storage(64);
+    let (out, lse) = (g.storage(64), g.storage(8));
+    let o = AttnOptions { documents: true, ..AttnOptions::plain(0.5) };
+    let _ = flash_ext_fwd(&g, &ids, &heads, &o, &AttnInputs { doc_pos: Some(&x), ..AttnInputs::default() }, Contiguous { b: 1, t: 4, pos0: 3 }, &x, &x, &x, &out, &lse);
+}
+
+#[test]
+#[should_panic(expected = "packed documents are a training layout")]
+fn documents_on_the_paged_layout_are_refused() {
+    let (g, ids) = device();
+    let heads = HeadShape { n_heads: 2, n_kv_heads: 1, head_dim: 4 };
+    let x = g.storage(64);
+    let (out, lse) = (g.storage(64), g.storage(8));
+    let o = AttnOptions { documents: true, ..AttnOptions::plain(0.5) };
+    let paged = PagedKv { index: &x, n_seqs: 1, max_q: 4, n_rows: 4, block_size: 4, max_bt: 1, ring: 0 };
+    let _ = flash_ext_paged_fwd(&g, &ids, &heads, &o, &AttnInputs { doc_pos: Some(&x), ..AttnInputs::default() }, &paged, &x, KvPlanes::F32 { k: &x, v: &x }, &out, &lse);
 }

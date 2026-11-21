@@ -23,7 +23,8 @@
 //   dQ_i        = tq_i * scale * sum_j dZ_ij * k_j
 //   dRel[i,h,r] = tb_i * sum_{j: i-j < extent} dZ_ij * bank[r, i-j]      (BIAS only)
 //
-// over the keys the forward saw (causal, inside the window).
+// over the keys the forward saw (causal, inside the window, and with DOCS inside
+// the query's own document, at in-document positions).
 
 struct Params {
     n_seqs: u32,       // batch
@@ -35,13 +36,13 @@ struct Params {
     max_bt: u32,       // unused
     ring: u32,         // unused
     window: u32,       // 0: plain causal
-    flags: u32,        // 1 SINK, 2 BIAS, 4 TAU, 8 TAU_BIAS (PAGED is refused by the host)
+    flags: u32,        // 1 SINK, 2 BIAS, 4 TAU, 8 TAU_BIAS, 32 DOCS (PAGED is refused by the host)
     extent: u32,
     d_rel: u32,        // <= 64
     sink_off: u32,
     rel_off: u32,
     bank_off: u32,
-    pos0: u32,         // absolute position of row 0
+    pos0: u32,         // absolute position of row 0 (0 with DOCS)
     scale: f32,
     tau_alpha: f32,
     tau_n_floor: f32,
@@ -57,6 +58,13 @@ struct Params {
 @group(0) @binding(6) var<storage, read>       aux:   array<f32>;
 @group(0) @binding(7) var<storage, read_write> dq:    array<f32>;
 @group(0) @binding(8) var<storage, read_write> d_rel: array<f32>;
+
+// The first row of query row `row`'s document, relative to its sequence (0 without DOCS): what
+// `flash_attn_gqa_ext_bwd_prep` left past the per-(row, head) statistics.
+fn doc_start(row: u32) -> u32 {
+    if ((p.flags & 32u) == 0u) { return 0u; }
+    return u32(stats[2u * p.n_seqs * p.max_q * p.n_heads + row]);
+}
 
 // The per-row query factor and bias factor at absolute position `pos`.
 fn tau_q(pos: u32) -> f32 {
@@ -91,7 +99,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let row = idx / nh;
     let i = row % T;
     let b = row / T;
-    let pos = p.pos0 + i;
+    let ds = doc_start(row);
+    let pos = p.pos0 + i - ds;
     let hd = p.head_dim;
     let hkv = h / (nh / p.n_kv_heads);
     let kvd = p.n_kv_heads * hd;
@@ -101,8 +110,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let lse_i = stats[2u * idx];
     let d_i = stats[2u * idx + 1u];
 
-    var lo = 0u;
-    if (p.window > 0u && i + 1u > p.window) { lo = i + 1u - p.window; }
+    var lo = ds;
+    if (p.window > 0u && i + 1u > p.window) { lo = max(lo, i + 1u - p.window); }
 
     var acc: array<f32, 256>;
     for (var d = 0u; d < hd; d = d + 1u) { acc[d] = 0.0; }

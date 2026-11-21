@@ -35,6 +35,7 @@ pub mod llama_bpe;
 pub mod loader;
 pub mod mlm;
 pub mod message_scan;
+pub mod packing;
 pub mod qwen_chat;
 pub mod qwen_tokenizer;
 pub mod rng;

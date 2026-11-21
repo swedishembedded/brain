@@ -19,6 +19,10 @@
 //!   ([`log_position_scale`]), applied to the query and, when [`LogPositionScale::scales_bias`], to the bias
 //!   (the same factor a caller would otherwise apply to the relative states).
 //!
+//! * packed documents (training rows that hold several documents, [`AttnOptions::documents`]): a query sees only
+//!   the keys of its own document, and the window, the distances and `tau` use its position INSIDE the document, so
+//!   each packed document computes exactly what it computes alone, forward and backward.
+//!
 //! The logit of query row `i` against key `j` is `tq_i * scale * <q_i, k_j> + tb_i * bias_ij`.
 //!
 //! Distances and `tau` are taken from ABSOLUTE positions, so a chunked prefill against a paged or ring cache
@@ -45,6 +49,7 @@ const BIAS: u32 = 2;
 const TAU: u32 = 4;
 const TAU_BIAS: u32 = 8;
 const PAGED: u32 = 16;
+const DOCS: u32 = 32;
 
 /// Widest head the kernels hold (their per-thread accumulators are `array<f32, 256>`).
 pub const MAX_HEAD_DIM: u32 = 256;
@@ -89,13 +94,16 @@ pub struct AttnOptions {
     pub bias: Option<DistanceBias>,
     /// The log-position query scale.
     pub tau: Option<LogPositionScale>,
+    /// The rows pack several documents ([`AttnInputs::doc_pos`]): attention never crosses a document and positions
+    /// restart at each one. Contiguous layout at `pos0 == 0` only (serving has no packed rows).
+    pub documents: bool,
 }
 
 impl AttnOptions {
     /// Plain causal attention at `scale`: every option off.
     #[must_use]
     pub fn plain(scale: f32) -> AttnOptions {
-        AttnOptions { scale, window: None, sink: false, bias: None, tau: None }
+        AttnOptions { scale, window: None, sink: false, bias: None, tau: None, documents: false }
     }
 
     fn flags(&self) -> u32 {
@@ -111,6 +119,9 @@ impl AttnOptions {
             if t.scales_bias {
                 fl |= TAU_BIAS;
             }
+        }
+        if self.documents {
+            fl |= DOCS;
         }
         fl
     }
@@ -151,6 +162,10 @@ pub struct AttnInputs<'a> {
     pub rel: Option<&'a DeviceBuffer>,
     /// `[d_rel, extent]` distance bank.
     pub bank: Option<&'a DeviceBuffer>,
+    /// `[rows]` u32: each row's position inside its packed document - 0 at a document's first row, one more on each
+    /// following row of the same document ([`data::packing::document_positions`] builds it from per-token document ids). A row's
+    /// position is clamped to its index in the sequence, so a sequence may open mid-document.
+    pub doc_pos: Option<&'a DeviceBuffer>,
 }
 
 /// Gradients of [`AttnInputs`], overwritten by [`flash_ext_bwd`]; each present exactly when its input is
@@ -241,6 +256,7 @@ fn pack_aux(g: &Gpu, ids: &FlashExtIds, opts: &AttnOptions, heads: &HeadShape, i
     assert_eq!(opts.sink, inputs.sink.is_some(), "flash_ext: the sink option and the sink buffer must come together (option {}, buffer {})", opts.sink, inputs.sink.is_some());
     assert_eq!(opts.bias.is_some(), inputs.rel.is_some(), "flash_ext: the bias option and the rel buffer must come together");
     assert_eq!(opts.bias.is_some(), inputs.bank.is_some(), "flash_ext: the bias option and the bank buffer must come together");
+    assert_eq!(opts.documents, inputs.doc_pos.is_some(), "flash_ext: the documents option and the doc_pos buffer must come together (option {}, buffer {})", opts.documents, inputs.doc_pos.is_some());
     let nh = u64::from(heads.n_heads);
     let sink_len = if opts.sink { rows * nh } else { 0 };
     let (rel_len, bank_len) = opts.bias.map_or((0, 0), |b| (rows * nh * u64::from(b.d_rel), u64::from(b.d_rel) * u64::from(b.extent)));
@@ -285,19 +301,31 @@ fn params(opts: &AttnOptions, heads: &HeadShape, n_seqs: u32, max_q: u32, block_
     ]
 }
 
+/// Refuse a contiguous layout the documents option cannot run on: packed positions start at 0, and a row-local
+/// document start must be exact as the f32 the backward carries it in.
+fn check_contiguous(opts: &AttnOptions, layout: &Contiguous) {
+    if opts.documents {
+        assert_eq!(layout.pos0, 0, "flash_ext: packed documents carry their own positions; pos0 must be 0, got {}", layout.pos0);
+        assert!(layout.t <= 1 << 24, "flash_ext: packed rows of {} tokens exceed the 2^24 the backward's f32 document starts hold exactly", layout.t);
+    }
+}
+
 /// Forward over the contiguous (training) layout: `out` `[b*t, n_heads*head_dim]` and `lse` `[b*t, n_heads]`
 /// (each row's log-sum-exp of its logits and its sink: all [`flash_ext_bwd`] needs) are overwritten.
 #[allow(clippy::too_many_arguments)]
 pub fn flash_ext_fwd(g: &Gpu, ids: &FlashExtIds, heads: &HeadShape, opts: &AttnOptions, inputs: &AttnInputs, layout: Contiguous, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer, out: &DeviceBuffer, lse: &DeviceBuffer) -> Vec<Step> {
     opts.check(heads);
+    check_contiguous(opts, &layout);
     let rows = u64::from(layout.b) * u64::from(layout.t);
     word(rows * u64::from(heads.n_heads) * u64::from(heads.head_dim), "q elements");
     let mut steps = Vec::new();
     let aux = pack_aux(g, ids, opts, heads, inputs, rows, &mut steps);
-    let index = g.storage(1);
+    // The contiguous layout reads no paged index; with documents the binding carries the rows' document positions.
+    let spare = g.storage(1);
+    let index = inputs.doc_pos.unwrap_or(&spare);
     let p = params(opts, heads, layout.b, layout.t, 0, 0, 0, 0, &aux, layout.pos0);
     let threads = word(rows * u64::from(heads.n_heads), "query rows * heads");
-    steps.push(g.dispatch(ids.fwd, &[q, k, v, &index, &aux.buf, out, lse], &p, gpu_core::Dispatch::Threads(threads)));
+    steps.push(g.dispatch(ids.fwd, &[q, k, v, index, &aux.buf, out, lse], &p, gpu_core::Dispatch::Threads(threads)));
     steps
 }
 
@@ -323,6 +351,7 @@ pub fn flash_ext_bwd(
     grads: &AttnInputGrads,
 ) -> Vec<Step> {
     opts.check(heads);
+    check_contiguous(opts, &layout);
     assert_eq!(opts.sink, grads.d_sink.is_some(), "flash_ext_bwd: d_sink must be given exactly when the sink option is set");
     assert_eq!(opts.bias.is_some(), grads.d_rel.is_some(), "flash_ext_bwd: d_rel must be given exactly when the bias option is set");
     assert_eq!(opts.bias.is_some(), grads.d_bank.is_some(), "flash_ext_bwd: d_bank must be given exactly when the bias option is set");
@@ -331,10 +360,11 @@ pub fn flash_ext_bwd(
     let mut steps = Vec::new();
     let aux = pack_aux(g, ids, opts, heads, inputs, rows, &mut steps);
     let p = params(opts, heads, layout.b, layout.t, 0, 0, 0, 0, &aux, layout.pos0);
-    let stats = g.storage_uninit(2 * rows * nh);
-    let (spare_sink, spare_rel) = (g.storage(1), g.storage(1));
+    // `lse` and `D` per (row, head), then with documents each row's document start (see the prep kernel).
+    let stats = g.storage_uninit(2 * rows * nh + if opts.documents { rows } else { 0 });
+    let (spare_sink, spare_rel, spare_doc) = (g.storage(1), g.storage(1), g.storage(1));
     let row_threads = word(rows * nh, "query rows * heads");
-    steps.push(g.dispatch(ids.bwd_prep, &[out, d_out, lse, &aux.buf, &stats, grads.d_sink.unwrap_or(&spare_sink)], &p, gpu_core::Dispatch::Threads(row_threads)));
+    steps.push(g.dispatch(ids.bwd_prep, &[out, d_out, lse, &aux.buf, &stats, grads.d_sink.unwrap_or(&spare_sink), inputs.doc_pos.unwrap_or(&spare_doc)], &p, gpu_core::Dispatch::Threads(row_threads)));
     steps.push(g.dispatch(ids.bwd_dq, &[q, k, v, d_out, &stats, &aux.buf, d_q, grads.d_rel.unwrap_or(&spare_rel)], &p, gpu_core::Dispatch::Threads(row_threads)));
     let key_threads = word(rows * u64::from(heads.n_kv_heads), "key rows * kv heads");
     steps.push(g.dispatch(ids.bwd_dkv, &[q, k, v, d_out, &stats, &aux.buf, d_k, d_v], &p, gpu_core::Dispatch::Threads(key_threads)));
@@ -416,6 +446,7 @@ impl<'a> KvPlanes<'a> {
 #[allow(clippy::too_many_arguments)]
 pub fn flash_ext_paged_fwd(g: &Gpu, ids: &FlashExtIds, heads: &HeadShape, opts: &AttnOptions, inputs: &AttnInputs, paged: &PagedKv, q: &DeviceBuffer, kv: KvPlanes, out: &DeviceBuffer, lse: &DeviceBuffer) -> Vec<Step> {
     opts.check(heads);
+    assert!(!opts.documents, "flash_ext_paged_fwd: packed documents are a training layout; a paged cache holds one sequence per table");
     assert!(paged.block_size >= 1 && paged.max_bt >= 1, "flash_ext_paged_fwd: empty block geometry");
     if paged.ring > 0 {
         let w = opts.window.unwrap_or(u32::MAX);

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-// @what  Causal GQA online-softmax attention with optional sliding window, sink logits, in-tile distance-bank bias and log-position query scale, over contiguous or paged/ring KV
+// @what  Causal GQA online-softmax attention with optional sliding window, sink logits, in-tile distance-bank bias, log-position query scale and packed documents, over contiguous or paged/ring KV
 // @how   one thread per (query row, head), serial key walk with an online softmax
 // @opt   2
 // @cpu   yes
@@ -49,6 +49,14 @@
 // are always absolute-position differences, so a chunked prefill, a ring and a
 // decode step compute the same logits as one whole-sequence pass.
 //
+// DOCS (contiguous only, `pos0 == 0`): the row packs several documents and
+// `index[row]` is that row's position inside its document (0 at a document's
+// first row, +1 per row; clamped to the row index, so a sequence may open
+// mid-document). A query sees only the keys of its own document, and its
+// position - for the window, the distances and tau - is the in-document one,
+// so every packed document computes exactly what it computes alone (the keys
+// are walked in the same order).
+//
 // lse is `[rows, n_heads]` (row-major per query row), what the backward reads.
 
 struct Params {
@@ -61,13 +69,13 @@ struct Params {
     max_bt: u32,       // paged only: block-table row stride
     ring: u32,         // paged only: 0 linear, else logical slot = (p - kv_pos0) % ring
     window: u32,       // 0: plain causal
-    flags: u32,        // 1 SINK, 2 BIAS, 4 TAU, 8 TAU_BIAS, 16 PAGED
+    flags: u32,        // 1 SINK, 2 BIAS, 4 TAU, 8 TAU_BIAS, 16 PAGED, 32 DOCS (contiguous only)
     extent: u32,       // bias distances 0..extent
     d_rel: u32,        // <= 64
     sink_off: u32,
     rel_off: u32,
     bank_off: u32,
-    pos0: u32,         // contiguous only: absolute position of row 0
+    pos0: u32,         // contiguous only: absolute position of row 0 (0 with DOCS)
     scale: f32,
     tau_alpha: f32,
     tau_n_floor: f32,
@@ -106,7 +114,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     }
     if (i >= n_q) { return; }
     let row = q_row0 + i;
-    let pos = q_pos0 + i;
+    var pos = q_pos0 + i;
+    // Contiguous key row of logical slot 0 of this query's keys: the sequence's first row, or with DOCS the first
+    // row of the query's document (whose in-document position is then the query's position).
+    var key_row0 = s * p.max_q;
+    if (!paged && (p.flags & 32u) != 0u) {
+        let dp = min(index[row], i);
+        key_row0 = key_row0 + i - dp;
+        pos = dp;
+    }
 
     var lo = kv_pos0;
     if (p.window > 0u && pos + 1u > p.window) { lo = max(lo, pos + 1u - p.window); }
@@ -131,7 +147,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     var m = -3.4e38;
     var l = 0.0;
     for (var kp = lo; kp <= pos; kp = kp + 1u) {
-        var krow = s * p.max_q + (kp - kv_pos0);
+        var krow = key_row0 + (kp - kv_pos0);
         if (paged) {
             var slot = kp - kv_pos0;
             if (p.ring > 0u) { slot = slot % p.ring; }

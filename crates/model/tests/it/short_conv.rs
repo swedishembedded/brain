@@ -8,7 +8,8 @@
 //! - the backward (dx, d-base, d-dyn) equals central differences of that oracle;
 //! - the single-token step over a ring state, token by token, equals the whole-block forward;
 //! - a chunked prefill with the state a chunk leaves equals the unchunked forward;
-//! - packed documents never see each other, and neither do blocks;
+//! - packed documents never see each other, and neither do blocks; a packed row's outputs and gradients are those of
+//!   each document run alone (its rows' `dx` and `d_dyn`, and `d_base` the sum of the documents');
 //! - the static family equals `causal_conv1d_step` (the existing static step) when no option is on.
 //!
 //! Swedish Embedded AB implements solutions for training and serving models with short causal convolutions for its
@@ -325,4 +326,47 @@ fn the_static_family_equals_the_existing_static_step_when_no_option_is_on() {
     }
     let (a, b) = (g.read(&new_hist, (C * (TAPS - 1)) as usize), g.read(&old_hist, (C * (TAPS - 1)) as usize));
     assert!(a.iter().zip(&b).all(|(p, q)| p.to_bits() == q.to_bits()), "the ring state differs from causal_conv1d_step's");
+}
+
+/// Forward and backward of `x` (`n` rows) with `shape`; `d_base` accumulates from zero.
+fn run_with_grads(g: &Gpu, ids: &ShortConvIds, shape: &ShortConvShape, x: &[f32], dyn_taps: &[f32], base: &[f32], seg: Option<&[u32]>, dy: &[f32]) -> [Vec<f32>; 4] {
+    let n = shape.n as usize;
+    let (xb, db, bb, dyb) = (g.storage_init("x", x), g.storage_init("dyn", dyn_taps), g.storage_init("base", base), g.storage_init("dy", dy));
+    let segb = seg.map(|s| seg_buffer(g, s));
+    let y = g.storage((n * C as usize) as u64);
+    let (dx, dbase, ddyn) = (g.storage((n * C as usize) as u64), g.storage_init("dbase", &vec![0.0; base.len()]), g.storage_init("ddyn", &vec![0.0; n * STRIDE as usize]));
+    let mut steps = vec![short_conv_fwd(g, ids, shape, &xb, Some(&db), &bb, segb.as_ref(), None, &y)];
+    steps.extend(short_conv_bwd(g, ids, shape, &xb, &dyb, Some(&db), &bb, segb.as_ref(), &dx, &dbase, Some(&ddyn)));
+    g.submit(&[], &steps);
+    [g.read(&y, n * C as usize), g.read(&dx, n * C as usize), g.read(&dbase, base.len()), g.read(&ddyn, n * STRIDE as usize)]
+}
+
+/// A packed row of documents (dynamic taps, residual and scale, segments on) computes each document exactly as the
+/// document alone: its rows of `y`, `dx` and `d_dyn` bit for bit (the same taps in the same order), and `d_base`
+/// the sum of the documents' own.
+#[test]
+fn a_packed_row_convolves_each_document_as_it_convolves_alone() {
+    let g = gpu_core::testgpu::dev(pipes());
+    let ids = ids(&g);
+    let mut rng = Lcg::new(random_seed());
+    let packed = case(&mut rng, true, BaseLayout::TapMajor, Some(1.0 / 5f32.sqrt()), true, false, N);
+    let dy = rng.vec_scaled((N * C) as usize, 1.0);
+    let [y, dx, dbase, ddyn] = run_with_grads(&g, &ids, &packed.shape, &packed.x, &packed.dyn_taps, &packed.base, Some(&packed.seg), &dy);
+    let (c, stride) = (C as usize, STRIDE as usize);
+    let mut dbase_sum = vec![0f64; dbase.len()];
+    for (first, len) in [(0usize, 4usize), (4, 4), (8, 3)] {
+        let alone = ShortConvShape { n: len as u32, block: len as u32, segments: false, ..packed.shape };
+        let rows = |v: &[f32], width: usize| v[first * width..][..len * width].to_vec();
+        let [ya, dxa, dbasea, ddyna] = run_with_grads(&g, &ids, &alone, &rows(&packed.x, c), &rows(&packed.dyn_taps, stride), &packed.base, None, &rows(&dy, c));
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&ya), bits(&rows(&y, c)), "document at {first}: y");
+        assert_eq!(bits(&dxa), bits(&rows(&dx, c)), "document at {first}: dx");
+        assert_eq!(bits(&ddyna), bits(&rows(&ddyn, stride)), "document at {first}: d_dyn");
+        for (s, v) in dbase_sum.iter_mut().zip(&dbasea) {
+            *s += f64::from(*v);
+        }
+    }
+    for (i, (&got, &want)) in dbase.iter().zip(&dbase_sum).enumerate() {
+        near(got, want, "d_base is the sum of the documents'", i);
+    }
 }

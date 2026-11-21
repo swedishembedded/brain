@@ -22,6 +22,9 @@
 //
 //   dBank[r, d] = sum_{b,h,i: i >= d, d inside the window} tb_i * dZ_{i,i-d} * rel[b,i,h,r]
 //
+// With DOCS only the pairs inside one document count (`i - d` at or after the
+// document's start), at in-document positions.
+//
 // One thread owns one distance and all `d_rel` of its outputs, so every element
 // is written exactly once (no atomics). The walk recomputes the score at that
 // one diagonal: `O(extent * rows * heads * head_dim)` work, a banded attention's.
@@ -36,13 +39,13 @@ struct Params {
     max_bt: u32,       // unused
     ring: u32,         // unused
     window: u32,       // 0: plain causal
-    flags: u32,        // 1 SINK, 2 BIAS, 4 TAU, 8 TAU_BIAS (PAGED is refused by the host)
+    flags: u32,        // 1 SINK, 2 BIAS, 4 TAU, 8 TAU_BIAS, 32 DOCS (PAGED is refused by the host)
     extent: u32,
     d_rel: u32,        // <= 64
     sink_off: u32,
     rel_off: u32,
     bank_off: u32,
-    pos0: u32,         // absolute position of row 0
+    pos0: u32,         // absolute position of row 0 (0 with DOCS)
     scale: f32,
     tau_alpha: f32,
     tau_n_floor: f32,
@@ -57,6 +60,13 @@ struct Params {
 @group(0) @binding(5) var<storage, read>       stats:  array<f32>;
 @group(0) @binding(6) var<storage, read>       aux:    array<f32>;
 @group(0) @binding(7) var<storage, read_write> d_bank: array<f32>;
+
+// The first row of query row `row`'s document, relative to its sequence (0 without DOCS): what
+// `flash_attn_gqa_ext_bwd_prep` left past the per-(row, head) statistics.
+fn doc_start(row: u32) -> u32 {
+    if ((p.flags & 32u) == 0u) { return 0u; }
+    return u32(stats[2u * p.n_seqs * p.max_q * p.n_heads + row]);
+}
 
 // The per-row query factor and bias factor at absolute position `pos`.
 fn tau_q(pos: u32) -> f32 {
@@ -101,7 +111,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
                 for (var i = dist; i < T; i = i + 1u) {
                     let j = i - dist;
                     let row = b * T + i;
-                    let pos = p.pos0 + i;
+                    let ds = doc_start(row);
+                    if (j < ds) { continue; }
+                    let pos = p.pos0 + i - ds;
                     let qb = (row * nh + h) * hd;
                     let kb = (b * T + j) * kvd + hkv * hd;
                     let st = 2u * (row * nh + h);
