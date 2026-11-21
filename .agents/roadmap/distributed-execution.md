@@ -266,6 +266,24 @@ Scope: Running one training job as ranks across machines, and serving one model 
   time varies between runs (rank 1 measured 94.7 ms/step at 4 steps), so the
   fixed part is differenced rather than assumed.
 
+- **Cluster fabric, NCCL 2.32.3 (2026-11-21, Slurm job on GH200 nodes, fp32,
+  20 iterations after 5 warmup, one process per card).** Libfabric network
+  plugin 1.22.0 over the hosts' libfabric 2.3.1 CXI provider with GPU direct
+  RDMA, against NCCL's TCP sockets on the Slingshot interfaces. Bus bandwidth
+  (nccl-tests convention) at 64 MiB / 1 GiB / 4 GiB:
+  - 4 ranks, one node, NVLink: all-reduce 302.7 / 339.6 / 340.4 GB/s,
+    all-gather 260.3 / 312.7 / 322.3, reduce-scatter 264.7 / 312.7 / 321.0.
+  - 2 ranks, one card on each of two nodes: all-reduce over the fabric plugin
+    13.1 / 12.6 / 12.9, over sockets 7.9 / 9.8 / 9.8; all-gather 12.4 / 12.5 /
+    12.7 vs 10.0 / 9.1 / 9.5. One rank per node drives one NIC.
+  - 8 ranks, 4+4 on two nodes, fabric plugin: all-reduce 115.1 / 149.2 /
+    153.0, all-gather 84.4 / 92.2 / 92.6, reduce-scatter 85.1 / 91.1 / 92.3:
+    the four NICs per node near line rate. Small messages: 8-byte all-reduce
+    14.3 us over the fabric, 29.9 us over sockets.
+  The data-parallel budget this sets: a 27B LoRA gradient (tens of MiB) reduces
+  in about a millisecond across 8 cards, a full bf16 27B gradient (54 GB) in
+  about 0.7 s, so full-parameter runs need C3's sharding and overlap.
+
 - **End to end through a durable job controller.** An orchestrator submitted
       two Qwen3-0.6B LoRA ranks on one machine (eval-free, 2 steps, one P40
       each); the job completed 6.6 s after launch with exit 0, the adapters in
@@ -294,10 +312,12 @@ its own fabric VNI, so fabric traffic must come from scheduler-launched ranks.
 brain stays scheduler-agnostic: a launcher maps the scheduler's rank and
 addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
 
-- [ ] **C0 fabric baseline.** NCCL all-reduce/all-gather/reduce-scatter bus
+- [x] **C0 fabric baseline.** NCCL all-reduce/all-gather/reduce-scatter bus
       bandwidth within a node, across 2 nodes and across 16 cards, over the
       libfabric network plugin and over NCCL's socket fallback, recorded under
       Measured. This is the ceiling every later item is judged against.
+      Done 2026-11-21 for 4 cards (NVLink), 2 and 8 ranks over two nodes
+      (knowledge #541); 12 and 16 ranks follow with C2's scaling runs.
 - [ ] **C1 NCCL across processes and nodes.** `backend_cuda::nccl` gains
       `ncclGetUniqueId`/`ncclCommInitRank` (one rank per process, one card per
       process) and `ncclCommSplit` for the tp/dp groups `Grid` addresses, plus
