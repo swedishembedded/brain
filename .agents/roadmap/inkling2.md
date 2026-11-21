@@ -265,8 +265,8 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
     scales.
   - Kernels may instead consume the interleaved layout directly as a declared `GluLayout`;
     decide in I1.3.
-- **I0.4** `modelstore::recipe`: a files recipe for the repo, including `mtp.safetensors`
-  (it is not in the index). `checkpoint::weightio` opens it as a second, optional source
+- **I0.4** `modelstore::recipe`: make sure `brain pull` lands every file the model needs,
+  including `mtp.safetensors` (it is not in the index); check what the pull fetches today. `checkpoint::weightio` opens it as a second, optional source
   with its own unprefixed names.
 - **I0.5** `tools/goldens/inkling2_dump_reference.py`: a tiny random-config golden
   (2 prelude, 2 core x 3 passes, 2 coda, block size 2, 8 experts top-2, d 64), recording:
@@ -451,13 +451,20 @@ Driven by the per-device gap list, as new candidates only:
 - the MTP drafter through `dflash2` with a tap API keyed by logical depth and rollback
   over rings and conv rows.
 
-## Open decisions
+## Decisions (2026-11-21)
 
-- I2.4: does the default serve the HF reference numerics (dequantized weights, bf16
-  activations), or the vendor's activation-quantized numerics? The plan says the reference
-  by default, the vendor numerics as an opt-in tier.
-- I1.3 / I0.3: consume interleaved gate/up in the kernels, or de-interleave once at load?
-  The plan prefers a declared layout in the kernels, so the published bytes are served as
-  downloaded.
-- I2.1: migrate ouro and huginn onto the shared visit plan in the same series, or after
-  inkling2 lands?
+- I2.4: the default serves the reference numerics (dequantized expert weights,
+  unquantized activations). The vendor's activation-quantized numerics are an opt-in tier,
+  measured as KL and top-1 against the bf16 reference.
+- I1.3 / I0.3: the kernels consume the interleaved gate/up layout as a declared
+  `GluLayout`, so the published bytes are served as downloaded; there is no
+  de-interleaving at load.
+- I2.1: ouro and huginn migrate onto the shared visit plan in the same series that
+  introduces it.
+- The checkpoint lives only in brain's model store as
+  `thinkingmachines/Inkling-2-Mini`, and no copy of the weights lives elsewhere.
+  - Today `brain pull` refuses it ("unsupported architecture", exit 1) until the arch row
+    (I2.2) exists. The store entry was therefore filled from the pinned revision with the
+    Hugging Face CLI.
+  - Once I2.2 lands, `brain pull` must accept the entry as is and write its checksums
+    (I0.4).
