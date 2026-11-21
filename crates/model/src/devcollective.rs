@@ -302,8 +302,21 @@ impl<C: Collective> Collective for JobCollective<C> {
         self.host.world_size()
     }
 
+    /// On the device group once the ranks formed one: a step's scalars (its token count, an evaluation's result)
+    /// then cost an NCCL round of microseconds instead of a sealed host-star round trip. Before that, through the
+    /// host star.
     fn all_reduce<'a>(&'a self, rank: usize, local: Payload) -> CollectiveFuture<'a, Payload> {
-        self.host.all_reduce(rank, local)
+        Box::pin(async move {
+            {
+                let path = self.device.lock().unwrap_or_else(|e| e.into_inner());
+                if let DevicePath::Device(group) = &*path {
+                    if let Some(out) = device_all_reduce(group, &local, self.op_timeout)? {
+                        return Ok(out);
+                    }
+                }
+            }
+            self.host.all_reduce(rank, local).await
+        })
     }
 
     fn all_gather<'a>(&'a self, rank: usize, local: Payload) -> CollectiveFuture<'a, Payload> {
@@ -314,8 +327,19 @@ impl<C: Collective> Collective for JobCollective<C> {
         self.host.reduce_scatter(rank, local)
     }
 
+    /// On the device group once the ranks formed one, like [`Collective::all_reduce`] here.
     fn broadcast<'a>(&'a self, rank: usize, local: Payload, root: usize) -> CollectiveFuture<'a, Payload> {
-        self.host.broadcast(rank, local, root)
+        Box::pin(async move {
+            {
+                let path = self.device.lock().unwrap_or_else(|e| e.into_inner());
+                if let DevicePath::Device(group) = &*path {
+                    if let Some(out) = device_broadcast(group, rank, &local, root, self.op_timeout)? {
+                        return Ok(out);
+                    }
+                }
+            }
+            self.host.broadcast(rank, local, root).await
+        })
     }
 
     fn all_reduce_device<'a>(&'a self, rank: usize, gpu: &'a Gpu, bufs: &'a [(&'a DeviceBuffer, u64)], dtype: CollectiveDtype, scale: f32) -> CollectiveFuture<'a, bool> {
@@ -368,6 +392,92 @@ impl<C: Collective> JobCollective<C> {
             _ => Ok(false),
         }
     }
+}
+
+/// The fp32 slot one rank's scalars travel in over the device group: length, element type, then up to 62 values. A
+/// longer payload takes the host path, on every rank alike.
+const SCALAR_SLOT: usize = 64;
+
+/// The index of `dtype` in [`gpu_core::select::Dtype::ALL`], exact in fp32.
+fn dtype_code(dtype: gpu_core::select::Dtype) -> f32 {
+    gpu_core::select::Dtype::ALL.iter().position(|d| *d == dtype).unwrap_or(usize::MAX >> 40) as f32
+}
+
+/// Upload `data` to a fresh buffer of the group's card.
+fn upload(group: &RankGroup, data: &[f32]) -> DeviceBuffer {
+    let buf = group.gpu().storage(data.len().max(1) as u64);
+    if !data.is_empty() {
+        group.gpu().write_f32(&buf, data);
+    }
+    buf
+}
+
+/// Run `ops` on the group, wait for them within `timeout`, and read `n` values of `buf` back.
+fn settle_read(group: &RankGroup, buf: &DeviceBuffer, n: usize, timeout: Duration, ops: Result<(), String>) -> CollectiveResult<Vec<f32>> {
+    ops.and_then(|()| group.wait(timeout)).map_err(CollectiveError::Transport)?;
+    Ok(if n == 0 { Vec::new() } else { group.gpu().read(buf, n) })
+}
+
+/// [`Collective::all_reduce`] over the device group, as ONE device round: every rank's length, type and values are
+/// gathered, each rank checks them as the host star does and sums them in rank order, so every rank computes the same
+/// bytes; `None` when the payload is too long for this path (every rank sees every length, so all agree).
+fn device_all_reduce(group: &RankGroup, local: &Payload, timeout: Duration) -> CollectiveResult<Option<Payload>> {
+    let world = group.world();
+    let n = local.data.len();
+    // A step's scalars are a few values; a longer payload is a gradient, which has its own device path.
+    if n > SCALAR_SLOT - 2 {
+        return Ok(None);
+    }
+    let mut mine = vec![0f32; SCALAR_SLOT];
+    mine[0] = n as f32;
+    mine[1] = dtype_code(local.dtype);
+    mine[2..2 + n].copy_from_slice(&local.data);
+    let send = upload(group, &mine);
+    let all = group.gpu().storage((SCALAR_SLOT * world) as u64);
+    let slots = settle_read(group, &all, SCALAR_SLOT * world, timeout, group.all_gather(&send, &all, SCALAR_SLOT as u64, CollectiveDtype::F32))?;
+    let first = &slots[..SCALAR_SLOT];
+    let mut sum = vec![0f32; first[0] as usize];
+    for (rank, slot) in slots.chunks(SCALAR_SLOT).enumerate() {
+        if slot[0] > (SCALAR_SLOT - 2) as f32 {
+            // Another rank's payload is too long for a slot: every rank sees it and all take the host path.
+            return Ok(None);
+        }
+        if slot[1] != first[1] {
+            let named = |code: f32| gpu_core::select::Dtype::ALL.get(code as usize).copied().unwrap_or(local.dtype);
+            return Err(CollectiveError::DtypeMismatch { rank, expected: named(first[1]), got: named(slot[1]) });
+        }
+        if slot[0] != first[0] {
+            return Err(CollectiveError::LengthMismatch { rank, expected: first[0] as usize, got: slot[0] as usize });
+        }
+        for (s, v) in sum.iter_mut().zip(&slot[2..]) {
+            *s += v;
+        }
+    }
+    Ok(Some(Payload::new(local.dtype, sum)))
+}
+
+/// [`Collective::broadcast`] over the device group, as ONE device round of a fixed slot carrying the root's length,
+/// type and values, so a rank that passed nothing knows what it receives; `None` when the root's payload is too long
+/// for a slot (every rank learns that from the slot itself).
+fn device_broadcast(group: &RankGroup, rank: usize, local: &Payload, root: usize, timeout: Duration) -> CollectiveResult<Option<Payload>> {
+    crate::collective::check_rank(root, group.world())?;
+    let mut mine = vec![0f32; SCALAR_SLOT];
+    if rank == root {
+        let n = local.data.len();
+        mine[0] = n.min(SCALAR_SLOT - 1) as f32;
+        mine[1] = dtype_code(local.dtype);
+        if n <= SCALAR_SLOT - 2 {
+            mine[2..2 + n].copy_from_slice(&local.data);
+        }
+    }
+    let buf = upload(group, &mine);
+    let slot = settle_read(group, &buf, SCALAR_SLOT, timeout, group.broadcast(&buf, SCALAR_SLOT as u64, CollectiveDtype::F32, root))?;
+    let n = slot[0] as usize;
+    if n > SCALAR_SLOT - 2 {
+        return Ok(None);
+    }
+    let dtype = gpu_core::select::Dtype::ALL.get(slot[1] as usize).copied().unwrap_or(local.dtype);
+    Ok(Some(Payload::new(dtype, slot[2..2 + n].to_vec())))
 }
 
 #[cfg(test)]

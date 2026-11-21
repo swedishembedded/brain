@@ -187,6 +187,9 @@ fn check_ops(world: usize) {
         assert_eq!(got["provider"], json!("nccl"), "rank {rank}");
         let grads: Vec<f32> = GRADS.iter().flat_map(|&n| sum_of(0..world, n)).map(|x| x * 0.5).collect();
         assert_eq!(floats(&got["grad"]), grads, "rank {rank}: bucketed device gradient reduction (scale 0.5)");
+        let w = world as f32;
+        assert_eq!(floats(&got["scalar_sum"]), vec![w * (w + 1.0) / 2.0, 2.0 * w], "rank {rank}: a scalar sum on the device group");
+        assert_eq!(floats(&got["scalar_cast"]), vec![7.0, 8.0, 9.0], "rank {rank}: a broadcast on the device group");
         let halves: Vec<f32> = GRADS_BF16.iter().flat_map(|&n| sum_of(0..world, n)).collect();
         assert_eq!(floats(&got["grad_bf16"]), halves, "rank {rank}: bucketed bf16 gradient reduction");
         assert_eq!(floats(&got["all_reduce"]), total, "rank {rank}: all_reduce f32");
@@ -382,6 +385,10 @@ fn ops(rank: usize, ctx: &JobContext, gpu: &Gpu) -> Value {
         .collect();
     let half_bufs: Vec<(&DeviceBuffer, u64)> = halves.iter().zip(GRADS_BF16).map(|(b, n)| (b, n as u64)).collect();
     assert!(pollster::block_on(host.all_reduce_device(rank, gpu, &half_bufs, CollectiveDtype::Bf16, 1.0)).unwrap_or_else(|e| fail(rank, e)));
+    // A step's scalars ride the device group once it is formed: a sum, and a broadcast to ranks that pass nothing.
+    let scalar_sum = pollster::block_on(host.all_reduce(rank, model::collective::Payload::f32(vec![rank as f32 + 1.0, 2.0]))).unwrap_or_else(|e| fail(rank, e)).data;
+    let offer = if rank == world - 1 { vec![7.0, 8.0, 9.0] } else { Vec::new() };
+    let scalar_cast = pollster::block_on(host.broadcast(rank, model::collective::Payload::f32(offer), world - 1)).unwrap_or_else(|e| fail(rank, e)).data;
     let provider = job.device_provider();
 
     let group = rendezvous(host, rank, RankGroup::supported(gpu), || RankGroup::id(gpu), |id| RankGroup::join(gpu, id, world, rank, Duration::from_secs(60)))
@@ -409,6 +416,8 @@ fn ops(rank: usize, ctx: &JobContext, gpu: &Gpu) -> Value {
     let mut doc = json!({
         "provider": provider,
         "grad": grads.iter().zip(GRADS).flat_map(|(b, n)| gpu.read(b, n)).collect::<Vec<f32>>(),
+        "scalar_sum": scalar_sum,
+        "scalar_cast": scalar_cast,
         "grad_bf16": halves.iter().zip(GRADS_BF16).flat_map(|(b, n)| from_bf16_words(&gpu.read(b, n.div_ceil(2)), n)).collect::<Vec<f32>>(),
         "all_reduce": gpu.read(&reduced, N),
         "all_reduce_bf16": from_bf16_words(&gpu.read(&half, N.div_ceil(2)), N),

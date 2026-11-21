@@ -130,6 +130,11 @@ impl RankGroup {
         Ok(RankGroup { gpu: gpu.share(), comm })
     }
 
+    /// The card this rank's buffers live on.
+    pub fn gpu(&self) -> &Gpu {
+        &self.gpu
+    }
+
     /// Who moves the bytes (`"nccl"`).
     pub fn provider(&self) -> &'static str {
         self.comm.provider()
