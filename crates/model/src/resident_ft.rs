@@ -846,6 +846,29 @@ impl ResidentFullFt {
         &self.grads[i]
     }
 
+    /// Tensor `i`'s accumulated gradient as host f32, decoded from bf16 where it is stored so.
+    pub fn read_grad(&self, gpu: &Gpu, i: usize) -> Vec<f32> {
+        let numel = self.specs[i].n as usize * self.specs[i].k as usize;
+        match self.cfg.grad {
+            GradDtype::F32 => gpu.read(&self.grads[i], numel),
+            GradDtype::Bf16 => gpu.read(&self.grads[i], numel.div_ceil(2)).iter().flat_map(|w| [f32::from_bits(w.to_bits() << 16), f32::from_bits(w.to_bits() & 0xFFFF_0000)]).take(numel).collect(),
+        }
+    }
+
+    /// Every resident tensor's gradient buffer with its name, element count and element type, for a data-parallel
+    /// reduction that sums them where they live. A layer-streamed build reuses a few lanes of gradient buffers across
+    /// the layers, so at a step's end most gradients are gone from the device: that build refuses by name.
+    pub fn device_grads(&self) -> Result<Vec<(String, DeviceBuffer, u64, gpu_core::CollectiveDtype)>, String> {
+        if self.window.is_some() {
+            return Err("a layer-streamed resident fine-tune reuses its gradient buffers across layers, so they are not on the device together at the end of a step".into());
+        }
+        let dtype = match self.cfg.grad {
+            GradDtype::F32 => gpu_core::CollectiveDtype::F32,
+            GradDtype::Bf16 => gpu_core::CollectiveDtype::Bf16,
+        };
+        Ok(self.specs.iter().zip(&self.grads).map(|(spec, g)| (spec.name.clone(), g.clone(), u64::from(spec.n) * u64::from(spec.k), dtype)).collect())
+    }
+
     pub fn grad_dtype(&self) -> GradDtype {
         self.cfg.grad
     }

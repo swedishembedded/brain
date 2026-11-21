@@ -7564,15 +7564,11 @@ impl Qwen35 {
     /// The accumulated gradient of `name`, as host f32: the resident state's buffer (decoded from bf16 where it is
     /// stored so) for a tensor that state holds, the parameter store's otherwise.
     pub fn read_grad(&self, name: &str) -> Vec<f32> {
-        if let Some((buf, dtype)) = self.resident.as_ref().and_then(|ft| {
+        if let Some(ft) = self.resident.as_ref() {
             let ft = ft.borrow();
-            ft.index_of(name).map(|i| (ft.grad_buffer(i).clone(), ft.grad_dtype()))
-        }) {
-            let numel = self.resident.as_ref().expect("checked").borrow().specs().iter().find(|s| s.name == name).map(|s| s.n as usize * s.k as usize).expect("indexed");
-            return match dtype {
-                model::ops::GradDtype::F32 => self.gpu.read(&buf, numel),
-                model::ops::GradDtype::Bf16 => self.gpu.read(&buf, numel / 2).iter().flat_map(|w| [f32::from_bits(w.to_bits() << 16), f32::from_bits(w.to_bits() & 0xFFFF_0000)]).collect(),
-            };
+            if let Some(i) = ft.index_of(name) {
+                return ft.read_grad(&self.gpu, i);
+            }
         }
         self.ps.read_grad(&self.gpu, name)
     }
@@ -7948,6 +7944,10 @@ impl model::Model for Qwen35 {
     }
     fn read_grad(&self, name: &str) -> Vec<f32> {
         Qwen35::read_grad(self, name)
+    }
+    fn device_grads(&self) -> Result<model::DeviceGrads, String> {
+        let resident = self.resident.as_ref().map(|ft| ft.borrow());
+        model::DeviceGrads::from_store_and_resident(&self.gpu, &self.ps, resident.as_deref(), &model::Model::param_names(self))
     }
     fn logits_all(&self, tokens: &[u32]) -> Option<Vec<f32>> {
         Some(Qwen35::logits_all(self, tokens))

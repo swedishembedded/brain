@@ -92,6 +92,7 @@ pub mod ops;
 // modules whose declarations WERE gated).
 #[cfg(not(target_arch = "wasm32"))]
 pub mod devcollective;
+pub mod gradbucket;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod netcollective;
 #[cfg(not(target_arch = "wasm32"))]
@@ -143,6 +144,38 @@ pub use plan::{plan_tp, Hardware, ModelShape, TpPlan};
 pub use shard::{plan_balanced, plan_stage_layout, Pipeline, PipelineModel, Shard, ShardCost, Shardable, StreamPlan};
 
 pub use objective::{Objective, StepVerdict};
+/// A model's gradients on the device ([`Model::device_grads`]): the card and, per optimised parameter in
+/// [`Model::param_names`] order, its gradient buffer, element count and element type.
+pub struct DeviceGrads {
+    pub gpu: gpu_core::Gpu,
+    pub tensors: Vec<(gpu_core::DeviceBuffer, u64, gpu_core::CollectiveDtype)>,
+}
+
+impl DeviceGrads {
+    /// The gradients of `names` from the parameter store, and from `resident` for the names it holds: what a model
+    /// that keeps a resident full fine-tune beside its store answers [`Model::device_grads`] with.
+    pub fn from_store_and_resident(gpu: &gpu_core::Gpu, store: &paramstore::ParamStore, resident: Option<&resident_ft::ResidentFullFt>, names: &[String]) -> Result<DeviceGrads, String> {
+        let held: HashMap<String, (gpu_core::DeviceBuffer, u64, gpu_core::CollectiveDtype)> = match resident {
+            Some(r) => r.device_grads()?.into_iter().map(|(name, b, n, d)| (name, (b, n, d))).collect(),
+            None => HashMap::new(),
+        };
+        let tensors = names
+            .iter()
+            .map(|n| match (held.get(n), store.grad.get(n)) {
+                (Some(t), _) => Ok(t.clone()),
+                (None, Some(g)) => Ok((g.clone(), store.numel(n) as u64, gpu_core::CollectiveDtype::F32)),
+                (None, None) => Err(format!("{n}: its gradient is in neither the parameter store nor the resident state")),
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(DeviceGrads { gpu: gpu.share(), tensors })
+    }
+
+    /// The fp32 gradients of `names` in `store`, or which one it does not hold.
+    pub fn from_store(gpu: &gpu_core::Gpu, store: &paramstore::ParamStore, names: &[String]) -> Result<DeviceGrads, String> {
+        DeviceGrads::from_store_and_resident(gpu, store, None, names)
+    }
+}
+
 pub use trainprec::{apply_train_precision, OptimizerParts, OptimizerState, ResidentRequest, StateSupport, TrainPrecision, TrainPrecisionSupport};
 #[cfg(not(target_arch = "wasm32"))]
 pub use score::{example_rows, score_base, score_dataset, score_tuned, supervised_positions, ScoredSet};
@@ -484,6 +517,17 @@ pub trait Model {
     /// an offloaded store through, for a model that keeps no [`OffDeviceState`] of its own.
     fn optimizer_parts(&self) -> Option<OptimizerParts<'_>> {
         None
+    }
+
+    /// Every optimised parameter's gradient where it lives on the device, in [`Model::param_names`] order, so a
+    /// data-parallel reduction can sum them without staging them through the host. The default answers from the
+    /// parameter store ([`Model::optimizer_parts`]) when it holds every one of them; a model that keeps gradients
+    /// elsewhere (a resident full fine-tune) adds its own, and one that holds them nowhere a reduction can reach
+    /// answers why, so the run reduces through the host instead.
+    fn device_grads(&self) -> Result<DeviceGrads, String> {
+        let parts = self.optimizer_parts().ok_or("this model keeps no parameter store a reduction can reach")?;
+        let names = self.param_names();
+        DeviceGrads::from_store(parts.gpu, parts.store, &names)
     }
 
     /// `name`'s AdamW `(m, v)` moments; `None` when it has none to give.

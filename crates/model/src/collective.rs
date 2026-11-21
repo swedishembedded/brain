@@ -178,7 +178,7 @@ pub trait Collective: Send + Sync {
     /// is ignored (pass an empty vec).
     fn broadcast<'a>(&'a self, rank: usize, local: Payload, root: usize) -> CollectiveFuture<'a, Payload>;
 
-    /// Sum fp32 device buffers in place across the ranks without staging them
+    /// Sum device buffers of `dtype` in place across the ranks without staging them
     /// through the host: for every `(buf, count)` on `gpu`, the first `count`
     /// elements become the sum over the ranks of `scale * x` (each rank's own
     /// `scale`), and every rank receives the same bytes. Resolves to `false`
@@ -187,8 +187,30 @@ pub trait Collective: Send + Sync {
     /// the same call, so the ranks agree on the path.
     ///
     /// The default has no device path.
-    fn all_reduce_device<'a>(&'a self, _rank: usize, _gpu: &'a gpu_core::Gpu, _bufs: &'a [(&'a gpu_core::DeviceBuffer, u64)], _scale: f32) -> CollectiveFuture<'a, bool> {
+    fn all_reduce_device<'a>(&'a self, _rank: usize, _gpu: &'a gpu_core::Gpu, _bufs: &'a [(&'a gpu_core::DeviceBuffer, u64)], _dtype: gpu_core::CollectiveDtype, _scale: f32) -> CollectiveFuture<'a, bool> {
         Box::pin(async { Ok(false) })
+    }
+}
+
+/// A shared group is the group: ranks that are threads of one process hold it behind an `Arc`.
+impl<T: Collective + ?Sized> Collective for std::sync::Arc<T> {
+    fn world_size(&self) -> usize {
+        (**self).world_size()
+    }
+    fn all_reduce<'a>(&'a self, rank: usize, local: Payload) -> CollectiveFuture<'a, Payload> {
+        (**self).all_reduce(rank, local)
+    }
+    fn all_gather<'a>(&'a self, rank: usize, local: Payload) -> CollectiveFuture<'a, Payload> {
+        (**self).all_gather(rank, local)
+    }
+    fn reduce_scatter<'a>(&'a self, rank: usize, local: Payload) -> CollectiveFuture<'a, Payload> {
+        (**self).reduce_scatter(rank, local)
+    }
+    fn broadcast<'a>(&'a self, rank: usize, local: Payload, root: usize) -> CollectiveFuture<'a, Payload> {
+        (**self).broadcast(rank, local, root)
+    }
+    fn all_reduce_device<'a>(&'a self, rank: usize, gpu: &'a gpu_core::Gpu, bufs: &'a [(&'a gpu_core::DeviceBuffer, u64)], dtype: gpu_core::CollectiveDtype, scale: f32) -> CollectiveFuture<'a, bool> {
+        (**self).all_reduce_device(rank, gpu, bufs, dtype, scale)
     }
 }
 
@@ -643,13 +665,13 @@ impl Collective for TimedCollective<'_> {
         })
     }
 
-    /// Timed as an all-reduce of the buffers' fp32 bytes when the inner
+    /// Timed as an all-reduce of the buffers' bytes when the inner
     /// transport takes the device path; a call it declines is not an op.
-    fn all_reduce_device<'a>(&'a self, rank: usize, gpu: &'a gpu_core::Gpu, bufs: &'a [(&'a gpu_core::DeviceBuffer, u64)], scale: f32) -> CollectiveFuture<'a, bool> {
+    fn all_reduce_device<'a>(&'a self, rank: usize, gpu: &'a gpu_core::Gpu, bufs: &'a [(&'a gpu_core::DeviceBuffer, u64)], dtype: gpu_core::CollectiveDtype, scale: f32) -> CollectiveFuture<'a, bool> {
         Box::pin(async move {
-            let bytes = bufs.iter().map(|(_, n)| n.saturating_mul(4)).sum();
+            let bytes = bufs.iter().map(|(_, n)| n.saturating_mul(dtype.bytes())).sum();
             let started = Instant::now();
-            let out = self.inner.all_reduce_device(rank, gpu, bufs, scale).await;
+            let out = self.inner.all_reduce_device(rank, gpu, bufs, dtype, scale).await;
             if matches!(out, Ok(true) | Err(_)) {
                 self.record(OpKind::AllReduce, bytes, started.elapsed());
             }

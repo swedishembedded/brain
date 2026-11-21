@@ -118,9 +118,22 @@ pub fn reduce_grads<M: Model>(model: &M, coll: &dyn Collective, rank: usize) -> 
 /// receives `Σ(gᵢ·nᵢ) / Σ nᵢ`, the mean over all the items of the step rather
 /// than the mean of the ranks' means. Equal weights give [`reduce_grads`].
 pub fn reduce_grads_weighted<M: Model>(model: &M, coll: &dyn Collective, rank: usize, local_weight: f32) -> CollectiveResult<()> {
+    if gpu_core::profile::enabled() {
+        // Under --kernel-profile only: let the backward finish first, so the reduction's own cost is what the
+        // stages below measure rather than the wait for the device.
+        if let Some(parts) = model.optimizer_parts() {
+            let clock = std::time::Instant::now();
+            parts.gpu.poll_wait();
+            gpu_core::profile::stage_time("reduce: wait for the backward", clock);
+        }
+    }
+    let clock = std::time::Instant::now();
     let total = pollster::block_on(coll.all_reduce(rank, Payload::f32(vec![local_weight])))?.data[0];
+    gpu_core::profile::stage_time("reduce: step weight over the host transport", clock);
     let inv = 1.0 / total.max(1e-12);
+    let clock = std::time::Instant::now();
     if reduce_on_device(model, coll, rank, local_weight * inv)? {
+        gpu_core::profile::stage_time("reduce: gradients on the device", clock);
         return Ok(());
     }
     for name in model.param_names() {
@@ -133,18 +146,36 @@ pub fn reduce_grads_weighted<M: Model>(model: &M, coll: &dyn Collective, rank: u
 }
 
 /// Replace every gradient with the sum over the ranks of `scale * g` where the
-/// gradients live, when the model keeps them in its parameter store and the
-/// transport reduces on the device; `false` (nothing moved) otherwise, for the
-/// host path. The condition depends only on the model and the transport, so
-/// every rank of a job takes the same branch.
+/// gradients live ([`Model::device_grads`]), when the transport reduces on the
+/// device; `false` (nothing moved) otherwise, for the host path. The condition
+/// depends only on the model and the transport, so every rank of a job takes
+/// the same branch. A model whose gradients a device reduction cannot reach
+/// says why once per process.
 fn reduce_on_device<M: Model>(model: &M, coll: &dyn Collective, rank: usize, scale: f32) -> CollectiveResult<bool> {
-    let Some(parts) = model.optimizer_parts() else { return Ok(false) };
-    let names = model.param_names();
-    if names.iter().any(|n| !parts.store.grad.contains_key(n)) {
-        return Ok(false);
+    let grads = match model.device_grads() {
+        Ok(grads) => grads,
+        Err(why) => {
+            static SAID: std::sync::Once = std::sync::Once::new();
+            SAID.call_once(|| eprintln!("brain: rank {rank}: gradients reduce through the host ({why})"));
+            return Ok(false);
+        }
+    };
+    // One reduction per element type (a resident fine-tune keeps bf16 gradients beside fp32 ones), in a fixed order.
+    let mut reduced = false;
+    for dtype in [gpu_core::CollectiveDtype::F32, gpu_core::CollectiveDtype::Bf16] {
+        let bufs: Vec<(&gpu_core::DeviceBuffer, u64)> = grads.tensors.iter().filter(|t| t.2 == dtype).map(|(b, n, _)| (b, *n)).collect();
+        if bufs.is_empty() {
+            continue;
+        }
+        if !pollster::block_on(coll.all_reduce_device(rank, &grads.gpu, &bufs, dtype, scale))? {
+            if reduced {
+                return Err(CollectiveError::Transport("the transport reduced one gradient type on the device and declined the other".into()));
+            }
+            return Ok(false);
+        }
+        reduced = true;
     }
-    let bufs: Vec<(&gpu_core::DeviceBuffer, u64)> = names.iter().map(|n| (parts.store.g(n), parts.store.numel(n) as u64)).collect();
-    pollster::block_on(coll.all_reduce_device(rank, parts.gpu, &bufs, scale))
+    Ok(reduced)
 }
 
 // ---- Model-generic glue (flatten from / scatter to the model) ------------------

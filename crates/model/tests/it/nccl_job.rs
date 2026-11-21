@@ -23,7 +23,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use gpu_core::devgroup::RankGroup;
-use gpu_core::{CollectiveDtype, Gpu};
+use gpu_core::{CollectiveDtype, DeviceBuffer, Gpu};
 use model::collective::Collective;
 use model::devcollective::rendezvous;
 use model::{Axis, CollectivePath, Grid, JobContext, JobPlan, JobSecret};
@@ -32,6 +32,12 @@ use serde_json::{json, Value};
 const CHILD: &str = "nccl_job::rank_process";
 /// Elements per rank in the op checks; not a multiple of anything NCCL likes.
 const N: usize = 1001;
+/// Gradient tensor sizes for the bucketed reduction under a 1 MiB cap: small ones packed into buckets
+/// (more than one), and one at the cap (262,144 fp32) reduced in place.
+const GRADS: [usize; 7] = [1001, 200_000, 262_144, 7, 100_000, 3, 70_000];
+/// bf16 gradient sizes, odd ones among them, so packed members must be aligned to whole words; one at the
+/// 1 MiB cap (524,288 bf16) stays in place.
+const GRADS_BF16: [usize; 5] = [3, 1001, 524_288, 5, 70_001];
 
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("brain-nccl-{}-{name}", std::process::id()));
@@ -80,6 +86,8 @@ impl Job {
         plan.handshake_timeout_ms = 60_000;
         plan.op_timeout_ms = op_timeout_ms;
         plan.collectives = CollectivePath::Device;
+        // A 1 MiB bucket cap, so the gradient check below has packed buckets and a tensor reduced in place.
+        plan.bucket_mib = 1;
         if world.is_multiple_of(2) {
             plan.tp = 2;
             plan.dp = world / 2;
@@ -177,7 +185,10 @@ fn check_ops(world: usize) {
     let total = sum_of(0..world, N);
     for (rank, got) in results.iter().enumerate() {
         assert_eq!(got["provider"], json!("nccl"), "rank {rank}");
-        assert_eq!(floats(&got["grad"]), total.iter().map(|x| x * 0.5).collect::<Vec<_>>(), "rank {rank}: device gradient reduction (scale 0.5)");
+        let grads: Vec<f32> = GRADS.iter().flat_map(|&n| sum_of(0..world, n)).map(|x| x * 0.5).collect();
+        assert_eq!(floats(&got["grad"]), grads, "rank {rank}: bucketed device gradient reduction (scale 0.5)");
+        let halves: Vec<f32> = GRADS_BF16.iter().flat_map(|&n| sum_of(0..world, n)).collect();
+        assert_eq!(floats(&got["grad_bf16"]), halves, "rank {rank}: bucketed bf16 gradient reduction");
         assert_eq!(floats(&got["all_reduce"]), total, "rank {rank}: all_reduce f32");
         assert_eq!(floats(&got["all_reduce_bf16"]), total, "rank {rank}: all_reduce bf16");
         let gathered: Vec<f32> = (0..world).flat_map(|r| exact_input(r, N)).collect();
@@ -300,7 +311,7 @@ fn measure_rank(rank: usize, ctx: &JobContext, gpu: &Gpu) -> Value {
         for i in 0..6 {
             gpu.flush();
             let started = Instant::now();
-            assert!(pollster::block_on(device.all_reduce_device(rank, gpu, &bufs, 1.0 / ctx.plan().world_size as f32)).unwrap_or_else(|e| fail(rank, e)));
+            assert!(pollster::block_on(device.all_reduce_device(rank, gpu, &bufs, CollectiveDtype::F32, 1.0 / ctx.plan().world_size as f32)).unwrap_or_else(|e| fail(rank, e)));
             if i > 0 {
                 on_device.push(started.elapsed().as_secs_f64() * 1e3);
             }
@@ -355,10 +366,22 @@ fn ops(rank: usize, ctx: &JobContext, gpu: &Gpu) -> Value {
     };
 
     // The trainer's path: the job's collective reduces device gradients itself.
-    let grad = up(&exact_input(rank, N));
-    let bufs = [(&grad, N as u64)];
-    let on_device = pollster::block_on(host.all_reduce_device(rank, gpu, &bufs, 0.5)).unwrap_or_else(|e| fail(rank, e));
+    // The trainer's shape: many tensors, small ones packed into buckets, one at the cap reduced in place.
+    let grads: Vec<DeviceBuffer> = GRADS.iter().map(|&n| up(&exact_input(rank, n))).collect();
+    let bufs: Vec<(&DeviceBuffer, u64)> = grads.iter().zip(GRADS).map(|(b, n)| (b, n as u64)).collect();
+    let on_device = pollster::block_on(host.all_reduce_device(rank, gpu, &bufs, CollectiveDtype::F32, 0.5)).unwrap_or_else(|e| fail(rank, e));
     assert!(on_device, "the plan requires the device path");
+    // bf16 gradients of odd lengths: packed members start on whole words.
+    let halves: Vec<DeviceBuffer> = GRADS_BF16
+        .iter()
+        .map(|&n| {
+            let buf = gpu.storage(n.div_ceil(2) as u64);
+            gpu.write(&buf, &bf16_words(&exact_input(rank, n)));
+            buf
+        })
+        .collect();
+    let half_bufs: Vec<(&DeviceBuffer, u64)> = halves.iter().zip(GRADS_BF16).map(|(b, n)| (b, n as u64)).collect();
+    assert!(pollster::block_on(host.all_reduce_device(rank, gpu, &half_bufs, CollectiveDtype::Bf16, 1.0)).unwrap_or_else(|e| fail(rank, e)));
     let provider = job.device_provider();
 
     let group = rendezvous(host, rank, RankGroup::supported(gpu), || RankGroup::id(gpu), |id| RankGroup::join(gpu, id, world, rank, Duration::from_secs(60)))
@@ -385,7 +408,8 @@ fn ops(rank: usize, ctx: &JobContext, gpu: &Gpu) -> Value {
 
     let mut doc = json!({
         "provider": provider,
-        "grad": gpu.read(&grad, N),
+        "grad": grads.iter().zip(GRADS).flat_map(|(b, n)| gpu.read(b, n)).collect::<Vec<f32>>(),
+        "grad_bf16": halves.iter().zip(GRADS_BF16).flat_map(|(b, n)| from_bf16_words(&gpu.read(b, n.div_ceil(2)), n)).collect::<Vec<f32>>(),
         "all_reduce": gpu.read(&reduced, N),
         "all_reduce_bf16": from_bf16_words(&gpu.read(&half, N.div_ceil(2)), N),
         "all_gather": gpu.read(&gathered, N * world),
@@ -437,13 +461,13 @@ fn rank_process() {
             gpu.write_f32(&buf, &exact_input(rank, N));
             let bufs = [(&buf, N as u64)];
             // The first reduction forms the device group on both ranks.
-            pollster::block_on(job.all_reduce_device(rank, &gpu, &bufs, 1.0)).unwrap_or_else(|e| fail(rank, e));
+            pollster::block_on(job.all_reduce_device(rank, &gpu, &bufs, CollectiveDtype::F32, 1.0)).unwrap_or_else(|e| fail(rank, e));
             if case == "quit" {
                 // Leave the way a killed rank would: no further contribution.
                 std::process::exit(0);
             }
             let started = Instant::now();
-            let outcome = pollster::block_on(job.all_reduce_device(rank, &gpu, &bufs, 1.0));
+            let outcome = pollster::block_on(job.all_reduce_device(rank, &gpu, &bufs, CollectiveDtype::F32, 1.0));
             json!({ "error": outcome.err().map(|e| e.to_string()), "waited_ms": started.elapsed().as_secs_f64() * 1e3 })
         }
         other => fail(rank, format!("unknown case {other}")),

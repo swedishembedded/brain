@@ -355,18 +355,31 @@ Scope: Running one training job as ranks across machines, and serving one model 
 - **`brain qwen3 lora_train --job-plan`, device vs host star (2026-11-21,
   one GH200 node, one card per rank).** Qwen3-4B, LoRA r16 on all seven
   projections (33.0 M fp32 gradient elements, 132 MB per step), bf16 base,
-  block 128, batch 1, eval-free; per-step time by differencing a 6-step and a
-  2-step run's training call on rank 0 so the fixed setup cancels. The plan's
-  `collectives` was `auto` (every rank reported the device path over NCCL)
-  or `host`:
-  - 2 ranks: 108 ms/step on the device vs 719 ms through the host star (6.7x).
-  - 4 ranks: 154 ms/step vs 1128 ms (7.3x).
-  - The host star spends about 530 ms (2 ranks) and 900 ms (4 ranks) of a
-    step on rank 0 in 504 per-tensor reductions; the device path makes one
-    grouped reduction. Forming the device group (rendezvous and NCCL init) is a
-    one-off 2.0 s (2 ranks) and 3.1 s (4 ranks) on the first step.
-  - Every run's adapters were byte-identical across its ranks, device and
-    host alike.
+  block 128, batch 1, eval-free. Per-step times here are the fit loop's own
+  step stage (`--kernel-profile`), median of steps 3-10 on rank 0.
+  - 1 card (no job plan) 110.5 ms; 2 ranks 118.2 ms; 4 ranks 117.7-121.6 ms
+    over four runs: 128-token rows per second 1158 / 2166 / 4210-4350,
+    parallel efficiency 93% at 2 and 91-94% at 4. The 108 -> 154 ms "growth"
+    first recorded here was an artifact: it differenced whole training calls
+    whose fixed part (load, NCCL init) varies by hundreds of ms.
+  - Where the 4-rank extra goes, with the backward drained first: the device
+    reduction 3.0 ms (504 tensors as one NCCL group; 0.7 ms of it is
+    bandwidth, from the payload sweep), the step-weight scalar over the host
+    star 0.1-1.8 ms (it is also where a rank waits for the slowest one), and
+    the remaining few ms are the drain itself. Overlap can hide at most the
+    3.0 ms (overlap efficiency E = 0 today: the reduction starts after the
+    backward).
+  - Bucket cap sweep at 4 ranks (device reduction per step): none 3.0 ms;
+    4 / 16 / 64 / 128 MiB 5.8 / 5.2 / 5.2 / 5.2 ms. Per-tensor copies into the
+    flat buckets cost more than the fewer NCCL operations save, so the default
+    packs nothing.
+  - Repeatability: every run's adapters were byte-identical across its
+    ranks, and two 4-rank runs of the same plan gave the same bytes
+    (`sha256:506f9ca1...`); a different bucket cap gives different bytes (it
+    changes the reduction's layout).
+  - Through the host star instead (same model, differenced training calls):
+    about 530 ms (2 ranks) and 900 ms (4 ranks) of each step in 504
+    per-tensor reductions.
 
 - **Slingshot settings sweep (2026-11-21, two GH200 nodes, NCCL 2.32.3,
   fp32 all-reduce, 20 iterations).** The same ranks under the site's injected
@@ -494,6 +507,43 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         from another world is refused, and a caller naming a contradictory
         world size is refused. Test:
         `a_distributed_state_carries_its_world_and_resumes_only_in_the_same_world`.
+      - [x] Gradients are reduced where they live for every model that can
+        name them (2026-11-21): `Model::device_grads` answers from the
+        parameter store by default, and a resident full fine-tune adds its own
+        fp32 or bf16 gradient buffers (`DeviceGrads::from_store_and_resident`,
+        used by qwen3 and qwen35; their host `read_grad`/`write_grad` reach the
+        resident state too instead of panicking). The reduction runs once per
+        element type. A model that keeps state off the device and cannot name
+        its gradients (a layer-streamed build) is refused by that reason when a
+        data-parallel run starts.
+      - [x] The SDK trains as ranks (2026-11-21): `brain::DataParallel` joins a
+        launcher's job (`join_job`) or makes in-process ranks, one per card
+        (`in_process`), and `ChatFineTune::data_parallel` runs any chat
+        family the SDK trains as one rank (same seed required, refused by
+        name otherwise). Test: `chat_finetune_data_parallel` (two in-process
+        ranks end byte-identical; one process over the whole stream does not).
+      - [x] Bucket layout (2026-11-21): `model::gradbucket::plan` packs
+        tensors in reverse (backward) order into flat buckets under a cap, the
+        same layout on every rank, members word-aligned (bf16), tensors at
+        the cap in place; the plan's `bucket_mib` chooses the cap and is part
+        of the layout a repeatable run fixes. Default 0 (no packing): measured
+        slower with per-tensor copies (see Measured). The layout is the one a
+        reduce-scatter (C3) shards.
+      - [ ] Overlap with backward. Not done: on the measured LoRA step the
+        whole exposed reduction is 3.0 ms of 118 ms, so overlap could gain at
+        most about 2.5%; it needs a per-layer gradient-ready hook in each backward and
+        a one-kernel bucket gather. Revisit for full fine-tunes, where the
+        payload is 30x larger.
+      - [ ] The served `train` action on several cards of one server. Design:
+        a request field `cards` (default 1) with admission charging every card
+        through the residency multi-device path (`MultiDeviceResidentModel`),
+        then in-process ranks via `brain::DataParallel::in_process` on those
+        cards. Blocker: the multi-device path takes the device set from the
+        model's own estimate, while a train job must be placed on any `cards`
+        cards with room; the residency layer needs a "N of any devices" claim.
+        Cross-node served training would take a job plan in the request (the
+        plan, this server's rank range and the secret's digest) and the
+        server's own sealed coordinator address.
 - [ ] **C3 sharded training.** Optimizer state and gradient sharding over the dp
       group (reduce-scatter + all-gather), then parameter sharding; tensor
       parallelism inside a node over NVLink, sharded data parallelism across

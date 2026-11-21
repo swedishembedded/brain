@@ -2920,7 +2920,12 @@ impl Qwen {
     pub fn offload_host_bytes(&self) -> Option<(u64, usize)> {
         self.opt.host_bytes()
     }
+    /// The accumulated gradient of `name`, as host f32: the resident state's buffer for a tensor that state holds, the
+    /// parameter store's otherwise.
     pub fn read_grad(&self, name: &str) -> Vec<f32> {
+        if let (Some(ft), Some(i)) = (self.resident.as_ref(), self.resident_index(name)) {
+            return ft.borrow().read_grad(&self.gpu, i);
+        }
         self.ps.read_grad(&self.gpu, name)
     }
     pub fn read_weight(&self, name: &str) -> Vec<f32> {
@@ -4644,8 +4649,16 @@ impl model::Model for Qwen {
         if !self.param_names().iter().any(|n| n == name) {
             return Err(format!("{name}: not a trainable parameter of this qwen3 model, so it has no gradient to reduce"));
         }
-        Qwen::write_grad(self, name, data);
+        match (self.resident.as_ref(), self.resident_index(name)) {
+            // A resident full fine-tune keeps this gradient in its own state, in that state's gradient type.
+            (Some(ft), Some(i)) => ft.borrow().write_grad(&self.ops, i, data),
+            _ => Qwen::write_grad(self, name, data),
+        }
         Ok(())
+    }
+    fn device_grads(&self) -> Result<model::DeviceGrads, String> {
+        let resident = self.resident.as_ref().map(|ft| ft.borrow());
+        model::DeviceGrads::from_store_and_resident(&self.gpu, &self.ps, resident.as_deref(), &model::Model::param_names(self))
     }
     fn logits_all(&self, tokens: &[u32]) -> Option<Vec<f32>> {
         Some(Qwen::logits_all(self, tokens))

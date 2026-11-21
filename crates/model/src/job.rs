@@ -75,6 +75,26 @@ pub struct JobPlan {
     /// (`host`), or on the device or not at all (`device`).
     #[serde(default, skip_serializing_if = "CollectivePath::is_auto")]
     pub collectives: CollectivePath,
+    /// The cap, in MiB, of a packed gradient bucket on the device path:
+    /// tensors below it are reduced together from flat buffers, larger ones
+    /// where they live; `0` packs nothing. Every rank reduces the same layout,
+    /// which is why it is part of the plan.
+    #[serde(default = "default_bucket_mib", skip_serializing_if = "is_default_bucket_mib")]
+    pub bucket_mib: u32,
+}
+
+/// The bucket cap a plan that names none uses: none. Packing copies every small tensor into its bucket and back one
+/// copy at a time, and on a Qwen3-4B LoRA step (504 tensors, 132 MB, 4 GH200 ranks) that cost more than it saved:
+/// 5.2 ms per reduction at caps of 4-128 MiB against 3.0 ms for the tensors reduced as one NCCL group where they
+/// live. A cap pays once the packing is one gather kernel.
+pub const DEFAULT_BUCKET_MIB: u32 = 0;
+
+fn default_bucket_mib() -> u32 {
+    DEFAULT_BUCKET_MIB
+}
+
+fn is_default_bucket_mib(mib: &u32) -> bool {
+    *mib == DEFAULT_BUCKET_MIB
 }
 
 impl JobPlan {
@@ -90,6 +110,7 @@ impl JobPlan {
             handshake_timeout_ms: DEFAULT_HANDSHAKE_TIMEOUT_MS,
             op_timeout_ms: DEFAULT_OP_TIMEOUT_MS,
             collectives: CollectivePath::Auto,
+            bucket_mib: DEFAULT_BUCKET_MIB,
         }
     }
 
@@ -227,7 +248,7 @@ impl JobContext {
     /// waits on the plan's handshake timeout, each device reduction on its op
     /// timeout.
     pub fn job_collective(&self) -> Result<JobCollective<NetworkCollective>, CollectiveError> {
-        Ok(JobCollective::new(self.collective()?, self.plan.collectives, self.plan.handshake_timeout(), self.plan.op_timeout()))
+        Ok(JobCollective::new(self.collective()?, self.plan.collectives, self.plan.handshake_timeout(), self.plan.op_timeout()).with_bucket_bytes(u64::from(self.plan.bucket_mib) << 20))
     }
 }
 

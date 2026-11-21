@@ -1875,6 +1875,11 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         if sync.collective.world_size() == 0 {
             return Err(std::io::Error::other("the distributed run's gradient group has no ranks"));
         }
+        // A model that keeps state off the device (a layer-streamed build) must say where its gradients are; one that
+        // cannot holds them nowhere a reduction reaches at the end of a step, and is refused by what it lacks.
+        if let (Err(why), true) = (model.device_grads(), model.off_device_state().is_some()) {
+            return Err(std::io::Error::other(format!("a data-parallel run cannot reduce this model's gradients: {why}")));
+        }
     }
     // One writer: every rank holds the same replica, so a second writer would
     // only race the first.

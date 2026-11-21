@@ -171,13 +171,96 @@ pub struct JobCollective<C: Collective> {
     join_timeout: Duration,
     op_timeout: Duration,
     device: Mutex<DevicePath>,
+    /// The cap of a packed gradient bucket, in bytes (`0`: every tensor reduced where it lives).
+    bucket_bytes: u64,
+    /// The bucket layout of the last reduction and its flat buffers, kept for the next one: a training run reduces
+    /// the same tensors every step, so the buffers are allocated once.
+    buckets: Mutex<Vec<Buckets>>,
+}
+
+/// A bucket layout and the flat buffers of its packed buckets, for one element type and set of tensor sizes.
+struct Buckets {
+    dtype: CollectiveDtype,
+    counts: Vec<u64>,
+    slots: Vec<crate::gradbucket::Slot>,
+    flats: Vec<DeviceBuffer>,
 }
 
 impl<C: Collective> JobCollective<C> {
     /// Wrap the job's host transport; `join_timeout` bounds forming the device
     /// collective and `op_timeout` every device reduction.
     pub fn new(host: C, path: CollectivePath, join_timeout: Duration, op_timeout: Duration) -> JobCollective<C> {
-        JobCollective { host, path, join_timeout, op_timeout, device: Mutex::new(DevicePath::Undecided) }
+        JobCollective { host, path, join_timeout, op_timeout, device: Mutex::new(DevicePath::Undecided), bucket_bytes: 0, buckets: Mutex::new(Vec::new()) }
+    }
+
+    /// Pack device reductions into flat buckets of at most `bytes` of gradient ([`crate::gradbucket::plan`]); `0`
+    /// reduces every tensor where it lives. Every rank must use the same cap.
+    pub fn with_bucket_bytes(mut self, bytes: u64) -> JobCollective<C> {
+        self.bucket_bytes = bytes;
+        self
+    }
+
+    /// Reduce `bufs` over `group`, packed into buckets: small tensors are copied into their bucket's flat buffer, the
+    /// flat buffers and the large tensors are reduced as one group, and the packed tensors are copied back.
+    fn reduce_bucketed(&self, group: &RankGroup, gpu: &Gpu, bufs: &[(&DeviceBuffer, u64)], dtype: CollectiveDtype, scale: f32) -> Result<(), String> {
+        use crate::gradbucket::Slot;
+        let width = dtype.bytes();
+        // A copy moves whole 32-bit words, so a packed member starts on one: bf16 members start on an even element.
+        let align = 4 / width;
+        let counts: Vec<u64> = bufs.iter().map(|(_, n)| *n).collect();
+        let mut cache = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        let at = match cache.iter().position(|b| b.dtype == dtype && b.counts == counts) {
+            Some(at) => at,
+            None => {
+                let slots = crate::gradbucket::plan(&counts, self.bucket_bytes / width, align);
+                let flats = slots
+                    .iter()
+                    .filter_map(|s| match s {
+                        Slot::Packed { elems, .. } => Some(gpu.storage((elems * width).div_ceil(4))),
+                        Slot::InPlace(_) => None,
+                    })
+                    .collect();
+                // A run reduces one or two layouts (one per gradient type); keep a few, never grow without bound.
+                if cache.len() >= 4 {
+                    cache.remove(0);
+                }
+                cache.push(Buckets { dtype, counts, slots, flats });
+                cache.len() - 1
+            }
+        };
+        let buckets = &cache[at];
+        let packed = || {
+            buckets
+                .slots
+                .iter()
+                .filter_map(|s| match s {
+                    Slot::Packed { members, .. } => Some(members),
+                    Slot::InPlace(_) => None,
+                })
+                .zip(&buckets.flats)
+        };
+        let words = |count: u64| (count * width).div_ceil(4) * 4;
+        for (members, flat) in packed() {
+            for &(index, offset, count) in members {
+                gpu.copy_to(bufs[index].0, 0, gpu, flat, offset * width, words(count));
+            }
+        }
+        let mut flat = packed().map(|(_, flat)| flat);
+        let units: Vec<(&DeviceBuffer, u64)> = buckets
+            .slots
+            .iter()
+            .map(|s| match s {
+                Slot::InPlace(index) => bufs[*index],
+                Slot::Packed { elems, .. } => (flat.next().expect("one flat buffer per packed bucket"), *elems),
+            })
+            .collect();
+        group.all_reduce_sum(&units, dtype, scale)?;
+        for (members, flat) in packed() {
+            for &(index, offset, count) in members {
+                gpu.copy_to(flat, offset * width, gpu, bufs[index].0, 0, words(count));
+            }
+        }
+        group.wait(self.op_timeout)
     }
 
     /// Who reduces device gradients: the device library's name (`"nccl"`),
@@ -235,7 +318,7 @@ impl<C: Collective> Collective for JobCollective<C> {
         self.host.broadcast(rank, local, root)
     }
 
-    fn all_reduce_device<'a>(&'a self, rank: usize, gpu: &'a Gpu, bufs: &'a [(&'a DeviceBuffer, u64)], scale: f32) -> CollectiveFuture<'a, bool> {
+    fn all_reduce_device<'a>(&'a self, rank: usize, gpu: &'a Gpu, bufs: &'a [(&'a DeviceBuffer, u64)], dtype: CollectiveDtype, scale: f32) -> CollectiveFuture<'a, bool> {
         Box::pin(async move {
             let mut path = self.device.lock().unwrap_or_else(|e| e.into_inner());
             if matches!(*path, DevicePath::Undecided) {
@@ -243,7 +326,7 @@ impl<C: Collective> Collective for JobCollective<C> {
             }
             match &*path {
                 DevicePath::Device(group) => {
-                    group.all_reduce_sum(bufs, CollectiveDtype::F32, scale).and_then(|()| group.wait(self.op_timeout)).map_err(CollectiveError::Transport)?;
+                    self.reduce_bucketed(group, gpu, bufs, dtype, scale).map_err(CollectiveError::Transport)?;
                     Ok(true)
                 }
                 _ => Ok(false),
@@ -340,7 +423,7 @@ mod tests {
         let gpu = gpu_core::Gpu::new_cpu(&[]);
         let buf = gpu.storage(4);
         let bufs = [(&buf, 4u64)];
-        assert!(!pollster::block_on(job.all_reduce_device(0, &gpu, &bufs, 1.0)).unwrap());
+        assert!(!pollster::block_on(job.all_reduce_device(0, &gpu, &bufs, CollectiveDtype::F32, 1.0)).unwrap());
         assert_eq!(job.device_provider(), Some("host"));
     }
 
@@ -350,10 +433,10 @@ mod tests {
         let gpu = gpu_core::Gpu::new_cpu(&[]);
         let buf = gpu.storage(4);
         let bufs = [(&buf, 4u64)];
-        let err = pollster::block_on(job.all_reduce_device(0, &gpu, &bufs, 1.0)).unwrap_err();
+        let err = pollster::block_on(job.all_reduce_device(0, &gpu, &bufs, CollectiveDtype::F32, 1.0)).unwrap_err();
         assert!(err.to_string().contains("asks for device collectives"), "{err}");
         let auto = JobCollective::new(one_rank(), CollectivePath::Auto, Duration::from_secs(1), Duration::from_secs(1));
-        assert!(!pollster::block_on(auto.all_reduce_device(0, &gpu, &bufs, 1.0)).unwrap());
+        assert!(!pollster::block_on(auto.all_reduce_device(0, &gpu, &bufs, CollectiveDtype::F32, 1.0)).unwrap());
         assert_eq!(auto.device_provider(), Some("host"));
     }
 }
