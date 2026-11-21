@@ -247,6 +247,23 @@ Scope: Running one training job as ranks across machines, and serving one model 
   held-out set, so replicas agree on the held-out loss and on an early-stop
   decision.
 
+- Cluster topology facts that need no tuning (verified 2026-11-21 on the GH200
+  nodes): NIC `cxiN` sits on NUMA node N beside card N, and NCCL's own
+  topology search already sends card N's network channels over `cxiN` on every
+  node, so no topology file is written. NVLS is unavailable (NCCL: "NVLS
+  multicast support is not available"; four GH200s on NVLink have no NVSwitch),
+  so no NVLS path is planned. Without a job-level VNI (granted only when the
+  allocation itself is requested with `--network=job_vni`), every srun step
+  gets its own VNI, so all ranks of one NCCL group are tasks of one step;
+  separately launched steps (trainer, rollout servers) talk over TCP/HTTP.
+- Three reproducibility levels, chosen per run, not implied by speed settings:
+  fast (results within a stated tolerance), repeatable (bit-identical on an
+  unchanged layout, library and card set: what resume and exams rely on today,
+  since every rank receives NCCL's identical bytes) and strict (a fixed
+  reduction tree independent of NCCL's algorithm choice, for comparisons across
+  layouts). Fixing NCCL settings alone does not give the last two; data order,
+  RNG streams, kernel choice and accumulation order are part of the contract.
+
 ## Measured
 
 - **Single-machine profile** (`make bench/distributed ARGS="--steps 3"`): a
