@@ -6,12 +6,11 @@
 //! prompt with a fixed target continuation, scored by fraction of matching
 //! tokens - no model-as-judge, deterministic, matching `rl::env`'s own
 //! contract), driven through `model::fit_with` for a handful of steps. This
-//! is NOT the gradient-correctness gate (`tests/grpo_gradcheck.rs` is) -
-//! it proves the rollout -> verify -> group-advantage -> pack -> weighted
-//! backward pipeline actually runs to completion against a real `Model`
-//! without panicking and without producing non-finite losses, the thing a
-//! pure-math unit test and a fixed-batch gradcheck harness cannot cover on
-//! their own.
+//! is NOT the gradient-correctness gate (`tests/grpo_gradcheck.rs` is), and
+//! the group path's learning (`group_size >= 2`) is held to what it learns by
+//! `tests/it/pg_learning.rs`: here the RFT/STaR degenerate path runs to
+//! completion with finite losses, and an external rollout is synced on
+//! schedule with its log-probabilities recomputed.
 
 use qwen3::{Qwen, QwenConfig};
 use rl::env::{Environment, Reward, Step, Task, Verifier};
@@ -49,56 +48,6 @@ impl Verifier for FracMatchVerifier {
 
 fn gpu_disabled() -> bool {
     brain_testutil::gpu_tests_skipped()
-}
-
-/// GRPO (`group_size = 2`): real sampling variance across the group is what
-/// exercises `group_advantages_with`'s non-degenerate z-score path, not just its
-/// zero-variance drop.
-#[test]
-fn grpo_group_size_two_runs_end_to_end_through_fit_with() {
-    if gpu_disabled() {
-        return;
-    }
-    let cfg = QwenConfig::tiny();
-    let init = qwen3::init_weights(&cfg, 7);
-    let mut model = Qwen::new(cfg, 1, 8, &init);
-    model::Model::token_objectives_mut(&mut model).unwrap().enable_weighted_loss();
-
-    let env = FixedTargetEnv { prompt: vec![1, 2, 3], target: vec![4, 5, 6] };
-    let grpo_cfg = GrpoConfig {
-        group_size: 2,
-        clip_eps: 0.2,
-        kl_beta: 0.0,
-        seq_len: 8,
-        rollout: model::rollout::RolloutParams {
-            max_new: 3,
-            sample: model::serve::SampleParams { temp: 1.0, top_k: 0, top_p: 1.0, ..model::serve::SampleParams::greedy() },
-            eos: None,
-        },
-        max_attempts: 1,
-        options: Default::default(),
-    };
-    let obj = Grpo::try_new(env, FracMatchVerifier, grpo_cfg).expect("a valid GRPO configuration");
-
-    let opts = model::FitOpts {
-        steps: 2,
-        grad_accum: 2, // one full group's worth of rows per optimizer step
-        lr: 1e-3,
-        min_lr: 1e-4,
-        warmup: 0,
-        decay_iters: 10,
-        weight_decay: 0.0,
-        grad_clip: 1.0,
-        eval_interval: 0,
-        eval_batches: 0,
-        seed: data::rng::random_seed(),
-        checkpoint_secs: 0,
-        ..model::FitOpts::default()
-    };
-
-    let (initial, last) = model::fit_with(model, obj, &opts, None).expect("fit_with");
-    assert!(initial.is_finite(), "initial loss {initial} is not finite");
-    assert!(last.is_finite(), "final loss {last} is not finite");
 }
 
 /// RFT/STaR (`group_size = 1`): rejection sampling with a small
