@@ -113,7 +113,7 @@ fn a_parameter_sharded_run_follows_the_single_rank_run() {
                 s.spawn(move || {
                     let shared: Arc<dyn Collective> = coll.clone();
                     let m = build(Some(ShardGroup { collective: shared, rank }));
-                    let sync = GradSync { collective: &*coll, rank, checkpoint: None };
+                    let sync = GradSync { collective: &*coll, rank, checkpoint: None, observer: None };
                     losses(dir, &opts(Sharding::Parameters, seed), m, Some(sync))
                 })
             })
@@ -201,7 +201,7 @@ fn measure_sharded_parameters_rank() {
         );
         true
     };
-    let sync = GradSync { collective: &*job, rank, checkpoint: None };
+    let sync = GradSync { collective: &*job, rank, checkpoint: None, observer: None };
     let control = model::FitControl { on_step: Some(&mut on_step), grad_sync: Some(sync), ..Default::default() };
     model::fit_controlled(m, model::causal_lm::<Qwen35>(train, val, bcfg, itos), &opts, None, control).unwrap();
     eprintln!("rank {rank}: done in {:.1} s", started.elapsed().as_secs_f64());

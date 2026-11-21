@@ -94,6 +94,24 @@ fn run<M: Model>(name: &str, build: &(impl Fn() -> M + Sync), dir: &Path, world:
     out.into_iter().collect()
 }
 
+/// Whether a shard file of the sharded optimizer was saved for the resume state at `state`, wherever the fit loop files
+/// the state's off-device part (beside the file, or in a distributed run's generations).
+fn saved_shard(state: &Path) -> bool {
+    fn walk(dir: &Path) -> bool {
+        std::fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
+            let path = e.path();
+            if path.is_dir() {
+                walk(&path)
+            } else {
+                path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("shard-") && n.ends_with(".safetensors"))
+            }
+        })
+    }
+    let parent = state.parent().unwrap_or(Path::new("."));
+    let stem = state.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+    std::fs::read_dir(parent).into_iter().flatten().flatten().any(|e| e.file_name().to_str().is_some_and(|n| n.starts_with(stem) && n != stem) && e.path().is_dir() && walk(&e.path()))
+}
+
 fn bits_equal(a: &[(String, Vec<f32>)], b: &[(String, Vec<f32>)]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|((na, wa), (nb, wb))| na == nb && wa.iter().map(|x| x.to_bits()).eq(wb.iter().map(|x| x.to_bits())))
 }
@@ -140,7 +158,7 @@ pub fn check_sharded_training<M: Model>(name: &str, build: impl Fn() -> M + Sync
         let state = |rank: usize| scratch.join(format!("{sharding:?}-{host_state}-rank{rank}.state"));
         run(name, &build, scratch, world, &o, Some(3), Some(&state))?;
         for rank in 0..world {
-            if sharding != Sharding::Replicated && !state(rank).with_extension("offdevice").is_dir() {
+            if sharding != Sharding::Replicated && !saved_shard(&state(rank)) {
                 return Err(format!("{name} {sharding:?}: rank {rank} saved no shard of its optimizer state"));
             }
         }
