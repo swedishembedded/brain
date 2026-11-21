@@ -54,6 +54,7 @@ mod layer_streamed_full_ft;
 mod lora_adapter_file;
 mod lora_footprint;
 mod lora_bf16_base;
+mod lora_exact_resume;
 mod lora_gemm_precision;
 mod lora_hf_base;
 mod lora_int8_base;
