@@ -90,81 +90,234 @@ pub fn parse_json_ordered(raw: &str) -> Result<Value, TemplateError> {
     serde_json::from_str::<Value>(raw).map_err(|e| TemplateError::new(format!("invalid JSON: {e}")))
 }
 
-/// Write `v` the way Python's `json.dumps(v, ensure_ascii=False)` would:
-/// `", "` between elements, `": "` after keys, map key order preserved
-/// (`minijinja::Value`'s own map already IS ordered — see the module doc),
-/// non-ASCII passed through literally. Mirrors `crate::qwen_chat::json_py`'s
-/// write side, but over `minijinja::Value` instead of an ad-hoc parse
-/// tree, since minijinja already gives us an order-preserving parsed value.
-///
-/// Known limitation: a genuine float that happens to be a whole number
-/// (`16.0`) prints as `16`, not `16.0` — `minijinja::Value` does not retain
-/// a number's original lexical text the way `json_py::Node::Num` does, and
-/// tool-schema JSON in practice is overwhelmingly strings/objects/arrays, so
-/// this has not been worth chasing further.
-fn write_pyjson(v: &Value, out: &mut String) {
-    use minijinja::value::ValueKind;
-    match v.kind() {
-        ValueKind::Undefined | ValueKind::None => out.push_str("null"),
-        ValueKind::Bool => out.push_str(if v.is_true() { "true" } else { "false" }),
-        ValueKind::Number => {
-            if let Some(i) = v.as_i64() {
-                out.push_str(&i.to_string());
-            } else if let Ok(f) = f64::try_from(v.clone()) {
-                out.push_str(&f.to_string());
-            } else {
-                out.push_str(&v.to_string());
-            }
+/// The knobs of `transformers`' `tojson` filter, which is `json.dumps(x, ensure_ascii=False,
+/// indent=indent, separators=separators, sort_keys=sort_keys)`: what a template can ask of the
+/// serialization it writes into a prompt (tool schemas, call arguments).
+#[derive(Clone, Debug)]
+struct PyJson {
+    item_separator: String,
+    key_separator: String,
+    indent: Option<usize>,
+    sort_keys: bool,
+    ensure_ascii: bool,
+}
+
+impl PyJson {
+    /// Python's defaults: `", "` and `": "`, or `","` and `": "` once an indent puts items on lines.
+    fn new(indent: Option<usize>, separators: Option<(String, String)>, sort_keys: bool, ensure_ascii: bool) -> PyJson {
+        let (item_separator, key_separator) = separators.unwrap_or_else(|| (if indent.is_some() { "," } else { ", " }.to_string(), ": ".to_string()));
+        PyJson { item_separator, key_separator, indent, sort_keys, ensure_ascii }
+    }
+
+    /// `v` as Python would write it, map key order preserved (`minijinja::Value`'s own map IS
+    /// ordered, see the module doc) unless `sort_keys`.
+    fn dumps(&self, v: &Value) -> String {
+        let mut out = String::new();
+        self.write(v, 0, &mut out);
+        out
+    }
+
+    fn newline(&self, level: usize, out: &mut String) {
+        if let Some(indent) = self.indent {
+            out.push('\n');
+            out.extend(std::iter::repeat_n(' ', indent * level));
         }
-        ValueKind::String => write_pystr(v.as_str().unwrap_or_default(), out),
-        ValueKind::Seq | ValueKind::Iterable => {
-            out.push('[');
-            for (i, item) in v.try_iter().into_iter().flatten().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
+    }
+
+    fn write(&self, v: &Value, level: usize, out: &mut String) {
+        use minijinja::value::ValueKind;
+        match v.kind() {
+            ValueKind::Undefined | ValueKind::None => out.push_str("null"),
+            ValueKind::Bool => out.push_str(if v.is_true() { "true" } else { "false" }),
+            ValueKind::Number => match v.as_i64() {
+                Some(i) if v.is_integer() => out.push_str(&i.to_string()),
+                _ if v.is_integer() => out.push_str(&v.to_string()),
+                _ => out.push_str(&py_float_json(f64::try_from(v.clone()).unwrap_or(f64::NAN))),
+            },
+            ValueKind::String => self.write_str(v.as_str().unwrap_or_default(), out),
+            ValueKind::Seq | ValueKind::Iterable => {
+                let items: Vec<Value> = v.try_iter().into_iter().flatten().collect();
+                if items.is_empty() {
+                    out.push_str("[]");
+                    return;
                 }
-                write_pyjson(&item, out);
-            }
-            out.push(']');
-        }
-        ValueKind::Map => {
-            out.push('{');
-            for (i, key) in v.try_iter().into_iter().flatten().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
+                out.push('[');
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(&self.item_separator);
+                    }
+                    self.newline(level + 1, out);
+                    self.write(item, level + 1, out);
                 }
-                let key_str = key.as_str().map(str::to_string).unwrap_or_else(|| key.to_string());
-                write_pystr(&key_str, out);
-                out.push_str(": ");
-                let val = v.get_item(&key).unwrap_or(Value::from(()));
-                write_pyjson(&val, out);
+                self.newline(level, out);
+                out.push(']');
             }
-            out.push('}');
+            ValueKind::Map => {
+                let mut keys: Vec<(String, Value)> = v.try_iter().into_iter().flatten().map(|k| (k.as_str().map(str::to_string).unwrap_or_else(|| k.to_string()), k)).collect();
+                if keys.is_empty() {
+                    out.push_str("{}");
+                    return;
+                }
+                if self.sort_keys {
+                    keys.sort_by(|a, b| a.0.cmp(&b.0));
+                }
+                out.push('{');
+                for (i, (name, key)) in keys.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(&self.item_separator);
+                    }
+                    self.newline(level + 1, out);
+                    self.write_str(name, out);
+                    out.push_str(&self.key_separator);
+                    self.write(&v.get_item(key).unwrap_or(Value::from(())), level + 1, out);
+                }
+                self.newline(level, out);
+                out.push('}');
+            }
+            _ => self.write_str(&v.to_string(), out),
         }
-        _ => write_pystr(&v.to_string(), out),
+    }
+
+    /// Python `json.dumps` string escaping: `\`, `"`, and the six named control escapes get their
+    /// short form; every other control char (< 0x20) gets `\u00xx`; non-ASCII is written through
+    /// literally, or as `\uXXXX` (surrogate pairs above the BMP) when `ensure_ascii`.
+    fn write_str(&self, s: &str, out: &mut String) {
+        out.push('"');
+        for c in s.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                '\u{08}' => out.push_str("\\b"),
+                '\u{0C}' => out.push_str("\\f"),
+                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                c if self.ensure_ascii && !c.is_ascii() => {
+                    let mut units = [0u16; 2];
+                    for unit in c.encode_utf16(&mut units) {
+                        out.push_str(&format!("\\u{unit:04x}"));
+                    }
+                }
+                c => out.push(c),
+            }
+        }
+        out.push('"');
     }
 }
 
-/// Python `json.dumps` string escaping: `\`, `"`, and the six named control
-/// escapes get their short form; every other control char (< 0x20) gets
-/// `\u00xx`; everything else — including all non-ASCII — is written
-/// through literally (`ensure_ascii=False`).
-fn write_pystr(s: &str, out: &mut String) {
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0C}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
+/// A float as `json.dumps` writes it: Python's shortest `repr` (`1.0`, `2.5`, `1e-05`, `1e+16`), with
+/// `NaN` and `Infinity` for the values JSON proper cannot hold.
+fn py_float_json(f: f64) -> String {
+    if f.is_nan() {
+        return "NaN".to_string();
+    }
+    if f.is_infinite() {
+        return if f > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
+    }
+    let sign = if f.is_sign_negative() { "-" } else { "" };
+    if f == 0.0 {
+        return format!("{sign}0.0");
+    }
+    // `{:e}` yields the shortest digits that round-trip, as `d.ddde<exp>`.
+    let scientific = format!("{:e}", f.abs());
+    let (mantissa, exponent) = scientific.split_once('e').expect("`{:e}` of a finite float has an exponent");
+    let exponent: i32 = exponent.parse().expect("`{:e}` writes an integer exponent");
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let body = if (-4..16).contains(&exponent) {
+        if exponent >= 0 {
+            let whole = exponent as usize + 1;
+            let padded = format!("{digits:0<whole$}");
+            let (int, frac) = padded.split_at(whole);
+            format!("{int}.{}", if frac.is_empty() { "0" } else { frac })
+        } else {
+            format!("0.{}{digits}", "0".repeat((-exponent - 1) as usize))
+        }
+    } else {
+        let (first, rest) = digits.split_at(1);
+        let mantissa = if rest.is_empty() { first.to_string() } else { format!("{first}.{rest}") };
+        format!("{mantissa}e{}{:02}", if exponent < 0 { '-' } else { '+' }, exponent.abs())
+    };
+    format!("{sign}{body}")
+}
+
+/// The `tojson` filter with `transformers`' signature: `indent`, `separators` (a pair of strings),
+/// `sort_keys` and `ensure_ascii` keywords.
+fn tojson_filter(v: Value, kwargs: minijinja::value::Kwargs) -> Result<String, minijinja::Error> {
+    use minijinja::{Error, ErrorKind};
+    let indent: Option<usize> = kwargs.get("indent")?;
+    let separators: Option<Vec<String>> = kwargs.get("separators")?;
+    let sort_keys: Option<bool> = kwargs.get("sort_keys")?;
+    let ensure_ascii: Option<bool> = kwargs.get("ensure_ascii")?;
+    kwargs.assert_all_used()?;
+    let separators = match separators {
+        None => None,
+        Some(pair) => match <[String; 2]>::try_from(pair) {
+            Ok([item, key]) => Some((item, key)),
+            Err(_) => return Err(Error::new(ErrorKind::InvalidOperation, "tojson separators must be a pair of strings")),
+        },
+    };
+    Ok(PyJson::new(indent, separators, sort_keys.unwrap_or(false), ensure_ascii.unwrap_or(false)).dumps(&v))
+}
+
+/// How hard a model is asked to reason, for a template that reads a `reasoning_effort` variable: a
+/// name the template maps itself (`low`, `high`, ...) or a numeric level.
+///
+/// The template owns the names and refuses one it does not know, so a [`Self::Named`] value passes
+/// through unchecked; the numeric level is validated here, at the boundary, against the range the
+/// templates that take one declare.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ReasoningEffort {
+    Named(String),
+    Level(f64),
+}
+
+impl ReasoningEffort {
+    /// The template variable this value is passed as.
+    pub const KWARG: &'static str = "reasoning_effort";
+    /// The largest numeric level a template accepts.
+    pub const MAX_LEVEL: f64 = 0.99;
+
+    /// A numeric level in `0.0..=MAX_LEVEL`.
+    ///
+    /// # Errors
+    /// The level is not finite or lies outside the range.
+    pub fn level(level: f64) -> Result<ReasoningEffort, TemplateError> {
+        if level.is_finite() && (0.0..=Self::MAX_LEVEL).contains(&level) {
+            Ok(ReasoningEffort::Level(level))
+        } else {
+            Err(TemplateError::new(format!("reasoning_effort must be in [0.0, {}], got {level}", Self::MAX_LEVEL)))
         }
     }
-    out.push('"');
+
+    /// A request parameter's text: a number is a [`Self::level`], anything else a name.
+    ///
+    /// # Errors
+    /// The text is empty, or a number outside the level range.
+    pub fn parse(text: &str) -> Result<ReasoningEffort, TemplateError> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(TemplateError::new("reasoning_effort is empty".to_string()));
+        }
+        match text.parse::<f64>() {
+            Ok(level) => Self::level(level),
+            Err(_) => Ok(ReasoningEffort::Named(text.to_string())),
+        }
+    }
+
+    /// Set this as the `reasoning_effort` variable of a render's `extra` knobs.
+    pub fn apply(self, extra: &mut BTreeMap<String, Value>) {
+        extra.insert(Self::KWARG.to_string(), self.into());
+    }
+}
+
+impl From<ReasoningEffort> for Value {
+    fn from(effort: ReasoningEffort) -> Value {
+        match effort {
+            ReasoningEffort::Named(name) => Value::from(name),
+            ReasoningEffort::Level(level) => Value::from(level),
+        }
+    }
 }
 
 /// A compiled chat template, ready to render. Cheap to keep around (one per
@@ -254,11 +407,7 @@ impl ChatTemplate {
         // round-tripped through the wrong separator convention would not
         // byte-match what the checkpoint's OWN template actually produces
         // for real inference/training, so this OVERRIDES the built-in filter.
-        env.add_filter("tojson", |v: Value| -> String {
-            let mut out = String::new();
-            write_pyjson(&v, &mut out);
-            out
-        });
+        env.add_filter("tojson", tojson_filter);
         env.add_template_owned("chat", without_generation_tags(jinja_src)).map_err(|e| TemplateError::new(format!("{e:#}")))?;
         Ok(ChatTemplate { env, defaults: BTreeMap::new(), source: jinja_src.to_string() })
     }
@@ -828,6 +977,39 @@ mod tests {
         ctx.insert("obj".to_string(), obj);
         let out = t.render(Value::from(Vec::<Value>::new()), None, false, &ctx).unwrap();
         assert_eq!(out, r#"{"zebra": 1, "apple": 2}"#);
+    }
+
+    /// `tojson(...)` keywords as Python's `json.dumps` reads them, and floats as its `repr` writes them.
+    #[test]
+    fn tojson_takes_the_transformers_keywords_and_writes_python_floats() {
+        let render = |expr: &str, json: &str| {
+            let t = ChatTemplate::compile(&format!("{{{{ obj | tojson{expr} }}}}")).unwrap();
+            let ctx = BTreeMap::from([("obj".to_string(), parse_json_ordered(json).unwrap())]);
+            t.render(Value::from(Vec::<Value>::new()), None, false, &ctx).unwrap()
+        };
+        let obj = r#"{"b": [1, 2.0, {}], "a": "\u00e5\ud83d\ude00", "c": []}"#;
+        assert_eq!(render("(sort_keys=true, separators=(',', ':'))", obj), r#"{"a":"å😀","b":[1,2.0,{}],"c":[]}"#);
+        assert_eq!(render("(indent=2)", obj), "{\n  \"b\": [\n    1,\n    2.0,\n    {}\n  ],\n  \"a\": \"å😀\",\n  \"c\": []\n}");
+        assert_eq!(render("(ensure_ascii=true)", r#""å😀""#), r#""\u00e5\ud83d\ude00""#);
+        for (written, text) in [(1e-5, "1e-05"), (0.0001, "0.0001"), (1e16, "1e+16"), (1.5e300, "1.5e+300"), (123456789012345.0, "123456789012345.0"), (-0.0, "-0.0"), (0.1, "0.1"), (1e15, "1000000000000000.0")] {
+            assert_eq!(py_float_json(written), text);
+        }
+        let t = ChatTemplate::compile("{{ obj | tojson(sort_key=true) }}").unwrap();
+        let ctx = BTreeMap::from([("obj".to_string(), Value::from(1))]);
+        assert!(t.render(Value::from(Vec::<Value>::new()), None, false, &ctx).is_err(), "a misspelled keyword is refused, not ignored");
+    }
+
+    #[test]
+    fn reasoning_effort_is_a_name_or_a_level_in_range() {
+        assert_eq!(ReasoningEffort::parse(" high ").unwrap(), ReasoningEffort::Named("high".to_string()));
+        assert_eq!(ReasoningEffort::parse("0.25").unwrap(), ReasoningEffort::Level(0.25));
+        for bad in ["", "1", "-0.1", "0.995", "NaN", "inf"] {
+            assert!(ReasoningEffort::parse(bad).is_err(), "{bad:?}");
+        }
+        let mut extra = BTreeMap::new();
+        ReasoningEffort::Level(0.5).apply(&mut extra);
+        assert_eq!(extra["reasoning_effort"].as_str(), None);
+        assert_eq!(f64::try_from(extra["reasoning_effort"].clone()).unwrap(), 0.5);
     }
 
     #[test]
