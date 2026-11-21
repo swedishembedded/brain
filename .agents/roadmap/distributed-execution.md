@@ -366,6 +366,25 @@ Scope: Running one training job as ranks across machines, and serving one model 
   The host star is 200-2000x slower and its time grows with the world; for
   the large payloads the device path's time falls with it.
 
+- **Served `train` job on several cards (2026-11-21, n442, one `brain serve
+  --training --device gpu0,gpu1,gpu2,gpu3 --backend cuda`, build a856e280b +
+  the card-order fix).** `POST /v1/jobs` sft, Qwen/Qwen3-4B, LoRA r16, bf16
+  base, `max_block` 128, `grad_accum` 1, seed 7, 100 steps, 256 short
+  arithmetic chat records by digest, eval-free; steps/s from the step
+  frames' `seconds` between steps 10 and 100; wall is POST to the end of the
+  event stream; two runs of each.
+  - `cards` 1: 9.06 / 9.08 steps/s (9.1 records/s), first step at 10.5 s,
+    wall 22.1 / 22.0 s; repeat adapters identical (`sha256:06e20afa...`).
+  - `cards` 4: 8.24 / 8.00 steps/s, i.e. 32.0-33.0 records/s, 3.5-3.6x one
+    card (parallel efficiency 88-91%, the same as the `--job-plan` runs);
+    first step at 15.3-17.0 s (four bases loaded and the NCCL group formed),
+    wall 30.4 / 29.7 s for four times the records; repeat adapters
+    identical (`sha256:8a74bfe5...`). The report has the one-card keys.
+  - Before the card-order fix the two 4-card repeats were placed on
+    Gpu1+3+2+0 and Gpu3+1+2+0 (free room differs by the capacity probe's
+    noise) and gave different adapters (`sha256:595231ea...`,
+    `sha256:4c50b376...`): the rank-to-card layout is part of the bytes.
+
 - **`brain qwen3 lora_train --job-plan`, device vs host star (2026-11-21,
   one GH200 node, one card per rank).** Qwen3-4B, LoRA r16 on all seven
   projections (33.0 M fp32 gradient elements, 132 MB per step), bf16 base,
@@ -744,8 +763,10 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         most about 2.5%; it needs a per-layer gradient-ready hook in each backward and
         a one-kernel bucket gather. Revisit for full fine-tunes, where the
         payload is 30x larger.
-      - [ ] The served `train` action on several cards of one server
-        (2026-11-21; open: the measured comparison). The request field `cards`
+      - [x] The served `train` action on several cards of one server
+        (2026-11-21; Qwen3-4B on 4 cards: 3.6x the records per second of one
+        card, byte-identical adapters across a repeat, see Measured). The
+        request field `cards`
         (default 1, at most the server's cards, refused by name for the
         preference, feedback and distill objectives) runs the `sft` and
         `policy_gradient` job as `brain::DataParallel::in_process` ranks, one
@@ -761,7 +782,10 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         `cards` (two cards held, same report keys as one card, byte-identical
         adapters across a repeat, cancel, resume to the uninterrupted adapter,
         door refusals), `sdk` `chat_finetune_data_parallel` (agreed cancel,
-        abort). Open: a rank blocked in an NCCL reduction learns of a failed
+        abort). The claimed cards are handed to the ranks in card order, so the
+        same card set always gets the same rank layout: chosen by free room
+        alone, two repeats of a 4-card run got different layouts and different
+        adapter bytes (Measured). Open: a rank blocked in an NCCL reduction learns of a failed
         peer only at the group's op timeout (600 s in-process), not at once.
         Residency half (2026-11-21): `ResidentModel::cards(key)` (default 1) and
         `activate_cards(key, &[Device])` make a claim of "any N cards with

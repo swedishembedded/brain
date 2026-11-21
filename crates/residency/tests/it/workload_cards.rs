@@ -262,6 +262,8 @@ fn a_workload_on_several_cards_is_built_across_that_many_distinct_cards_charged_
     let cards = rig.built.lock().unwrap()[0].clone();
     assert_eq!(cards.len(), 2);
     assert_ne!(cards[0], cards[1], "two distinct cards");
+    let index = |d: &Device| if let Device::Gpu(i) = d { *i } else { u32::MAX };
+    assert!(index(&cards[0]) < index(&cards[1]), "in card order, so rank r always gets the r-th card of a set: {cards:?}");
 
     // The run holds both cards: a served model needing a whole card goes to the third.
     let serving = submit(&rig.exec, "served", "generate", json!({"wait": "yes"}));
@@ -282,7 +284,8 @@ fn a_workload_on_several_cards_is_built_across_that_many_distinct_cards_charged_
     wait_for(&rig.exec, only_served);
     assert!(answer(&train(&rig.exec, json!({"cards": 3, "fail": "build"}))).unwrap_err().contains("the build failed"));
     wait_for(&rig.exec, |r| r.multi_placements.is_empty() && r.budgets.iter().all(|b| b.used == 0));
-    assert_eq!(rig.built.lock().unwrap().last().unwrap().len(), 3, "a three-card run evicted the idle served model for its third card");
+    let three = rig.built.lock().unwrap().last().unwrap().clone();
+    assert_eq!(three, vec![Device::Gpu(0), Device::Gpu(1), Device::Gpu(2)], "a three-card run evicted the idle served model for its third card, and its ranks go in card order");
 }
 
 #[test]

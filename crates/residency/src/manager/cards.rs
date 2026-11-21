@@ -110,6 +110,9 @@ impl ResidencyManager {
                 victims.extend(on_d);
             }
         }
+        // In card order, whichever had the most room: rank r of the run goes to the r-th card, so the same set of
+        // cards always gets the same ranks and a repeat reduces in the same order (the same bytes).
+        devices.sort_by_key(|&d| device_order(d));
         let per_card: Vec<(Device, u64)> = devices.iter().map(|&d| (d, share(d))).collect();
         Ok(CardsPlan { devices, victims, cost: MultiDeviceCost::new(per_card, process_host) })
     }
