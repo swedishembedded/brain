@@ -170,6 +170,70 @@ startup log prints the placement, and a deployment that does not place on the
 cards is left out with what it needs and what they offer. See
 [the Ripple page](../../reference/models/ricursive.md).
 
+## Serving across machines
+
+`brain serve --upstream URL ...` runs a router instead of models: one
+OpenAI-compatible URL and one key in front of several `brain serve` endpoints,
+for example one per card of every node in a cluster allocation. The router
+loads no model and uses no device; it can run anywhere that reaches the
+upstreams.
+
+```bash
+# on each node, one server per card, all behind one upstream key
+brain --device gpu0 serve --openai 0.0.0.0:8800 --api-key-file upstream.key --insecure-plaintext
+brain --device gpu1 serve --openai 0.0.0.0:8801 --api-key-file upstream.key --insecure-plaintext
+# the router, where clients reach it
+brain serve --openai 127.0.0.1:8788 --upstreams-file fleet.txt --upstream-key-file upstream.key --insecure-plaintext
+```
+
+`fleet.txt` lists one upstream base URL per line (`http://node7:8800`); `#`
+starts a comment. `--upstream URL` (repeatable, or comma-separated) names them
+on the command line instead.
+
+- **Routing.** A chat or completion goes to the upstream whose prefix cache
+  holds the longest useful prefix of its prompt, so a conversation that resends
+  its history returns to the server that holds it; otherwise to the upstream
+  with the least load for its decode slots. It is the same policy as for
+  [replicas on several cards](#serving-on-several-cards), with each server as a
+  replica. Embeddings, images and speech go by load alone.
+- **Health.** Every upstream's `/v1/health` (its decode slots and the requests
+  it admits at once) and `/v1/models` are read every `--upstream-health-ms`
+  (default 2000). An upstream is in rotation while both answer; one that a
+  request cannot connect to is taken out at once.
+- **Models.** `GET /v1/models` lists every model any upstream in rotation
+  serves, once; a request goes only to upstreams that list its `model`
+  (adapters included, since a served adapter is listed as a model). A model no
+  upstream lists is a 404.
+- **Drain.** `POST /v1/upstreams/N/drain` takes upstream `N` (0-based, in the
+  order given) out of rotation: it takes no new request and finishes what it
+  holds. `POST /v1/upstreams/N/resume` puts it back. With `--caller`, only an
+  admin caller may. `GET /v1/health` reports each upstream by index: healthy,
+  draining, requests in flight, decode slots.
+- **At most once.** A request moves to another upstream only when its
+  connection could not be opened, so nothing of it was sent. A failure after it
+  was sent is answered with 502 and no `Retry-After`: the request may have
+  run, and only the client knows whether sending it again is safe.
+- **Backpressure.** An upstream is sent at most the requests its own edge
+  admits; when every upstream serving the model is full, the request is refused
+  at once with 503 and `Retry-After`, never queued in the router. A server's own
+  429 and 503 pass through with their `Retry-After`.
+- **Streaming.** Responses stream through unbuffered; a client that hangs up
+  closes its upstream connection, which cancels the generation there.
+
+Clients authenticate to the router with its own key (`--api-key-file`,
+`--api-keys-out` or `--caller`, as for any server); the router presents
+`--upstream-key-file` to the upstreams and forwards no client header but
+`Accept`. A plaintext `http://` upstream off the router's machine needs
+`--insecure-plaintext` (the network path is protected otherwise, as on a
+cluster's private fabric); an `https://` upstream is verified against
+`--upstream-ca PEM`. Background jobs (`/v1/jobs`, `/videos`) and uploads are
+not routed: they belong to the server that started them, so a client uses that
+server directly.
+
+The same router is a library: `apiserve::route::Fleet` over
+`apiserve::route::FleetConfig`, served with `apiserve::route::serve`, or
+mounted with `apiserve::route::router` in an application's own server.
+
 ## Sampling defaults
 
 A request that omits `temp`, `top_k`, `top_p`, `min_p` or `repetition_penalty` is

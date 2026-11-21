@@ -47,6 +47,7 @@ mod resolve;
 mod roofline_cli;
 mod run_cli;
 mod serve_daemon;
+mod serve_route;
 mod supply;
 mod tree;
 const HELP: &str = "\

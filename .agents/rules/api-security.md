@@ -252,6 +252,31 @@ Training is a model of the same server, so every item above applies to it; these
 - [ ] Anyone holding the key can occupy a card with a run: training is off unless the operator passes
       `--training`, and its admission obeys the surface's deadline (429), but there is no per-caller quota.
 
+## The router surface (`brain serve --upstream`, `crates/apiserve/src/route`)
+
+The router is a serving surface with no model behind it: everything above that concerns routes, keys, bodies and
+errors applies to it, and these are the parts specific to forwarding. `crates/apiserve/tests/it/route.rs` and
+`tests/e2e/route.bats` pin each.
+
+- [ ] Clients authenticate to the router (its own key or `--caller`s, the same `Authenticator` seam, fallback
+      included); the router presents `--upstream-key-file` to the upstreams. A client's key never reaches an upstream.
+- [ ] Only allowlisted routes are forwarded (chat, completions, embeddings, images, speech); stateful routes (jobs,
+      videos) are 404 rather than sent to an upstream that did not start them. The path sent upstream is the route's
+      own, never client text.
+- [ ] Nothing is smuggled: the router builds each upstream request itself (`Host`, `Content-Type`, `Content-Length` of
+      the buffered body, `Accept`, its key) and forwards no other client header; the JSON body is forwarded byte for
+      byte after its top level parsed as an object with a valid `model` and no field named twice. Only `Content-Type`,
+      `Cache-Control` and `Retry-After` come back from an upstream.
+- [ ] Bounded: the body limit, the listener's deadlines and connection cap, a per-upstream ceiling from the upstream's
+      own `edge_concurrency` (503 with `Retry-After` past it, no router queue), bounded probe answers (size, model
+      count, id length), and a connect and answer timeout.
+- [ ] A request is sent at most once: it moves to another upstream only when its connection never opened; after that a
+      failure is a 502 with no `Retry-After`.
+- [ ] Topology stays with the operator: `/health` reports upstreams by index, never by address; upstream errors are
+      logged server-side, the client gets a fixed message. Draining is an admin caller's.
+- [ ] A plaintext upstream off the router's machine needs `--insecure-plaintext`; `https://` upstreams are verified
+      against `--upstream-ca`.
+
 ## When to run
 - Adding/removing/altering any route, handler, auth path, error shape, admission
   policy, or D-Bus method.

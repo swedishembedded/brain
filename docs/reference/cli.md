@@ -332,6 +332,12 @@ like, rather than silently fetching something adjacent.
   processes instead of in the server, so a wedged or crashed driver call
   ends a worker rather than the server (see
   [Device failure](../concepts/execution/device-failure.md#models-hosted-in-a-worker)).
+- With `--upstream URL` (repeatable) or `--upstreams-file FILE`, it serves no
+  model: it routes the OpenAI dialect over other `brain serve` endpoints,
+  prefix-affine and weighed by load, with health checks, drain and a merged
+  model listing (`--upstream-key-file`, `--upstream-ca`,
+  `--upstream-timeout-ms`, `--upstream-health-ms`; see
+  [Serving across machines](../guides/serving/serving.md#serving-across-machines)).
 - With `--stdio`, it instead runs an event-driven stdio controller: it reads
   JSONL events on stdin (e.g. `user_text`, `camera_frame`) and streams JSONL
   events back on stdout (e.g. `brain_text_chunk`, `object_detected`), driven

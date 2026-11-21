@@ -130,6 +130,32 @@ HTTP INFERENCE APIS  (each behind its own key)
   no --listen / --host / --bind flag -- the address goes directly after the
   dialect flag it names, as ADDR above.
 
+ROUTING ACROSS SERVERS  (one URL for every card of a cluster)
+  --upstream URL         route to another `brain serve` instead of serving models
+                         here (repeatable, or comma-separated). URL is the base:
+                         http[s]://HOST:PORT. This process loads no model and uses
+                         no device; it serves the OpenAI dialect (--openai ADDR) over
+                         every upstream: a request goes to the upstream already
+                         holding the longest useful prefix of its prompt, else to
+                         the one with the least load for its slots. An upstream
+                         is in rotation while its /health and /models answer; a
+                         request is retried elsewhere only if its connection never
+                         opened; when every upstream is full it is refused with
+                         503 and Retry-After. GET /v1/models lists every upstream's
+                         models once; POST /v1/upstreams/N/drain and .../resume take
+                         upstream N (0-based) out of rotation and back (an admin
+                         caller only, with --caller).
+  --upstreams-file FILE  upstream URLs, one per line (# comments)
+  --upstream-key-file FILE  the key the router presents to every upstream (start
+                         the upstreams with --api-key-file holding the same key).
+                         Clients authenticate to the router with its own key.
+  --upstream-ca PEM      the CA an https:// upstream's certificate chains to. A
+                         plaintext http:// upstream off this machine needs
+                         --insecure-plaintext.
+  --upstream-timeout-ms N  how long an upstream may take to start answering a
+                         request (default 1860000)
+  --upstream-health-ms N how often every upstream is probed (default 2000)
+
 D-BUS CONTROL SURFACE
   --dbus                 serve com.swedishembedded.Brain1 on the session bus
   --dbus-system          use the system bus instead. Needs a system.d policy:
@@ -850,6 +876,8 @@ pub fn run_serve(args: &[String]) {
     let mut tls_key: Option<PathBuf> = None;
     let mut insecure_plaintext = false;
     let mut caller_flags: Vec<String> = Vec::new();
+    // `--upstream URL ...`: route to other servers instead of serving models.
+    let mut upstream = crate::serve_route::UpstreamFlags::default();
     // `--runtime-dir DIR`: where the lifecycle files and the connection
     // record live (see `serve_daemon::state_dir`); `main` reads it too, for
     // `-d`/`--status`/`--stop`.
@@ -1029,6 +1057,12 @@ pub fn run_serve(args: &[String]) {
             "--tls-key" => tls_key = Some(PathBuf::from(val(args, &mut i, "--tls-key"))),
             "--insecure-plaintext" => insecure_plaintext = true,
             "--caller" => caller_flags.push(val(args, &mut i, "--caller")),
+            "--upstream" => upstream.urls.push(val(args, &mut i, "--upstream")),
+            "--upstreams-file" => upstream.files.push(PathBuf::from(val(args, &mut i, "--upstreams-file"))),
+            "--upstream-key-file" => upstream.key_file = Some(PathBuf::from(val(args, &mut i, "--upstream-key-file"))),
+            "--upstream-ca" => upstream.ca = Some(PathBuf::from(val(args, &mut i, "--upstream-ca"))),
+            "--upstream-timeout-ms" => upstream.timeout_ms = Some(positive_ms(args, &mut i, "--upstream-timeout-ms").as_millis() as u64),
+            "--upstream-health-ms" => upstream.health_ms = Some(positive_ms(args, &mut i, "--upstream-health-ms").as_millis() as u64),
             "--tokenizer" => qwen_cfg.tokenizer = Some(val(args, &mut i, "--tokenizer")),
             "--ready-file" => ready_file = Some(val(args, &mut i, "--ready-file")),
             "--admit-deadline-ms" => deadlines.admit = positive_ms(args, &mut i, "--admit-deadline-ms"),
@@ -1095,6 +1129,46 @@ pub fn run_serve(args: &[String]) {
     if let Err(e) = apiserve::tls::check_exposure(&http_addrs, tls.is_some(), insecure_plaintext) {
         eprintln!("brain serve: {e}");
         std::process::exit(2);
+    }
+
+    if upstream.any_given() {
+        // A router loads no model: a flag that only a server running models reads would be ignored while the operator
+        // believes it is in effect, so it is refused.
+        if !upstream.routing() {
+            eprintln!("brain serve: the --upstream-* settings belong to a router; add --upstream URL or --upstreams-file FILE");
+            std::process::exit(2);
+        }
+        let model_flags = [
+            (dbus, "--dbus"),
+            (anthropic.is_some(), "--anthropic"),
+            (openrouter.is_some(), "--openrouter"),
+            (stdio, "--stdio"),
+            (mock, "--mock"),
+            (training, "--training"),
+            (autofetch, "--autofetch"),
+            (models_dir.is_some(), "--models-dir"),
+            (adapter.is_some() || adapter_manifest.is_some() || watch_adapters.is_some() || serve_adapters.is_some(), "the adapter flags"),
+        ];
+        if let Some((_, flag)) = model_flags.iter().find(|(given, _)| *given) {
+            eprintln!("brain serve: {flag} serves models in this process; a router (--upstream) serves its upstreams' models over the OpenAI dialect only");
+            std::process::exit(2);
+        }
+        let fleet = upstream.fleet(insecure_plaintext).unwrap_or_else(|e| {
+            eprintln!("brain serve: {e}");
+            std::process::exit(2);
+        });
+        let addrs = openai.unwrap_or_default();
+        let ready = match &ready_file {
+            Some(p) => brain_shutdown::ready::Gate::touching(p, addrs.len().max(1)).unwrap_or_else(|e| {
+                eprintln!("brain serve: --ready-file {p}: {e}");
+                std::process::exit(2);
+            }),
+            None => brain_shutdown::ready::Gate::disabled(),
+        };
+        return crate::serve_route::run_route(
+            fleet,
+            crate::serve_route::RouteServe { addrs, fixed_key, fixed_key_file, callers, api_keys_out, tls, ready, record: serve_daemon_record(runtime_dir.as_deref()) },
+        );
     }
 
     let adapter_mode = match crate::continuous_train::AdapterMode::from_flags(adapter.map(PathBuf::from), adapter_manifest.map(PathBuf::from), watch_adapters.map(PathBuf::from), serve_adapters.map(PathBuf::from)) {

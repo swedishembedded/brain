@@ -711,6 +711,17 @@ train_body() { # train_body <extra params json fragment, with a leading comma or
   ! grep -qiE 'uuid|pci|/dev/|/home/' "$RESP"
 }
 
+@test "health: GET /v1/health needs the key and reports only counts" {
+  local st
+  st=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "$(base openai)/v1/health")
+  [ "$st" -eq 401 ]
+  st=$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer wrong" "$(base openai)/health")
+  [ "$st" -eq 401 ]
+  get_url openai /v1/health
+  [ "$STATUS" -eq 200 ]
+  jq -e '.status == "ok" and .decode_slots >= 1 and .edge_concurrency >= .decode_slots and (keys | sort == ["decode_slots","edge_concurrency","status"])' "$RESP"
+}
+
 @test "training: it is offered like any model, with no param that names a path" {
   get_url openai /v1/capabilities
   [ "$STATUS" -eq 200 ]

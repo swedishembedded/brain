@@ -609,9 +609,9 @@ test/parity/wan:
 	@test -n "$(BRAIN_WAN_DIT)" || (echo "set BRAIN_WAN_DIT/_VAE (and BRAIN_TESTDATA if the goldens are not in ./testdata)"; exit 2)
 	BRAIN_REQUIRE_FIXTURES=1 $(CARGO_TEST) -p brain-wan --test dit_parity --test vae_parity
 
-## test/e2e - default: every fast end-to-end bats suite (api-conformance, video-api, shutdown, samples, ready)
+## test/e2e - default: every fast end-to-end bats suite (api-conformance, video-api, shutdown, samples, ready, route)
 ##   Opt-in and heavier: claude-code, scheduler, quickstart, deb, results-hygiene, s3dit-int8.
-test/e2e: test/e2e/api-conformance test/e2e/video-api test/e2e/shutdown test/e2e/samples test/e2e/ready
+test/e2e: test/e2e/api-conformance test/e2e/video-api test/e2e/shutdown test/e2e/samples test/e2e/ready test/e2e/route
 
 # End-to-end: HTTP API conformance over a real socket against a single `brain serve`
 # backed by the built-in deterministic mock model (brain serve --mock) - no weights, no GPU,
@@ -622,6 +622,13 @@ test/e2e: test/e2e/api-conformance test/e2e/video-api test/e2e/shutdown test/e2e
 ## test/e2e/api-conformance - HTTP API conformance of every provider dialect against the mock model
 test/e2e/api-conformance: $(E2E_BUILD)
 	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/api_conformance.bats
+
+# End-to-end: `brain serve --upstream` routing over two real `brain serve --mock`
+# upstreams on loopback: one key, the merged listing, streaming through, drain,
+# an upstream that stops routed around, misconfiguration refused. No weights, no GPU.
+## test/e2e/route - a router over two mock servers: listing, routing, drain, failover, refusals
+test/e2e/route: $(E2E_BUILD)
+	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/route.bats
 
 # End-to-end: the OpenRouter /videos contract over a real socket against the mock
 # video model (brain serve --mock): list, submit, poll, download, edit. No weights, no GPU.

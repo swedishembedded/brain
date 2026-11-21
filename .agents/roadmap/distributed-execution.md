@@ -192,7 +192,36 @@ Scope: Running one training job as ranks across machines, and serving one model 
       commit and its three refusals, the world-identity refusal, and the
       two-rank run below.
 
+- [x] **One URL in front of many servers (C4, router part).** `brain serve
+      --upstream URL ...` (or `--upstreams-file`) serves the OpenAI dialect
+      over other `brain serve` endpoints and loads no model; the library is
+      `apiserve::route` (`Fleet`, `router`, `serve`). Routing is
+      `residency::affinity`'s replica policy with each upstream as a replica:
+      `choose_replica` now weighs load against each replica's own slots, and
+      `text_request_chain` keys a text request the same way for the
+      in-process dispatcher and the router. Health and capacity come from the
+      upstream's new `GET /v1/health` (decode slots, edge concurrency) and its
+      `/v1/models`; drain and resume are admin routes; the listing is merged;
+      a request is retried elsewhere only when its connection never opened;
+      past every upstream's own edge ceiling the router refuses with 503 and
+      `Retry-After`. Tests: `crates/apiserve/tests/it/route.rs` (mock
+      upstreams on loopback: affinity, load per slot, health, drain,
+      streaming and cancel-on-disconnect, at-most-once, model merge,
+      overload, the security boundary), `tests/e2e/route.bats` (two real
+      `brain serve --mock` behind a real router), the unit tests in
+      `crates/residency/src/affinity.rs` and `crates/apiserve/src/route/upstream.rs`.
+
 ## Decisions
+
+- The router is a mode of `brain serve` and a module of `apiserve`
+  (`apiserve::route`), not a `brain` SDK surface: the SDK is an in-process
+  library with no admission control by design (`crates/sdk/src/lib.rs`), and a
+  router is a network service whose whole job is admission. An application
+  embeds it through `apiserve::route` the way it embeds a serving surface
+  through `apiserve::serve_all`. It opens one connection per request: that is
+  what makes "the connection never opened" a safe retry condition (a pooled
+  connection found dead at write time is ambiguous), at the cost of a TCP
+  handshake per request.
 
 - A cluster job's authority is its durable job record and its checkpoint
   commit, not a per-worker session store. The durable session engine
@@ -380,9 +409,11 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
       `brain serve` endpoints, reusing `residency::affinity` (longest cached
       prefix, then least loaded), with health, drain and model listing merged,
       so a client sees one OpenAI-compatible URL for every card of an
-      allocation. Tensor-parallel serving inside a node for a model that does
-      not fit one card; a cross-node layer split only for one that does not fit
-      a node.
+      allocation: delivered (`brain serve --upstream`, see Delivered); a
+      measurement on real servers across nodes is pending. Open: tensor-parallel serving
+      inside a node for a model that does not fit one card; a cross-node layer
+      split only for one that does not fit a node; multipart uploads
+      (`/audio/transcriptions`) and job routes are not routed.
 - [ ] **C5 cluster launch sample and gates.** `samples/` gains a Slurm launch
       sample (job plan and secret written once, scheduler rank mapped onto
       `--job-rank`, rank bound to its card's NUMA node, NCCL network plugin

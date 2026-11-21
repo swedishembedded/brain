@@ -59,6 +59,9 @@ pub enum Kind {
     /// was saturated and the request was load-shed — HTTP 503, carries a
     /// `Retry-After`.
     Saturated,
+    /// A router's upstream failed after the request was sent to it -- HTTP 502. Not retryable by the router or with a
+    /// `Retry-After` hint: the request may have run, so only the client knows whether sending it again is safe.
+    BadGateway,
     /// A model reported a [`capability::FailureClass`] in its own error: the
     /// status and `code` say which of the seven it was, so a client can tell an
     /// uninstalled model from a malformed request from a passed deadline
@@ -81,6 +84,7 @@ impl Kind {
             Kind::NotImplemented => StatusCode::NOT_IMPLEMENTED,
             Kind::Overloaded => StatusCode::TOO_MANY_REQUESTS,
             Kind::Saturated => StatusCode::SERVICE_UNAVAILABLE,
+            Kind::BadGateway => StatusCode::BAD_GATEWAY,
             Kind::Failure(class) => match class {
                 FailureClass::NotInstalled => StatusCode::NOT_FOUND,
                 FailureClass::FailedToLoad | FailureClass::BackendFailure => StatusCode::INTERNAL_SERVER_ERROR,
@@ -110,6 +114,7 @@ impl Kind {
             // Anthropic has no "not_implemented"; api_error is its catch-all.
             Kind::NotImplemented => "api_error",
             Kind::Overloaded | Kind::Saturated => "overloaded_error",
+            Kind::BadGateway => "api_error",
             Kind::Failure(FailureClass::NotInstalled) => "not_found_error",
             Kind::Failure(FailureClass::UnsupportedCapability | FailureClass::InvalidRequest) => "invalid_request_error",
             Kind::Failure(FailureClass::Unavailable) => "overloaded_error",
@@ -129,7 +134,7 @@ impl Kind {
             }
             Kind::NotImplemented => "not_implemented",
             Kind::Overloaded => "rate_limit_exceeded",
-            Kind::Saturated => "server_error",
+            Kind::Saturated | Kind::BadGateway => "server_error",
             Kind::Failure(FailureClass::NotInstalled | FailureClass::UnsupportedCapability | FailureClass::InvalidRequest) => "invalid_request_error",
             Kind::Failure(FailureClass::FailedToLoad | FailureClass::BackendFailure | FailureClass::Timeout | FailureClass::Unavailable) => "server_error",
         }
@@ -152,6 +157,7 @@ impl Kind {
             Kind::NotImplemented => "not_implemented",
             Kind::Overloaded => "rate_limit_exceeded",
             Kind::Saturated => "server_error",
+            Kind::BadGateway => "upstream_error",
             // The class's own wire name with `_` for `-`.
             Kind::Failure(class) => failure_code(*class),
         }
@@ -226,6 +232,9 @@ impl ApiError {
     }
     pub fn saturated(provider: Provider, message: impl Into<String>) -> ApiError {
         ApiError::new(provider, Kind::Saturated, message)
+    }
+    pub fn bad_gateway(provider: Provider, message: impl Into<String>) -> ApiError {
+        ApiError::new(provider, Kind::BadGateway, message)
     }
     /// A model-reported [`FailureClass`].
     pub fn failure(provider: Provider, class: FailureClass, message: impl Into<String>) -> ApiError {

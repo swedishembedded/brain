@@ -745,6 +745,23 @@ async fn model_card_route_requires_the_key() {
     }
 }
 
+/// A router keeps a server in rotation by its `/health` and weighs its load by the slots it reports: behind the key,
+/// on every dialect, naming nothing but counts.
+#[tokio::test]
+async fn health_reports_the_decode_slots_behind_the_key() {
+    for p in ALL {
+        let (app, key) = build_app(p);
+        for uri in ["/health", "/v1/health"] {
+            let (st, _) = send(&app, Request::builder().uri(uri).body(Body::empty()).unwrap()).await;
+            assert_eq!(st, StatusCode::UNAUTHORIZED, "{p}: {uri} without a key");
+            let health = get_json(&app, p, uri, &key).await;
+            assert_eq!(health["status"], "ok", "{p}: {uri}");
+            let slots = health["decode_slots"].as_u64().expect("decode_slots");
+            assert!(slots >= 1 && health["edge_concurrency"].as_u64().expect("edge_concurrency") >= slots, "{p}: {health}");
+        }
+    }
+}
+
 #[tokio::test]
 async fn unknown_path_is_404() {
     for p in ALL {

@@ -30,6 +30,9 @@
 //! - [`error`] — provider-shaped error bodies.
 //! - [`catalog`] — deriving API capabilities from a manifest; the `/models` filter.
 //! - [`models`] — the `/models` catalog handlers.
+//! - [`health`] - `/health`: liveness and how much work the server takes at once.
+//! - [`route`] - one surface in front of several `brain serve` endpoints: prefix-affine,
+//!   load-weighed routing, health, drain and a merged model listing.
 //! - [`bridge`] — the async→sync seam to the shared executor (submit/stream + the
 //!   cancel-on-disconnect guard) that the chat handlers dispatch through.
 //! - `stream_queue` - the bounded queue between a streamed generation and its
@@ -50,6 +53,7 @@ pub mod bridge;
 pub mod capabilities;
 pub mod catalog;
 pub mod error;
+pub mod health;
 pub mod hooks;
 mod listener;
 pub mod media;
@@ -59,6 +63,7 @@ pub mod openrouter;
 pub mod png;
 pub mod preprocess;
 pub mod request_fields;
+pub mod route;
 pub mod sampling;
 pub mod speech;
 pub mod state;
@@ -136,6 +141,7 @@ pub fn router(state: AppState) -> Router {
 
     Router::new()
         .merge(models::routes())
+        .merge(health::routes())
         .merge(provider_routes.merge(capabilities::routes()).merge(systemone::routes()).layer(edge))
         .fallback(fallback)
         // Auth wraps everything (incl. the fallback): an unauthenticated caller
