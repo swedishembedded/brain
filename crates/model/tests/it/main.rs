@@ -127,6 +127,7 @@ mod readout_topk;
 mod recurrent_slot;
 mod relpos_gather;
 mod resident_full_ft;
+mod resident_shard;
 mod nccl_job;
 mod norm_rows_default;
 mod rmsnorm_decode_cost;

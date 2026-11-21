@@ -99,6 +99,7 @@ mod score_readout;
 mod serve;
 mod serve_conformance;
 mod shard_parity;
+mod sharded_parameters;
 mod spec_decode;
 mod stream_profile;
 mod stream_train_equivalence;

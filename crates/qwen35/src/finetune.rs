@@ -109,7 +109,7 @@ fn unsupported_precision(why: String) -> std::io::Error {
 /// resident low-precision linears, the resident trainer ([`build_resident`]).
 fn build_full(cfg: Qwen35Config, opts: &FitOpts, src: &dyn checkpoint::TensorSource) -> std::io::Result<Qwen35> {
     <Qwen35Trainer as model::finetune::ChatTrainer>::TRAIN_PRECISION.check(&opts.precision).map_err(unsupported_precision)?;
-    if let Some(resident) = opts.precision.resident_config(Some(opts.seed)).map_err(std::io::Error::other)? {
+    if let Some(resident) = opts.resident_config().map_err(std::io::Error::other)? {
         return build_resident(cfg, opts, src, &resident);
     }
     let params = crate::model::shard_param_list(&cfg, &model::Shard::whole(cfg.n_layers as usize));

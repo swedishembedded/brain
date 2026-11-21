@@ -69,7 +69,7 @@ fn objective<M: Model>(dir: &Path, opts: &model::FitOpts) -> impl model::Objecti
 }
 
 fn plan(value: ResidentValue, window: Option<u32>, clip_pass: ClipPass) -> ResidentPlan {
-    let cfg = ResidentFtConfig {
+    let cfg = ResidentFtConfig { shard: None,
         value,
         master: MasterPolicy::F32,
         state: StateFormat::Int8Block { block: 64 },

@@ -128,6 +128,11 @@ pub struct FitOpts {
     /// ([`Model::device_params`]), and are refused otherwise. Part of a run's identity: a state saved sharded is
     /// resumed sharded.
     pub sharding: crate::zero::Sharding,
+    /// The group a parameter-sharded resident build ([`crate::zero::Sharding::Parameters`]) shards over: what a
+    /// trainer that builds the model for such a run hands its resident state ([`Self::resident_config`]). Not part of
+    /// a run's identity beyond [`Self::sharding`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub parameter_group: Option<crate::zero::ShardGroup>,
     /// Batches the loss estimate taken before the first step averages ([`FitReport::initial_loss`]); `0` takes the
     /// first step's own loss instead, measured before its update by the forward the step runs anyway, so a run
     /// pays no extra forward for it (what a long run on a slow device wants: five probe forwards of 1024-token rows
@@ -140,6 +145,20 @@ pub struct FitOpts {
 }
 
 impl FitOpts {
+    /// The resident full fine-tune this run's precision asks for ([`crate::TrainPrecision::resident_config`]), seeded
+    /// by the run's seed, sharded over [`Self::parameter_group`] when the run shards its parameters.
+    pub fn resident_config(&self) -> Result<Option<crate::resident_ft::ResidentFtConfig>, String> {
+        let resident = self.precision.resident_config(Some(self.seed))?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let resident = resident.map(|mut r| {
+            if self.sharding == crate::zero::Sharding::Parameters {
+                r.shard = self.parameter_group.clone();
+            }
+            r
+        });
+        Ok(resident)
+    }
+
     /// Refuse numeric configuration no run can honour, naming the field: a zero batch or
     /// accumulation (which the loop would otherwise quietly raise to one), a rate or decay that is
     /// negative or not finite, a floor above the peak rate, AdamW betas outside `[0, 1)` or an
@@ -220,6 +239,8 @@ impl Default for FitOpts {
             native_sparse: None,
             strict_updates: false,
             sharding: crate::zero::Sharding::Replicated,
+            #[cfg(not(target_arch = "wasm32"))]
+            parameter_group: None,
             initial_probe_batches: 5,
             exit_entropy: 0.0,
         }
@@ -626,7 +647,7 @@ pub fn build_or_warm_start<M: Model>(cfg: M::Config, opts: &FitOpts, out: Option
 /// window (`weights=f32`, [`Model::new_resident`]), so a model larger than the device is built for training at all;
 /// a plain build otherwise, the run's other precision applied by the fit loop.
 pub fn build_for<M: Model>(cfg: M::Config, opts: &FitOpts, init: &std::collections::HashMap<String, Vec<f32>>) -> std::io::Result<M> {
-    match opts.precision.resident_config(Some(opts.seed)).map_err(std::io::Error::other)? {
+    match opts.resident_config().map_err(std::io::Error::other)? {
         Some(resident) if resident.value == crate::resident_ft::ResidentValue::F32 => {
             M::new_resident(cfg, opts.batch_size, opts.block_size, init, &resident).map_err(std::io::Error::other)
         }
@@ -1582,6 +1603,15 @@ fn sharded_optimizer<M: Model>(model: &mut M, opts: &FitOpts, grad_sync: Option<
     }
     let refuse = |why: String| std::io::Error::new(std::io::ErrorKind::Unsupported, format!("sharded training ({sharding:?}): {why}"));
     let sync = grad_sync.ok_or_else(|| refuse("it shards over a data-parallel group, and this run has none".into()))?;
+    if sharding == crate::zero::Sharding::Parameters {
+        // The model gathers, reduces and updates its own units: it must have been built over this group.
+        let group = model.parameter_shards().ok_or_else(|| refuse("this model was not built with its parameters sharded (a layer-streamed bf16 resident full fine-tune over the run's group)".into()))?;
+        let (world, rank) = (sync.collective.world_size(), sync.rank);
+        if group.collective.world_size() != world || group.rank != rank {
+            return Err(refuse(format!("the model shards over rank {} of {}, the run is rank {rank} of {world}", group.rank, group.collective.world_size())));
+        }
+        return Ok(None);
+    }
     // What the backward keeps of the forward is the model's business; how parameters and their state are held is the
     // sharded optimizer's, and it holds f32 AdamW state.
     // (`moments=host` places the sharded state in host memory instead of on the card.)
@@ -1812,14 +1842,17 @@ pub struct CheckpointIdentity<'a> {
 /// when the objective reports no evaluation: a rank 0 that skipped it while
 /// its peers waited for the result would deadlock the group. The root's
 /// "no evaluation" is therefore itself the broadcast value.
-fn agreed_eval<M: Model, O: Objective<M>>(obj: &mut O, model: &M, rng: &Rng, batches: u32, grad_sync: Option<&GradSync<'_>>) -> std::io::Result<Option<f32>> {
+fn agreed_eval<M: Model, O: Objective<M>>(obj: &mut O, model: &M, rng: &Rng, batches: u32, grad_sync: Option<&GradSync<'_>>, every_rank: bool) -> std::io::Result<Option<f32>> {
     let Some(sync) = grad_sync else {
         return Ok(obj.eval(model, &mut rng.clone(), batches));
     };
+    // A parameter-sharded model's forward gathers its layers over the group: every rank runs it, rank 0's result
+    // is the agreed one.
+    let local = if every_rank { obj.eval(model, &mut rng.clone(), batches) } else { None };
     // Only the root computes; everyone else sends a placeholder the root's
     // value replaces. `broadcast` ignores it, so its contents do not matter.
     let local = if sync.rank == 0 {
-        match obj.eval(model, &mut rng.clone(), batches) {
+        match if every_rank { local } else { obj.eval(model, &mut rng.clone(), batches) } {
             Some(loss) => crate::collective::Payload::f32(vec![1.0, loss]),
             None => crate::collective::Payload::f32(vec![0.0, 0.0]),
         }
@@ -1953,12 +1986,17 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         }
         // A model that keeps state off the device (a layer-streamed build) must say where its gradients are; one that
         // cannot holds them nowhere a reduction reaches at the end of a step, and is refused by what it lacks.
-        if let (Err(why), true) = (model.device_grads(), model.off_device_state().is_some()) {
+        if let (Err(why), true, false) = (model.device_grads(), model.off_device_state().is_some(), opts.sharding == crate::zero::Sharding::Parameters) {
             return Err(std::io::Error::other(format!("a data-parallel run cannot reduce this model's gradients: {why}")));
         }
     }
     // One writer: every rank holds the same replica, so a second writer would
     // only race the first.
+    let parameter_sharded = opts.sharding == crate::zero::Sharding::Parameters;
+    if parameter_sharded && (out.is_some() || control.state.is_some()) {
+        // Each rank holds only its slices of the trained weights; a save gathers nothing yet.
+        return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "sharded training (Parameters): writing the trained model or a resume state of a parameter-sharded run is not wired yet; run without an output or a state file"));
+    }
     let writer = grad_sync.as_ref().is_none_or(|sync| sync.rank == 0);
     let out = out.filter(|_| writer);
     // A writer publishes what it saved, so a later attempt can verify exactly
@@ -2140,6 +2178,19 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
                     if let Some(why) = gate.verdict(why)? {
                         eprintln!("step {:>6}: no optimiser step taken: {why}", step + 1);
                     }
+                } else if let (true, Some(sync)) = (parameter_sharded, &grad_sync) {
+                    // A parameter-sharded model reduces inside its own step; the ranks agree on taking it first.
+                    let totals = pollster::block_on(sync.collective.all_reduce(sync.rank, crate::collective::Payload::f32(vec![weight, if step_loss.is_finite() { 0.0 } else { 1.0 }]))).map_err(std::io::Error::other)?.data;
+                    let why = (totals.get(1).copied().unwrap_or(1.0) > 0.0).then(|| "non-finite loss on a rank".to_string());
+                    match gate.verdict(why)? {
+                        Some(why) => eprintln!("step {:>6}: no optimiser step taken: {why}", step + 1),
+                        None => {
+                            model.set_shard_weight(weight / totals[0].max(1e-12)).map_err(std::io::Error::other)?;
+                            applied += 1;
+                            model.adamw_step(applied, lr, opts.weight_decay, opts.adam, clip, scale);
+                            gate.verify_committed(model.last_grad_norm(), step + 1)?;
+                        }
+                    }
                 } else {
                 if let Some(sync) = &grad_sync {
                     health.guarded(step + 1, "gradient reduction", || crate::distributed::reduce_grads_weighted(&model, sync.collective, sync.rank, weight))?;
@@ -2196,7 +2247,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         let due = opts.eval_interval > 0 && ((step + 1) % opts.eval_interval == 0 || ((last || cooled) && selection.selecting()));
         let mut step_eval = None;
         if due {
-            if let Some(eval_loss) = agreed_eval(&mut obj, &model, &rng, opts.eval_batches, grad_sync.as_ref())? {
+            if let Some(eval_loss) = agreed_eval(&mut obj, &model, &rng, opts.eval_batches, grad_sync.as_ref(), parameter_sharded)? {
                 step_eval = Some(eval_loss);
                 let train_loss = selection.take_interval();
                 selection.evaluations.push(Evaluation { step: step + 1, train_loss, eval_loss });

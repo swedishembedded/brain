@@ -79,6 +79,11 @@ impl DataParallel {
         Ok(self)
     }
 
+    /// The group as a parameter-sharded model holds it ([`model::zero::ShardGroup`]).
+    pub(crate) fn shard_group(&self) -> model::zero::ShardGroup {
+        model::zero::ShardGroup { collective: std::sync::Arc::clone(&self.group), rank: self.rank }
+    }
+
     /// What the group shards across its ranks.
     pub fn sharding(&self) -> model::zero::Sharding {
         self.sharding

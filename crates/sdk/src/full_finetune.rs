@@ -405,7 +405,9 @@ impl ChatFullFineTune {
         chat.train_precision.check(&self.precision).map_err(|why| Error::Backend(format!("ChatFullFineTune: {why}")))?;
         let exit_entropy = exit_entropy_for(chat, self.exit_entropy, FINE_TUNE_EXIT_ENTROPY)?;
         let sharding = self.parallel.as_ref().map_or(model::zero::Sharding::Replicated, crate::DataParallel::sharding);
-        let requested = model::FitOpts { grad_accum: self.grad_accum, strict_updates: self.strict_updates, sharding, weight_decay: self.weight_decay, precision: self.precision.clone(), stages: self.stages, native_sparse: self.native_sparse, exit_entropy, ..fit_opts(self.steps, block, self.lr, seed) };
+        // A parameter-sharded run builds its resident state over the group.
+        let parameter_group = self.parallel.as_ref().filter(|p| p.sharding() == model::zero::Sharding::Parameters).map(crate::DataParallel::shard_group);
+        let requested = model::FitOpts { grad_accum: self.grad_accum, strict_updates: self.strict_updates, sharding, parameter_group, weight_decay: self.weight_decay, precision: self.precision.clone(), stages: self.stages, native_sparse: self.native_sparse, exit_entropy, ..fit_opts(self.steps, block, self.lr, seed) };
         let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &[]).map_err(|e| Error::Backend(format!("ChatFullFineTune: {e}")))?.into_opts();
         Ok((opts, exit_entropy))
     }

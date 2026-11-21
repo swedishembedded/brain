@@ -40,11 +40,16 @@
 //! an unchanged layout, card set and library a repeat is bit-identical ("repeatable"), and every rank receives the
 //! same parameters from the all-gather.
 //!
-//! # What this does not do (yet)
+//! # Parameter sharding
 //!
-//! [`Sharding::Parameters`] (ZeRO-3) needs the forward and backward to ask for each block's parameters before using
-//! them; a trainer that keeps every parameter resident is refused by that reason. Narrow optimizer-state formats and
-//! factored rules are refused by name: the sharded state is f32 AdamW.
+//! [`Sharding::Parameters`] (ZeRO-3) shards the parameters too: [`ZeroOptimizer::new_parameter_shards`] keeps one
+//! unit per block, each rank's slice of its f32 master, moments and bf16 value on the card, and the trainer drives the
+//! units itself: it gathers a block into the device buffers that hold it while it is used
+//! ([`ZeroOptimizer::gather_unit`]), reduce-scatters the block's gradient once it is complete
+//! ([`ZeroOptimizer::reduce_unit`]) and updates the slice ([`ZeroOptimizer::update_unit`]). The layer-streamed resident
+//! full fine-tune is such a trainer (`crate::resident_ft`, its window is the per-block seam); a trainer that keeps every
+//! parameter resident is refused by that reason. Narrow optimizer-state formats and factored rules are refused by name:
+//! the sharded state is f32 AdamW.
 
 use serde::{Deserialize, Serialize};
 
@@ -100,4 +105,20 @@ mod optimizer;
 #[cfg(not(target_arch = "wasm32"))]
 pub use checkpoint::{commit_generation, read_logical, LogicalState};
 #[cfg(not(target_arch = "wasm32"))]
-pub use optimizer::{read_elems, write_elems, DeviceParam, DeviceParams, StateTier, StepArgs, StepOutcome, ZeroOptimizer, KERNELS};
+pub use optimizer::{read_elems, write_elems, DeviceParam, DeviceParams, StateTier, StepArgs, StepOutcome, UnitUpdate, ZeroOptimizer, KERNELS};
+
+/// The group a parameter-sharded model gathers and reduces its units over: shared, because the model holds it for
+/// its whole life (its forward gathers layers too), and this rank's place in it.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+pub struct ShardGroup {
+    pub collective: std::sync::Arc<dyn crate::Collective>,
+    pub rank: usize,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Debug for ShardGroup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShardGroup").field("rank", &self.rank).field("world", &self.collective.world_size()).finish()
+    }
+}

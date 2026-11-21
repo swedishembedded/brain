@@ -4376,6 +4376,11 @@ impl model::resident_ft::ResidentBackward for Qwen {
         failed.map_or(Ok(()), Err)
     }
 
+    fn remainder_grads(&self) -> Result<model::DeviceGrads, String> {
+        let names: Vec<String> = self.ps.opt_params().iter().map(|(n, _)| n.clone()).collect();
+        model::DeviceGrads::from_store(&self.gpu, &self.ps, &names)
+    }
+
     fn update_remainder(&self, args: &model::resident_ft::StepArgs, grad_multiplier: f32) {
         self.update_device_params(args, None, grad_multiplier);
     }
@@ -4589,6 +4594,12 @@ impl model::Model for Qwen {
     }
     fn off_device_state(&self) -> Option<&dyn model::OffDeviceState> {
         self.resident.is_some().then_some(self as &dyn model::OffDeviceState)
+    }
+    fn parameter_shards(&self) -> Option<model::zero::ShardGroup> {
+        self.resident.as_ref().and_then(|ft| ft.borrow().shard_group().cloned())
+    }
+    fn set_shard_weight(&self, share: f32) -> Result<(), String> {
+        self.resident.as_ref().ok_or("this model does not shard its parameters")?.borrow_mut().set_shard_weight(share)
     }
     fn pin_rounding_seed(&self, seed: u64) {
         // Domain-separated from the batch generator, which the run keys on the same seed.

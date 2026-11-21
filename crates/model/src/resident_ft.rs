@@ -150,6 +150,13 @@ pub struct ResidentFtConfig {
     pub window: Option<LayerWindow>,
     /// How a layer-streamed step clips by the global gradient norm.
     pub clip_pass: ClipPass,
+    /// Parameter sharding (ZeRO-3) over a data-parallel group: each rank holds its slice of every layer's and
+    /// table's master, moments and bf16 value on the card instead of the whole model's state on the host; a layer is
+    /// gathered into its window slots where the forward or the backward uses it, its gradient is reduce-scattered to
+    /// its owners once complete, and each owner updates its slice ([`crate::zero`]). Needs a window, bf16 values and
+    /// gradients, an f32 master and f32 AdamW state. `None`: this rank holds the whole state.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub shard: Option<crate::zero::ShardGroup>,
 }
 
 /// The layers a layer-streamed build keeps on the device.
@@ -355,6 +362,19 @@ pub fn demands(cfg: &ResidentFtConfig, specs: &[ResidentSpec]) -> Result<Vec<Dem
             (resident, lanes, stored)
         }
     };
+    // Parameter-sharded: the host holds nothing; the card holds this rank's slices (an f32 master, two f32 moments and
+    // a bf16 value: 14 bytes an element) and the staging of the largest unit, twice, besides the window and lanes.
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(group) = &cfg.shard {
+        let world = group.collective.world_size().max(1) as u64;
+        let largest: u64 = layers_of(specs).values().map(|t| t.iter().map(|&i| specs[i].numel() as u64).sum::<u64>()).chain(specs.iter().filter(|s| s.is_table()).map(|s| s.numel() as u64)).max().unwrap_or(0);
+        let label = format!("{:?} weights of a {}-layer window, sharded over {world} ranks", cfg.value, cfg.window.map_or(1, |w| w.layers.max(1)));
+        return Ok(vec![
+            Demand::fixed(Category::Weights, label, weights),
+            Demand::fixed(Category::Grads, format!("{:?} gradients of one layer and the tables", cfg.grad), grads + 8 * largest.div_ceil(world)),
+            Demand::fixed(Category::OptimizerState, format!("this rank's slices of the f32 master and AdamW state and the bf16 values (1/{world}), and the staging of one unit, twice"), 14 * (numel as u64).div_ceil(world) + 2 * 2 * largest),
+        ]);
+    }
     let manifest: Vec<(String, usize)> = specs.iter().map(|s| (s.name.clone(), s.n as usize * s.k as usize)).collect();
     let ladder = paramstore::precision::optimizer_state_ladder(&manifest, cfg.rule.slots().len(), 256);
     let requested = ladder.iter().position(|(f, _)| *f == cfg.state).map(|i| ladder[i].1).unwrap_or(bytes.moments);
@@ -671,6 +691,10 @@ pub struct ResidentFullFt {
     /// Per tensor, the gradient of the visits of its layer finished so far in the open pass, when the backward visits
     /// a layer more than once ([`Self::carry_layer`]); `None` for a tensor with nothing carried.
     carry: Vec<Option<Vec<f32>>>,
+    /// Parameter sharding ([`ResidentFtConfig::shard`]): this rank's slices of every unit and the group, in place of
+    /// the host copy of the stored values and the whole-model optimizer state.
+    #[cfg(not(target_arch = "wasm32"))]
+    sharded: Option<crate::resident_shard::ShardedLayers>,
 }
 
 /// What a layer-streamed build holds besides the shared fields: the host copy of the stored values, the device slots
@@ -750,7 +774,16 @@ impl ResidentFullFt {
             export_values(&mut init, std::slice::from_ref(d), &registry, &mut sink, tile).map_err(|e| e.to_string())?;
             sink.take_weight().ok_or_else(|| format!("{}: the upload produced no weight", d.name))
         };
-        let manifest: Vec<(String, usize)> = specs.iter().map(|s| (s.name.clone(), s.n as usize * s.k as usize)).collect();
+        #[cfg(not(target_arch = "wasm32"))]
+        let sharding = cfg.shard.clone();
+        #[cfg(target_arch = "wasm32")]
+        let sharding: Option<()> = None;
+        #[cfg(not(target_arch = "wasm32"))]
+        if sharding.is_some() {
+            crate::resident_shard::check_config(&cfg)?;
+        }
+        // A parameter-sharded build keeps its state in its slices: the whole-model state is empty.
+        let manifest: Vec<(String, usize)> = if sharding.is_some() { Vec::new() } else { specs.iter().map(|s| (s.name.clone(), s.n as usize * s.k as usize)).collect() };
         let state_clock = std::time::Instant::now();
         let mut state = TrainState::create(TrainStateConfig {
             manifest,
@@ -777,16 +810,18 @@ impl ResidentFullFt {
         let (weights, grads, window, weight_bytes) = match cfg.window {
             None => {
                 let weights = (0..specs.len()).map(|ti| upload(ti, Some(&mut state))).collect::<Result<Vec<_>, _>>()?;
-                let grads = specs.iter().map(|s| gpu.storage(grad_words(s))).collect();
+                let grads = specs.iter().map(|s| gpu.storage(grad_words(s))).collect::<Vec<DeviceBuffer>>();
                 let bytes = specs.iter().map(|s| s.device_bytes(&cfg)).sum();
                 (weights, grads, None, bytes)
             }
             Some(w) => {
                 let pools = plan_pools(&specs, w.layers);
-                let mut host = EncodedValues::new(descs.clone(), CodecRegistry::reference(), MemBacking::zeroed(EncodedValues::<MemBacking>::required_bytes(&descs)), tile).map_err(|e| e.to_string())?;
+                // A parameter-sharded build holds no host copy: each rank reads only its slices, below.
+                let host_descs: Vec<TensorDescriptor> = if sharding.is_some() { Vec::new() } else { descs.clone() };
+                let mut host = EncodedValues::new(host_descs.clone(), CodecRegistry::reference(), MemBacking::zeroed(EncodedValues::<MemBacking>::required_bytes(&host_descs)), tile).map_err(|e| e.to_string())?;
                 let mut initial = SourceTiles::new(src, names.clone(), 0);
                 let mut values = vec![0f32; tile];
-                for (ti, d) in descs.iter().enumerate() {
+                for (ti, d) in host_descs.iter().enumerate() {
                     let numel = d.numel() as usize;
                     for start in (0..numel).step_by(tile) {
                         let n = tile.min(numel - start);
@@ -798,7 +833,7 @@ impl ResidentFullFt {
                 let slot_weights = pools.slot_rep.iter().map(|&ti| upload(ti, None)).collect::<Result<Vec<_>, _>>()?;
                 let lane_buffers: Vec<DeviceBuffer> = pools.lane_rep.iter().map(|&ti| gpu.storage(grad_words(&specs[ti]))).collect();
                 let weights = pools.slot_of.iter().map(|&s| slot_weights[s].clone()).collect();
-                let grads = pools.lane_of.iter().map(|&l| lane_buffers[l].clone()).collect();
+                let grads = pools.lane_of.iter().map(|&l| lane_buffers[l].clone()).collect::<Vec<DeviceBuffer>>();
                 let bytes = pools.slot_rep.iter().map(|&ti| specs[ti].device_bytes(&cfg)).sum();
                 // The tables were uploaded into their own slots above: those hold the current values.
                 let slot_holds = (0..slot_weights.len()).map(|slot| Some(pools.slot_rep[slot]).filter(|&ti| specs[ti].is_table()).map(|ti| (ti, 0))).collect();
@@ -817,7 +852,38 @@ impl ResidentFullFt {
         };
         gpu_core::profile::stage_time("resident build: read the base once, seed the master, encode and upload the weights", upload_clock);
         let carry = vec![None; specs.len()];
-        Ok(ResidentFullFt { cfg, specs, descs, weights, grads, state, registry, norm, tile, times: HostTimes::default(), weight_bytes, window, carry })
+        #[cfg(not(target_arch = "wasm32"))]
+        let sharded = match &sharding {
+            Some(group) => Some(crate::resident_shard::ShardedLayers::new(group.clone(), &specs, &weights, &grads, src, gpu)?),
+            None => None,
+        };
+        let mut ft = ResidentFullFt {
+            cfg,
+            specs,
+            descs,
+            weights,
+            grads,
+            state,
+            registry,
+            norm,
+            tile,
+            times: HostTimes::default(),
+            weight_bytes,
+            window,
+            carry,
+            #[cfg(not(target_arch = "wasm32"))]
+            sharded,
+        };
+        // A sharded build's tables come from the group's slices (the forward reads them without asking to load).
+        #[cfg(not(target_arch = "wasm32"))]
+        if ft.sharded.is_some() {
+            if let Some(w) = &mut ft.window {
+                w.slot_holds.iter_mut().for_each(|h| *h = None);
+            }
+            let tables = ft.tables();
+            ft.load_tensors(ops, &tables).map_err(|e| e.to_string())?;
+        }
+        Ok(ft)
     }
 
     pub fn specs(&self) -> &[ResidentSpec] {
@@ -915,11 +981,52 @@ impl ResidentFullFt {
 
     /// Per-tensor precision choices and the physical byte totals.
     pub fn report(&self) -> String {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(sh) = &self.sharded {
+            return sh.report();
+        }
         self.state.report()
     }
 
     pub fn step_count(&self) -> u32 {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(sh) = &self.sharded {
+            return sh.step;
+        }
         self.state.step_count()
+    }
+
+    /// Sum the remainder's gradients `grads` (parameters every rank holds whole) over a parameter-sharded build's
+    /// group, each rank's weighted by its share of the step.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn reduce_remainder(&self, grads: &crate::DeviceGrads) -> io::Result<()> {
+        match &self.sharded {
+            Some(sh) => sh.reduce_remainder(grads),
+            None => Ok(()),
+        }
+    }
+
+    /// Whether this build shards its parameters over a group ([`ResidentFtConfig::shard`]).
+    pub fn parameter_sharded(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        return self.sharded.is_some();
+        #[cfg(target_arch = "wasm32")]
+        false
+    }
+
+    /// The group a parameter-sharded build reduces over and this rank's place in it.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn shard_group(&self) -> Option<&crate::zero::ShardGroup> {
+        self.sharded.as_ref().map(|sh| &sh.group)
+    }
+
+    /// This rank's share of the next step's items (`local / total`): every gradient this rank reduces is weighted by
+    /// it. Only for a parameter-sharded build.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_shard_weight(&mut self, share: f32) -> Result<(), String> {
+        let sh = self.sharded.as_mut().ok_or("this build does not shard its parameters")?;
+        sh.scale = share;
+        Ok(())
     }
 
     pub fn seed(&self) -> u64 {
@@ -935,6 +1042,15 @@ impl ResidentFullFt {
         let sum = self.norm.sum_sq_each(ops.gpu(), &items).iter().sum();
         self.times.grad_read += t0.elapsed();
         Ok(sum)
+    }
+
+    /// Refuse what needs the whole model's master and state on this rank, which a parameter-sharded build does not
+    /// hold (its slices are saved per rank and reassembled through `zero::read_logical`).
+    fn require_whole_state(&self, what: &str) -> io::Result<()> {
+        if self.parameter_sharded() {
+            return Err(invalid(format!("{what}: a parameter-sharded build holds only this rank's slices of the master and state")));
+        }
+        Ok(())
     }
 
     fn require_resident(&self, what: &str) -> io::Result<()> {
@@ -1015,6 +1131,10 @@ impl ResidentFullFt {
     /// Copy the stored values of `tensors` from the host into their device slots, where a slot does not already hold
     /// the current value.
     fn load_tensors(&mut self, ops: &dyn DeviceIo, tensors: &[usize]) -> io::Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let (Some(sh), Some(w)) = (&mut self.sharded, &mut self.window) {
+            return sh.load(ops, tensors, &mut w.slot_holds, &w.slot_of, &w.versions, &w.by_layer);
+        }
         let Some(w) = &mut self.window else { return Ok(()) };
         let mut waited = false;
         let mut buf = TileBuf::default();
@@ -1057,10 +1177,15 @@ impl ResidentFullFt {
     /// Open a backward pass over the layers (see [`StreamPass`]). An updating pass opens the next optimizer step.
     pub fn begin_pass(&mut self, pass: StreamPass) {
         let n = self.specs.len();
-        let step = match pass {
-            StreamPass::Measure => 0,
-            StreamPass::Update { .. } | StreamPass::Running { .. } => self.state.begin_step(),
+        let updating = !matches!(pass, StreamPass::Measure);
+        #[cfg(not(target_arch = "wasm32"))]
+        let step = match &mut self.sharded {
+            Some(sh) => sh.begin_pass(updating),
+            None if updating => self.state.begin_step(),
+            None => 0,
         };
+        #[cfg(target_arch = "wasm32")]
+        let step = if updating { self.state.begin_step() } else { 0 };
         if let Some(w) = &mut self.window {
             w.pass = Some(PassState { pass, tensor_sum: vec![None; n], updated: vec![false; n], running: 0.0, min_multiplier: f32::INFINITY, step });
         }
@@ -1072,6 +1197,9 @@ impl ResidentFullFt {
     /// visit can reuse the lane. The layer is finished by [`Self::finish_carried`] once the backward is complete.
     /// Carried gradients are f32.
     pub fn carry_layer(&mut self, ops: &dyn DeviceIo, layer: usize) -> io::Result<()> {
+        if self.parameter_sharded() {
+            return Err(invalid("carry_layer: a parameter-sharded build reduces each layer once; a backward that visits a layer more than once is not sharded".into()));
+        }
         if self.cfg.grad != GradDtype::F32 {
             return Err(invalid(format!("carry_layer: a layer visited more than once carries f32 gradients, not {:?}", self.cfg.grad)));
         }
@@ -1150,6 +1278,27 @@ impl ResidentFullFt {
     }
 
     fn finish_layer_in(&mut self, ops: &dyn DeviceIo, pass: &mut PassState, tensors: &[usize]) -> io::Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let (Some(sh), Some(w)) = (&mut self.sharded, &mut self.window) {
+            let updating = match pass.pass {
+                StreamPass::Measure => None,
+                StreamPass::Update { lr, grad_multiplier } => Some((lr, grad_multiplier)),
+                StreamPass::Running { .. } => return Err(invalid("a parameter-sharded build clips by the exact global norm (clip=two-pass), not a running one".into())),
+            };
+            let local = sh.finish(ops, tensors, updating, self.cfg.rule)?;
+            for (i, &ti) in tensors.iter().enumerate() {
+                pass.tensor_sum[ti] = Some(if i == 0 { local } else { 0.0 });
+                if updating.is_some() {
+                    pass.updated[ti] = true;
+                    w.versions[ti] += 1;
+                }
+            }
+            pass.running += local;
+            if let Some((_, multiplier)) = updating {
+                pass.min_multiplier = pass.min_multiplier.min(multiplier);
+            }
+            return Ok(());
+        }
         let items: Vec<NormItem<'_>> = tensors.iter().map(|&ti| NormItem { buf: &self.grads[ti], numel: self.specs[ti].n as usize * self.specs[ti].k as usize, dtype: self.cfg.grad }).collect();
         let t0 = std::time::Instant::now();
         let sums = self.norm.sum_sq_each(ops.gpu(), &items);
@@ -1208,6 +1357,12 @@ impl ResidentFullFt {
             StreamPass::Running { .. } => pass.running,
             _ => pass.tensor_sum.iter().flatten().sum(),
         };
+        // A parameter-sharded rank measured its slices: the pass's norm is the group's.
+        #[cfg(not(target_arch = "wasm32"))]
+        let sum_sq = match &self.sharded {
+            Some(sh) => sh.global_sum(sum_sq)?,
+            None => sum_sq,
+        };
         Ok(PassReport { step: pass.step, sum_sq, min_multiplier: if updating { pass.min_multiplier } else { 1.0 } })
     }
 
@@ -1220,6 +1375,10 @@ impl ResidentFullFt {
     /// its trainer counts the tables with the parameters it holds itself.
     pub fn table_grad_sum_sq(&mut self, ops: &dyn DeviceIo) -> f64 {
         let tables = self.tables();
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(sh) = &mut self.sharded {
+            return sh.tables_sum_sq(ops, &tables).unwrap_or_else(|e| panic!("parameter-sharded tables: {e}"));
+        }
         let items: Vec<NormItem<'_>> = tables.iter().map(|&ti| NormItem { buf: &self.grads[ti], numel: self.specs[ti].numel(), dtype: self.cfg.grad }).collect();
         let t0 = std::time::Instant::now();
         let sum = self.norm.sum_sq_each(ops.gpu(), &items).iter().sum();
@@ -1236,6 +1395,14 @@ impl ResidentFullFt {
             return Err(invalid("update_tables: a resident build updates its tables in step_scaled".into()));
         }
         let tables = self.tables();
+        #[cfg(not(target_arch = "wasm32"))]
+        if let (Some(sh), Some(w)) = (&mut self.sharded, &mut self.window) {
+            sh.update_tables(ops, &tables, lr, grad_multiplier, self.cfg.rule)?;
+            for &ti in &tables {
+                w.versions[ti] += 1;
+            }
+            return self.load_tensors(ops, &tables);
+        }
         let t0 = std::time::Instant::now();
         let mut tiles = tiles!(self, ops);
         for &ti in &tables {
@@ -1259,6 +1426,7 @@ impl ResidentFullFt {
 
     /// The master copy of tensor `i` (the stored value, decoded, when it has none).
     pub fn read_master(&mut self, ops: &dyn DeviceIo, i: usize) -> io::Result<Vec<f32>> {
+        self.require_whole_state("read_master")?;
         let numel = self.descs[i].numel() as usize;
         let mut out = vec![0f32; numel];
         let mut tiles = tiles!(self, ops);
@@ -1271,6 +1439,7 @@ impl ResidentFullFt {
 
     /// Replace tensor `i`'s master copy with `data` and re-encode the stored weight from it.
     pub fn write_master(&mut self, ops: &dyn DeviceIo, i: usize, data: &[f32]) -> io::Result<()> {
+        self.require_whole_state("write_master")?;
         let numel = self.descs[i].numel() as usize;
         if data.len() != numel {
             return Err(invalid(format!("{}: {} values for {numel} elements", self.specs[i].name, data.len())));
@@ -1318,6 +1487,7 @@ impl ResidentFullFt {
     /// tensor `i`, one tile at a time: the export is a re-encoding of the highest-precision copy, not of the
     /// already-quantized resident weights.
     pub fn export(&mut self, ops: &dyn DeviceIo, dst: &[QuantEncoding], sink: &mut dyn TensorSink) -> io::Result<ExportReport> {
+        self.require_whole_state("export")?;
         let descs = self.export_descriptors(dst)?;
         let mut tiles = tiles!(self, ops);
         self.state.export_masters(&mut tiles, &descs, &self.registry, sink, self.tile)
@@ -1333,6 +1503,7 @@ impl ResidentFullFt {
 
     /// Atomically commit values, master, moments, step, seed and the trainer's schedule.
     pub fn commit(&mut self, ops: &dyn DeviceIo, dir: &CheckpointDir, run: &RunState) -> io::Result<PathBuf> {
+        self.require_whole_state("commit")?;
         let mut tiles = tiles!(self, ops);
         self.state.commit(dir, &mut tiles, run)
     }
@@ -1344,6 +1515,7 @@ impl ResidentFullFt {
 
     /// Restore the newest valid checkpoint into the master, the state and the device weights.
     pub fn restore(&mut self, ops: &dyn DeviceIo, dir: &CheckpointDir) -> io::Result<Option<RunState>> {
+        self.require_whole_state("restore")?;
         let mut tiles = tiles!(self, ops);
         let run = self.state.restore(dir, &mut tiles)?;
         self.refresh_tables(ops)?;
@@ -1352,6 +1524,7 @@ impl ResidentFullFt {
 
     /// [`Self::restore`] of exactly the checkpoint committed at optimizer step `step`.
     pub fn restore_at(&mut self, ops: &dyn DeviceIo, dir: &CheckpointDir, step: u32) -> io::Result<Option<RunState>> {
+        self.require_whole_state("restore_at")?;
         let mut tiles = tiles!(self, ops);
         let run = self.state.restore_at(dir, &mut tiles, step)?;
         self.refresh_tables(ops)?;
@@ -1423,6 +1596,12 @@ pub trait ResidentBackward {
     /// Update the remainder with the device optimizer for the step `args` describes, its gradients multiplied by
     /// `grad_multiplier` (the clip is already folded in: the optimizer must not clip again).
     fn update_remainder(&self, args: &StepArgs, grad_multiplier: f32);
+    /// The remainder's gradients where they live on the device: what a parameter-sharded build sums over its group
+    /// before measuring and updating the remainder, which every rank holds whole. The default names none, and a
+    /// parameter-sharded step of such a model is refused by that reason.
+    fn remainder_grads(&self) -> Result<crate::DeviceGrads, String> {
+        Err("this model does not name the gradients of its parameters outside the resident state".into())
+    }
 }
 
 /// The run's per-step values of [`adamw_step`].
@@ -1452,6 +1631,9 @@ pub fn adamw_step(host: &dyn ResidentBackward, ft: &RefCell<ResidentFullFt>, ops
         let mut ft = ft.borrow_mut();
         if matches!(ft.rule(), Rule::AdamW { .. }) {
             ft.set_rule(Rule::AdamW { adam, wd });
+        }
+        if ft.parameter_sharded() && clip.is_some() && ft.clip_pass() == ClipPass::Running {
+            return Err(invalid("a parameter-sharded build clips by the exact global norm (clip=two-pass), not a running one".into()));
         }
         debug_assert_eq!(ft.step_count() + 1, step, "the resident state and the run agree on the step index");
     }
@@ -1497,6 +1679,13 @@ pub fn adamw_step(host: &dyn ResidentBackward, ft: &RefCell<ResidentFullFt>, ops
                 LayerEvent::AfterVisits => ft.borrow_mut().finish_carried(ops),
             }
         })?;
+        // A parameter-sharded rank holds the remainder whole: its gradient is the group's, summed now.
+        #[cfg(not(target_arch = "wasm32"))]
+        if ft.borrow().parameter_sharded() {
+            host.flush_backward();
+            let grads = host.remainder_grads().map_err(|why| invalid(format!("parameter sharding: {why}")))?;
+            ft.borrow().reduce_remainder(&grads)?;
+        }
         ft.borrow_mut().end_pass()
     };
     let clip_pass = ft.borrow().clip_pass();

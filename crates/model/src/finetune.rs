@@ -128,7 +128,7 @@ impl<F: ModelFit> ModelFit for ScoredFit<'_, F> {
 pub fn fit_full<T: ChatTrainer>(base: &Path, dir: &Path, opts: &FitOpts, out: &Path, state: OptimizerState, control: FitControl<'_>) -> std::io::Result<FitReport> {
     T::TRAIN_PRECISION.check(&opts.precision).map_err(|why| std::io::Error::new(std::io::ErrorKind::Unsupported, why))?;
     let mut fit = CausalLmFit { dir, opts, out: Some(out), control: Some(control) };
-    let resident = opts.precision.resident_config(Some(opts.seed)).map_err(std::io::Error::other)?;
+    let resident = opts.resident_config().map_err(std::io::Error::other)?;
     // The host half of the run (decoding the base, the optimizer update, every transfer) works next to the card.
     let near = gpu_core::devices::selected_device().and_then(|card| gpu_core::devices::host_cores_near(card.index)).unwrap_or_default();
     if gpu_core::profile::enabled() {

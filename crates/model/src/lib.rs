@@ -109,6 +109,8 @@ pub mod prunable;
 pub mod probe;
 pub mod hostopt;
 pub mod resident_ft;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod resident_shard;
 pub mod rollout;
 pub mod saved;
 pub mod segmented;
@@ -543,6 +545,21 @@ pub trait Model {
         let parts = self.optimizer_parts().ok_or("this model keeps no parameter store a sharded optimizer can reach")?;
         let names = self.param_names();
         zero::DeviceParams::from_store(parts.gpu, parts.store, &names)
+    }
+
+    /// The group this model shards its parameters over (ZeRO-3, [`zero::Sharding::Parameters`]), when it was built
+    /// that way: it gathers, reduces and updates its own units, so a data-parallel fit loop neither reduces its
+    /// gradients nor shards an optimizer of its own around it. `None` (the default) for a model that holds every
+    /// parameter.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn parameter_shards(&self) -> Option<zero::ShardGroup> {
+        None
+    }
+
+    /// This rank's share of the next step's items (`local / total`), by which a parameter-sharded model weighs the
+    /// gradients it reduces. Refused by a model that does not shard its parameters.
+    fn set_shard_weight(&self, _share: f32) -> Result<(), String> {
+        Err("this model does not shard its parameters".into())
     }
 
     /// `name`'s AdamW `(m, v)` moments; `None` when it has none to give.

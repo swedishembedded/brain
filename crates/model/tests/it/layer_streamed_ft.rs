@@ -59,7 +59,7 @@ fn task() -> Task {
 }
 
 fn config(value: ResidentValue, window: Option<u32>, clip_pass: ClipPass) -> ResidentFtConfig {
-    ResidentFtConfig {
+    ResidentFtConfig { shard: None,
         value,
         // An f32 value is its own master.
         master: if value == ResidentValue::F32 { MasterPolicy::None } else { MasterPolicy::F32 },

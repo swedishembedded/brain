@@ -66,7 +66,7 @@ fn objective<M: Model>(dir: &Path, opts: &model::FitOpts) -> impl model::Objecti
 }
 
 fn resident(value: ResidentValue, state: StateFormat) -> ResidentFtConfig {
-    ResidentFtConfig {
+    ResidentFtConfig { shard: None,
         value,
         master: MasterPolicy::F32,
         state,

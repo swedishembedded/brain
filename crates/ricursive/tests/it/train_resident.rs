@@ -79,7 +79,7 @@ fn objective(dir: &Path, opts: &model::FitOpts) -> impl model::Objective<Ripple>
 }
 
 fn resident_cfg(value: ResidentValue, window: Option<u32>, clip_pass: ClipPass) -> ResidentFtConfig {
-    ResidentFtConfig {
+    ResidentFtConfig { shard: None,
         value,
         master: MasterPolicy::F32,
         state: StateFormat::F32,

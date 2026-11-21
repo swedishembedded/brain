@@ -113,7 +113,7 @@ pub fn finetune_from_watched(
         // What the run asked of the precision is checked against what this family runs before anything is built; a
         // resident request places the linears in their low-precision encoding with an off-device master.
         <Qwen3Trainer as model::finetune::ChatTrainer>::TRAIN_PRECISION.check(&opts.precision).map_err(|why| std::io::Error::new(std::io::ErrorKind::Unsupported, why))?;
-        match opts.precision.resident_config(Some(opts.seed)).map_err(std::io::Error::other)? {
+        match opts.resident_config().map_err(std::io::Error::other)? {
             Some(resident) => build_resident(cfg, opts, &*init, &resident)?,
             None => model::offload::with_adam_offloaded(true, || build_for_training(cfg, opts, &*init, Dtype::F32))?,
         }

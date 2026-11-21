@@ -67,7 +67,7 @@ fn run(name: &str, path: &str, case: Case) {
     let (cfg, init) = qwen3::open_checkpoint(path).expect("open checkpoint");
     let vocab = cfg.vocab;
     let opts = model::FitOpts { batch_size: 1, block_size: T, ..Default::default() };
-    let rcfg = ResidentFtConfig {
+    let rcfg = ResidentFtConfig { shard: None,
         value,
         master: MasterPolicy::F32,
         state,

@@ -108,6 +108,8 @@ impl TrainPrecision {
             defer_publication: false,
             window: r.window.map(|layers| LayerWindow { layers }),
             clip_pass: r.clip_pass,
+            #[cfg(not(target_arch = "wasm32"))]
+            shard: None,
         }))
     }
 
