@@ -39,6 +39,8 @@ const UPSTREAM_KEY: &str = "sk-upstream";
 #[derive(Clone, Debug)]
 struct Hit {
     path: String,
+    /// The router's side of the connection the request came on.
+    peer: SocketAddr,
     body: Value,
     headers: HeaderMap,
 }
@@ -102,9 +104,9 @@ async fn mock_models(State(m): State<Arc<Mock>>) -> Json<Value> {
     Json(json!({"object": "list", "data": data}))
 }
 
-async fn mock_generate(State(m): State<Arc<Mock>>, uri: axum::http::Uri, headers: HeaderMap, body: Bytes) -> Response {
+async fn mock_generate(State(m): State<Arc<Mock>>, axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>, uri: axum::http::Uri, headers: HeaderMap, body: Bytes) -> Response {
     let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-    m.hits.lock().unwrap().push(Hit { path: uri.path().to_string(), body: body.clone(), headers });
+    m.hits.lock().unwrap().push(Hit { path: uri.path().to_string(), peer, body: body.clone(), headers });
     if body["hold"] == json!(true) {
         m.release.acquire().await.expect("release").forget();
     }
@@ -150,7 +152,7 @@ async fn mock(name: &str, slots: u64, edge: u64, models: &[&str]) -> (Arc<Mock>,
         .with_state(m.clone());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let server = tokio::spawn(async move { axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await });
     *m.server.lock().unwrap() = Some(server.abort_handle());
     (m, format!("http://{addr}"))
 }
@@ -635,3 +637,106 @@ async fn chat_as(addr: SocketAddr, key: &'static str) -> (StatusCode, HeaderMap,
 async fn chat_key(addr: SocketAddr, key: &'static str, body: Value) -> (StatusCode, HeaderMap, Value) {
     call(addr, Method::POST, "/v1/chat/completions", Some(key), &body.to_string()).await
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn connections_are_kept_alive_and_reused() {
+    let (a, ua) = mock("a", 8, 16, &["m"]).await;
+    let (addr, fleet, _stop) = router(&[ua]).await;
+    for _ in 0..6 {
+        assert_eq!(chat(addr, conversation("m", "s", 1)).await.0, StatusCode::OK);
+        until("the connection to go back to the pool", || fleet.status()["upstreams"][0]["idle_connections"] == json!(1)).await;
+    }
+    let peers: std::collections::HashSet<SocketAddr> = a.hits().iter().map(|h| h.peer).collect();
+    assert_eq!(peers.len(), 1, "six requests in turn share one connection");
+    // A streamed answer read to its end gives its connection back too.
+    let body = json!({"model": "m", "messages": [], "stream": true}).to_string();
+    let resp = send(addr, Method::POST, "/v1/chat/completions", Some(CLIENT_KEY), &body, &[]).await;
+    let mut events = Body::new(resp.into_body()).into_data_stream();
+    events.next().await.unwrap().unwrap();
+    a.stream_go.notify_one();
+    while events.next().await.is_some() {}
+    until("the streamed connection to go back", || fleet.status()["upstreams"][0]["idle_connections"] == json!(1)).await;
+    assert_eq!(a.hits().iter().map(|h| h.peer).collect::<std::collections::HashSet<_>>().len(), 1);
+}
+
+/// An upstream that answers every request on a kept-alive connection, then closes it shortly after: the router must
+/// not send a request down a connection the upstream has closed.
+async fn closes_after_answering(models: &[&str]) -> (Arc<AtomicUsize>, String) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let posts = Arc::new(AtomicUsize::new(0));
+    let (seen, models) = (posts.clone(), models.iter().map(|id| json!({"id": id})).collect::<Vec<_>>());
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut s, _)) = listener.accept().await else { return };
+            let (seen, models) = (seen.clone(), models.clone());
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 65536];
+                let mut n = 0;
+                loop {
+                    match s.read(&mut buf[n..]).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(k) => n += k,
+                    }
+                    let Some(end) = buf[..n].windows(4).position(|w| w == b"\r\n\r\n") else { continue };
+                    let head = String::from_utf8_lossy(&buf[..end]).to_lowercase();
+                    let length: usize = head.lines().find_map(|l| l.strip_prefix("content-length:")).map_or(0, |v| v.trim().parse().unwrap());
+                    if n < end + 4 + length {
+                        continue;
+                    }
+                    let answer = if head.starts_with("get /v1/health") {
+                        json!({"decode_slots": 4, "edge_concurrency": 8}).to_string()
+                    } else if head.starts_with("get /v1/models") {
+                        json!({"data": models}).to_string()
+                    } else {
+                        seen.fetch_add(1, Ordering::SeqCst);
+                        json!({"upstream": "closer"}).to_string()
+                    };
+                    let _ = s.write_all(format!("HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{answer}", answer.len()).as_bytes()).await;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    return;
+                }
+            });
+        }
+    });
+    (posts, format!("http://{addr}"))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_connection_the_upstream_closed_is_not_reused() {
+    let (posts, url) = closes_after_answering(&["m"]).await;
+    let (addr, _fleet, _stop) = router(&[url]).await;
+    for n in 1..=4 {
+        let (code, _, body) = chat(addr, conversation("m", "s", 1)).await;
+        assert_eq!((code, body["upstream"].as_str()), (StatusCode::OK, Some("closer")), "request {n}");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+    assert_eq!(posts.load(Ordering::SeqCst), 4, "each sent once");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_drain_deadline_cuts_off_what_the_upstream_still_runs() {
+    let (a, ua) = mock("a", 8, 16, &["m"]).await;
+    let (addr, _fleet, _stop) = router(&[ua]).await;
+    let body = json!({"model": "m", "messages": [], "stream": true}).to_string();
+    let resp = send(addr, Method::POST, "/v1/chat/completions", Some(CLIENT_KEY), &body, &[]).await;
+    let mut events = Body::new(resp.into_body()).into_data_stream();
+    assert_eq!(events.next().await.unwrap().unwrap(), "data: one\n\n");
+    let (code, _, answer) = call(addr, Method::POST, "/v1/upstreams/0/drain", Some(CLIENT_KEY), r#"{"deadline_ms": 200}"#).await;
+    assert_eq!((code, answer["deadline_ms"].clone()), (StatusCode::OK, json!(200)));
+    let ended = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(chunk) = events.next().await {
+            if chunk.is_err() {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .expect("the stream ends at the deadline");
+    assert!(ended, "the cut stream ends in an error, not a silent end");
+    until("the upstream to see its client go", || a.stream_dropped.load(Ordering::SeqCst)).await;
+    assert_eq!(call(addr, Method::POST, "/v1/upstreams/0/drain", Some(CLIENT_KEY), r#"{"deadline_ms": 0}"#).await.0, StatusCode::BAD_REQUEST);
+    assert_eq!(call(addr, Method::POST, "/v1/upstreams/0/drain", Some(CLIENT_KEY), r#"{"deadline": 5}"#).await.0, StatusCode::BAD_REQUEST);
+}
+

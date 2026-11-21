@@ -514,8 +514,9 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
       cached-prefix or eviction events, so the index is advisory; the choice
       is longest prefix among replicas with a free slot, then load per slot,
       not a predicted cost (uncached prefill + queue wait + free KV, which
-      needs upstream-reported KV headroom); drain does not bound how long
-      in-flight requests may take; one TCP connection per request.
+      needs upstream-reported KV headroom). Connections are a bounded
+      keep-alive pool per upstream, and a drain cuts what still runs at its
+      deadline (`--drain-deadline-ms`, default 300000).
 - [ ] **C5 cluster launch sample and gates.** `samples/` gains a Slurm launch
       sample (job plan and secret written once, scheduler rank mapped onto
       `--job-rank`, rank bound to its card's NUMA node, NCCL network plugin

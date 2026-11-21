@@ -91,6 +91,12 @@ const MAX_HEALTH_BYTES: usize = 64 << 10;
 /// The most decode slots, and requests at once, an upstream may claim.
 const MAX_ADVERTISED_SLOTS: u64 = 1 << 20;
 
+/// The most idle keep-alive connections kept per upstream.
+const MAX_IDLE_PER_UPSTREAM: usize = 64;
+
+/// The longest drain deadline a request may ask for.
+const MAX_DRAIN_DEADLINE: Duration = Duration::from_secs(24 * 3600);
+
 /// How long one health probe may take.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -117,6 +123,8 @@ pub struct FleetConfig {
     pub queue_bound: usize,
     /// How long a request may wait in the router for a slot before it is refused with 429.
     pub queue_deadline: Duration,
+    /// How long a drained upstream may finish what it runs before the rest is cut off; `None` waits for it all.
+    pub drain_deadline: Option<Duration>,
 }
 
 impl FleetConfig {
@@ -134,7 +142,12 @@ impl FleetConfig {
             cached_prompts: 256,
             queue_bound: 1024,
             queue_deadline: crate::DEFAULT_ADMIT_DEADLINE,
+            drain_deadline: Some(Duration::from_secs(300)),
         }
+    }
+    pub fn with_drain_deadline(mut self, deadline: Option<Duration>) -> FleetConfig {
+        self.drain_deadline = deadline;
+        self
     }
     pub fn with_queue(mut self, bound: usize, deadline: Duration) -> FleetConfig {
         self.queue_bound = bound;
@@ -186,6 +199,12 @@ pub struct Member {
     advertised: RwLock<Advertised>,
     /// The upstream's cumulative served counters at the last two good probes, for its recent rates.
     readings: Mutex<Readings>,
+    /// Its idle keep-alive connections.
+    pool: Arc<upstream::Pool>,
+    /// Bumped when a drain's deadline passes: every request still running there is cut off.
+    cut: tokio::sync::watch::Sender<u64>,
+    /// Bumped by every drain and resume, so a deadline cuts only the drain that set it.
+    drains: AtomicUsize,
 }
 
 /// Two readings of an upstream's served counters, the rates between them.
@@ -306,6 +325,7 @@ pub struct Fleet {
     changed: Arc<tokio::sync::Notify>,
     queue_bound: usize,
     queue_deadline: Duration,
+    drain_deadline: Option<Duration>,
     sessions: Mutex<Sessions>,
 }
 
@@ -341,7 +361,7 @@ impl Fleet {
         let members: Vec<Arc<Member>> = config
             .upstreams
             .into_iter()
-            .map(|url| Arc::new(Member { url, healthy: AtomicBool::new(false), probed: AtomicBool::new(false), draining: AtomicBool::new(false), in_flight: AtomicUsize::new(0), advertised: RwLock::default(), readings: Mutex::default() }))
+            .map(|url| Arc::new(Member { url, healthy: AtomicBool::new(false), probed: AtomicBool::new(false), draining: AtomicBool::new(false), in_flight: AtomicUsize::new(0), advertised: RwLock::default(), readings: Mutex::default(), pool: Arc::new(upstream::Pool::new(MAX_IDLE_PER_UPSTREAM)), cut: tokio::sync::watch::Sender::new(0), drains: AtomicUsize::new(0) }))
             .collect();
         let directories = Mutex::new(members.iter().map(|_| PrefixDirectory::new(config.cached_prompts)).collect());
         Ok(Arc::new(Fleet {
@@ -355,18 +375,42 @@ impl Fleet {
             changed: Arc::new(tokio::sync::Notify::new()),
             queue_bound: config.queue_bound,
             queue_deadline: config.queue_deadline,
+            drain_deadline: config.drain_deadline,
             sessions: Mutex::default(),
         }))
     }
 
     /// Stop sending new requests to upstream `index`; what it holds finishes. `false` when there is no such upstream.
-    pub fn drain(&self, index: usize) -> bool {
-        self.members.get(index).map(|m| m.draining.store(true, Ordering::SeqCst)).is_some()
+    ///
+    /// With `deadline`, whatever it still runs when the deadline passes (and the upstream has not been resumed since)
+    /// is cut off: the client's stream ends in an error and the upstream connection closes, which cancels the
+    /// generation. Needs a Tokio runtime when a deadline is given.
+    pub fn drain(&self, index: usize, deadline: Option<Duration>) -> bool {
+        let Some(member) = self.members.get(index) else { return false };
+        member.draining.store(true, Ordering::SeqCst);
+        let drain = member.drains.fetch_add(1, Ordering::SeqCst) + 1;
+        if let Some(deadline) = deadline {
+            let member = member.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(deadline).await;
+                if member.draining.load(Ordering::SeqCst) && member.drains.load(Ordering::SeqCst) == drain {
+                    member.cut.send_modify(|n| *n += 1);
+                }
+            });
+        }
+        true
     }
 
     /// Put a drained upstream `index` back in rotation. `false` when there is no such upstream.
     pub fn resume(&self, index: usize) -> bool {
-        let found = self.members.get(index).map(|m| m.draining.store(false, Ordering::SeqCst)).is_some();
+        let found = self
+            .members
+            .get(index)
+            .map(|m| {
+                m.drains.fetch_add(1, Ordering::SeqCst);
+                m.draining.store(false, Ordering::SeqCst)
+            })
+            .is_some();
         self.changed.notify_waiters();
         found
     }
@@ -407,6 +451,7 @@ impl Fleet {
                     "queue_depth": adv.queue_depth,
                     "tokens_per_s": readings.tokens_per_s,
                     "prefix_hit_rate": readings.prefix_hit_rate,
+                    "idle_connections": m.pool.idle(),
                     "models": adv.ids.len(),
                 })
             })
@@ -742,10 +787,22 @@ fn operator_only(principal: &Principal) -> Result<(), ApiError> {
     }
 }
 
-async fn drain(State(state): State<RouteState>, Extension(principal): Extension<Principal>, Path(index): Path<String>) -> Result<Json<Value>, ApiError> {
+/// `POST /v1/upstreams/{n}/drain`, optionally with `{"deadline_ms": N}` (else [`FleetConfig::drain_deadline`]).
+async fn drain(State(state): State<RouteState>, Extension(principal): Extension<Principal>, Path(index): Path<String>, body: Bytes) -> Result<Json<Value>, ApiError> {
     operator_only(&principal)?;
-    let index = index.parse::<usize>().ok().filter(|&i| state.fleet.drain(i)).ok_or_else(|| ApiError::not_found(PROVIDER, "no such upstream"))?;
-    Ok(Json(json!({"index": index, "draining": true})))
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct DrainBody {
+        deadline_ms: Option<u64>,
+    }
+    let asked = if body.is_empty() { None } else { serde_json::from_slice::<DrainBody>(&body).map_err(|e| ApiError::invalid_request(PROVIDER, format!("drain body: {e}")))?.deadline_ms };
+    let deadline = match asked {
+        Some(ms) if ms == 0 || Duration::from_millis(ms) > MAX_DRAIN_DEADLINE => return Err(ApiError::invalid_request(PROVIDER, "deadline_ms is between 1 and 86400000")),
+        Some(ms) => Some(Duration::from_millis(ms)),
+        None => state.fleet.drain_deadline,
+    };
+    let index = index.parse::<usize>().ok().filter(|&i| state.fleet.drain(i, deadline)).ok_or_else(|| ApiError::not_found(PROVIDER, "no such upstream"))?;
+    Ok(Json(json!({"index": index, "draining": true, "deadline_ms": deadline.map(|d| d.as_millis() as u64)})))
 }
 
 async fn resume(State(state): State<RouteState>, Extension(principal): Extension<Principal>, Path(index): Path<String>) -> Result<Json<Value>, ApiError> {
@@ -804,6 +861,7 @@ async fn forward(State(state): State<RouteState>, Extension(principal): Extensio
     let request_id = format!("route-{}", uuid::Uuid::new_v4().simple());
     let fleet = &state.fleet;
     let mut excluded = vec![false; fleet.members.len()];
+    let mut resends = 0usize;
     loop {
         let (index, in_flight) = match fleet.admit(&model, &chain, session.as_deref(), &excluded).await {
             Ok(chosen) => chosen,
@@ -813,7 +871,7 @@ async fn forward(State(state): State<RouteState>, Extension(principal): Extensio
             Err(Refusal::Deadline) => return ApiError::overloaded(PROVIDER, "no upstream slot freed within the admit deadline").into_response(),
         };
         let member = &fleet.members[index];
-        let conn = match fleet.connector.open(&member.url).await {
+        let conn = match fleet.connector.checkout(&member.url, &member.pool).await {
             Ok(conn) => conn,
             Err(not_sent) => {
                 // Nothing was sent: the request may go to another upstream, and this one waits for its next probe.
@@ -822,16 +880,31 @@ async fn forward(State(state): State<RouteState>, Extension(principal): Extensio
                 continue;
             }
         };
-        let sent = tokio::time::timeout(fleet.response_timeout, conn.send(Method::POST, path, fleet.key.as_deref(), accept.as_ref(), Some(&request_id), body.clone())).await;
+        let mut cut = member.cut.subscribe();
+        let send = tokio::time::timeout(fleet.response_timeout, conn.send(Method::POST, path, fleet.key.as_deref(), accept.as_ref(), Some(&request_id), body.clone()));
+        let sent = tokio::select! {
+            sent = send => sent,
+            _ = cut.changed() => return ApiError::bad_gateway(PROVIDER, "the upstream was drained before it answered; the request may have run").into_response(),
+        };
         return match sent {
-            Ok(Ok((response, task))) => {
-                let mut out = relay(response, (task, in_flight, caller_slot));
+            Ok(Ok((response, conn))) => {
+                let mut out = relay(response, conn, member.pool.clone(), cut, (in_flight, caller_slot));
                 if let Ok(id) = axum::http::HeaderValue::from_str(&request_id) {
                     out.headers_mut().insert("x-request-id", id);
                 }
                 out
             }
-            Ok(Err(why)) => {
+            Ok(Err(upstream::SendError::NotSent(why))) => {
+                // A kept-alive connection the upstream had closed: the request was handed back unsent. Try again with
+                // a fresh connection, a bounded number of times.
+                resends += 1;
+                if resends > MAX_UNSENT_RETRIES {
+                    eprintln!("brain route: upstream {index} ({}) took no request on {resends} connections: {why}", member.url);
+                    return ApiError::saturated(PROVIDER, "no upstream connection took the request").into_response();
+                }
+                continue;
+            }
+            Ok(Err(upstream::SendError::Sent(why))) => {
                 eprintln!("brain route: upstream {index} ({}) failed a sent request: {why}", member.url);
                 ApiError::bad_gateway(PROVIDER, "the upstream failed after the request was sent; it may have run").into_response()
             }
@@ -840,17 +913,39 @@ async fn forward(State(state): State<RouteState>, Extension(principal): Extensio
     }
 }
 
+/// How many times one request is offered to fresh connections after kept-alive ones handed it back unsent.
+const MAX_UNSENT_RETRIES: usize = 4;
+
 /// The upstream's answer as the client's: its status, the headers a client of the API reads, and its body streamed
-/// through. `held` (the connection, the upstream slot, the caller's slot) lives until the body ends or the client hangs
-/// up.
-fn relay<H: Send + 'static>(response: hyper::Response<hyper::body::Incoming>, held: H) -> Response {
+/// through. `held` (the upstream slot, the caller's slot) lives until the body ends, the client hangs up or a drain's
+/// deadline cuts it; a body read to its end gives `conn` back to `pool`, any other end closes it.
+fn relay<H: Send + 'static>(response: hyper::Response<hyper::body::Incoming>, conn: upstream::Connection, pool: Arc<upstream::Pool>, mut cut: tokio::sync::watch::Receiver<u64>, held: H) -> Response {
     const PASSED: [header::HeaderName; 3] = [header::CONTENT_TYPE, header::CACHE_CONTROL, header::RETRY_AFTER];
     let (parts, incoming) = response.into_parts();
     let mut upstream_body = Body::new(incoming).into_data_stream();
     let body = async_stream::stream! {
         let _held = held;
-        while let Some(chunk) = upstream_body.next().await {
-            yield chunk;
+        let mut conn = Some(conn);
+        loop {
+            tokio::select! {
+                chunk = upstream_body.next() => match chunk {
+                    Some(Ok(chunk)) => yield Ok(chunk),
+                    Some(Err(e)) => {
+                        yield Err(e);
+                        break;
+                    }
+                    None => {
+                        if let Some(conn) = conn.take() {
+                            pool.give_back(conn);
+                        }
+                        break;
+                    }
+                },
+                _ = cut.changed() => {
+                    yield Err(axum::Error::new(std::io::Error::other("the upstream was drained before the response ended")));
+                    break;
+                }
+            }
         }
     };
     let mut out = Response::new(Body::from_stream(body));

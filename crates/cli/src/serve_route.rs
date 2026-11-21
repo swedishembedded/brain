@@ -28,6 +28,8 @@ pub(crate) struct UpstreamFlags {
     pub health_ms: Option<u64>,
     /// `--route-queue N`: the requests that may wait in the router for a slot.
     pub queue: Option<usize>,
+    /// `--drain-deadline-ms N`: how long a drained upstream may finish what it runs.
+    pub drain_ms: Option<u64>,
 }
 
 impl UpstreamFlags {
@@ -38,7 +40,7 @@ impl UpstreamFlags {
 
     /// Whether a flag that only a router reads was given.
     pub fn any_given(&self) -> bool {
-        self.routing() || self.key_file.is_some() || self.ca.is_some() || self.timeout_ms.is_some() || self.health_ms.is_some() || self.queue.is_some()
+        self.routing() || self.key_file.is_some() || self.ca.is_some() || self.timeout_ms.is_some() || self.health_ms.is_some() || self.queue.is_some() || self.drain_ms.is_some()
     }
 
     /// The fleet these flags name; a request waits in the router's queue for at most `queue_deadline`.
@@ -63,6 +65,9 @@ impl UpstreamFlags {
         config = config.with_queue(bound, queue_deadline);
         if let Some(ms) = self.timeout_ms {
             config = config.with_response_timeout(Duration::from_millis(ms));
+        }
+        if let Some(ms) = self.drain_ms {
+            config = config.with_drain_deadline(Some(Duration::from_millis(ms)));
         }
         if let Some(ms) = self.health_ms {
             config = config.with_health_interval(Duration::from_millis(ms));

@@ -208,7 +208,9 @@ on the command line instead.
   upstream lists is a 404.
 - **Drain.** `POST /v1/upstreams/N/drain` takes upstream `N` (0-based, in the
   order given) out of rotation: it takes no new request and finishes what it
-  holds. `POST /v1/upstreams/N/resume` puts it back. With `--caller`, only an
+  holds, for at most `--drain-deadline-ms` (default 300000) or the request's
+  own `{"deadline_ms": N}`; what still runs then is cut off, its client's
+  stream ending in an error and the upstream's generation cancelled. `POST /v1/upstreams/N/resume` puts it back. With `--caller`, only an
   admin caller may. `GET /v1/health` reports each upstream by index: healthy,
   draining, requests in flight, decode slots.
 - **At most once.** A request moves to another upstream only when its
@@ -228,6 +230,9 @@ on the command line instead.
   two probes), and the fleet's `capacity`, `in_flight`, `queued` and
   `tokens_per_s`: a client keeps `capacity` requests in flight to saturate the
   fleet. Every response carries the `X-Request-Id` the upstream was sent.
+- **Connections.** The router keeps up to 64 idle connections per upstream
+  alive and reuses each for a few seconds; a request handed back unsent by a
+  connection the upstream closed goes out on a fresh one.
 - **Streaming.** Responses stream through unbuffered; a client that hangs up
   closes its upstream connection, which cancels the generation there.
 

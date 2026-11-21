@@ -336,7 +336,8 @@ like, rather than silently fetching something adjacent.
   model: it routes the OpenAI dialect over other `brain serve` endpoints,
   prefix-affine and weighed by load, with health checks, drain and a merged
   model listing (`--upstream-key-file`, `--upstream-ca`,
-  `--upstream-timeout-ms`, `--upstream-health-ms`; see
+  `--upstream-timeout-ms`, `--upstream-health-ms`, `--route-queue`,
+  `--drain-deadline-ms`; see
   [Serving across machines](../guides/serving/serving.md#serving-across-machines)).
 - With `--stdio`, it instead runs an event-driven stdio controller: it reads
   JSONL events on stdin (e.g. `user_text`, `camera_frame`) and streams JSONL

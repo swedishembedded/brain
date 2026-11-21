@@ -164,6 +164,9 @@ ROUTING ACROSS SERVERS  (one URL for every card of a cluster)
   --upstream-health-ms N how often every upstream is probed (default 2000)
   --route-queue N        requests that may wait in the router for a free slot
                          (default 1024)
+  --drain-deadline-ms N  how long a drained upstream may finish what it runs
+                         before the rest is cut off (default 300000; a drain
+                         request may name its own: {\"deadline_ms\": N})
 
 D-BUS CONTROL SURFACE
   --dbus                 serve com.swedishembedded.Brain1 on the session bus
@@ -1071,6 +1074,7 @@ pub fn run_serve(args: &[String]) {
             "--upstream-key-file" => upstream.key_file = Some(PathBuf::from(val(args, &mut i, "--upstream-key-file"))),
             "--upstream-ca" => upstream.ca = Some(PathBuf::from(val(args, &mut i, "--upstream-ca"))),
             "--upstream-timeout-ms" => upstream.timeout_ms = Some(positive_ms(args, &mut i, "--upstream-timeout-ms").as_millis() as u64),
+            "--drain-deadline-ms" => upstream.drain_ms = Some(positive_ms(args, &mut i, "--drain-deadline-ms").as_millis() as u64),
             "--route-queue" => upstream.queue = Some(parsed(args, &mut i, "--route-queue")),
             "--upstream-health-ms" => upstream.health_ms = Some(positive_ms(args, &mut i, "--upstream-health-ms").as_millis() as u64),
             "--tokenizer" => qwen_cfg.tokenizer = Some(val(args, &mut i, "--tokenizer")),

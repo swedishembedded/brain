@@ -8,11 +8,13 @@
 
 //! One upstream `brain serve` endpoint: its address, and the client that reaches it.
 //!
-//! A request opens its own connection ([`Connector::open`]). That costs a TCP (and TLS) handshake per request, small
-//! beside a generation, and buys the one property the router's retry rule rests on: a failure to open the connection
-//! is a request that was never sent, so it may go to another upstream, while any failure after it opened may have run
-//! and is never sent again. A pooled connection that turns out dead at write time is ambiguous, which is why there is
-//! no pool.
+//! Connections are kept alive and reused ([`Pool`]): a request takes an idle connection to its upstream, or opens one,
+//! and gives it back when its response has been read to the end. The router's retry rule rests on knowing whether a
+//! request was sent: a connection that could not be opened sent nothing, and a reused connection that the client finds
+//! closed before it wrote the request hands the request back (hyper's `try_send_request`), so both may go elsewhere;
+//! any failure after the request was written may have run and is never sent again. An idle connection is reused only
+//! while younger than [`MAX_IDLE`], well inside the upstream's own idle deadline, so the window in which an upstream
+//! closes a connection the router is writing to stays small; a request caught in it is answered 502, not resent.
 
 use std::net::IpAddr;
 use std::path::Path;
@@ -184,9 +186,74 @@ pub(crate) struct Connection {
     authority: String,
 }
 
+impl Connector {
+    /// A connection to `url`: an idle one from `pool`, else a new one.
+    pub(crate) async fn checkout(&self, url: &UpstreamUrl, pool: &Pool) -> Result<Connection, NotSent> {
+        match pool.take() {
+            Some((sender, task)) => Ok(Connection { sender, task, authority: url.authority() }),
+            None => self.open(url).await,
+        }
+    }
+}
+
 /// Opening a connection failed: nothing was sent.
 #[derive(Debug)]
 pub(crate) struct NotSent(pub String);
+
+/// The longest an idle connection is kept: under the serving surfaces' idle (header) deadline, so the upstream does not
+/// close it under a request.
+pub(crate) const MAX_IDLE: Duration = Duration::from_secs(4);
+
+/// Idle keep-alive connections to one upstream, at most `max_idle` of them.
+pub(crate) struct Pool {
+    idle: std::sync::Mutex<Vec<(SendRequest<Body>, ConnectionTask, std::time::Instant)>>,
+    max_idle: usize,
+}
+
+impl Pool {
+    pub(crate) fn new(max_idle: usize) -> Pool {
+        Pool { idle: std::sync::Mutex::default(), max_idle }
+    }
+
+    /// An idle connection that is still open, ready and young, if there is one; the stale ones are closed.
+    fn take(&self) -> Option<(SendRequest<Body>, ConnectionTask)> {
+        let mut idle = self.idle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        while let Some((sender, task, since)) = idle.pop() {
+            if !sender.is_closed() && sender.is_ready() && since.elapsed() < MAX_IDLE {
+                return Some((sender, task));
+            }
+        }
+        None
+    }
+
+    /// Keep `conn` for the next request once it is ready again; close it when the pool is full or it does not become
+    /// ready (the upstream closed it).
+    pub(crate) fn give_back(self: &Arc<Pool>, conn: Connection) {
+        let pool = self.clone();
+        tokio::spawn(async move {
+            let Connection { mut sender, task, .. } = conn;
+            if tokio::time::timeout(Duration::from_secs(1), sender.ready()).await.is_ok_and(|r| r.is_ok()) {
+                let mut idle = pool.idle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if idle.len() < pool.max_idle {
+                    idle.push((sender, task, std::time::Instant::now()));
+                }
+            }
+        });
+    }
+
+    /// Idle connections now.
+    pub(crate) fn idle(&self) -> usize {
+        self.idle.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len()
+    }
+}
+
+/// Why a request did not get an answer.
+pub(crate) enum SendError {
+    /// Nothing of it reached the upstream: it may go elsewhere.
+    NotSent(String),
+    /// It was written, at least in part: it may have run.
+    Sent(String),
+}
 
 /// Opens connections to upstreams.
 #[derive(Clone)]
@@ -227,8 +294,9 @@ impl Connector {
 }
 
 impl Connection {
-    /// Send one request. `body` is sent whole with its length; only the headers set here reach the upstream.
-    pub(crate) async fn send(mut self, method: Method, path: &str, key: Option<&str>, accept: Option<&HeaderValue>, request_id: Option<&str>, body: bytes::Bytes) -> Result<(Response<Incoming>, ConnectionTask), String> {
+    /// Send one request. `body` is sent whole with its length; only the headers set here reach the upstream. On an
+    /// answer the connection comes back with the response, for its body to be read and the connection given back.
+    pub(crate) async fn send(mut self, method: Method, path: &str, key: Option<&str>, accept: Option<&HeaderValue>, request_id: Option<&str>, body: bytes::Bytes) -> Result<(Response<Incoming>, Connection), SendError> {
         let mut req = Request::builder().method(method).uri(path).header(header::HOST, self.authority.as_str());
         if let Some(id) = request_id {
             req = req.header("x-request-id", id);
@@ -242,9 +310,12 @@ impl Connection {
         if let Some(accept) = accept {
             req = req.header(header::ACCEPT, accept.clone());
         }
-        let req = req.body(Body::from(body)).map_err(|e| format!("request: {e}"))?;
-        let response = self.sender.send_request(req).await.map_err(|e| format!("upstream: {e}"))?;
-        Ok((response, self.task))
+        let req = req.body(Body::from(body)).map_err(|e| SendError::NotSent(format!("request: {e}")))?;
+        match self.sender.try_send_request(req).await {
+            Ok(response) => Ok((response, self)),
+            Err(e) if e.message().is_some() => Err(SendError::NotSent(format!("upstream: {}", e.into_error()))),
+            Err(e) => Err(SendError::Sent(format!("upstream: {}", e.into_error()))),
+        }
     }
 }
 
@@ -252,7 +323,9 @@ impl Connection {
 pub(crate) async fn get_json(connector: &Connector, url: &UpstreamUrl, path: &str, key: Option<&str>, limit: usize, timeout: Duration) -> Result<serde_json::Value, String> {
     let fetch = async {
         let conn = connector.open(url).await.map_err(|e| e.0)?;
-        let (response, _task) = conn.send(Method::GET, path, key, None, None, bytes::Bytes::new()).await?;
+        let (response, _conn) = conn.send(Method::GET, path, key, None, None, bytes::Bytes::new()).await.map_err(|e| match e {
+            SendError::NotSent(why) | SendError::Sent(why) => why,
+        })?;
         if response.status() != StatusCode::OK {
             return Err(format!("{path}: HTTP {}", response.status()));
         }
