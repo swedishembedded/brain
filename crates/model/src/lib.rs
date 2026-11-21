@@ -31,6 +31,7 @@ pub mod offload;
 pub mod kv_tier;
 pub mod kvcalib;
 pub mod memplan;
+pub mod message_gate;
 pub mod attninject;
 pub mod block;
 pub mod dispatch;

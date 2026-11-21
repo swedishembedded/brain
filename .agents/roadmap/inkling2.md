@@ -399,6 +399,15 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
 - **I1.8** `model` (compose first, fuse only on profile evidence): the message gate
   `(1 - tanh(a)) x + tanh(b) m`, with forward and backward over existing
   `rmsnorm`/`concat2`/`matmul`/`tanh` kernels.
+
+  Done (2026-11-21): `model::message_gate::{MessageGate, MessageGateIds, MessageGateWeights,
+  MessageGateActs, MessageGateScratch, kernels}`, composed from `rmsnorm_nogain(_dx)`,
+  `concat2`/`concat_split`, the `Ops` products, `tanh_act(_bwd)`, `mul`, `sub`, `add2`.
+  Spec in `crates/model/tests/it/message_gate.rs`: forward and every input and weight
+  gradient equal f64 central differences, weight gradients accumulate over calls, and all
+  16 q/k/v/mlp gate outputs of the tiny golden's looped visits reproduce within 1e-5 from
+  the checkpoint's `controllers.*` weights (CPU backend). Left: a fused kernel only if a
+  profile of the model puts the gate on the gap list.
 - **I1.9** `model::head_ce` + the serving head: a logit softcap and a valid-vocab bound
   in the chunked CE (forward and backward) and in every serving readout path (`logits`,
   top-k, keyed draws, full rows, `score_continuation`). `vocab()` reports the valid size.
