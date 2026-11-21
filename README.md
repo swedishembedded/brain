@@ -11,9 +11,23 @@
 
 Language models are only part of the picture. brain brings text, embeddings, vision, document understanding, image and speech generation, video, forecasting, decision models, 3D reconstruction and interactive world models into **one extensible engine**, exposed through a CLI, a Rust SDK and interoperable serving APIs.
 
-**[Get started](#quickstart)** · **[Documentation](docs/index.md)** · **[Model catalog](docs/reference/models/index.md)** · **[Capabilities and certification](docs/reference/training-capabilities.md)** · **[Examples](samples/README.md)** · **[Book](https://www.amazon.com/dp/B0HRWWYHGF?maas=maas_adg_B0EF476BE0ACF3F28B1215EE6A9E234B_afap_abs[Book](docs/book/index.md)ref_=aa_maas[Book](docs/book/index.md)tag=maas)**
+**[Get started](#quickstart)** · **[Documentation](docs/index.md)** · **[Model catalog](docs/reference/models/index.md)** · **[Capabilities and certification](docs/reference/training-capabilities.md)** · **[Examples](samples/README.md)** · **[Book](https://www.amazon.com/dp/B0HRWWYHGF?maas=maas_adg_B0EF476BE0ACF3F28B1215EE6A9E234B_afap_abs&ref_=aa_maas&tag=maas)**
+
+[![Watch the brain demo video](https://img.youtube.com/vi/6N3J8Xj0HkY/maxresdefault.jpg)](https://www.youtube.com/watch?v=6N3J8Xj0HkY)
 
 ---
+
+## Three projects, one stack
+
+brain is one of three open projects that work together. Each stands on its own:
+
+| Project | Its role |
+| --- | --- |
+| **[brain](https://github.com/swedishembedded/brain)** (this repository) | **Runs the models.** Inference, training, fine-tuning, quantization and serving. |
+| **[Sven](https://sven.swedishembedded.com)** | **Runs the agent.** A terminal AI agent that reads code, runs tools and works through tasks, using any model provider, brain included. |
+| **[Splinter](https://github.com/mkschreder/splinter)** | **Turns agent experience into better local models.** It runs Sven on real tasks, checks the results, trains a model with brain, and releases it only when held-out tests show it improved. |
+
+You can use brain without the other two: it serves models to any application that speaks the OpenAI, Anthropic or OpenRouter API or D-Bus, or links the Rust SDK.
 
 ## Why brain exists
 
@@ -32,7 +46,7 @@ brain is designed for engineers who want to **run AI locally, deploy it onto con
 
 ## What you can build
 
-The model catalog contains the complete architecture-by-architecture list, including the actions and weights each model supports. These are representative capabilities-not a claim that every model supports every training method or device.
+The model catalog contains the complete architecture-by-architecture list, including the actions and weights each model supports. These are representative capabilities, not a claim that every model supports every training method or device.
 
 | Area | Capabilities and implementations | Go deeper |
 | --- | --- | --- |
@@ -100,9 +114,9 @@ make gpt/calculator/train
 make gpt/calculator/eval
 ```
 
-This produces a real model checkpoint and reports perplexity and exact-match performance-not merely a successful forward pass. For larger models, start with [fine-tuning](docs/guides/training/lora.md) or the [training capability matrix](docs/reference/training-capabilities.md).
+This produces a real model checkpoint and reports perplexity and exact-match performance, not merely a successful forward pass. For larger models, start with [fine-tuning](docs/guides/training/lora.md) or the [training capability matrix](docs/reference/training-capabilities.md).
 
-For more task-oriented walkthroughs, use the full [quickstart](docs/getting-started/quickstart.md) or explore the standalone [Rust, Python and shell samples](samples/README.md).
+For more task-oriented walkthroughs, use the full [quickstart](docs/getting-started/quickstart.md), the [tour](docs/getting-started/tour.md) (real commands and output, one model feeding the next) or explore the standalone [Rust, Python and shell samples](samples/README.md).
 
 ## One engine, several ways in
 
@@ -146,7 +160,7 @@ The same architecture's declared actions are discoverable with `brain caps <arch
 - **Native Vulkan:** direct Vulkan execution with WGSL translated to SPIR-V.
 - **CUDA:** an NVIDIA driver-based backend that can compile translated WGSL for the target GPU and use native CUDA kernels for supported high-performance operations. Ahead-of-time CUDA kernel packages are also supported.
 
-Precision and fast-kernel paths are **capability-gated**: the portable numerical baseline remains available when a device lacks a specialized format or instruction. brain also has **separate, model-specific NPU integrations**, including Intel NPU execution via ONNX/OpenVINO and an embedded Rockchip sample; these are not interchangeable fifth/sixth eager backends.
+`brain devices` lists what was found; select hardware with `--device` and how it is driven with `--backend`. Precision and fast-kernel paths are **capability-gated**: the portable numerical baseline remains available when a device lacks a specialized format or instruction. brain also has **separate, model-specific NPU integrations**, including Intel NPU execution via ONNX/OpenVINO and an embedded Rockchip sample; these are not interchangeable fifth/sixth eager backends.
 
 This design matters when moving workloads between a workstation, an accelerator server, a browser and a constrained device: model code does not need a new implementation for every compute backend. Performance still depends on the model, precision, kernels and hardware; portability is not a promise of equal speed.
 
@@ -168,7 +182,7 @@ Training is not claimed for a model just because inference is registered. Check 
 
 [Fine-tuning guide](docs/guides/training/lora.md) · [Served training](docs/guides/training/served-training.md) · [Optimizer state](docs/guides/training/optimizer-state.md) · [Scaling](docs/concepts/scaling/overview.md) · [SDK training workflows](docs/reference/sdk.md)
 
-## Make models fit-and make serving predictable
+## Make models fit, and make serving predictable
 
 The practical problem is often not *can the network compute this?* but *can this particular machine load, train and serve it within its memory and latency budget?*
 
@@ -216,8 +230,10 @@ These checks establish *specific* contracts, not a blanket claim that every mode
 | [Practical guides](docs/index.md) | Hardware, text, vision, image generation, speech, forecasting, 3D, training, deployment and optimization. |
 | [Samples](samples/README.md) | Complete standalone Rust applications plus Python and shell clients. |
 | [Architecture and kernels](docs/concepts/architecture.md) | Backend design, layers, kernel catalogs and numerical contracts. |
-| [From First Principles to Intelligent Machines](https://www.amazon.com/dp/B0HRWWYHGF?maas=maas_adg_B0EF476BE0ACF3F28B1215EE6A9E234B_afap_abs[From First Principles to Intelligent Machines](docs/book/index.md)ref_=aa_maas[From First Principles to Intelligent Machines](docs/book/index.md)tag=maas) | A sixteen-volume textbook connecting ML mathematics and algorithms to the implementation of a complete engine. |
-| [Contributing](docs/contributing/index.md) | Building, tests, generated files, documentation and contribution conventions. |
+| [From First Principles to Intelligent Machines](docs/book/index.md) | A sixteen-volume textbook connecting ML mathematics and algorithms to the implementation of a complete engine. Read it [in this repository](docs/book/index.md) or [buy the book](https://www.amazon.com/dp/B0HRWWYHGF?maas=maas_adg_B0EF476BE0ACF3F28B1215EE6A9E234B_afap_abs&ref_=aa_maas&tag=maas). |
+| [Contributing](docs/contributing/index.md) | Building, tests, generated files, documentation and contribution conventions; see also [AGENTS.md](AGENTS.md). |
+
+The manual is also published at <https://swedishembedded.com/docs/brain>.
 
 **Source layout:** `crates/` contains the engine, model families, backends, SDK and services; `samples/` demonstrates applications and integrations; `tests/` and `scripts/` hold system and repository gates; `docs/` is the user-facing manual; `brain-py/` contains an optional Python subprocess client; `papers/` contains research work. The core does not depend on the sample applications or an external agent orchestrator.
 
@@ -231,6 +247,17 @@ brain owns **model execution and learning**: architectures, kernels, checkpoint 
 
 brain's source code is licensed under **[Apache License 2.0](LICENSE)**. Documentation and individual assets may carry their own SPDX notices. Downloaded model weights, datasets and third-party assets retain their respective licenses and restrictions; see [third-party model licensing](docs/compliance/third-party-models.md) and [NOTICE](NOTICE.md).
 
-Built in the open by **[Swedish Embedded AB](https://swedishembedded.com/)**. We work on model ports, training and inference engines, accelerator kernels, performance and getting AI onto real hardware.
+Built in the open by **[Swedish Embedded AB](https://swedishembedded.com/)**. We build AI that runs on hardware that ships: the GPU you already have, a CPU with no GPU at all, an Intel NPU, a board in the field or a browser tab. If your team needs any of this, you can procure our services:
 
-**Website:** [swedishembedded.com](https://swedishembedded.com/) · **Documentation:** [brain manual](docs/index.md) · **Engineering inquiries:** [info@swedishembedded.com](mailto:info@swedishembedded.com)
+* **Running models on the hardware you have**: NVIDIA and other GPUs, CPUs, Intel NPUs, embedded Linux boards, the browser.
+* **Making a large model fit**: quantization, weight streaming, splitting a model across GPUs.
+* **Porting a model** from a paper or a PyTorch checkpoint, with its results checked against the original.
+* **Making GPU code fast**, and proving it is still correct afterwards.
+* **Production inference**: serving many users at once, keeping models loaded, scheduling across accelerators.
+* **Embedded and real-time firmware** alongside the AI, which is where this company started.
+
+Send an email to **[info@swedishembedded.com](mailto:info@swedishembedded.com)** and tell us what you are trying to ship.
+
+**Website:** [swedishembedded.com](https://swedishembedded.com/) · **Documentation:** [brain manual](docs/index.md)
+
+Copyright (c) 2026 Martin Schröder.
