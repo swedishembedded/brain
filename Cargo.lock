@@ -843,6 +843,7 @@ dependencies = [
  "brain-testutil",
  "brain-toyautoencoder",
  "brain-toymoe",
+ "pollster",
  "serde",
  "serde_json",
 ]

@@ -504,6 +504,24 @@ Scope: Running one training job as ranks across machines, and serving one model 
     so under sustained load they lag and the router's own in-flight count is
     what bounds an upstream.
 
+- **Cluster sample and collective benchmark, one node, 2026-11-21**
+  (C5/C9). n442, 4 GH200 ranks, one srun step with
+  `--network=single_node_vni`, the NCCL libfabric plugin env as rank env,
+  ranks pinned to each card's `local_cpulist` (72 cores each). `brain bench
+  collectives`, 10 timed iterations, f32 busbw at 1 GiB: all-reduce 330.6,
+  all-gather 298.6, reduce-scatter 298.0, broadcast 324.2 GB/s (bf16 within
+  1%); at 256 MiB 293-294, 234-235, 236-239, 278-279 GB/s; the C probe
+  measured 339.6 (all-reduce) and 312.7 (all-gather) at 1 GiB. NCCL 2.32.3,
+  network Libfabric, every channel P2P/CUMEM; all 8 correctness checks
+  exact. Per-iteration times include the host wait for completion, so the
+  small-size figures (p50 140-240 us at 64 KiB) bound the latency from
+  above. The suite's three tests pass; a 4-rank Qwen3-4B LoRA (4 steps)
+  through `train.sh --collectives device` reduced its gradients on the
+  device over NCCL. The first run found the site injecting
+  `NCCL_DEBUG=VERSION` into every step, which silenced the per-rank log the
+  transport is read from: `rank.sh` sets `NCCL_DEBUG=INFO` after the site's
+  file.
+
 ## Plan: multi-node clusters (2026-11-21)
 
 Target machine class: Slurm allocations of GH200 nodes, 4 cards per node on
@@ -644,11 +662,23 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
       regression. A least-loaded-only policy was not measured. Connections are a bounded
       keep-alive pool per upstream, and a drain cuts what still runs at its
       deadline (`--drain-deadline-ms`, default 300000).
-- [ ] **C5 cluster launch sample and gates.** `samples/` gains a Slurm launch
+- [x] **C5 cluster launch sample and gates.** `samples/` gains a Slurm launch
       sample (job plan and secret written once, scheduler rank mapped onto
       `--job-rank`, rank bound to its card's NUMA node, NCCL network plugin
       selected) and a cluster end-to-end suite that runs under the scheduler
-      and skips by name without one.
+      and skips by name without one. Delivered 2026-11-21:
+      `samples/shell/cluster/slurm` (`train.sh`: plan with the step's first
+      node as coordinator on a port drawn once, a 0600 secret, ONE srun step
+      with a task per card and `--network=single_node_vni` on one node;
+      `rank.sh`: `SLURM_PROCID`/`SLURM_LOCALID` onto `--job-rank` and
+      `--device gpuN`, taskset to the card's `local_cpulist`, an optional
+      site rank-env file sourced in the task, NCCL's INFO log per rank to a
+      file; `serve.sh`: a server per card and the router in front, URL, key
+      and endpoints file printed; an optional container prefix), and
+      `tests/e2e/cluster.bats` (`make test/e2e/cluster`: the collective
+      benchmark as one job with the transport gate, a wrong expected network
+      that must fail, mock servers per card behind the router). Validated on
+      one node (Measured); multi-node pending a window.
 - [ ] **C6 versioned weight publication for live servers.** Rollout servers and
       trainers as separate groups: a new policy (full weights or an adapter) is
       staged into inactive buffers, verified by size and digest, and activated
@@ -673,7 +703,18 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
       Gate: fault injection that kills or stalls a rank during all-gather,
       reduce-scatter, the optimizer step, weight publication and a checkpoint
       write never leaves a partially applied step.
-- [ ] **C9 qualification suite and traces.** One machine-readable result per
+- [ ] **C9 qualification suite and traces.** Communication part delivered
+      2026-11-21: `brain bench collectives` (`crates/bench/src/collectives.rs`,
+      `make bench/collectives`) joins a job plan as one rank, forms the device
+      group the trainer uses and times all-reduce, all-gather, reduce-scatter
+      and broadcast over a size sweep in f32 and bf16, checks each against a
+      host reference on every rank, and rank 0 writes one result (hosts,
+      cards, brain, NCCL version, loaded communication libraries, config and
+      plan, p50/p99, algbw/busbw from the slowest rank, the network and
+      channel paths NCCL logged per rank, CXI NIC octets per host, verdict;
+      unobserved fields null). `--expect-network` fails a run on another
+      network or, across nodes, without a channel over it. Remaining: the
+      cross-node trace, the scaling and overlap gates. One machine-readable result per
       run (hardware, every library version, configuration, p50/p99, algorithm
       and bus bandwidth, NIC octets from CXI telemetry, correctness verdict;
       unmeasured fields stay null) and a cross-node trace (per rank: forward,

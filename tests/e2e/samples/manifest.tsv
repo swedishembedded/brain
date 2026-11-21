@@ -102,3 +102,6 @@ samples/shell/imagegen/rgb-to-ir/tests/test_seed.py	skip	unit tests of the sampl
 samples/shell/timeline/lifecycle/lifecycle.sh	skip	direct-CLI (no D-Bus); trains, checks and serves a timeline model on user-supplied records
 samples/shell/timeline/predict/history.sh	skip	direct-CLI (no D-Bus); needs a saved timeline model (lifecycle.sh writes one)
 samples/shell/timeline/predict/predict.sh	skip	direct-CLI (no D-Bus); needs a saved timeline model and subjects to score
+samples/shell/cluster/slurm/train.sh	skip	needs a Slurm allocation with GPUs; real run in tests/e2e/cluster.bats (make test/e2e/cluster)
+samples/shell/cluster/slurm/serve.sh	skip	needs a Slurm allocation with GPUs; real run in tests/e2e/cluster.bats (make test/e2e/cluster)
+samples/shell/cluster/slurm/rank.sh	skip	the per-task helper train.sh and serve.sh run under srun; exercised by tests/e2e/cluster.bats

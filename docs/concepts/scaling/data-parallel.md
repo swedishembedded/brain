@@ -36,6 +36,11 @@ tested. So data-parallel training already works whether your GPUs are all in
 one box or spread across a network of machines; it's the same mechanism
 either way, not a separate feature.
 
+On a Slurm cluster, the [launch sample](../../../samples/shell/cluster/slurm/README.md)
+writes the job plan and secret, starts every card as one rank in one `srun`
+step pinned to its card's cores, and measures the fabric first with
+`brain bench collectives`; brain itself reads no scheduler variable.
+
 ## Which models support it
 
 Data-parallel training is generic — it's built once against the shared

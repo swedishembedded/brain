@@ -131,6 +131,8 @@ struct Lib {
 
 /// What a one-rank-per-process communicator needs beyond [`Lib`]'s single-process set.
 struct RankFns {
+    /// `ncclGetVersion`'s code (major * 10000 + minor * 100 + patch since 2.9).
+    version: c_int,
     get_unique_id: unsafe extern "C" fn(*mut UniqueId) -> NcclResult,
     comm_init_rank_config: unsafe extern "C" fn(*mut Comm, c_int, UniqueId, c_int, *mut Config) -> NcclResult,
     comm_split: unsafe extern "C" fn(Comm, c_int, c_int, *mut Comm, *mut Config) -> NcclResult,
@@ -202,6 +204,7 @@ unsafe fn rank_fns(lib: &libloading::Library) -> Result<RankFns, String> {
         return Err(format!("NCCL {version} predates the one-rank-per-process communicator ({MIN_RANK_VERSION} or newer)"));
     }
     Ok(RankFns {
+        version,
         get_unique_id: sym(lib, b"ncclGetUniqueId\0")?,
         comm_init_rank_config: sym(lib, b"ncclCommInitRankConfig\0")?,
         comm_split: sym(lib, b"ncclCommSplit\0")?,
@@ -526,6 +529,11 @@ impl NcclRank {
 impl RankCollective for NcclRank {
     fn provider(&self) -> &'static str {
         "nccl"
+    }
+
+    fn library_version(&self) -> Option<String> {
+        let v = self.fns.version;
+        Some(format!("{}.{}.{}", v / 10000, (v / 100) % 100, v % 100))
     }
 
     fn world(&self) -> usize {

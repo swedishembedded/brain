@@ -135,6 +135,11 @@ impl RankGroup {
         self.comm.provider()
     }
 
+    /// The provider library's version (`"2.32.3"`), when it says.
+    pub fn library_version(&self) -> Option<String> {
+        self.comm.library_version()
+    }
+
     /// How many ranks the group has.
     pub fn world(&self) -> usize {
         self.comm.world()

@@ -46,6 +46,8 @@ brain-horizon.workspace = true
 brain-survival.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# `collectives`: the job transport's futures, waited on from the benchmark's thread.
+pollster.workspace = true
 
 [dev-dependencies]
 brain-eval.workspace = true

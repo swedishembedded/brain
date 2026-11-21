@@ -791,6 +791,7 @@ fn run_bench(args: &[String]) {
         Some("compare") => return run_bench_compare(&args[1..]),
         Some("scale") => return run_bench_scale(&args[1..]),
         Some("advise") => return run_bench_advise(&args[1..]),
+        Some("collectives") => std::process::exit(run_bench_collectives(&args[1..])),
         _ => {}
     }
 
@@ -858,6 +859,117 @@ fn run_scaling(seed: u64) {
 /// turn-key architecture-eval harness: run EVERY registered benchmark against the
 /// named architecture, aggregate per capability axis, write a results artifact
 /// under `results/<arch>-<seed>.json` (or `--out`), and print the table + axes.
+const BENCH_COLLECTIVES_HELP: &str = "\
+brain bench collectives - time and check the device collectives as one rank of a job
+
+USAGE:
+  brain --device gpuN bench collectives --job-plan FILE --job-rank N --job-secret FILE [options]
+
+Every rank of the job runs it with the same plan and secret and its own rank and card; rank 0 writes the
+result. A launcher maps its scheduler's rank onto --job-rank (samples/shell/cluster/slurm does for Slurm).
+
+OPTIONS:
+  --ops LIST             all_reduce,all_gather,reduce_scatter,broadcast (default: all four)
+  --dtypes LIST          f32,bf16 (default: both)
+  --sizes LIST           operation sizes in bytes, with K/M/G suffixes (default: 8,1K,64K,1M,16M,256M,1G)
+  --warmup N             untimed iterations per case (default 5)
+  --iters N              timed iterations per case (default 20)
+  --op-timeout-ms N      how long one operation may take before the group is aborted (default 120000)
+  --nccl-log FILE        this rank's NCCL log (NCCL_DEBUG=INFO, NCCL_DEBUG_FILE=FILE), to report the transport
+  --expect-network NAME  fail unless NCCL chose network NAME on every rank (Libfabric, IB, Socket...) and, across
+                         nodes, a channel crosses it
+  --out FILE             (rank 0) write the result document here, else print it on stdout
+
+Exit status: 0 when every check passed, 1 when a check failed, 2 on a usage or setup error.
+";
+
+/// `brain bench collectives`: see [`BENCH_COLLECTIVES_HELP`]. Returns the exit status.
+fn run_bench_collectives(args: &[String]) -> i32 {
+    let usage = |msg: &str| {
+        eprintln!("brain bench collectives: {msg}\n\n{BENCH_COLLECTIVES_HELP}");
+        2
+    };
+    let mut cfg = bench::collectives::Config::default();
+    let (mut plan, mut rank, mut secret, mut out) = (None, None, None, None::<String>);
+    let mut i = 0;
+    while i < args.len() {
+        let flag = args[i].as_str();
+        if matches!(flag, "--help" | "-h") {
+            print!("{BENCH_COLLECTIVES_HELP}");
+            return 0;
+        }
+        let Some(value) = args.get(i + 1).cloned() else { return usage(&format!("{flag} needs a value")) };
+        let list = |v: &str| v.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect::<Vec<_>>();
+        let parsed = match flag {
+            "--job-plan" => {
+                plan = Some(value);
+                Ok(())
+            }
+            "--job-rank" => value.parse().map(|r: usize| rank = Some(r)).map_err(|_| format!("--job-rank {value:?} is not a rank")),
+            "--job-secret" => {
+                secret = Some(value);
+                Ok(())
+            }
+            "--out" => {
+                out = Some(value);
+                Ok(())
+            }
+            "--nccl-log" => {
+                cfg.nccl_log = Some(value.into());
+                Ok(())
+            }
+            "--expect-network" => {
+                cfg.expect_network = Some(value);
+                Ok(())
+            }
+            "--warmup" => value.parse().map(|n| cfg.warmup = n).map_err(|_| format!("--warmup {value:?} is not a count")),
+            "--iters" => value.parse().ok().filter(|&n: &usize| n > 0).map(|n| cfg.iters = n).ok_or(format!("--iters {value:?} is not a positive count")),
+            "--op-timeout-ms" => value.parse().ok().filter(|&n: &u64| n > 0).map(|n| cfg.op_timeout = std::time::Duration::from_millis(n)).ok_or(format!("--op-timeout-ms {value:?} is not a positive number")),
+            "--ops" => list(&value).iter().map(|o| bench::collectives::Op::parse(o).ok_or(format!("unknown op {o:?}"))).collect::<Result<Vec<_>, _>>().map(|v| cfg.ops = v),
+            "--dtypes" => list(&value).iter().map(|d| bench::collectives::parse_dtype(d).ok_or(format!("unknown dtype {d:?}"))).collect::<Result<Vec<_>, _>>().map(|v| cfg.dtypes = v),
+            "--sizes" => list(&value).iter().map(|s| bench::collectives::parse_size(s).ok_or(format!("size {s:?} is not a positive byte count"))).collect::<Result<Vec<_>, _>>().map(|v| cfg.sizes = v),
+            other => Err(format!("unknown flag {other:?}")),
+        };
+        if let Err(e) = parsed {
+            return usage(&e);
+        }
+        i += 2;
+    }
+    if cfg.ops.is_empty() || cfg.dtypes.is_empty() || cfg.sizes.is_empty() {
+        return usage("--ops, --dtypes and --sizes each name at least one");
+    }
+    let (Some(plan), Some(rank), Some(secret)) = (plan, rank, secret) else { return usage("--job-plan, --job-rank and --job-secret go together and are required") };
+    let ctx = match model::JobContext::from_plan_file(std::path::Path::new(&plan), rank, std::path::Path::new(&secret)) {
+        Ok(ctx) => ctx,
+        Err(e) => return usage(&e),
+    };
+    let gpu = gpu_core::Gpu::new(&[]);
+    match bench::collectives::run(&ctx, &gpu, &cfg) {
+        Ok(None) => 0,
+        Ok(Some(doc)) => {
+            let text = serde_json::to_string_pretty(&doc).expect("a JSON value serializes");
+            match &out {
+                Some(path) => {
+                    if let Err(e) = std::fs::write(path, format!("{text}\n")) {
+                        eprintln!("brain bench collectives: --out {path}: {e}");
+                        return 2;
+                    }
+                }
+                None => println!("{text}"),
+            }
+            let pass = doc["verdict"] == "pass";
+            if !pass {
+                eprintln!("brain bench collectives: FAILED (correctness: {}, transport: {})", doc["correctness"], doc["transport"]["reason"]);
+            }
+            if pass { 0 } else { 1 }
+        }
+        Err(e) => {
+            eprintln!("brain bench collectives: rank {rank}: {e}");
+            2
+        }
+    }
+}
+
 fn run_bench_eval(args: &[String]) {
     let (seed, rest) = crate::args::split_seed(args, "brain bench eval");
     let args = &rest[..];

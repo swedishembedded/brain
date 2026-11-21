@@ -2283,6 +2283,10 @@ impl PeerLink {
 pub trait DeviceCollective: Send + Sync {
     /// The library that moves the bytes, for reporting.
     fn provider(&self) -> &'static str;
+    /// The version of that library, for reporting; `None` when it does not say.
+    fn library_version(&self) -> Option<String> {
+        None
+    }
     /// Every rank's `bufs[i]` (its first `words` f32 words) becomes the element-wise sum over ranks.
     fn all_reduce_sum(&self, bufs: &[&DeviceBuffer], words: u64) -> Result<(), String>;
     /// Every rank's `recv[j]` (`ranks * words` f32 words) becomes the concatenation, in rank order, of every rank's
@@ -2336,6 +2340,10 @@ impl CollectiveDtype {
 pub trait RankCollective: Send + Sync {
     /// The library that moves the bytes, for reporting.
     fn provider(&self) -> &'static str;
+    /// The version of that library, for reporting; `None` when it does not say.
+    fn library_version(&self) -> Option<String> {
+        None
+    }
     /// How many ranks the communicator has.
     fn world(&self) -> usize;
     /// This process's rank in it.

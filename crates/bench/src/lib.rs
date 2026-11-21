@@ -34,6 +34,7 @@ pub mod advisor;
 pub mod arch;
 pub mod axes;
 pub mod capscale;
+pub mod collectives;
 pub mod distributed;
 pub mod eval;
 pub mod forecast_bench;

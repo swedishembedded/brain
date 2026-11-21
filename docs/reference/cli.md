@@ -84,7 +84,7 @@ way.
 | `brain perf` | performance: latency/throughput/serve/sweep runs vs. a baseline, `perf flops` (FLOP/OPS accounting) and `perf roofline` (measured hardware capacity) |
 | `brain perf flops` | offline/online FLOP and int-OPS accounting for a forward/backward pass, or for a whole image/video generation stage by stage (`--model flux2\|ltxv`) |
 | `brain npu` | the generic ONNX tools for OpenVINO/NPU: `check` (op histogram and compile) and `bench` (latency); each model's own export, quantization and run are actions of its sample |
-| `brain bench` | cross-architecture evaluation harness: `eval`, `scale`, `advise`, `compare` |
+| `brain bench` | cross-architecture evaluation harness: `eval`, `scale`, `advise`, `compare`; and `collectives`, which times and checks all-reduce, all-gather, reduce-scatter and broadcast over the cards of a distributed job as one of its ranks and writes one result document (sizes, dtypes, p50/p99, algorithm and bus bandwidth, the NCCL network and channel paths, NIC octets, a correctness verdict; `--expect-network NAME` fails a run on any other network) - launched on a cluster by the [Slurm sample](../../samples/shell/cluster/slurm/README.md) |
 | `brain pull <model>` | fetch a model's official weights into the model store, by canonical id or HuggingFace URL - see below |
 | `brain models list` | architecture → provider repo → quantization: what's local, what's declared-but-not-pulled, size/fit/cost - see [Seeing what you have](../guides/inference/models-and-weights.md#seeing-what-you-have) |
 | `brain models list-adapters` | architecture → base variant → LoRA adapter, with rank/alpha/dataset from the adapter's own card |

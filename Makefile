@@ -623,6 +623,14 @@ test/e2e: test/e2e/api-conformance test/e2e/video-api test/e2e/shutdown test/e2e
 test/e2e/api-conformance: $(E2E_BUILD)
 	BRAIN_BIN=$(BRAIN_BIN) bats tests/e2e/api_conformance.bats
 
+# End-to-end on a Slurm allocation: the cluster launch sample runs the collective
+# benchmark as one job over the cards and serves a mock model per card behind the
+# router. Skips by name outside an allocation; BRAIN_BIN must be a binary every
+# node can run, and CLUSTER_* (tests/e2e/cluster.bats) say how to reach the nodes.
+## test/e2e/cluster - the Slurm launch sample on the allocation it runs in: collectives benchmark, fabric gate, serving
+test/e2e/cluster:
+	BRAIN_BIN=$(abspath $(BRAIN_BIN)) bats tests/e2e/cluster.bats
+
 # End-to-end: `brain serve --upstream` routing over two real `brain serve --mock`
 # upstreams on loopback: one key, the merged listing, streaming through, drain,
 # an upstream that stops routed around, misconfiguration refused. No weights, no GPU.
@@ -1523,6 +1531,13 @@ bench/scaling: build/release
 ## bench/distributed - distributed-training profile on one machine: world 1/2/4 x host/loopback/shaped, one JSON document (ARGS="--steps 5")
 bench/distributed:
 	cargo run --release --offline -p brain-bench --bin distributed_profile -- $(ARGS)
+
+# `make bench/collectives` runs the device-collective benchmark as one rank of a
+# job plan (`brain bench collectives --help`); every rank of the job runs it, so
+# on a cluster it is launched by samples/shell/cluster/slurm/train.sh.
+## bench/collectives - time and check all-reduce/all-gather/reduce-scatter/broadcast as one rank of a job (ARGS="--job-plan P --job-rank N --job-secret S ...")
+bench/collectives: build/release
+	$(BRAIN) bench collectives $(ARGS)
 
 # `make bench/eval ARCH=<name>` runs the turn-key architecture-eval harness: the
 # WHOLE registered battery against one architecture, aggregated per capability
