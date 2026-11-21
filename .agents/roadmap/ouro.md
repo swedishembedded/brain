@@ -133,6 +133,9 @@ gate and a pass-selected or exit-weighted head.
   a 24 GB card; lower-precision serving weights (bf16 storage) are the step
   that puts a 6k context on one card. Prefix reuse and host offload stay off
   for the looped path until they are pass-aware.
+- Adopt `model::serve::visit_state::VisitPool` (2026-11-22): one block table for every pass's plane (one allocator
+  instead of one per pass) and visit-aware prefix reuse come with it; the engine keeps its batched step and passes
+  each visit's K/V through `attend_chunk` / `attend_decode` (or reads the pool's planes with its own kernels).
 - A served end-to-end check of a from-scratch model emitting a tool call over `/v1/chat/completions` (needs a model
   trained far enough to call tools).
 - LoRA serving (runtime adapters) on the looped path.

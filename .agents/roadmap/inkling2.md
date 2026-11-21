@@ -530,10 +530,36 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
   - per-visit conv-state rows charged to the pool (`sequence_state_blocks`).
 
   Admission uses `blocks_for` times visits by kind.
+  Done (2026-11-22): `model::serve::visit_state` (`VisitLayout`, `VisitPool<P>`, `VisitStateShape`, `ConvState`,
+  `VisitPoolSizing`, `SlotKv`, `Resumed`). Every full slot is a paged plane addressed by the SAME block ids, so the
+  scheduler's one `BlockTable` covers all full visits and `blocks_for(tokens)` charges `full slots x 2 x block` rows per
+  block (`VisitLayout::block_bytes`); every windowed slot keeps a ring of exactly its window per sequence and every slot
+  its declared f32 convolution states: together one state row per sequence (`row_bytes`), rows `0..live_rows` for running
+  sequences (`max_batch`), then snapshot rows. The state rows are a reserved store beside the block pool (no sparse
+  backing exists off CUDA), so `sequence_state_blocks` stays 0 and `pool_bytes` reports blocks plus every row; `sizing_for`
+  splits a byte budget. `attend_chunk` (paged append + `flash_ext_paged_fwd`, or `ring_chunk_attend`) and
+  `attend_decode` (append at the block / ring row, then each row through its own table) take any `AttnOptions`;
+  `conv_rows` / `store_conv_rows` move convolution state between rows and the `short_conv` batch layout. Spec:
+  `crates/model/tests/it/serve_visit_state.rs`, a tiny looped decoder (2 prelude + 2 core x 2 + 1 coda, full and
+  window-5 layers, three conv states, sinks) on the pool: the conformance suite (f32 and bf16 KV, prefills sliced),
+  and every served logit of a sequence prefilled in slices and decoded far past the window equal to the bit to a
+  stateless whole-sequence forward, on a state row another sequence used first. CPU backend; CUDA not exercised.
+  Left: state rows charged to the block pool need sparse backing (`qwen35`'s `unipool` is the CUDA mechanism, model
+  specific today); a row-indexed conv step would remove the gather/scatter around `short_conv_step`; ouro and huginn
+  can adopt the pool (noted in their ledgers).
 - **I3.2** `model::snapshot_prefix`: prefix entries spanning all visits (full-visit blocks
   shared, ring and conv rows snapshotted).
   - This is the visit-aware identity ouro and huginn lack.
   - Gate: the serve conformance prefix tests.
+  Done (2026-11-22): `VisitPool::{begin, file_prefix, cached_prefix_blocks, reclaim, reclaim_keeping, evict_namespace,
+  prefix_stats}` over `SnapshotPrefixCache` (extended with `held_blocks`, no parallel cache): one entry per prompt and
+  namespace spans every visit, its table a fork of the full visits' blocks (a resumed sequence copies a partly filled
+  tail block before writing), its snapshot row every ring and conv state after the prompt, its payload the engine's
+  (the last hidden row: a repeat computes nothing). Admission is charged only the blocks a hit does not adopt. Spec:
+  the conformance prefix tests and `a_prefix_hit_restores_every_visits_state_exactly` (an extension and two repeats of a
+  cached prompt serve the cold run's logits to the bit; removing the snapshot restore or the tail copy fails it).
+  Left: no branch points or checkpoint-before-tail filing yet (`branch_point`, knowledge #347): an engine files where its
+  prefill ends; the inkling2 engine should file a chat prompt a few tokens short of its end.
 - **I3.3** `data` + chat: an Inkling template flavor and tool/thinking scanner. Pass
   numeric `reasoning_effort` as a template variable. A stop set of 200006 plus 200010,
   which needs a format-level stop API in place of the Qwen-only `end_of_turn()`.

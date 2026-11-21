@@ -41,6 +41,14 @@
 //! An entry belongs to the KV namespace of the sequence that prefilled it (its
 //! `table`'s): K/V computed under one adapter are not the base's or another
 //! adapter's, so a prompt only ever resumes from an entry of its own namespace.
+//!
+//! # Looped decoders
+//!
+//! An entry is keyed by the prompt alone, so a decoder that runs some layers several times per token (a
+//! [`crate::looped::VisitPlan`]) files ONE entry for all its visits: the `table` holds the blocks of every
+//! full-attention visit at once (their planes share block ids, [`crate::serve::visit_state`]), and the snapshot row
+//! holds every windowed visit's ring and every visit's convolution state. Which visit owns which part of the row is
+//! the engine's layout; the cache never sees it.
 
 use std::sync::Arc;
 
@@ -326,10 +334,15 @@ impl<P> SnapshotPrefixCache<P> {
         Some(e.table)
     }
 
-    /// `(hit tokens, looked-up tokens, cached prompts)`, the shape
-    /// `PagedDecoder::prefix_stats` reports.
+    /// `(hit tokens, looked-up tokens, cached prompts)`.
     pub fn stats(&self) -> (u64, u64, usize) {
         (self.hit_tokens, self.lookup_tokens, self.entries.len())
+    }
+
+    /// KV blocks the entries' tables hold (a block two entries share counts twice): what an engine whose entries retain
+    /// blocks reports as its cached blocks (`PagedDecoder::prefix_stats`).
+    pub fn held_blocks(&self) -> usize {
+        self.entries.iter().map(|e| e.table.blocks().len()).sum()
     }
 }
 

@@ -80,6 +80,10 @@ un-embeds the final latent state into the tied head.
 
 ## Left to do
 
+- Adopt `model::serve::visit_state::VisitPool` (2026-11-22) for one block table over every visit's plane and
+  visit-aware prefix reuse. A shared slot (`VisitPlan::share_core_slots`) is one plane every visit of the slot writes
+  at the same position, the later visit overwriting the earlier: the engine's sharing ring as it stands.
+
 - Bounded prefill: chunk the prompt through `paged_flash_prefill` so the slab
   is chunk-sized instead of prompt-sized, and charge it in the estimate.
 - Truncated backprop as the reference's sampled-depth mode runs it (run the
