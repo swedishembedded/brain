@@ -373,6 +373,10 @@ ADAPTERS  (one resident copy of the Qwen3 weights serves the base and every
                          come up -- so a waiter must also bound its wait and
                          check the process is still alive.
                          \"Ready\" means listening, not warm: models load lazily.
+                         Every served model was sized first: one that could
+                         never fit is named and not served, and a start whose
+                         adapters' base (or every model) could never fit exits
+                         1 without creating PATH.
                          A stale PATH from a previous run is removed at startup.
                          The file is empty and not a secret: it holds no key, no
                          pid and no address.
@@ -1733,6 +1737,10 @@ fn run_apis(a: RunApis) {
         }
     };
     let _adapter_watcher = host.watch(follow, &executor);
+    // Ready means servable: every served model, its adapters included, is sized now, before any surface binds and so
+    // before the ready file; one that could never fit is withdrawn by name, and a configuration that leaves its
+    // adapters, or everything, unservable refuses to start.
+    crate::servable::check(&executor);
 
     let dbus_handle = if a.dbus {
         let opts = brain_dbus::DbusOpts {

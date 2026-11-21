@@ -565,3 +565,41 @@ fn a_pin_no_served_model_reads_is_refused_at_startup() {
     assert!(stderr.contains("--pin wan.dti: wan has no role 'dti'"), "stderr: {stderr}");
     assert!(!stderr.contains("--pin wan.dit:"), "a role wan reads is not refused: {stderr}");
 }
+
+/// Ready means servable (serving-runtime G14): a served base whose adapter rides on it, and which could never fit the
+/// memory this process may use (a 4 MiB checkpoint under a host-RAM ceiling of 1 MiB), is named with its size before
+/// any surface binds, the start is refused with exit 1, and the ready file is never written, rather than reporting
+/// ready and answering every request with a 500.
+#[test]
+fn a_configuration_whose_adapter_cannot_fit_refuses_to_start_and_never_reports_ready() {
+    let dir = Scratch::dir("brain-serve-cli-unservable");
+    let base = dir.join("big-base.safetensors");
+    checkpoint::st::save_safetensors(base.to_str().unwrap(), &[("embed.weight".to_string(), vec![1 << 20], vec![1.0; 1 << 20])], &serde_json::json!({}), None).unwrap();
+    let (_, adapter) = write_named_adapter(&dir, 1.0, Some(&base), ADAPTER_ID);
+    let ready = dir.join("ready");
+    let mut child = serve_command(&dir, &base, &["--adapter", adapter.to_str().unwrap(), "--ready-file", ready.to_str().unwrap()])
+        .args(["--limit-ram-total", "1MiB"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn brain serve");
+    // Bounded: a regression serves instead of exiting, and must fail the test rather than hang it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("wait for brain serve") {
+            break Some(status);
+        }
+        if std::time::Instant::now() > deadline {
+            child.kill().ok();
+            child.wait().ok();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(&mut child.stderr.take().unwrap(), &mut stderr).ok();
+    assert_eq!(status.and_then(|s| s.code()), Some(1), "the start is refused; stderr:\n{stderr}");
+    assert!(stderr.contains("brain serve: UNSERVABLE") && stderr.contains(" MiB"), "each unservable model is named with its size; stderr:\n{stderr}");
+    assert!(stderr.contains(ADAPTER_ID) && stderr.contains("refusing to start"), "the adapter riding on it is named; stderr:\n{stderr}");
+    assert!(!ready.exists(), "no ready file for a server that cannot serve; stderr:\n{stderr}");
+}

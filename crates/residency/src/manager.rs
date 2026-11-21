@@ -614,6 +614,7 @@ impl ResidencyManager {
                 model: model.to_string(),
                 action: action.to_string(),
                 instance_key: key.config.clone(),
+            instance_model: key.model.clone(),
                 required,
                 resident_on: resident.clone(),
                 device: devices.first().copied(),
@@ -622,6 +623,8 @@ impl ResidencyManager {
                 evict: Vec::new(),
                 supported_devices: devices.clone(),
                 estimated_transfer: if resident.is_some() { 0 } else { required.vram },
+                // A multi-device model has no single budget to be "never fitting" against: `claim_multi` decides per device.
+                never_fits: false,
                 refusal: if placeable || devices.is_empty() {
                     None
                 } else {
@@ -639,12 +642,15 @@ impl ResidencyManager {
             .ok_or_else(|| PlanError::UnknownModel { model: model.to_string() })?;
         let cost = self.hot_cost(&**m, &key);
         let supported = crate::runplan::supported_devices(&cost, &self.budgets);
+        // Permanent, not a matter of what is resident now: no device (the host tier included) could hold it even empty.
+        let never_fits = !could_ever_fit(&cost, &self.budgets);
 
         if let Some(entry) = self.residents.get(&key) {
             return Ok(RunPlan {
                 model: model.to_string(),
                 action: action.to_string(),
                 instance_key: key.config.clone(),
+            instance_model: key.model.clone(),
                 required: cost,
                 resident_on: Some(Placement { device: entry.device, tier: entry.tier }),
                 device: Some(entry.device),
@@ -652,6 +658,7 @@ impl ResidencyManager {
                 supported_devices: supported,
                 // Already there: nothing crosses a bus to start this job.
                 estimated_transfer: 0,
+                never_fits,
                 refusal: None,
             });
         }
@@ -662,12 +669,14 @@ impl ResidencyManager {
                 model: model.to_string(),
                 action: action.to_string(),
                 instance_key: key.config.clone(),
+            instance_model: key.model.clone(),
                 required: cost,
                 resident_on: None,
                 device: None,
                 evict: Vec::new(),
                 supported_devices: supported,
                 estimated_transfer: 0,
+                never_fits,
                 refusal: Some(refused.to_string()),
             });
         }
@@ -678,12 +687,14 @@ impl ResidencyManager {
                 model: model.to_string(),
                 action: action.to_string(),
                 instance_key: key.config.clone(),
+            instance_model: key.model.clone(),
                 required: cost,
                 resident_on: None,
                 device: Some(device),
                 evict: Vec::new(),
                 supported_devices: supported,
                 estimated_transfer: crate::runplan::transfer_for(&cost, Some(device)),
+                never_fits,
                 refusal: None,
             });
         }
@@ -722,12 +733,14 @@ impl ResidencyManager {
                 model: model.to_string(),
                 action: action.to_string(),
                 instance_key: key.config.clone(),
+            instance_model: key.model.clone(),
                 required: cost,
                 resident_on: None,
                 device: Some(plan.device),
                 evict,
                 supported_devices: supported,
                 estimated_transfer: crate::runplan::transfer_for(&cost, Some(plan.device)),
+                never_fits,
                 refusal: None,
             });
         }
@@ -752,12 +765,14 @@ impl ResidencyManager {
             model: model.to_string(),
             action: action.to_string(),
             instance_key: key.config.clone(),
+            instance_model: key.model.clone(),
             required: cost,
             resident_on: None,
             device: None,
             evict: Vec::new(),
             supported_devices: supported,
             estimated_transfer: 0,
+            never_fits,
             refusal: Some(refusal),
         })
     }
@@ -1953,6 +1968,7 @@ mod tests {
         // Nothing loaded: `a` fits outright and disturbs nobody.
         let plan = mgr.plan("a", "run", &Invocation::new()).expect("a is registered");
         assert!(plan.runnable());
+        assert!(!plan.never_fits);
         assert!(!plan.disturbs_residents(), "an empty card evicts nothing");
         assert_eq!(plan.device, Some(Device::Gpu(0)));
         assert_eq!(plan.required.vram, 10 * GB);
@@ -2002,6 +2018,8 @@ mod tests {
 
         let plan = mgr.plan("huge", "run", &Invocation::new()).expect("it IS registered");
         assert!(!plan.runnable());
+        assert!(plan.never_fits, "a refusal no eviction or wait can lift is marked as such");
+        assert_eq!(plan.instance_model, "huge");
         assert_eq!(plan.device, None);
         assert!(plan.evict.is_empty(), "nothing to evict when nothing would help");
         assert!(

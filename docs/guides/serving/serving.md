@@ -667,6 +667,17 @@ disk and that the socket(s) are accepting connections, so a launcher script
 can simply poll for the file's existence instead of polling a port or
 grepping logs.
 
+Before any surface binds, every served model is sized as this configuration
+makes it (its batch, KV cache and adapter bank, by the model's own estimate)
+against the memory this process may use. A model that could never fit, even
+with nothing else resident, is named with its size
+(`brain serve: UNSERVABLE <model> (instance ...) needs N MiB: ...`) and not
+served: it is not listed and a request for it is "no model", never a 500
+after ready. When the instance that could never fit carries served adapters,
+or no servable model is left, the server exits 1 before the marker exists:
+shrink `--adapter-slots`, `--adapter-rank-cap` or `--max-batch`, or serve
+fewer adapters per server.
+
 There is deliberately no `/healthz`-style unauthenticated route - readiness
 here is a process-level property that also has to cover D-Bus, which has no
 HTTP route to answer for it. Use `--ready-file` for scripted startup instead.

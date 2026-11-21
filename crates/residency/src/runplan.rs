@@ -51,6 +51,9 @@ pub struct RunPlan {
     /// requests sharing this key share one hot instance, which is why a plan
     /// for a 512x512 image and one for 1024x1024 can differ entirely.
     pub instance_key: String,
+    /// The model whose instance runs the job, with [`Self::instance_key`] the whole instance: an adapter's plan names
+    /// its base, so an adapter and its base that share one instance are seen to.
+    pub instance_model: String,
     /// What this instance costs while hot: device bytes, host bytes, NPU
     /// bytes and reclaimable mapped bytes, kept separate because a governor
     /// must not treat them as interchangeable.
@@ -79,6 +82,9 @@ pub struct RunPlan {
     /// Why this cannot run, when it cannot. `None` means it can - either as
     /// it stands, or after the evictions above.
     pub refusal: Option<String>,
+    /// Whether no device this host has, the host tier included, could hold this instance even with nothing resident:
+    /// a refusal no eviction or wait can lift, decided by the configuration (the model and its sizes), not the load.
+    pub never_fits: bool,
 }
 
 impl RunPlan {
@@ -109,6 +115,7 @@ impl RunPlan {
             "model": self.model,
             "action": self.action,
             "instance_key": self.instance_key,
+            "instance_model": self.instance_model,
             "required": mem_json(&self.required),
             "resident_on": self.resident_on.as_ref().map(|p| json!({
                 "device": device_name(p.device),
@@ -125,6 +132,7 @@ impl RunPlan {
             "estimated_transfer": self.estimated_transfer,
             "runnable": self.runnable(),
             "refusal": self.refusal,
+            "never_fits": self.never_fits,
         })
     }
 }
