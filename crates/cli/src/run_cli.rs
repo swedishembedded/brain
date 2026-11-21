@@ -249,7 +249,9 @@ SERVING OPTIONS
                          idle serving instances, never one a request is running on: with
                          every candidate card busy it waits for the admit deadline and is
                          then refused (HTTP 429), and a run needing more than the
-                         largest card holds is refused at once. OFF unless given.
+                         largest card holds is refused at once. A run asking for
+                         `cards` N trains on N cards at once, one data-parallel rank
+                         each. OFF unless given.
   --artifact-store DIR   (with --training) the content-addressed store datasets are named
                          in and trained adapters are published to: files named by the
                          blake3 of their bytes, 64 lowercase hex digits, verified when a
