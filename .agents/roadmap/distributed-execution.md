@@ -408,6 +408,32 @@ Scope: Running one training job as ranks across machines, and serving one model 
       list the adapter id. This is replica distribution, not model sharding:
       no request spans cards and no routing layer is implied.
 
+- **Router across nodes, 2026-11-21** (`brain serve --upstream`, C4). Four
+  `brain serve` processes on n442, one GH200 each (`--device gpuN --backend
+  cuda`, Qwen/Qwen3-4B alone in the store, defaults: 263 decode slots each),
+  bound on hsn0; the router on n424 (`--device cpu`) reaching them over
+  Slingshot TCP. Load: a Python client on n424, non-streamed chat, greedy,
+  `max_tokens` 64, fresh prompts per run (no cache carried between runs);
+  prefix hit = cached prompt tokens / prompt tokens from each response's
+  usage (token-weighted). Another lane shared the node, so early runs were
+  noisy; the comparisons below are back-to-back pairs.
+  - Multi-turn agents, 256 conversations x 6 turns, distinct ~1400-token
+    system prompts, 256 in flight (1536 requests): router 6388 and 6334
+    completion tok/s (99.8 and 99.0 req/s, p50 2.51/2.42 s, p95 3.48/3.99 s,
+    p99 4.52/4.37 s), hit 0.818/0.822; client round-robin over the same four
+    6067 and 6193 tok/s (94.8/96.8 req/s, p95 4.76/4.70 s, p99 5.45/5.73 s),
+    hit 0.443/0.445; one server alone (earlier, under contention) 1606
+    tok/s, hit 0.822. Affinity doubles the hit rate, cuts p95 by about a
+    fifth and gains 3-5% throughput at this short output length.
+  - Shared system prompt, 512 single-turn requests, 256 in flight: before
+    the balance bound the router pinned all of it to one card (944 vs 4787
+    tok/s round-robin, knowledge 543); with `balance_slack` 4907 vs 4978
+    tok/s, hit 0.982 vs 0.981.
+  - Not measured: TTFT and inter-token latency (non-streamed client),
+    independent-prompt workloads, a least-loaded-only policy, and the
+    router's queue under overload (the four upstreams' 1052 slots were never
+    exceeded).
+
 ## Plan: multi-node clusters (2026-11-21)
 
 Target machine class: Slurm allocations of GH200 nodes, 4 cards per node on
@@ -476,8 +502,8 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
       `brain serve` endpoints, reusing `residency::affinity` (longest cached
       prefix, then least loaded), with health, drain and model listing merged,
       so a client sees one OpenAI-compatible URL for every card of an
-      allocation: delivered (`brain serve --upstream`, see Delivered); a
-      measurement on real servers across nodes is pending. Open: tensor-parallel serving
+      allocation: delivered (`brain serve --upstream`, see Delivered) and
+      measured across nodes (Measured, 2026-11-21). Open: tensor-parallel serving
       inside a node for a model that does not fit one card; a cross-node layer
       split only for one that does not fit a node; multipart uploads
       (`/audio/transcriptions`) and job routes are not routed. Router policy

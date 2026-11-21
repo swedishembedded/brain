@@ -23,7 +23,8 @@
 //! so the choice is made in this order:
 //!
 //! 1. **A replica holding a useful prefix of the prompt**, among the replicas
-//!    with a free slot: the one holding the longest.
+//!    with a free slot that carry at most [`balance_slack`] more requests than
+//!    the least loaded one: the one holding the longest.
 //! 2. **The least-loaded active replica** with a free slot (one that is built or
 //!    already has work), so a light load is served by as few cards as possible
 //!    and shares one batch. Load is relative to the replica's own slots, so a
@@ -221,9 +222,13 @@ pub fn choose_replica(views: &[ReplicaView]) -> usize {
     };
     let least_loaded = |of: &mut dyn Iterator<Item = usize>| of.min_by(lighter);
     let free: Vec<usize> = usable.iter().copied().filter(|&i| views[i].load < views[i].slots).collect();
-    let best_match = free.iter().map(|&i| views[i].matched).max().unwrap_or(0);
+    // A hit is worth its prefill only on a replica not far busier than the least loaded one: within
+    // [`balance_slack`] requests of the lowest load share among the free replicas.
+    let lowest_share = free.iter().map(|&i| views[i].load as f64 / views[i].slots.max(1) as f64).fold(f64::INFINITY, f64::min);
+    let balanced: Vec<usize> = free.iter().copied().filter(|&i| views[i].load as f64 <= lowest_share * views[i].slots.max(1) as f64 + balance_slack(views[i].slots) as f64).collect();
+    let best_match = balanced.iter().map(|&i| views[i].matched).max().unwrap_or(0);
     if best_match >= MIN_USEFUL_PREFIX {
-        return least_loaded(&mut free.iter().copied().filter(|&i| views[i].matched == best_match)).unwrap_or(0);
+        return least_loaded(&mut balanced.iter().copied().filter(|&i| views[i].matched == best_match)).unwrap_or(0);
     }
     if let Some(i) = least_loaded(&mut free.iter().copied().filter(|&i| views[i].active)) {
         return i;
@@ -235,6 +240,14 @@ pub fn choose_replica(views: &[ReplicaView]) -> usize {
     let best_match = usable.iter().map(|&i| views[i].matched).max().unwrap_or(0);
     let pool: Vec<usize> = usable.into_iter().filter(|&i| best_match < MIN_USEFUL_PREFIX || views[i].matched == best_match).collect();
     least_loaded(&mut pool.into_iter()).unwrap_or(0)
+}
+
+/// How many requests more than the least-loaded free replica (at its share of slots) a replica holding a useful
+/// prefix may carry and still be chosen for it: an eighth of its slots, at least 8. Below that the cached prefill wins;
+/// past it balance does, so a prefix every request shares (one system prompt) spreads over the replicas instead of
+/// piling onto the one that served it first.
+pub fn balance_slack(slots: usize) -> usize {
+    (slots / 8).max(8)
 }
 
 /// The request parameters that shape the start of a rendered chat prompt, before the first message: everything a
@@ -487,5 +500,16 @@ mod tests {
         let _ = json_array_elements(r#"[{"a": "unterminated"#);
         let _ = json_array_elements("]]]}}}[[[{{{");
         let _ = json_array_elements(r#"["\"#);
+    }
+
+    #[test]
+    fn a_prefix_every_request_shares_does_not_pin_a_wide_replica_while_others_idle() {
+        // Replicas with hundreds of slots are never full: the hit must give way once its replica carries much more
+        // than the least loaded one, or one shared system prompt sends every request to one replica.
+        let hit = MIN_USEFUL_PREFIX * 4;
+        let wide = |load, matched| ReplicaView { load, slots: 256, active: true, can_run: true, matched };
+        assert_eq!(choose_replica(&[wide(20, hit), wide(0, 0)]), 0, "a little more load is worth the cached prefill");
+        assert_eq!(choose_replica(&[wide(40, hit), wide(0, 0)]), 1, "far more load is not");
+        assert_eq!(choose_replica(&[wide(40, hit), wide(10, hit / 2), wide(0, 0)]), 1, "the best hit among the balanced ones");
     }
 }
