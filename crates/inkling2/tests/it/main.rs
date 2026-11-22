@@ -5,3 +5,4 @@
 //! directory, environment variables): the others run beside it.
 
 mod layout;
+mod vision;

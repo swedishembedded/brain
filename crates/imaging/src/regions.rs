@@ -83,9 +83,9 @@ impl RegionImage {
 /// The straight-alpha image composited onto the checkerboard, as RGB.
 pub fn composite_over_checkerboard(img: &Rgba8, board: Checkerboard) -> Rgb8 {
     let mut px = Vec::with_capacity(img.w as usize * img.h as usize * 3);
-    for (i, p) in img.px.chunks_exact(4).enumerate() {
+    for (i, p) in img.px.as_chunks::<4>().0.iter().enumerate() {
         let (y, x) = (i as u32 / img.w, i as u32 % img.w);
-        let even = (y / board.cell + x / board.cell) % 2 == 0;
+        let even = (y / board.cell + x / board.cell).is_multiple_of(2);
         let bg = i32::from(if even { board.light } else { board.dark });
         let a = i32::from(p[3]);
         for &c in &p[..3] {

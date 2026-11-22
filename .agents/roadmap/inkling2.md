@@ -661,10 +661,48 @@ The first trainable target needs no streaming: the base is about 19.5 GB.
   - a class token per image;
   - block-diagonal spans;
   - the 2x2 merge projector.
+
+  Done (2026-11-22): `inkling2::vision` (`VisionWeights::load`, `VisionTower::{new, encode, encode_traced}`,
+  `pipelines()`). Interleaved-pair RoPE is the new `rope2d_pairs` kernel filling `VitKernelIds::rope2d` (same Params as
+  `rope2d`, backward is sign -1); the position table is `model::postable` (`bilinear_grid_plan`, `DeviceTaps`) over the
+  new `rows_gather_weighted` and its CSR-transposed `rows_gather_weighted_bwd`, both with finite-difference specs and
+  host references in `hostmath`. The shared block's layer scale, LayerNorm bias and per-image spans are used as they
+  were. Parity on the CPU backend, f32: tiny random tower in the published naming (embeddings, `ln_pre`, every layer,
+  merger input and output, worst rel L2 5e-7) and the published weights on two images (embeddings, layers 0/11/22,
+  last hidden, merger, worst rel L2 5e-6); images in a batch equal images alone (block-diagonal). CUDA and Vulkan not
+  exercised; the fused attention and register-tiled GEMM rows are registered and resolved by name, so a GPU takes them,
+  but their parity on this tower is unmeasured.
+
+  Left: training the tower needs `vit_block_fwd_cached`/`vit_block_bwd` wired per layer (the `rope2d` slot with sign -1
+  already inverts the pair rotation), the patch-embedding weight gradient, the class-token rows' gradient,
+  `DeviceTaps::table_grad_step` for the position table, the merger through a trainable `MlpProjector`, and a
+  `bias: false` projector config (zero biases are fed today, exact but a parameter that does not exist). The projector
+  is rebuilt per forward (its activations are sized for the region count), which re-uploads 100 MB of merger weights per
+  call; serving wants a capacity-sized projector or a two-matmul step list on resident weights. TF32 tensor-core
+  products (`vit_block_fwd_tc`) are not passed. Tower activations are f32 end to end; the reference's bf16 rounding
+  points are not reproduced.
 - **I5.2** `imaging`: the preprocessor (pad, checkerboard alpha, normalisation, region
   grid), byte-exact against the reference processor.
+
+  Done (2026-11-22): `imaging::regions` (`RegionTiling::{preprocess, preprocess_bytes}`, `composite_over_checkerboard`,
+  `RegionImage`) and the alpha-keeping decode `imaging::decode_alpha_bounded`. Bit-identical `pixel_values` and grid for
+  RGB, RGBA (every alpha class), grayscale, odd sizes, 1x1 and exact multiples (PNG sources). The reference processor
+  cannot be imported in the pinned venv (no torchvision), so the dumper replays its `convert_to_rgb` and `_preprocess`
+  on torch tensors; the checkerboard, the -1 pad and the fused mean/std are taken from the processor source, not from
+  `processor_config.json` (which carries only mean, std, rescale and the 40-pixel size). Sides over 4096 pixels and
+  empty images are refused by name; the pixel bound is applied from the header before decoding.
+
+  Left: the exactness claim is for 8-bit sources decoded losslessly. JPEG is decoded by `image`, not libjpeg, and may
+  differ by an IDCT rounding step from PIL; 16-bit PNGs go through `image`'s 16-to-8-bit conversion, which is not PIL's.
 - **I5.3** Image-text parity and the `PromptEmbeds` splice into the scheduler. Frozen-tower
   LoRA comes after that.
+
+  Done, tower half (2026-11-22): `vision::{expand_placeholders, splice_embeds, VisionTower::embed_prompt}` and
+  `ImageProcessorSpec` (typed `processor_config.json`, refuses a recipe other than the trained one). The chat template
+  renders one `<|unused_200054|>` per image; the processor expands it to one per 40x40 region; the features of all
+  images in image order fill the placeholder positions in order (`get_placeholder_mask`). `embed_prompt` from PNG bytes
+  equals the tower on the reference processor's own pixels. Left for the model lane: the serving splice of
+  `PromptEmbeds` into the scheduler, and image-text logit parity once the decoder is up.
 
 ### Phase 6: full fine-tuning
 

@@ -14,6 +14,12 @@ path = "src/lib.rs"
 
 [dependencies]
 brain-checkpoint.workspace = true
+# The shared operators the tower runs on: ViT blocks, the position-table taps, the MLP projector, the prompt embeds.
+brain-model.workspace = true
+brain-gpu-core.workspace = true
+brain-kernels.workspace = true
+# The pad-and-tile image preprocessor.
+brain-imaging.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

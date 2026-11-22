@@ -16,5 +16,6 @@
 
 pub mod config;
 pub mod names;
+pub mod vision;
 
 pub use config::{Family, Inkling2Config, LayerKind};

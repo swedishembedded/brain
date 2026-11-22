@@ -287,8 +287,13 @@ pub fn text_manifest(cfg: &Inkling2Config) -> Vec<Entry> {
 
 /// Every vision-tower parameter of `cfg` in the published names (empty without a `vision_config`).
 pub fn vision_manifest(cfg: &Inkling2Config) -> Vec<Entry> {
+    cfg.vision.as_ref().map(vision_manifest_of).unwrap_or_default()
+}
+
+/// [`vision_manifest`] for a bare `vision_config`: what a file holding only the tower (a golden, an extracted
+/// tower) is held to.
+pub fn vision_manifest_of(v: &crate::config::VisionConfig) -> Vec<Entry> {
     use Admits::Float;
-    let Some(v) = &cfg.vision else { return Vec::new() };
     let (w, ff, p, m) = (v.hidden_size, v.mlp_width(), v.native_patch_size, v.adapter_merge_size);
     let b = format!("{VISION_PREFIX}backbone.");
     let mut out = vec![
