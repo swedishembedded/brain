@@ -27,7 +27,9 @@
 //! untied head with its soft cap over the valid vocabulary.
 //!
 //! Numerics are the reference's (I2.4): expert weights are read as published (NVFP4, MXFP8, or float) and multiplied
-//! with unquantised f32 activations; every other weight keeps its stored tier. On request
+//! with unquantised f32 activations; every other weight keeps its stored tier. The default GEMM precision lets a
+//! tensor-core device round the operands of the dense products and of the grouped expert products (see
+//! [`Inkling2::set_gemm_precision`]). On request
 //! ([`LinearActivations::Declared`], `--linear-activations declared`) the expert products take their activations as the
 //! release declares them (`required_activation_quantization`: NVFP4 per-token four-over-six on the NVFP4 layers, MXFP8
 //! on the MXFP8 ones), the numerics the model was trained with, through [`model::act_quant`].
@@ -519,9 +521,10 @@ impl Inkling2 {
         &self.ops
     }
 
-    /// Choose the arithmetic of the dense bf16-weight products (see [`Ops::set_gemm_precision`]): `Auto`, the default,
-    /// lets a tensor-core device round their operands, `Fp32Reference` keeps every product in binary32, what a parity
-    /// gate against the f32 reference needs. The expert banks' products are f32 either way.
+    /// Choose the arithmetic of the products (see [`Ops::set_gemm_precision`]): `Auto`, the default, lets a tensor-core
+    /// device round their operands - the dense bf16-weight products and the grouped expert products (the weights decoded
+    /// exactly, the activations rounded to bf16, [`Ops::micro_grouped`]) - and `Fp32Reference` keeps every product in
+    /// binary32, what a parity gate against the f32 reference needs. The router is binary32 at every tier.
     pub fn set_gemm_precision(&mut self, precision: gpu_core::provider::library::GemmPrecision) {
         self.ops.set_gemm_precision(precision);
     }
@@ -809,7 +812,7 @@ impl Inkling2 {
         self.tap(s, probe, &key("mlp_in"), &mlp_in, n);
         let mlp_in = gated(s, probe, 3, &mlp_in, "gated_mlp");
         let hn = self.rms(s, &mlp_in, &lw.mlp_norm, t);
-        let moe = self.moe(s, v, &hn, t, !matches!(rows, Rows::Decode { .. }), rows.bank(), probe, routes);
+        let moe = self.moe(s, v, &hn, t, rows.bank(), probe, routes);
         self.tap(s, probe, &key("mlp"), &moe, n);
         let mlp_conv = self.conv(s, rows, v.index, 3, &moe, ConvTaps::Static(&lw.mlp_conv), t, d);
         self.conv_state(s, probe, &key("conv3"), &moe, t, d);
@@ -909,11 +912,12 @@ impl Inkling2 {
         }
     }
 
-    /// The routed experts over `t` rows. `grouped`: the published banks multiply slots grouped by expert (one weight
-    /// pass per expert, the prefill regime) instead of one gather per slot (decode); the arithmetic is the same.
-    /// `bank`: the served adapter bank, whose stacked expert pairs correct each routed product.
+    /// The routed experts over `t` rows. The published banks multiply the slots grouped by expert (one weight pass per
+    /// tile of an expert's slots) in every pass: measured on a GH200 (ledger, Phase 7) the grouped product ties the
+    /// one-gather-per-slot product at a decode step of one sequence and wins from eight on. `bank`: the served adapter
+    /// bank, whose stacked expert pairs correct each routed product.
     #[allow(clippy::too_many_arguments)]
-    fn moe(&self, s: &mut Vec<Step>, v: &Visit, x: &DeviceBuffer, t: u32, grouped: bool, bank: Option<&AdapterBank>, probe: &mut Option<&mut dyn Probe>, routes: Option<&mut Vec<DeviceBuffer>>) -> DeviceBuffer {
+    fn moe(&self, s: &mut Vec<Step>, v: &Visit, x: &DeviceBuffer, t: u32, bank: Option<&AdapterBank>, probe: &mut Option<&mut dyn Probe>, routes: Option<&mut Vec<DeviceBuffer>>) -> DeviceBuffer {
         let (cfg, g, d) = (&self.cfg, self.g(), self.cfg.hidden);
         let lw = &self.w.layers[v.layer];
         let key = |name: &str| format!("visit{}.{name}", v.index);
@@ -978,13 +982,17 @@ impl Inkling2 {
                 const REGISTERED: &str = "the bank's kernels are registered";
                 let xq = quantized(s, act[0], x, t, d);
                 let x = xq.as_ref().unwrap_or(x);
-                let route = grouped.then(|| MicroRoute::new(g, slots, e));
-                if let Some(route) = &route {
-                    s.extend(route.steps(g, &ids).expect(REGISTERED));
-                    s.push(w13.grouped(g, x, &route.tab, &route.perm, &gate_up, route.tiles(), k, e).expect(REGISTERED));
-                } else {
-                    s.push(w13.gather(g, x, &ids, &gate_up, slots, k).expect(REGISTERED));
-                }
+                let route = MicroRoute::new(g, slots, e);
+                s.extend(route.steps(g, &ids).expect(REGISTERED));
+                // At the declared tier the activations are the declared format's values; the products stay binary32.
+                let product = |s: &mut Vec<Step>, experts: &MicroBank, x: &DeviceBuffer, rows: u32, out: &DeviceBuffer, xdiv: u32| {
+                    if declared {
+                        s.push(experts.grouped(g, x, &route.tab, &route.perm, out, route.tiles(), xdiv, e).expect(REGISTERED));
+                    } else {
+                        self.ops.micro_grouped(s, experts, x, rows, &route, out, xdiv).expect(REGISTERED);
+                    }
+                };
+                product(s, w13, x, t, &gate_up, k);
                 // An adapter's stacked pairs correct each routed product after it, on the rows the product read.
                 let names = LayerNames::new(v.layer as u32);
                 if let Some(bank) = bank {
@@ -999,11 +1007,7 @@ impl Inkling2 {
                 let h = if weighted_input { self.weighted_slots(s, &gate, &ids, &h, t, slots, ff) } else { h };
                 let hq = quantized(s, act[1], &h, slots, ff);
                 let h = hq.as_ref().unwrap_or(&h);
-                if let Some(route) = &route {
-                    s.push(w2.grouped(g, h, &route.tab, &route.perm, &y, route.tiles(), 1, e).expect(REGISTERED));
-                } else {
-                    s.push(w2.gather(g, h, &ids, &y, slots, 1).expect(REGISTERED));
-                }
+                product(s, w2, h, slots, &y, 1);
                 if let Some(bank) = bank {
                     bank.correct_experts(g, s, &names.w2(), h, 1, &ids, &y, slots);
                 }

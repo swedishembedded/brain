@@ -829,6 +829,156 @@ brain_matmul_nvfp4_mma64(const unsigned int* params, const unsigned int* xb, con
     brain_matmul_nvfp4_mma_body<8, 2, 4>(params, xb, w, s, y);
 }
 
+// ---- Microscaled expert GEMMs on the tensor cores, slots grouped by expert ------------------------------------------
+
+// `out[s, c] = gl[e] * sum_k bf16(x[s / xdiv, k]) * w[e n + c, k]` for the slots of each expert as `moe_route_*` group them
+// (tiles of up to 8 slots of one expert), on the bf16 tensor cores, for an NVFP4 bank (E2M1 codes, an E4M3 scale per 16 and a
+// per-expert f32 `gl`) or an MXFP8 bank (E4M3 elements, an E8M0 scale per 32, no `gl`). The expert-bank form of
+// `brain_matmul_nvfp4_mma_body`: a lane owns one 32-weight chunk of each of its rows per 128-weight group, decoded in registers
+// straight into `mma.m16n8k16` weight fragments (the block scale multiplies before the bf16 rounding; an E2M1 or E4M3 value
+// times its block scale is exact in bf16), and the activation fragments read the same four positions from the slots' rows of
+// `xb` (the activations rounded to bf16, `[rows, k]` as pairs). The tile's 8 slots are the MMA's 8 columns. A block covers 64
+// weight rows of one tile: two row-warps of two 16-row tiles by four K-slices, whose partial sums meet in shared memory in
+// slice order, so the result does not depend on scheduling. Params `[tiles, k, n, xdiv, ne]` (`k` a whole number of 128-weight
+// groups) as the WGSL grouped kernels; bindings `xb, tab, perm, w, s` (and `gl` for NVFP4) read, `out` (`[slots, n]` f32)
+// written.
+#define BRAIN_GM_RT 2
+#define BRAIN_GM_KS 4
+#define BRAIN_GM_ROWS (2 * BRAIN_GM_RT * 16)
+#define BRAIN_GM_THREADS (64 * BRAIN_GM_KS)
+
+// Four E4M3 bytes of `word` times `sc` (the block scale times 2^8) as two bf16 pairs.
+__device__ __forceinline__ void brain_f8_a_pairs(const unsigned int word, const float sc, unsigned int& p01, unsigned int& p23) {
+    const float2 a = brain_qg_e4m3_pair((word & 0xFFu) | ((word & 0xFF00u) << 8));
+    const float2 b = brain_qg_e4m3_pair(((word >> 16) & 0xFFu) | ((word >> 8) & 0x00FF0000u));
+    p01 = brain_fp4_pack_bf16(a.x * sc, a.y * sc);
+    p23 = brain_fp4_pack_bf16(b.x * sc, b.y * sc);
+}
+
+// An E8M0 scale byte as its power of two (2^-127 at 0, NaN at 255), as the WGSL kernels decode it.
+__device__ __forceinline__ float brain_e8m0(unsigned int b) {
+    return b == 0u ? __uint_as_float(0x00400000u) : b == 255u ? __uint_as_float(0x7fc00000u) : __uint_as_float(b << 23);
+}
+
+template <bool NVFP4>
+__device__ __forceinline__ void brain_moe_grouped_mma_body(const unsigned int* params, const unsigned int* xb, const unsigned int* tab, const unsigned int* perm,
+                                                           const unsigned int* w, const unsigned int* s, const float* gl, float* out) {
+    const unsigned int k = params[1], n = params[2], xdiv = params[3], ne = params[4];
+    const unsigned int blk = blockIdx.y * gridDim.x + blockIdx.x;
+    const unsigned int col_tiles = (n + BRAIN_GM_ROWS - 1u) / BRAIN_GM_ROWS;
+    const unsigned int tile = blk / col_tiles;
+    const unsigned int ct = blk - tile * col_tiles;
+    if (tile >= tab[2u * ne + 1u]) { return; }  // block-uniform: past the router's last tile
+    unsigned int lo = 0u, hi = ne;
+    while (hi - lo > 1u) {
+        const unsigned int mid = (lo + hi) >> 1;
+        if (tab[ne + 1u + mid] <= tile) { lo = mid; } else { hi = mid; }
+    }
+    const unsigned int e = lo;
+    const unsigned int first = tab[e] + (tile - tab[ne + 1u + e]) * 8u;
+    const unsigned int rem = tab[e + 1u] - first;
+    const unsigned int cnt = rem < 8u ? rem : 8u;
+
+    const unsigned int warp = threadIdx.x >> 5, lane = threadIdx.x & 31u;
+    const unsigned int rw = warp & 1u, ks = warp >> 1;
+    const unsigned int g = lane >> 2, t = lane & 3u;
+    const unsigned int groups = k >> 7;
+    // Words of a weight row and of its scale row.
+    const unsigned int wwords = NVFP4 ? (k >> 3) : (k >> 2);
+    const unsigned int swords = NVFP4 ? (k >> 6) : (k >> 7);
+    const unsigned int row0 = ct * BRAIN_GM_ROWS + rw * (BRAIN_GM_RT * 16u);
+
+    const unsigned int* wrow[2 * BRAIN_GM_RT];
+    const unsigned int* srow[2 * BRAIN_GM_RT];
+#pragma unroll
+    for (int r = 0; r < 2 * BRAIN_GM_RT; ++r) {
+        const unsigned int row = row0 + (r >> 1) * 16u + g + (r & 1) * 8u;
+        // A row past the matrix reads the last real row; its result is never stored.
+        const unsigned long long src = static_cast<unsigned long long>(e) * n + (row < n ? row : n - 1u);
+        wrow[r] = w + src * wwords;
+        srow[r] = s + src * swords;
+    }
+    // The activation row of this lane's column: slot g of the tile (an empty column reads slot 0's, never stored).
+    const uint2* xb2 = reinterpret_cast<const uint2*>(xb);
+    const unsigned long long xr = static_cast<unsigned long long>(perm[first + (g < cnt ? g : 0u)] / xdiv) * (k >> 2);
+
+    float acc[BRAIN_GM_RT][4];
+#pragma unroll
+    for (int ti = 0; ti < BRAIN_GM_RT; ++ti) {
+#pragma unroll
+        for (int c = 0; c < 4; ++c) { acc[ti][c] = 0.0f; }
+    }
+    for (unsigned int grp = ks; grp < groups; grp += BRAIN_GM_KS) {
+        const unsigned int c = 4u * grp + t;  // this lane's 32-weight chunk of the group
+        // A chunk is one uint4 of E2M1 codes, or two of E4M3 bytes.
+        uint4 wv[2 * BRAIN_GM_RT][NVFP4 ? 1 : 2];
+        unsigned int sw[2 * BRAIN_GM_RT];
+#pragma unroll
+        for (int r = 0; r < 2 * BRAIN_GM_RT; ++r) {
+            const uint4* q = reinterpret_cast<const uint4*>(wrow[r]) + (NVFP4 ? c : 2u * c);
+            wv[r][0] = brain_qg_ld_stream(q);
+            if (!NVFP4) { wv[r][NVFP4 ? 0 : 1] = brain_qg_ld_stream(q + 1); }
+            // NVFP4: the two E4M3 scales of the chunk (one per 16); MXFP8: its one E8M0 scale.
+            sw[r] = NVFP4 ? (__ldg(srow[r] + (c >> 1)) >> ((c & 1u) * 16u)) : ((__ldg(srow[r] + grp) >> (t * 8u)) & 0xFFu);
+        }
+#pragma unroll
+        for (int st = 0; st < 8; ++st) {
+            unsigned int a[2 * BRAIN_GM_RT][2];
+#pragma unroll
+            for (int r = 0; r < 2 * BRAIN_GM_RT; ++r) {
+                if (NVFP4) {
+                    const uint4 v = wv[r][0];
+                    const unsigned int word = (st >> 1) == 0 ? v.x : (st >> 1) == 1 ? v.y : (st >> 1) == 2 ? v.z : v.w;
+                    const unsigned int codes16 = (word >> ((st & 1) * 16)) & 0xFFFFu;
+                    const float sc = brain_qg_e4m3_scale((sw[r] >> ((st >> 2) * 8)) & 0xFFu) * 4194304.0f;
+                    brain_fp4_a_pairs(codes16, sc, a[r][0], a[r][1]);
+                } else {
+                    const uint4 v = wv[r][st >> 2];
+                    const unsigned int q4 = st & 3;
+                    const unsigned int word = q4 == 0 ? v.x : q4 == 1 ? v.y : q4 == 2 ? v.z : v.w;
+                    brain_f8_a_pairs(word, brain_e8m0(sw[r]) * 256.0f, a[r][0], a[r][1]);
+                }
+            }
+            const uint2 bv = __ldg(xb2 + xr + (grp << 5) + 8u * t + st);  // x[row][128 grp + 32 t + 4 st .. + 3]
+#pragma unroll
+            for (int ti = 0; ti < BRAIN_GM_RT; ++ti) { brain_mma_bf16_16816(acc[ti], a[2 * ti][0], a[2 * ti + 1][0], a[2 * ti][1], a[2 * ti + 1][1], bv.x, bv.y); }
+        }
+    }
+    // D fragment: c0, c1 (row g, columns 2 t, 2 t + 1), c2, c3 (row g + 8); the slices are summed in slice order.
+    __shared__ float part[BRAIN_GM_KS][BRAIN_GM_ROWS][8];
+#pragma unroll
+    for (int ti = 0; ti < BRAIN_GM_RT; ++ti) {
+#pragma unroll
+        for (int c = 0; c < 4; ++c) {
+            part[ks][rw * (BRAIN_GM_RT * 16u) + ti * 16u + g + (c >> 1) * 8u][2u * t + (c & 1)] = acc[ti][c];
+        }
+    }
+    __syncthreads();
+    const float global = NVFP4 ? gl[e] : 1.0f;
+    for (unsigned int i = threadIdx.x; i < BRAIN_GM_ROWS * cnt; i += BRAIN_GM_THREADS) {
+        const unsigned int r = i % BRAIN_GM_ROWS, slot = i / BRAIN_GM_ROWS;
+        const unsigned int row = ct * BRAIN_GM_ROWS + r;
+        if (row < n) {
+            float sum = 0.0f;
+#pragma unroll
+            for (int q = 0; q < BRAIN_GM_KS; ++q) { sum += part[q][r][slot]; }
+            out[static_cast<unsigned long long>(perm[first + slot]) * n + row] = sum * global;
+        }
+    }
+}
+
+extern "C" __global__ void __launch_bounds__(BRAIN_GM_THREADS, 2)
+brain_moe_nvfp4_grouped_mma(const unsigned int* params, const unsigned int* xb, const unsigned int* tab, const unsigned int* perm,
+                            const unsigned int* w, const unsigned int* s, const float* gl, float* out) {
+    brain_moe_grouped_mma_body<true>(params, xb, tab, perm, w, s, gl, out);
+}
+
+extern "C" __global__ void __launch_bounds__(BRAIN_GM_THREADS, 2)
+brain_moe_mxfp8_grouped_mma(const unsigned int* params, const unsigned int* xb, const unsigned int* tab, const unsigned int* perm,
+                            const unsigned int* w, const unsigned int* s, float* out) {
+    brain_moe_grouped_mma_body<false>(params, xb, tab, perm, w, s, nullptr, out);
+}
+
 // ---- NVFP4 expert gather ---------------------------------------------------------------------------------------------
 
 // One block covers 16 weight rows of ONE slot's expert; the grid is slot-major, `ceil(n / 16)` blocks per slot.

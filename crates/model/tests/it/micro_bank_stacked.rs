@@ -16,10 +16,16 @@
 //!
 //! A product a native kernel serves (`gpu_core::native_upgrade`: on a CUDA device both NVFP4 products go to native
 //! twins that sum in other orders) is held to the decoded product alone, as `gpu-core`'s `moe_nvfp4` gate holds them.
+//!
+//! `Ops::micro_grouped` is the grouped product at the handle's arithmetic: pinned to binary32 it is the bank's own
+//! kernel to the bit; at the default tier, on a device offered the tensor-core NVFP4 kernel, it is the f64 product of
+//! the decoded weights and the activations rounded to bf16 (the operand rounding of a tensor-core tier, nothing else),
+//! over several tiles of one expert and a bank narrower than the kernel's 64-row block.
 
 use checkpoint::packed::{BoundedWorkspace, CodecRegistry, MemoryBudget, PackedReader, PackedSource, PackedTensorReader, SlicedReader, Tile, TileBuf};
 use data::rng::Lcg;
 use gpu_core::Gpu;
+use gpu_core::provider::library::GemmPrecision;
 use model::ops::{micro_bank_kernels, training_kernel_list, upload_micro_bank, MicroBank, MicroRoute, MicroScaled, Ops, MICRO_GROUPED_SLOTS};
 
 const E: usize = 3;
@@ -192,3 +198,57 @@ fn stacked_expert_projections_load_into_banks_and_multiply_as_decoded() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `x` rounded to bf16 (to nearest, ties to even) and widened back: what a bf16 tensor-core operand holds.
+fn bf16(x: f32) -> f32 {
+    let b = x.to_bits();
+    f32::from_bits((b.wrapping_add(0x7FFF + ((b >> 16) & 1))) & 0xFFFF_0000)
+}
+
+#[test]
+fn the_grouped_product_at_the_default_tier_rounds_only_the_activations() {
+    let mut list = training_kernel_list().to_vec();
+    list.extend(micro_bank_kernels());
+    let mut ops = Ops::new(Gpu::new(Box::leak(list.into_boxed_slice()))).expect("Ops::new");
+    let mut rng = Lcg::random();
+    let dir = std::env::temp_dir().join(format!("micro_bank_grouped_tier_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    release(&dir, &mut rng);
+    let reader = PackedReader::open(&dir).unwrap();
+    // 19 slots of expert 1 (three tiles), a few of the others, interleaved.
+    let ids: Vec<u32> = (0..27u32).map(|s| if s % 4 == 3 { s % 3 } else { 1 }).collect();
+    let xdiv = 3usize;
+    let x = rng.vec_scaled(ids.len().div_ceil(xdiv) * K, 1.0);
+    let slots = ids.len() as u32;
+    for (name, fused) in [("nv_weight", gpu_core::Fused::MoeNvfp4GroupedMma), ("mx_weight", gpu_core::Fused::MoeMxfp8GroupedMma)] {
+        let b = bank(&ops, &dir, name);
+        let want_w = decoded(&reader, name);
+        let run = |ops: &Ops| {
+            let g = ops.gpu();
+            let idb = g.storage(slots as u64);
+            g.write(&idb, &ids);
+            let xb = g.storage_init("x", &x);
+            let route = MicroRoute::new(g, slots, E as u32);
+            let out = g.storage(slots as u64 * N as u64);
+            let mut s = route.steps(g, &idb).unwrap();
+            ops.micro_grouped(&mut s, &b, &xb, ids.len().div_ceil(xdiv) as u32, &route, &out, xdiv as u32).unwrap();
+            g.submit(&[], &s);
+            g.read(&out, slots as usize * N)
+        };
+        ops.set_gemm_precision(GemmPrecision::Fp32Reference);
+        let pinned = run(&ops);
+        check(&format!("{name} at the binary32 tier"), &pinned, &want_w, &x, &ids, xdiv);
+        ops.set_gemm_precision(GemmPrecision::Auto);
+        let auto = run(&ops);
+        if !ops.gpu().has_fused(fused) {
+            assert_eq!(auto.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), pinned.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), "{name}: without the tensor-core kernel both tiers run the bank's kernel");
+            brain_testutil::skip_unavailable(&format!("the tensor-core grouped product of {name} (no CUDA device offering it)"));
+            continue;
+        }
+        let xr: Vec<f32> = x.iter().map(|&v| bf16(v)).collect();
+        check(&format!("{name} at the tensor-core tier, against the bf16-rounded activations"), &auto, &want_w, &xr, &ids, xdiv);
+        assert_ne!(auto, pinned, "{name}: the default tier rounds the activations");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+

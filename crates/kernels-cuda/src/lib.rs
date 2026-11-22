@@ -3985,6 +3985,42 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/fp8_nvfp4_gemv.cu"),
     },
     CudaKernel {
+        name: "moe_nvfp4_grouped_mma",
+        // A fused kernel asked for by name (`gpu_core::Fused::MoeNvfp4GroupedMma`): the grouped NVFP4 expert GEMM on the bf16
+        // tensor cores for a tier that lets products round their operands; `moe_nvfp4_grouped` stays the binary32 form.
+        op: Op::MoeExpertLinear,
+        weight: Dtype::F4E2M1,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: (8, 0),
+        entry: "brain_moe_nvfp4_grouped_mma",
+        what: "sparse-MoE NVFP4 GEMM over a fused expert bank with each expert's slots grouped, on the bf16 tensor cores: the codes and block scales decoded in registers into mma.m16n8k16 weight fragments (exact), a tile's 8 slots as the 8 columns, activations rounded to bf16, f32 accumulation, four K-slices summed in a fixed order",
+        reported: "native:moe_nvfp4_grouped_mma",
+        block_dim: 256,
+        // One tile of the router's tables (8 slots of one expert) by 64 weight rows per block, tile-major.
+        tile: (1, 64),
+        shared_bytes: 4 * 64 * 8 * 4,
+        programmatic: false,
+        src: include_str!("../cu/fp8_nvfp4_gemv.cu"),
+    },
+    CudaKernel {
+        name: "moe_mxfp8_grouped_mma",
+        // `moe_nvfp4_grouped_mma` for an MXFP8 bank (`gpu_core::Fused::MoeMxfp8GroupedMma`).
+        op: Op::MoeExpertLinear,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: (8, 0),
+        entry: "brain_moe_mxfp8_grouped_mma",
+        what: "sparse-MoE MXFP8 GEMM over a fused expert bank with each expert's slots grouped, on the bf16 tensor cores: the E4M3 elements and E8M0 block scales decoded in registers into mma.m16n8k16 weight fragments (exact), a tile's 8 slots as the 8 columns, activations rounded to bf16, f32 accumulation, four K-slices summed in a fixed order",
+        reported: "native:moe_mxfp8_grouped_mma",
+        block_dim: 256,
+        tile: (1, 64),
+        shared_bytes: 4 * 64 * 8 * 4,
+        programmatic: false,
+        src: include_str!("../cu/fp8_nvfp4_gemv.cu"),
+    },
+    CudaKernel {
         name: "add_rms_quant",
         // Not an operator a selector chooses an implementation of: a FUSED
         // kernel a model asks for by name (`gpu_core::Fused`), with no WGSL twin

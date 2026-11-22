@@ -815,6 +815,9 @@ const MOE_NVFP4_GATHER_BINDINGS: &[BindKind] = &[
 /// `matmul_nvfp4_wgmma`'s bindings: params, `xq`, `w`, `s`, `sx`, `y`.
 const NVFP4_WGMMA_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
 
+/// `moe_mxfp8_grouped_mma`'s bindings: params, `xb`, `tab`, `perm`, `w`, `s` read, `out` written.
+const MOE_MXFP8_GROUPED_MMA_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
+
 /// `matmul_nvfp4_mma`'s bindings: params, `xb`, `w`, `s`, `y`.
 const NVFP4_MMA_BINDINGS: &[BindKind] = QGEMV_BINDINGS;
 
@@ -2766,6 +2769,14 @@ pub enum Fused {
     /// `moe_nvfp4_gateup_silu`: the gate and up projections of an NVFP4 expert bank for the same slots, and `silu(gate) * up`,
     /// in one launch. Params `[slots, k, n, xdiv]`; bindings `x, ids, wg, sg, gg, wu, su, gu` read, `h` written.
     MoeNvfp4GateUp,
+    /// `moe_nvfp4_grouped_mma`: `moe_nvfp4_grouped`'s product on the bf16 tensor cores, the codes decoded in registers into the weight
+    /// fragments and the activations read as bf16 (rounded, the operand rounding of a tensor-core tier). Params `[tiles, k, n, xdiv,
+    /// ne]` (`k` a whole number of 128-weight groups); bindings `xb` (the activation rows rounded to bf16, `[rows, k]`), `tab`, `perm`,
+    /// `w`, `s`, `gl` read, `out` (`[slots, n]` f32) written.
+    MoeNvfp4GroupedMma,
+    /// `moe_mxfp8_grouped_mma`: [`Fused::MoeNvfp4GroupedMma`] for an MXFP8 bank (E4M3 elements, an E8M0 scale per 32, no per-expert
+    /// scale): the same params; bindings `xb, tab, perm, w, s` read, `out` written.
+    MoeMxfp8GroupedMma,
     /// `matmul_nvfp4_mma8`, `..16`, `..32`, `..64`: an NVFP4 weight multiplied against up to 8, 16, 32 or 64 activation rows on the bf16
     /// tensor cores, the codes decoded in registers into the operand fragments (no bf16 copy of the weight). One build per
     /// activation-tile count, since the accumulators of a lane grow with it. Params `[m, k, count, first, pad, global_bits, pad,
@@ -3261,6 +3272,8 @@ impl Fused {
             Fused::GqaDecodePrep => "gqa_decode_prep",
             Fused::GqaDecodePrepI8 => "gqa_decode_prep_i8",
             Fused::MoeNvfp4GateUp => "moe_nvfp4_gateup_silu",
+            Fused::MoeNvfp4GroupedMma => "moe_nvfp4_grouped_mma",
+            Fused::MoeMxfp8GroupedMma => "moe_mxfp8_grouped_mma",
             Fused::MatmulNvfp4Mma8 => "matmul_nvfp4_mma8",
             Fused::MatmulNvfp4Mma16 => "matmul_nvfp4_mma16",
             Fused::MatmulNvfp4Mma32 => "matmul_nvfp4_mma32",
@@ -3299,6 +3312,8 @@ impl Fused {
             Fused::GqaDecodePrep => GQA_DECODE_PREP_BINDINGS,
             Fused::GqaDecodePrepI8 => GQA_DECODE_PREP_I8_BINDINGS,
             Fused::MoeNvfp4GateUp => MOE_NVFP4_GATEUP_BINDINGS,
+            Fused::MoeNvfp4GroupedMma => MOE_NVFP4_GROUPED_BINDINGS,
+            Fused::MoeMxfp8GroupedMma => MOE_MXFP8_GROUPED_MMA_BINDINGS,
             Fused::MatmulNvfp4Mma8 | Fused::MatmulNvfp4Mma16 | Fused::MatmulNvfp4Mma32 | Fused::MatmulNvfp4Mma64 => NVFP4_MMA_BINDINGS,
             Fused::MatmulNvfp4Wgmma | Fused::MatmulNvfp4MmaE8 | Fused::MatmulNvfp4MmaE16 | Fused::MatmulNvfp4MmaE32 => NVFP4_WGMMA_BINDINGS,
             Fused::I8GemvMulti | Fused::Q4GemvMulti => I8_GEMV_MULTI_BINDINGS,
@@ -3474,6 +3489,8 @@ impl Fused {
                 matches!(params, [rows, k] if *rows >= 1 && *k >= 1 && u64::from(*rows) * u64::from(*k) <= u64::from(u32::MAX))
             }
             Fused::MoeNvfp4GateUp => serves_moe_nvfp4_gather(params),
+            Fused::MoeNvfp4GroupedMma | Fused::MoeMxfp8GroupedMma => matches!(params, [tiles, k, n, xdiv, ne] if *tiles >= 1 && *n >= 1 && *xdiv >= 1 && *ne >= 1 && *k >= 128 && k % 128 == 0
+                && u64::from(*tiles) * u64::from(n.div_ceil(self.tile().1)) <= u64::from(u32::MAX)),
             Fused::MatmulNvfp4Mma8 | Fused::MatmulNvfp4Mma16 | Fused::MatmulNvfp4Mma32 | Fused::MatmulNvfp4Mma64 => {
                 matches!(params, [m, k, count, ..] if (1..=self.mma_rows()).contains(m) && *count >= 1 && *k >= 128 && k % 128 == 0)
             }
@@ -3499,6 +3516,8 @@ impl Fused {
             Fused::GdnCommitPool | Fused::GdnCommitPoolBf16 => params[0] * params[1].div_ceil(GDN_COMMIT_TILE),
             Fused::GqaDecodePrep | Fused::GqaDecodePrepI8 => (params[0] + params[1]) * params[6],
             Fused::MoeNvfp4GateUp => params[0] * params[2].div_ceil(QGEMV_COLS),
+            // Tile-major: every column block of a tile, then the next tile.
+            Fused::MoeNvfp4GroupedMma | Fused::MoeMxfp8GroupedMma => params[0] * params[2].div_ceil(self.tile().1),
             // The weight rows a block covers: two row-warps of the registry tile's rows.
             Fused::MatmulNvfp4Mma8 | Fused::MatmulNvfp4Mma16 | Fused::MatmulNvfp4Mma32 | Fused::MatmulNvfp4Mma64 => params[2].div_ceil(self.tile().1),
             Fused::MatmulNvfp4Wgmma => gemm_blocks(params, self.tile()).min(kernels_cuda::FP8_TMA_MAX_CTAS),

@@ -395,6 +395,40 @@ impl Ops {
         }
     }
 
+    /// The grouped expert product of `bank` ([`MicroBank::grouped`]: `out[s, :] = W[expert(s)] @ x[s / xdiv, :]` for the slots
+    /// `route` groups by expert, `x` holding `rows` rows) at this handle's arithmetic: on a tier that lets products round their
+    /// operands (not [`GemmPrecision::Fp32Reference`]) an NVFP4 or MXFP8 bank runs on the bf16 tensor cores
+    /// ([`gpu_core::Fused::MoeNvfp4GroupedMma`], [`gpu_core::Fused::MoeMxfp8GroupedMma`]: the weights decoded exactly, the
+    /// activations rounded to bf16, f32 sums) where the device is offered the kernel; everything else is the bank's binary32
+    /// kernel.
+    #[allow(clippy::too_many_arguments)] // the bank product's own operands
+    pub fn micro_grouped(&self, s: &mut Vec<Step>, bank: &MicroBank, x: &DeviceBuffer, rows: u32, route: &MicroRoute, out: &DeviceBuffer, xdiv: u32) -> Result<(), String> {
+        let params = [route.tiles(), bank.k, bank.n, xdiv, route.ne];
+        let which = match bank.kind {
+            MicroScaled::Nvfp4 => Some(gpu_core::Fused::MoeNvfp4GroupedMma),
+            MicroScaled::Mxfp8E4m3 => Some(gpu_core::Fused::MoeMxfp8GroupedMma),
+            _ => None,
+        };
+        if let Some(which) = which.filter(|w| self.rounding_natives_allowed() && !fp32_kernels_active() && self.providers.runs("cuda") && w.serves(&params)) {
+            let act = self.act_f32(x, 0, rows, bank.k);
+            let mut prep = Vec::new();
+            if let Some((xb, _)) = self.bf16_rows(&act, &mut prep) {
+                let mut bufs = vec![&xb, &route.tab, &route.perm, &bank.w, &bank.s];
+                if bank.kind == MicroScaled::Nvfp4 {
+                    bufs.push(&bank.global);
+                }
+                bufs.push(out);
+                if let Some(step) = self.gpu.fused_step(which, &bufs, &params) {
+                    s.append(&mut prep);
+                    s.push(step);
+                    return Ok(());
+                }
+            }
+        }
+        s.push(bank.grouped(&self.gpu, x, &route.tab, &route.perm, out, route.tiles(), xdiv, route.ne)?);
+        Ok(())
+    }
+
     /// The product of an NVFP4 weight against up to 64 activation rows on the bf16 tensor cores by the kernel that decodes the
     /// stored codes into its operand fragments ([`gpu_core::Fused::MatmulNvfp4Mma8`] and its wider builds): the weight is read once at its stored
     /// bytes and no bf16 copy of it is written, which is what the tile decode feeding the vendor library does for every row count

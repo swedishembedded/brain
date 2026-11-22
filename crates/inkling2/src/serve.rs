@@ -19,7 +19,8 @@
 //!   embedding rows (images) has them spliced over its placeholder positions after the embedding norm, as the reference
 //!   splices image features into `inputs_embeds`.
 //! - **Decode** runs one new token of every running sequence as one pass of `b` rows: each row attends through its own
-//!   table, the convolutions step each sequence's state, the banks gather per slot.
+//!   table, the convolutions step each sequence's state, the banks multiply the step's slots grouped by expert as a
+//!   prefill does.
 //! - **Head.** The logits are soft-capped and the padding rows of the unembedding floored on the device
 //!   ([`PagedDecoder::head_transform`] declares it), greedy picks and candidates are reduced there
 //!   ([`model::readout`]); a served row has the valid vocabulary's length.

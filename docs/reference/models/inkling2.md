@@ -204,7 +204,11 @@ HTTP.
 
 By default the experts multiply their published NVFP4 and MXFP8 weights with
 f32 activations: the reference implementation's numerics, which brain is
-parity-gated against. The release also declares the activation quantization
+parity-gated against. On a GPU with bf16 tensor cores the default arithmetic
+lets the expert products round their activations to bf16 (the
+weights are decoded exactly), as it does for the dense bf16 products; the
+`Fp32Reference` GEMM precision keeps every product in binary32, and the router
+is binary32 at every precision. The release also declares the activation quantization
 its own runtime applies to each expert product (`required_activation_quantization`
 in `hf_quant_config.json`: NVFP4 with a per-token scale and the "four over six"
 block-scale rule on layers 0-19, MXFP8 on 20-23). `brain serve
