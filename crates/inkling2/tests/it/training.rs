@@ -93,6 +93,13 @@ fn random_adapters(m: &Inkling2Train, seed: u64) {
 /// A bf16 base trains the adapters an f32 build over its rounded values does: the frozen linears held as bf16 are read
 /// exactly as the bf16 values they hold (the routing pinned to the f32 build's, though with identical values it does
 /// not move), so the loss and every adapter gradient agree to f32 rounding.
+///
+/// How well a gradient can agree is the model's own conditioning at that draw: the two builds sum their products in
+/// different orders, which is a perturbation of about one ulp of every weight, and a draw whose gradient is
+/// hypersensitive (the query banks and sink projections, through the looped depth) moves by 1e-3 of its norm under
+/// exactly that perturbation, with no bf16 anywhere. So each tensor's bound is a fixed 1e-3 of its norm plus a
+/// multiple of what an f32 control build, with every linear scaled by up to one ulp, moves it: a bf16 rounding of the
+/// weights moves the gradients by percents, far beyond both.
 #[test]
 fn a_bf16_base_trains_the_adapters_the_f32_base_does() {
     let tc = lora_config(false);
@@ -108,9 +115,19 @@ fn a_bf16_base_trains_the_adapters_the_f32_base_does() {
         })
         .collect();
     let build = |tier, init: &std::collections::HashMap<String, Vec<f32>>| Inkling2Train::from_tensors(tc.clone(), init, 2, 6, &model::ops::TierPolicy::uniform(tier), seed).unwrap();
-    let (f32m, bf16m) = (build(gpu_core::select::Dtype::F32, &rounded), build(gpu_core::select::Dtype::BF16, &init));
-    random_adapters(&f32m, seed);
-    random_adapters(&bf16m, seed);
+    // The control: the f32 build over the same values with each linear moved by up to an ulp, a deterministic
+    // pattern of seven factors (index-keyed, so the perturbation is the same on every run).
+    let nudged: std::collections::HashMap<String, Vec<f32>> = rounded
+        .iter()
+        .map(|(n, v)| {
+            let moved = if inkling2::train::is_linear(&tc.cfg, n) { v.iter().enumerate().map(|(i, x)| x * (1.0 + f32::EPSILON / 2.0 * ((i % 7) as f32 - 3.0) / 3.0)).collect() } else { v.clone() };
+            (n.clone(), moved)
+        })
+        .collect();
+    let (f32m, bf16m, control) = (build(gpu_core::select::Dtype::F32, &rounded), build(gpu_core::select::Dtype::BF16, &init), build(gpu_core::select::Dtype::F32, &nudged));
+    for m in [&f32m, &bf16m, &control] {
+        random_adapters(m, seed);
+    }
     let (x, y) = batch(2, 6, tc.cfg.valid_vocab);
     f32m.set_batch(model::Batch::Lm { tokens: &x, targets: &y });
     f32m.forward();
@@ -123,15 +140,14 @@ fn a_bf16_base_trains_the_adapters_the_f32_base_does() {
         m.backward();
         (loss, m.param_names().into_iter().map(|n| (n.clone(), m.read_grad(&n))).collect::<Vec<_>>())
     };
-    let ((lw, want), (lg, got)) = (grads(&f32m), grads(&bf16m));
+    let ((lw, want), (lg, got), (_, noise)) = (grads(&f32m), grads(&bf16m), grads(&control));
     assert!((lw - lg).abs() <= 1e-5 * lw.abs().max(1.0), "loss {lg} over the bf16 base, {lw} over its rounded values");
+    let distance = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(a, b)| (a - b) * (a - b)).sum::<f32>().sqrt();
     let mut compared = 0;
-    for ((name, w), (_, g)) in want.iter().zip(&got) {
+    for (((name, w), (_, g)), (_, c)) in want.iter().zip(&got).zip(&noise) {
         let norm = w.iter().map(|v| v * v).sum::<f32>().sqrt();
-        let diff = w.iter().zip(g).map(|(a, b)| (a - b) * (a - b)).sum::<f32>().sqrt();
-        // The two builds sum their products in different orders (the bf16 tier decodes in tiles): f32 rounding,
-        // measured up to 2.7e-4 of a tensor's norm; a bf16 rounding of the weights moves them by percents.
-        assert!(diff <= 1e-3 * norm + 1e-7, "{name}: the bf16 base's gradient differs by {diff} at a norm of {norm}");
+        let (diff, floor) = (distance(w, g), distance(w, c));
+        assert!(diff <= 1e-3 * norm + 4.0 * floor + 1e-7, "{name}: the bf16 base's gradient differs by {diff} at a norm of {norm}, an ulp of the weights moves it by {floor} (seed {seed})");
         compared += 1;
     }
     assert!(compared > 10, "only {compared} adapter tensors");
