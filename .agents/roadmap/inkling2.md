@@ -1466,11 +1466,12 @@ the Phase 7 gap list:
 4. Host: about 3,500 `cuMemAlloc`/`cuMemFree` pairs and 3,000 launches a forward (2.5 s in `cuMemFree` over the run):
    per-step storage instead of retained blocks or a step arena.
 
-## Left (2026-11-22): `make check/samples` budget defect
+## Done (2026-11-22): `make check/samples` budget defect
 
 `llmserve` gained a `brain-imaging` dependency for `image_frontend`, which pushed the five `text` samples (embed, embed-train,
-encoder-finetune, retrieve, retrieve-json) to 39 brain crates against `max-brain-crates` 35. The fix (not landed, only
-compile-checked plus the crate-layers gate on the touched crates) is on origin branch `ink-deps-wip` (`162a3f1fb`): `Rgb8`, `Rgba8`,
-`Decoded` and the byte/unit casts move to `capability::pixels`, `imaging` re-exports them, `llmserve` drops `brain-imaging`.
-Left: run `make check/samples` with the original budgets, `cargo tree -p sample-text-embed`, and the inkling2/qwen35 image serving
-tests on CPU, then rebase and land.
+encoder-finetune, retrieve, retrieve-json) to 39 brain crates against `max-brain-crates` 35. `Rgb8`, `Rgba8`, `Decoded` and the
+byte/unit casts now live in `capability::pixels` (one definition; `imaging` re-exports them) and `llmserve` no longer depends on
+`brain-imaging`. Verified: `make check/samples` passes with the original budgets; `cargo tree -p sample-text-embed` lists the 34
+brain crates it linked before the campaign; `cargo check --tests` of capability, imaging, llmserve, catalog, apiserve, qwen35 and
+inkling2; the capability, imaging and llmserve suites, the inkling2 vision and image-serving tests, the catalog inkling2 tests and
+the qwen35 vision tests on CPU; clippy `-D warnings` on the three touched crates.
