@@ -29,12 +29,13 @@
 // - the key tiles are the 128 positions `[128 c, 128 c + 128)` (absolute positions, never relative to a chunk's start);
 //   a key outside the row's causal range or window scores nothing and adds an exact zero to the tile's sum;
 // - a score is `scale * tau(pos)` times the dot product summed over head_dim ascending, plus `tau_b` times the bias
-//   summed over d_rel ascending (columns past head_dim are staged as zeros: adding the +0 or -0 their product gives
+//   summed over d_rel ascending (each step one fused multiply-add) (columns past head_dim are staged as zeros: adding the +0 or -0 their product gives
 //   leaves a sum that started at +0 exactly as it was);
 // - the tile maximum (exact in any order), then the exp-sum folded by the rows twin's tree (lane `j` is the key at
 //   `t0 + j`; strides 64, 32, ..., 1: the first two strides join a thread's own four keys `kl + 32 i`, the rest run in
 //   workgroup memory), then `l = l * corr + sum`;
-// - the output scaled by `corr`, then the values added key by key, ascending, for the row's keys only;
+// - the output scaled by `corr`, then the values added key by key (fused multiply-adds), ascending, for the row's keys
+//   only;
 // - the sink, then `out = o * (1 / l)` and `lse = m + log(l)`.
 // A tile wholly outside a row's keys leaves its state as it was (corr is exactly 1, the sum exactly 0), so the rows a
 // block carries beside a row never change that row's bits. `model` tests `flash_ext` hold this kernel to the rows twin
@@ -249,7 +250,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
                     for (var r = 0u; r < RT; r = r + 1u) {
                         let qc = qv[r][c];
                         for (var i = 0u; i < 4u; i = i + 1u) {
-                            acc[r * 4u + i] = acc[r * 4u + i] + qc * kr[i];
+                            acc[r * 4u + i] = fma(qc, kr[i], acc[r * 4u + i]);
                         }
                     }
                 }
@@ -271,7 +272,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
                         var b = 0.0;
                         let slot = row + KT - 1u - (kl + 32u * i);
                         for (var x = 0u; x < p.d_rel; x = x + 1u) {
-                            b = b + rel_s[row * DREL + x] * p_s[x * BSTRIDE + slot];
+                            b = fma(rel_s[row * DREL + x], p_s[x * BSTRIDE + slot], b);
                         }
                         logit = logit + row_tb[row] * b;
                     }
@@ -354,7 +355,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
                     let pj = p_s[(rg + r) * KT + j0 + j];
                     if (pj >= 0.0) {
                         for (var i = 0u; i < 4u; i = i + 1u) {
-                            o[r * 4u + i] = o[r * 4u + i] + pj * vr[i];
+                            o[r * 4u + i] = fma(pj, vr[i], o[r * 4u + i]);
                         }
                     }
                 }

@@ -20,7 +20,8 @@
 // head_dim-wide accumulator in private memory: a decode step of a few sequences, or a prompt of tens of rows, runs a
 // few hundred threads. Here a workgroup owns the pair: each lane scores one key of a 128-key tile (the q row and the
 // bias coefficients staged in workgroup memory), the tile's maximum and exp-sum fold by tree, and each lane mixes the
-// values of its own head_dim columns (coalesced across lanes). The online softmax rescales once per tile instead of
+// values of its own head_dim columns (coalesced across lanes; the dot products, the bias and the value mix accumulate
+// by fused multiply-adds). The online softmax rescales once per tile instead of
 // once per key, so the sums reassociate: held to the reference within a tolerance (`model` tests `flash_ext`).
 //
 // The tiles are the 128 positions `[128 c, 128 c + 128)` (absolute positions, a key below the row's window masked), so a
@@ -165,14 +166,14 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
             var dot = 0.0;
             for (var d = 0u; d < hd; d = d + 1u) {
                 let ki = kb + d;
-                dot = dot + q_s[d] * pool_k[ki];
+                dot = fma(q_s[d], pool_k[ki], dot);
             }
             logit = qs * dot;
             let dist = pos - kp;
             if (bias_on && dist < p.extent) {
                 var b = 0.0;
                 for (var r = 0u; r < p.d_rel; r = r + 1u) {
-                    b = b + rel_s[r] * aux[p.bank_off + r * p.extent + dist];
+                    b = fma(rel_s[r], aux[p.bank_off + r * p.extent + dist], b);
                 }
                 logit = logit + tb * b;
             }
@@ -201,11 +202,11 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
             let vb = kbase[j];
             if (lane < hd) {
                 let vi = vb + lane;
-                o0 = o0 + pj * pool_v[vi];
+                o0 = fma(pj, pool_v[vi], o0);
             }
             if (lane + WG < hd) {
                 let vi = vb + lane + WG;
-                o1 = o1 + pj * pool_v[vi];
+                o1 = fma(pj, pool_v[vi], o1);
             }
         }
     }

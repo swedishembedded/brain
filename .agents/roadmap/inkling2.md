@@ -1376,11 +1376,11 @@ of 1024 or 8192 tokens, 2-token output, `ttfa` p50.
   - Left: the tiled kernel is binary32 CUDA-core work at about a quarter of that roof (a 512-row chunk fills 0.7 of a
     wave); a tensor-core form must keep the per-row form's bits, so decode would take the same kernel (or the same
     arithmetic); the backward still runs the reference `flash_attn_gqa_ext_bwd_*` kernels.
-  - Left (2026-11-22, unfinished, branch `ink-perf2-wip` at origin): both twins accumulating the dot product, bias and
-    value mix by `fma()` (halves the tiled kernel's multiply-add instructions under the CUDA backend's
-    `--fmad=false`). The bit-identity gate and `serve_visit_state` pass on CUDA; the speed-up is not measured - the
-    shared card was loaded by another process during the runs (8k prefill 4.3 s, then 4.5-26 s for the same binary).
-    Measure on an idle card before landing. Also open: `moe_nvfp4_grouped_mma` is now the 8k prefill's top kernel
+  - Done (2026-11-22): both twins accumulate the dot product, bias and value mix by `fma()` (halves the tiled kernel's
+    multiply-add instructions under the CUDA backend's `--fmad=false`); the chunk-invariance gate and `serve_visit_state`
+    pass on CPU and CUDA. Measured on an idle GH200 (n442, `brain perf run serve`, seed 7, three alternating runs each,
+    medians): prefill 1k 0.554 -> 0.550 s, 8k 4.329 -> 4.256 s, 32k 23.52 -> 23.17 s (the before and after ranges do not
+    overlap); decode at batch 32 unchanged (39.55 -> 39.62 ms per token, within the run-to-run spread). Also open: `moe_nvfp4_grouped_mma` is now the 8k prefill's top kernel
     (nsys: 2.1 s of ~5.3 s of kernels a prompt, the tiled attention 1.8 s, `moe_route_emit_serial` 0.25 s); the
     decode batch-1 host work, `route_emit` and the `gemv_w_bf16` roofline items were not started.
 - Left: the decode step was host-bound before the arena (kernels 40-48% of its wall at batch 1 and 64 under nsys,
