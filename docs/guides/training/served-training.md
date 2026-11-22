@@ -321,7 +321,9 @@ the base is loaded, then one per optimiser step:
         "ratio_max": ..., "mean_advantage": ..., "scoring_seconds": ...}}
 ```
 
-`eval_loss` is present on a step that evaluated a held-out set. `pg` is present for a policy-gradient run, with the teacher-advantage statistics
+`loss` is the step's training loss, the per-token mean over the step's records; on several cards it is over every
+rank's records (what one card accumulating them would report), not the first rank's share. `eval_loss` is present on
+a step that evaluated a held-out set. `pg` is present for a policy-gradient run, with the teacher-advantage statistics
 (`token_advantage_mean`, `token_advantage_max`, `token_advantage_clip_fraction`)
 when records carry a teacher context. `seconds` is the time since training
 began. Step frames over D-Bus are droppable like every progress frame: a

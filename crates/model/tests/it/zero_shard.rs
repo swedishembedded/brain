@@ -84,7 +84,7 @@ fn ranks(world: usize, sharding: Sharding, tier: StateTier, dtype: CollectiveDty
                         for (i, h) in handles.iter().enumerate() {
                             zero::write_elems(&gpu, &h.grad, 0, &grad(t, rank, i, h.numel), dtype);
                         }
-                        assert!(matches!(opt.step(&*coll, 1.0 + rank as f32, true, &args(t)).unwrap(), StepOutcome::Applied { .. }));
+                        assert!(matches!(opt.step(&*coll, 1.0 + rank as f32, 1.0, &args(t)).unwrap(), StepOutcome::Applied { .. }));
                     }
                     if let Some(dir) = save {
                         opt.save(dir, serde_json::json!({ "rank0": rank == 0 })).unwrap();
@@ -160,7 +160,7 @@ fn a_non_finite_loss_on_one_rank_skips_the_step_everywhere() {
                     let h = p.tensors[0].clone();
                     let before = zero::read_elems(&gpu, &h.value, 0, h.numel, CollectiveDtype::F32);
                     let mut opt = ZeroOptimizer::new(p, Sharding::Optimizer, StateTier::Device, &*coll, rank, UNIT).unwrap();
-                    let outcome = opt.step(&*coll, 1.0, rank == 0, &args(1)).unwrap();
+                    let outcome = opt.step(&*coll, 1.0, if rank == 0 { 1.0 } else { f32::NAN }, &args(1)).unwrap();
                     (outcome, zero::read_elems(&gpu, &h.value, 0, h.numel, CollectiveDtype::F32) == before && opt.step_count() == 0)
                 })
             })

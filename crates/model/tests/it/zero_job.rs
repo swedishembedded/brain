@@ -207,7 +207,7 @@ fn rank_process() {
         for (i, h) in handles.iter().enumerate() {
             zero::write_elems(&gpu, &h.grad, 0, &grad(t, rank, i, h.numel), dtype);
         }
-        match opt.step(&job, 1.0 + rank as f32, true, &args(t)).unwrap_or_else(|e| fail(e.to_string())) {
+        match opt.step(&job, 1.0 + rank as f32, 1.0, &args(t)).unwrap_or_else(|e| fail(e.to_string())) {
             StepOutcome::Applied { .. } => {}
             skipped => fail(format!("{skipped:?}")),
         }

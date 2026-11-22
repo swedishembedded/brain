@@ -803,6 +803,21 @@ Scope: Running one training job as ranks across machines, and serving one model 
   transport `in_process`, sharding `gradients`. The installed export
   (`model.safetensors`, 16.1 GB fp32) served on one card and answered
   "What is 147 plus 592?" with "147 plus 592 is 739." One run, no repeat.
+- **Is the 4-card loss collapse a wrong gradient? No (2026-11-22, n442,
+  4 GH200, served `full_train`, Qwen3-4B, the same 256 records, seed 7,
+  `max_block` 512, lr 1e-6, brain c25ea1f69 + this change).** The run above
+  fell 4.96 -> 0.0009 in 20 steps. Step-1 update from the f32 exports against
+  the bf16 base: 1 card accumulating 4 records, 4 cards replicated, optimizer-
+  and gradient-sharded all moved |delta|_2 0.0589 (lr*sqrt(P) 0.0634), 93.7%
+  of the weights, 82.9% by lr within 5%; the 4-card updates match the 1-card
+  one to cosine 0.999976. Final losses (the step's own, see C2): 1 card x4
+  records 0.000899, 4 cards replicated / optimizer / gradients 0.000900 /
+  0.000899 / 0.000897, 1 card x1 record 0.0019, lr 1e-7 4.16, lr 0 4.92,
+  weights=bf16 on 1 card 1.41 and parameter-sharded on 4 1.37. AdamW moves
+  every weight by about lr, the records are one sentence template: the
+  collapse is memorisation, the same on one card (knowledge 565). Each run
+  58-100 s wall. Before the fix a multi-card step reported rank 0's quarter
+  of the records (4.9595 at step 1 where the step's loss is 4.9609).
 
 ## Plan: multi-node clusters (2026-11-21)
 
@@ -911,6 +926,21 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         also hosts the login containers it stayed about 13 ms (129.9 -> 129.3
         ms per step): there it is ranks waiting for a slow rank, not the round
         trip (Measured).
+      - [x] A data-parallel step is one rank's step over the same records
+        (2026-11-22): `model::conformance_zero` holds N replicated ranks to one
+        rank accumulating the same N records a step (within 1e-2 of an AdamW
+        step after six steps, first update at most one step of the scheduled
+        rate, step losses within 1e-3), every sharded run's ranks to the same
+        step losses. Found on the way: a step reported rank 0's own loss, a
+        1/N sample of the step; the step's loss is now the group's, weighted
+        like the gradients and reduced in the round that already carries the
+        step's weight (`reduce_grads_weighted` returns it,
+        `ZeroOptimizer::reduce` takes the loss and `ReducedStep::loss`, the
+        parameter-sharded vote carries it), so no collective is added. Tests:
+        gpt2 `sharded_training` (2 and 4 ranks), `distributed_model`
+        `reduce_grads_weighted_gives_the_per_token_mean_of_unequal_ranks`.
+        Measured on Qwen3-4B (Measured, knowledge 565). Open: a replicated or
+        one-card full fine-tune (host-offloaded AdamW) reports no grad_norm.
       - [ ] Load balance: a rank on a node shared with other work (n424) holds
         every step of a 12-card run back by about 10 ms; the first collective
         of a step is where it shows.

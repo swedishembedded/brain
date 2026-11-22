@@ -117,7 +117,10 @@ pub fn reduce_grads<M: Model>(model: &M, coll: &dyn Collective, rank: usize) -> 
 /// over (a token objective's supervised positions in the step), and every rank
 /// receives `Σ(gᵢ·nᵢ) / Σ nᵢ`, the mean over all the items of the step rather
 /// than the mean of the ranks' means. Equal weights give [`reduce_grads`].
-pub fn reduce_grads_weighted<M: Model>(model: &M, coll: &dyn Collective, rank: usize, local_weight: f32) -> CollectiveResult<()> {
+/// Returns the step's loss over the same items, `Σ(lossᵢ·nᵢ) / Σ nᵢ` of each
+/// rank's `local_loss`, reduced in the same round as the weights: what a
+/// data-parallel step reports, rather than one rank's share of it.
+pub fn reduce_grads_weighted<M: Model>(model: &M, coll: &dyn Collective, rank: usize, local_weight: f32, local_loss: f32) -> CollectiveResult<f32> {
     if gpu_core::profile::enabled() {
         // Under --kernel-profile only: let the backward finish first, so the reduction's own cost is what the
         // stages below measure rather than the wait for the device.
@@ -128,13 +131,17 @@ pub fn reduce_grads_weighted<M: Model>(model: &M, coll: &dyn Collective, rank: u
         }
     }
     let clock = std::time::Instant::now();
-    let total = pollster::block_on(coll.all_reduce(rank, Payload::f32(vec![local_weight])))?.data[0];
+    let totals = pollster::block_on(coll.all_reduce(rank, Payload::f32(vec![local_weight, local_weight * local_loss])))?.data;
     gpu_core::profile::stage_time("reduce: step weight over the host transport", clock);
+    let (total, step_loss) = match totals[..] {
+        [total, weighted_loss] => (total, weighted_loss / total.max(1e-12)),
+        _ => return Err(CollectiveError::Transport(format!("the step's weight reduction returned {} values", totals.len()))),
+    };
     let inv = 1.0 / total.max(1e-12);
     let clock = std::time::Instant::now();
     if reduce_on_device(model, coll, rank, local_weight * inv)? {
         gpu_core::profile::stage_time("reduce: gradients on the device", clock);
-        return Ok(());
+        return Ok(step_loss);
     }
     for name in model.param_names() {
         let scaled: Vec<f32> = model.read_grad(&name).iter().map(|&g| g * local_weight).collect();
@@ -142,7 +149,7 @@ pub fn reduce_grads_weighted<M: Model>(model: &M, coll: &dyn Collective, rank: u
         let mean: Vec<f32> = summed.iter().map(|value| value * inv).collect();
         model.write_grad(&name, &mean).map_err(CollectiveError::Transport)?;
     }
-    Ok(())
+    Ok(step_loss)
 }
 
 /// Replace every gradient with the sum over the ranks of `scale * g` where the

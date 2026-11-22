@@ -243,7 +243,8 @@ fn reduce_grads_writes_the_mean_of_the_reduced_gradient() {
 /// supervised tokens updates with the per-token mean over all of them. Each
 /// rank's gradient is a mean over its own tokens, so the reduction weights it
 /// by that count: ranks with means 1 (1 token) and 3 (3 tokens) give
-/// (1*1 + 3*3) / 4 = 2.5, not the mean of the means, 2.
+/// (1*1 + 3*3) / 4 = 2.5, not the mean of the means, 2. The step's loss is
+/// weighted the same way: losses 2 and 6 give (2*1 + 6*3) / 4 = 5 on both ranks.
 #[test]
 fn reduce_grads_weighted_gives_the_per_token_mean_of_unequal_ranks() {
     let a = Lin::with_target(vec![0.0], vec![1.0]);
@@ -254,17 +255,17 @@ fn reduce_grads_weighted_gives_the_per_token_mean_of_unequal_ranks() {
     let (ga, gb) = std::thread::scope(|s| {
         let coll = &coll;
         let h0 = s.spawn(move || {
-            model::reduce_grads_weighted(&a, &**coll, 0, 1.0).expect("reduce");
-            a.read_grad("w")
+            let loss = model::reduce_grads_weighted(&a, &**coll, 0, 1.0, 2.0).expect("reduce");
+            (a.read_grad("w"), loss)
         });
         let h1 = s.spawn(move || {
-            model::reduce_grads_weighted(&b, &**coll, 1, 3.0).expect("reduce");
-            b.read_grad("w")
+            let loss = model::reduce_grads_weighted(&b, &**coll, 1, 3.0, 6.0).expect("reduce");
+            (b.read_grad("w"), loss)
         });
         (h0.join().unwrap(), h1.join().unwrap())
     });
-    assert_eq!(ga, vec![2.5]);
-    assert_eq!(gb, vec![2.5]);
+    assert_eq!(ga, (vec![2.5], 5.0));
+    assert_eq!(gb, (vec![2.5], 5.0));
 }
 
 #[test]

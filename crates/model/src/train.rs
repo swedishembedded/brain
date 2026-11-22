@@ -2345,6 +2345,10 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         // What the micro-steps measured, taken once: its supervised count also
         // weights this rank in a data-parallel reduction below.
         let mut work = obj.step_work().unwrap_or_default();
+        // The micro-steps' summed loss over this many is the step's mean; a data-parallel step's loss, over every
+        // rank's records, is reduced with the step's weights below.
+        let micro_batches = opts.grad_accum.max(1) as f32;
+        let mut group_loss: Option<f32> = None;
         let update_clock = std::time::Instant::now();
         match obj.step_verdict() {
             StepVerdict::Apply => {
@@ -2362,9 +2366,10 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
                     // skipping it), then votes that its reduction completed, and only then updates. A failure is the
                     // job's (a lost or stalled rank): stop, and restart from the last commit.
                     let args = crate::zero::StepArgs { t: applied + 1, lr, wd: opts.weight_decay, adam: opts.adam, clip, extra_scale: scale };
-                    let reduction = health.guarded(step + 1, "sharded gradient reduction", || zero.reduce(sync.collective, weight, step_loss.is_finite(), &args))?;
+                    let reduction = health.guarded(step + 1, "sharded gradient reduction", || zero.reduce(sync.collective, weight, step_loss / micro_batches, &args))?;
                     let why = match reduction {
                         crate::zero::Reduction::Ready(reduced) => {
+                            group_loss = Some(reduced.loss());
                             crate::jobfault::agree(sync.collective, sync.rank, &mut health, step + 1, "agreement that every rank's reduction completed")?;
                             if let Some(observe) = sync.observer {
                                 observe(crate::jobfault::StepPhase::Reduced, step + 1);
@@ -2388,9 +2393,13 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
                     }
                 } else if let (true, Some(sync)) = (parameter_sharded, &grad_sync) {
                     // A parameter-sharded model reduces inside its own step; the ranks agree on taking it first.
-                    let local = crate::collective::Payload::f32(vec![weight, if step_loss.is_finite() { 0.0 } else { 1.0 }]);
+                    let finite = step_loss.is_finite();
+                    let local = crate::collective::Payload::f32(vec![weight, if finite { 0.0 } else { 1.0 }, if finite { weight * step_loss / micro_batches } else { 0.0 }]);
                     let totals = health.guarded(step + 1, "agreement on taking the parameter-sharded step", || pollster::block_on(sync.collective.all_reduce(sync.rank, local)))?.data;
                     let why = (totals.get(1).copied().unwrap_or(1.0) > 0.0).then(|| "non-finite loss on a rank".to_string());
+                    if let (None, Some(weighted)) = (&why, totals.get(2)) {
+                        group_loss = Some(weighted / totals[0].max(1e-12));
+                    }
                     match gate.verdict(why)? {
                         Some(why) => eprintln!("step {:>6}: no optimiser step taken: {why}", step + 1),
                         None => {
@@ -2408,7 +2417,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
                     }
                 } else {
                 if let Some(sync) = &grad_sync {
-                    health.guarded(step + 1, "gradient reduction", || crate::distributed::reduce_grads_weighted(&model, sync.collective, sync.rank, weight))?;
+                    group_loss = Some(health.guarded(step + 1, "gradient reduction", || crate::distributed::reduce_grads_weighted(&model, sync.collective, sync.rank, weight, step_loss / micro_batches))?);
                     // The step is a transaction: it is applied only once every rank says its reduction completed. A
                     // rank lost anywhere in the reduction leaves this vote unfinished, so no rank applies the step.
                     crate::jobfault::agree(sync.collective, sync.rank, &mut health, step + 1, "agreement that every rank's reduction completed")?;
@@ -2438,7 +2447,9 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         gpu_core::profile::stage_time("fit: step optimizer update", update_clock);
         gpu_core::profile::stage_time("fit: step total", step_clock);
         let grad_norm = if zero.is_some() { sharded_norm } else { model.last_grad_norm() };
-        let loss = step_loss / opts.grad_accum.max(1) as f32;
+        // A data-parallel step's loss is the group's, over every rank's records, as one rank accumulating them would
+        // measure it; this rank's own share is only its loss when it trains alone.
+        let loss = group_loss.unwrap_or(step_loss / micro_batches);
         // The first step's loss, measured before its update, when the run takes it as its initial estimate.
         initial.get_or_insert(loss);
         // The optimizer's share of the step: everything the objective did not
