@@ -978,6 +978,15 @@ The first trainable target needs no streaming: the base is about 19.5 GB.
     moving positions 9-12 (the sliding window of 4) by up to 0.44 logits. The test records both tiers' routing and
     leaves a flip and its window out of the tiny checkpoint's statistics (counted, at most two); over the rest every
     backend measures mean KL 1.2e-4, max 6.5e-4.
+  - Left (fix2): `serve_adapters` on CUDA - trainer vs engine 1.3e-4 / 1.5e-4 (bound 1e-4) and the base row against
+    the engine's own whole forward 5.1e-5 / 5.2e-5 (bound 5e-5) - is the GPU's summation order, not a product
+    precision: both sides run the exact products, the trainer's whole forward equals the engine's
+    (`Inkling2::forward`) bit for bit on CUDA, and the engine's paged prefill/decode rows differ from its own whole
+    forward by up to 5.2e-5 at every position (0 on CPU, where both paths run the same barrier-free kernels; the same
+    with the native kernels withheld). The bounds were measured on CPU only; a device-aware band (the paged path's own
+    spread from the whole forward, measured in the test, as knowledge #532 floors a step-parity band) is the open fix.
+  - Noted (2026-11-22, fix2): `optim` `parallel_update` was not a campaign regression: it failed since the test was
+    written (before 2b8b29597), and c84c40fee (knowledge #568) fixed it on main.
 - **I4.4** `model::train` + `data`: packed rows with document-boundary resets of
   attention, every conv state and the relative-position origin. Gate: no supervision or
   state crosses a boundary.
