@@ -61,7 +61,7 @@ fn reference_hidden(dir: &str, ids: &[u32]) -> Vec<Vec<f32>> {
 pub(crate) fn assert_taps(e: &RicursiveEngine, dir: &str, table: &BlockTable, ids: &[u32], label: &str) {
     let n = table.len() as usize;
     let hidden = tiny_config(dir).hidden_size;
-    let layers = e.tap_layers().to_vec();
+    let layers = e.tap_depths().to_vec();
     let reference = reference_hidden(dir, &ids[..n]);
     let got = e.read_taps(table, 0, n as u32).expect("taps");
     assert_eq!(got.len(), n * layers.len() * hidden);
@@ -78,7 +78,7 @@ fn retained_taps_equal_the_forward_hidden_states_through_prefill_decode_verify_a
     let vocab = tiny_config(&dir).vocab_size as u32;
     let ids = stream(3, 60, vocab);
     let mut e = drafted_engine(&dir, &draft, serve_config(5, 2));
-    assert_eq!(e.tap_layers(), &[0, 1, 2], "the draft reads the three layers of the tiny target");
+    assert_eq!(e.tap_depths(), &[0, 1, 2], "the draft reads the three layers of the tiny target");
 
     // Chunked prefill (chunks of 5, slices of 2), then decode steps.
     let mut table = BlockTable::new();
@@ -121,7 +121,7 @@ fn retained_taps_equal_the_forward_hidden_states_through_prefill_decode_verify_a
 fn taps_are_refused_for_layers_the_model_does_not_have() {
     let Some(dir) = tiny_dir() else { return };
     let mut e = engine_with(&dir, serve_config(5, 0));
-    assert!(e.tap_layers().is_empty() && e.read_taps(&BlockTable::new(), 0, 0).is_err(), "no taps until enabled");
+    assert!(e.tap_depths().is_empty() && e.read_taps(&BlockTable::new(), 0, 0).is_err(), "no taps until enabled");
     assert!(e.enable_taps(&[3]).unwrap_err().contains("distinct layers"));
     assert!(e.enable_taps(&[1, 1]).is_err() && e.enable_taps(&[]).is_err());
     e.enable_taps(&[2, 0]).unwrap();

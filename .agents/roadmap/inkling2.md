@@ -901,6 +901,15 @@ Driven by the per-device gap list, as new candidates only:
 - graph replay;
 - the MTP drafter through `dflash2` with a tap API keyed by logical depth and rollback
   over rings and conv rows.
+  - Done (2026-11-22): the tap API is keyed by logical depth (`PagedDecoder::{enable_taps, tap_depths, read_taps}`,
+    `TapPool::depths`: a decoder layer of a plain stack, a visit of a looped one, each decoder documenting what its row
+    holds). Verify rollback over the visit pool: `VisitPoolSizing::undo_rows` reserves one undo state row per live row,
+    `VisitPool::checkpoint` keeps every ring and convolution state before a verify writes ahead and
+    `VisitPool::rollback` restores them; the engine recomputes the kept rows (full visits need nothing: rejected
+    positions are truncated and rewritten). Spec `serve_visit_state.rs`
+    (`a_verify_that_keeps_part_of_its_rows_leaves_every_ring_and_convolution_as_decoding_them`, and the conformance
+    suite's `speculation_equals_plain_greedy` on the tiny looped decoder, which now speculates); removing the rollback
+    fails both.
 
 ## Decisions (2026-11-21)
 

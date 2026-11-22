@@ -231,7 +231,7 @@ impl VisitLayout {
         if num_blocks < need.max(1) {
             return Err(format!("visit state: {left} bytes after the state rows hold {num_blocks} blocks of {block_size} tokens, fewer than the {need} one {min_tokens}-token sequence needs"));
         }
-        Ok(VisitPoolSizing { block_size, num_blocks, live_rows, snapshot_rows })
+        Ok(VisitPoolSizing { block_size, num_blocks, live_rows, snapshot_rows, undo_rows: false })
     }
 }
 
@@ -246,6 +246,17 @@ pub struct VisitPoolSizing {
     pub live_rows: u32,
     /// State rows of prefix-cache entries (0 turns prefix reuse off).
     pub snapshot_rows: u32,
+    /// One more state row per live row, holding a sequence's state while a speculative verify runs ahead of what it
+    /// may keep ([`VisitPool::checkpoint`] / [`VisitPool::rollback`]). Off for an engine that does not speculate.
+    pub undo_rows: bool,
+}
+
+impl VisitPoolSizing {
+    /// State rows the pool reserves: live, snapshot and (when kept) undo rows.
+    #[must_use]
+    pub fn state_rows(&self) -> u64 {
+        u64::from(self.live_rows) * (1 + u64::from(self.undo_rows)) + u64::from(self.snapshot_rows)
+    }
 }
 
 /// What [`VisitPool::begin`] found in the prefix cache.
@@ -298,9 +309,9 @@ pub struct VisitPool<P> {
     sizing: VisitPoolSizing,
     /// One per full slot: `num_blocks * block_size` rows.
     paged: Vec<KvLayer>,
-    /// One per windowed slot: `(live_rows + snapshot_rows) * ring rows` rows.
+    /// One per windowed slot: [`VisitPoolSizing::state_rows`] `* ring rows` rows (live, then snapshot, then undo rows).
     rings: Vec<KvLayer>,
-    /// `[slot][state]`: `(live_rows + snapshot_rows + 1) * words` f32, the last row all zeros (a fresh sequence's state).
+    /// `[slot][state]`: `(state_rows + 1) * words` f32, the last row all zeros (a fresh sequence's state).
     conv: Vec<Vec<DeviceBuffer>>,
     alloc: BlockAllocator,
     free_rows: Vec<u32>,
@@ -329,7 +340,7 @@ impl<P: Clone> VisitPool<P> {
 
     /// The pool of `layout` at `sizing` on `g` (which registered [`Self::pipelines`]).
     pub fn new(g: &Gpu, layout: VisitLayout, sizing: VisitPoolSizing) -> Result<VisitPool<P>, String> {
-        let VisitPoolSizing { block_size, num_blocks, live_rows, snapshot_rows } = sizing;
+        let VisitPoolSizing { block_size, num_blocks, live_rows, snapshot_rows, .. } = sizing;
         if block_size == 0 || num_blocks == 0 || live_rows == 0 {
             return Err(format!("visit state: a pool of {num_blocks} blocks of {block_size} rows and {live_rows} live rows holds no sequence"));
         }
@@ -346,7 +357,7 @@ impl<P: Clone> VisitPool<P> {
         };
         let shape = layout.shape.clone();
         let (kvd, hd) = (u64::from(shape.kv_dim()), u64::from(shape.head_dim));
-        let rows = u64::from(live_rows) + u64::from(snapshot_rows);
+        let rows = sizing.state_rows();
         let pool_rows = u64::from(num_blocks) * u64::from(block_size);
         for (what, r) in std::iter::once(("paged plane", pool_rows)).chain(layout.rings.iter().map(|&n| ("ring plane", rows * u64::from(n)))) {
             if !KvTier::fits_addressing(r, kvd) {
@@ -408,11 +419,11 @@ impl<P: Clone> VisitPool<P> {
         self.sizing.live_rows as usize
     }
 
-    /// Device bytes of the whole layout: the block pool, every state row, live and snapshot, and the zero convolution
-    /// row a fresh sequence starts from (`PagedDecoder::kv_pool_bytes`).
+    /// Device bytes of the whole layout: the block pool, every state row, live, snapshot and undo, and the zero
+    /// convolution row a fresh sequence starts from (`PagedDecoder::kv_pool_bytes`).
     #[must_use]
     pub fn pool_bytes(&self) -> u64 {
-        let rows = u64::from(self.sizing.live_rows) + u64::from(self.sizing.snapshot_rows);
+        let rows = self.sizing.state_rows();
         u64::from(self.sizing.num_blocks) * self.layout.block_bytes(self.sizing.block_size) + rows * self.layout.row_bytes() + self.layout.zero_row_bytes()
     }
 
@@ -655,6 +666,27 @@ impl<P: Clone> VisitPool<P> {
         g.submit(&[], &[g.step(self.ids.scatter, &[&ids, src, buf], &[n, w, 0, w], n * w)]);
     }
 
+    // ---- speculative verify ----
+
+    /// Keep each sequence's state row (every ring and every convolution state) in its undo row before a verify writes
+    /// rows past what it may keep. The full visits' rows need no copy: a rejected position's block-table entry is
+    /// truncated and its rows are rewritten when the position is next computed. A ring row, by contrast, is shared
+    /// with the position one window earlier, and a convolution state holds the last inputs, so both are restored by
+    /// [`Self::rollback`].
+    pub fn checkpoint(&self, g: &Gpu, tables: &[&BlockTable]) {
+        for t in tables {
+            let row = t.state_row().expect("visit state: a verifying sequence holds its state row");
+            self.copy_state(g, row, self.undo_row(row));
+        }
+    }
+
+    /// Restore the state row of the sequence of `table` to what [`Self::checkpoint`] kept: the rings and convolution
+    /// states as they stood before the verify. The engine then recomputes the rows it keeps.
+    pub fn rollback(&self, g: &Gpu, table: &BlockTable) {
+        let row = table.state_row().expect("visit state: a verifying sequence holds its state row");
+        self.copy_state(g, self.undo_row(row), row);
+    }
+
     // ---- internals ----
 
     fn check_heads(&self, heads: &HeadShape) {
@@ -664,7 +696,13 @@ impl<P: Clone> VisitPool<P> {
 
     /// Row `zero_row` of every convolution buffer is never written: a fresh sequence's state.
     fn zero_row(&self) -> u64 {
-        u64::from(self.sizing.live_rows) + u64::from(self.sizing.snapshot_rows)
+        self.sizing.state_rows()
+    }
+
+    /// The undo row of live state row `row`.
+    fn undo_row(&self, row: u32) -> u32 {
+        assert!(self.sizing.undo_rows, "visit state: the pool was sized without undo rows (VisitPoolSizing::undo_rows), so it cannot undo a verify");
+        self.sizing.live_rows + self.sizing.snapshot_rows + row
     }
 
     fn snapshot_row(&self, snap: u32) -> u32 {
@@ -764,7 +802,7 @@ mod tests {
 
         let budget = 10 * l.row_bytes() + l.zero_row_bytes() + 20 * l.block_bytes(16) + 7;
         let s = l.sizing_for(budget, 16, 6, 4, 64).unwrap();
-        assert_eq!(s, VisitPoolSizing { block_size: 16, num_blocks: 20, live_rows: 6, snapshot_rows: 4 });
+        assert_eq!(s, VisitPoolSizing { block_size: 16, num_blocks: 20, live_rows: 6, snapshot_rows: 4, undo_rows: false });
         assert!(l.sizing_for(budget, 16, 6, 4, 400).unwrap_err().contains("fewer than"));
         assert!(l.sizing_for(5 * l.row_bytes(), 16, 6, 4, 1).unwrap_err().contains("more than the budget"));
     }

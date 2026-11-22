@@ -7,10 +7,11 @@
 // expertise in LLM serving throughput then you can procure our services by
 // sending an email to info@swedishembedded.com.
 
-//! Hidden-state taps: the residual stream of a target at chosen layers, kept per cached position.
+//! Hidden-state taps: the hidden state of a target at chosen logical depths, kept per cached position.
 //!
-//! A drafter that reads the target's internals (DFlash2 attends to the target's hidden states at a handful of its
-//! layers) needs those rows for every position the target has consumed: the prompt, every decoded token and every
+//! A drafter that reads the target's internals (a block drafter attends to the target's hidden states at a handful of
+//! its depths: decoder layers of a plain stack, visits of a looped one) needs those rows for every position the target
+//! has consumed: the prompt, every decoded token and every
 //! verify row. A decoder that can supply them implements [`PagedDecoder::enable_taps`] and
 //! [`PagedDecoder::read_taps`]; this module is the storage it can use.
 //!
@@ -28,14 +29,14 @@
 //!   charges it before anything loads.
 //!
 //! Rows are held as bf16 on the host: the drafter they feed was trained on bf16 hidden states, a row is
-//! `layers x hidden` wide (100 KiB at five taps of 5120 in f32), and a verify moves a few rows a step.
+//! `depths x hidden` wide (100 KiB at five taps of 5120 in f32), and a verify moves a few rows a step.
 
 use crate::half::f32_to_bf16;
 use crate::paged::BlockTable;
 
-/// Per-position storage of the residual stream at a fixed set of layers.
+/// Per-position storage of the hidden state at a fixed set of logical depths.
 pub struct TapPool {
-    layers: Vec<usize>,
+    depths: Vec<usize>,
     hidden: usize,
     block_size: u32,
     /// `[num_blocks * block_size, width]` bf16 bits.
@@ -43,34 +44,34 @@ pub struct TapPool {
 }
 
 impl TapPool {
-    /// A pool of `num_blocks` blocks of `block_size` positions retaining the residual of `layers`, each `hidden`
+    /// A pool of `num_blocks` blocks of `block_size` positions retaining the hidden state at `depths`, each `hidden`
     /// wide.
-    pub fn new(layers: Vec<usize>, hidden: usize, num_blocks: u32, block_size: u32) -> TapPool {
-        let width = layers.len() * hidden;
-        TapPool { layers, hidden, block_size, rows: vec![0; num_blocks as usize * block_size as usize * width] }
+    pub fn new(depths: Vec<usize>, hidden: usize, num_blocks: u32, block_size: u32) -> TapPool {
+        let width = depths.len() * hidden;
+        TapPool { depths, hidden, block_size, rows: vec![0; num_blocks as usize * block_size as usize * width] }
     }
 
     /// Host bytes a pool of this shape holds.
-    pub fn bytes(n_layers: usize, hidden: usize, num_blocks: u32, block_size: u32) -> u64 {
-        u64::from(num_blocks) * u64::from(block_size) * (n_layers * hidden) as u64 * 2
+    pub fn bytes(n_depths: usize, hidden: usize, num_blocks: u32, block_size: u32) -> u64 {
+        u64::from(num_blocks) * u64::from(block_size) * (n_depths * hidden) as u64 * 2
     }
 
-    /// The tapped layers, in row order.
-    pub fn layers(&self) -> &[usize] {
-        &self.layers
+    /// The tapped depths, in row order.
+    pub fn depths(&self) -> &[usize] {
+        &self.depths
     }
 
-    /// Values in one position's row: `layers x hidden`.
+    /// Values in one position's row: `depths x hidden`.
     pub fn width(&self) -> usize {
-        self.layers.len() * self.hidden
+        self.depths.len() * self.hidden
     }
 
     fn at(&self, block: u32, offset: u32) -> usize {
         (block as usize * self.block_size as usize + offset as usize) * self.width()
     }
 
-    /// Store the row of position `pos` of the sequence whose blocks are `blocks`; `row` is the tapped layers'
-    /// residual concatenated in [`Self::layers`] order.
+    /// Store the row of position `pos` of the sequence whose blocks are `blocks`; `row` is the tapped depths' hidden
+    /// states concatenated in [`Self::depths`] order.
     pub fn write(&mut self, blocks: &[u32], pos: u32, row: &[f32]) {
         assert_eq!(row.len(), self.width(), "a tap row is {} values, got {}", self.width(), row.len());
         let (block, offset) = (blocks[(pos / self.block_size) as usize], pos % self.block_size);

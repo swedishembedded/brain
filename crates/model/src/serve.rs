@@ -604,24 +604,27 @@ pub trait PagedDecoder {
 
     // ---- hidden-state taps (optional; see [`taps`]) ----
     //
-    // A drafter that reads the target's internals needs the residual stream at chosen layers for every position the
+    // A drafter that reads the target's internals needs the hidden state at chosen depths for every position the
     // decoder consumes. The defaults say "this decoder retains none".
 
-    /// Start retaining the residual stream after each of `layers` (0-based decoder layers) for every position the
-    /// decoder consumes from now on, prefill, decode and verify rows alike, in blocks shared with its KV so that
-    /// rollback and prefix reuse need nothing more. Sequences already running have no rows for the positions they
+    /// Start retaining the hidden state at each of `depths` for every position the decoder consumes from now on,
+    /// prefill, decode and verify rows alike, in blocks shared with its KV so that rollback and prefix reuse need nothing
+    /// more. A depth is the decoder's own **logical depth**: a decoder layer for a plain stack, a visit (a layer counted
+    /// once per time it runs) for a looped one, and the decoder documents what the row at a depth holds (the residual
+    /// leaving a layer, the carried state entering a visit, the final normalised row at the full depth): whatever
+    /// the drafter's checkpoint was trained on. Sequences already running have no rows for the positions they
     /// consumed before; call this before the first request. The default refuses.
-    fn enable_taps(&mut self, layers: &[usize]) -> Result<(), String> {
-        let _ = layers;
+    fn enable_taps(&mut self, depths: &[usize]) -> Result<(), String> {
+        let _ = depths;
         Err("this decoder does not retain hidden states".into())
     }
 
-    /// The layers [`Self::enable_taps`] enabled, in row order; empty while none are.
-    fn tap_layers(&self) -> &[usize] {
+    /// The depths [`Self::enable_taps`] enabled, in row order; empty while none are.
+    fn tap_depths(&self) -> &[usize] {
         &[]
     }
 
-    /// The retained rows of positions `from .. from + count` of `table` (`[count, layers x hidden]`). An error when
+    /// The retained rows of positions `from .. from + count` of `table` (`[count, depths x hidden]`). An error when
     /// taps are not enabled or the range is not cached.
     fn read_taps(&self, table: &BlockTable, from: u32, count: u32) -> Result<Vec<f32>, String> {
         let _ = (table, from, count);

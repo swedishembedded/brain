@@ -734,7 +734,7 @@ impl RicursiveEngine {
         let index = HostIndex::build(&geometry, rows);
         let n = rows.len() as u32;
         let boundary_bytes = u64::from(n) * self.cfg.hidden_size as u64 * 4;
-        let tap_layers: Vec<usize> = self.taps.as_ref().map(|t| t.layers().to_vec()).unwrap_or_default();
+        let tap_layers: Vec<usize> = self.taps.as_ref().map(|t| t.depths().to_vec()).unwrap_or_default();
         let mut tapped: Vec<(usize, DeviceBuffer)> = Vec::new();
         let mut carry: Option<(usize, DeviceBuffer)> = None;
         for (i, stage) in self.stages.iter().enumerate() {
@@ -766,7 +766,7 @@ impl RicursiveEngine {
         let Some(pool) = self.taps.as_mut() else { return };
         let hidden = self.cfg.hidden_size;
         let host: Vec<Vec<f32>> = tapped.iter().map(|(l, buf)| self.stages.iter().find(|s| s.range.contains(l)).expect("the stages tile the layers").gpu().read(buf, rows.len() * hidden)).collect();
-        debug_assert_eq!(host.len(), pool.layers().len(), "every tapped layer came back from its stage");
+        debug_assert_eq!(host.len(), pool.depths().len(), "every tapped layer came back from its stage");
         let mut row = vec![0f32; pool.width()];
         for (r, plan) in rows.iter().enumerate() {
             for (j, layer) in host.iter().enumerate() {
@@ -1331,16 +1331,16 @@ impl PagedDecoder for RicursiveEngine {
             return Err(format!("ricursive: taps need distinct layers of the model's {n}, got {layers:?}"));
         }
         match &self.taps {
-            Some(pool) if pool.layers() == layers => Ok(()),
-            Some(pool) => Err(format!("ricursive: taps are already retained for layers {:?}, not {layers:?}", pool.layers())),
+            Some(pool) if pool.depths() == layers => Ok(()),
+            Some(pool) => Err(format!("ricursive: taps are already retained for layers {:?}, not {layers:?}", pool.depths())),
             None => {
                 self.taps = Some(TapPool::new(layers.to_vec(), self.cfg.hidden_size, self.serve.num_blocks, self.serve.block_size));
                 Ok(())
             }
         }
     }
-    fn tap_layers(&self) -> &[usize] {
-        self.taps.as_ref().map_or(&[], TapPool::layers)
+    fn tap_depths(&self) -> &[usize] {
+        self.taps.as_ref().map_or(&[], TapPool::depths)
     }
     fn read_taps(&self, table: &BlockTable, from: u32, count: u32) -> Result<Vec<f32>, String> {
         self.taps.as_ref().ok_or("ricursive: hidden-state taps are not enabled")?.read(table, from, count)

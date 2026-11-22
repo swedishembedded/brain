@@ -16,7 +16,11 @@
 //!   whole-sequence forward of the same weights that keeps no state (contiguous windowed attention, convolutions
 //!   without history): each ring holds exactly its window and each convolution state its taps;
 //! - a prefix hit restores every visit's ring and convolution state and shares the full visits' blocks: what it then
-//!   prefills and decodes equals a cold run, and a repeat of the cached prompt computes nothing yet decodes the same.
+//!   prefills and decodes equals a cold run, and a repeat of the cached prompt computes nothing yet decodes the same;
+//! - a speculative verify (the proposals run as one chunk past the state row's checkpoint) that keeps only some of its
+//!   rows leaves every ring and convolution state as decoding the kept rows alone does: the undo row restores what the
+//!   verify overwrote (ring rows a window back, convolution inputs) and the kept rows are recomputed, so what the
+//!   sequence serves next equals the stateless forward, and speculative greedy decoding equals plain greedy decoding.
 
 use std::sync::OnceLock;
 
@@ -134,6 +138,8 @@ struct Looped {
     bases: Vec<[DeviceBuffer; 3]>,
     pool: VisitPool<Vec<f32>>,
     interleave: Option<usize>,
+    /// The verify awaiting `commit_verified`: each sequence's rows and first position.
+    pending: Vec<(Vec<u32>, u32)>,
 }
 
 impl Looped {
@@ -143,13 +149,13 @@ impl Looped {
 
     /// K/V (paged planes and rings) held at `kv_tier`.
     fn on(kv_tier: KvTier, interleave: Option<usize>) -> Looped {
-        let sizing = VisitPoolSizing { block_size: BLOCK, num_blocks: 64, live_rows: 4, snapshot_rows: 4 };
+        let sizing = VisitPoolSizing { block_size: BLOCK, num_blocks: 64, live_rows: 4, snapshot_rows: 4, undo_rows: true };
         let g = gpu_core::testgpu::dev(kernels());
         let plan = VisitPlan::new(shape(), attention).expect("a valid plan");
         let layout = VisitLayout::new(plan.clone(), VisitStateShape { n_kv_heads: NKV, head_dim: HD, kv_tier, conv: conv_states() }).expect("a valid layout");
         let pool = VisitPool::new(&g, layout, sizing).expect("the pool fits").with_min_cached_tokens(8);
         let bases = weights().layers.iter().map(|l| [0, 1, 2].map(|i| g.storage_init("conv.base", &l.conv[i]))).collect();
-        Looped { conv_ids: ShortConvIds::resolve(&g), g, plan, bases, pool, interleave }
+        Looped { conv_ids: ShortConvIds::resolve(&g), g, plan, bases, pool, interleave, pending: Vec::new() }
     }
 
     fn upload(&self, x: &[f32]) -> DeviceBuffer {
@@ -244,6 +250,27 @@ impl Looped {
         let mut x = Self::embed(inputs);
         self.layers(&Rows::Decode { tables: &refs }, &mut x, inputs.len());
         Self::head(&x, inputs.len())
+    }
+
+    /// The rows of one chunk of a served sequence at positions `start ..` (backed), returning its final hidden rows.
+    fn chunk(&self, table: &BlockTable, start: u32, tokens: &[u32]) -> Vec<f32> {
+        let mut x = Self::embed(tokens);
+        self.layers(&Rows::Chunk { table, start }, &mut x, tokens.len());
+        x
+    }
+
+    /// A verify: each sequence's rows run as one chunk past its checkpointed state row.
+    fn verify(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>]) -> Vec<Vec<Vec<f32>>> {
+        let refs: Vec<&BlockTable> = tables.iter().map(|t| &**t).collect();
+        self.pool.checkpoint(&self.g, &refs);
+        self.pending.clear();
+        let mut out = Vec::with_capacity(rows.len());
+        for (t, r) in tables.iter_mut().zip(rows) {
+            let start = self.pool.reserve(t, r.len() as u32);
+            out.push(Self::head(&self.chunk(t, start, r), r.len()));
+            self.pending.push((r.clone(), start));
+        }
+        out
     }
 }
 
@@ -368,6 +395,27 @@ impl PagedDecoder for Looped {
     fn topk_capacity(&self) -> usize {
         16
     }
+    fn spec_max_draft(&self) -> usize {
+        4
+    }
+    fn forward_batched_verify(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], cands: usize) -> Vec<Vec<Vec<(u32, f32)>>> {
+        let k = cands.clamp(1, self.topk_capacity());
+        self.verify(tables, rows).iter().map(|seq| seq.iter().map(|r| top_k(r, k)).collect()).collect()
+    }
+    fn forward_batched_verify_logit_rows(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>]) -> Vec<Vec<Vec<f32>>> {
+        self.verify(tables, rows)
+    }
+    /// A sequence that keeps every row is settled; one that keeps fewer restores its state row and recomputes the
+    /// kept rows over it.
+    fn commit_verified(&mut self, tables: &mut [&mut BlockTable], keep: &[usize]) {
+        let pending = std::mem::take(&mut self.pending);
+        for ((t, &kept), (rows, start)) in tables.iter().zip(keep).zip(&pending) {
+            if kept < rows.len() {
+                self.pool.rollback(&self.g, t);
+                self.chunk(t, *start, &rows[..kept]);
+            }
+        }
+    }
 }
 
 /// Prompts in slices of seven tokens, so admission, preemption and prefix reuse all meet partial prefills.
@@ -470,4 +518,37 @@ fn a_prefix_hit_restores_every_visits_state_exactly() {
     warm.release_table(&mut table);
     let (hits, _, _) = warm.prefix_stats();
     assert_eq!(hits, 60, "three hits of 20 tokens");
+}
+
+/// Spec: a verify of five rows that keeps `kept` of them leaves the sequence where decoding the kept rows alone would:
+/// the verify wrapped every ring (window [`WINDOW`]) and moved every convolution state past what is kept, and the
+/// logits served afterwards, decoded far on, equal the stateless whole-sequence forward at every position.
+#[test]
+fn a_verify_that_keeps_part_of_its_rows_leaves_every_ring_and_convolution_as_decoding_them() {
+    let tokens = sequence(30, 3);
+    let (prompt, rest) = tokens.split_at(9);
+    for kept in [1, 3, 5] {
+        let mut e = Looped::new(None);
+        let whole = e.whole(&tokens);
+        let mut table = BlockTable::new();
+        served(&mut e, &mut table, prompt, 4, &[]);
+        // The kept rows are the sequence's next tokens; the rest are wrong guesses.
+        let mut rows: Vec<u32> = rest[..5].to_vec();
+        for r in rows.iter_mut().skip(kept) {
+            *r = (*r % (VOCAB as u32 - 1)) + 1;
+        }
+        let verified = e.verify(&mut [&mut table], &[rows]).remove(0);
+        for (j, row) in verified.iter().take(kept).enumerate() {
+            assert_eq!(row, &e.logits(&whole[prompt.len() + j]), "kept {kept}: verify row {j}");
+        }
+        e.commit_verified(&mut [&mut table], &[kept]);
+        let len = prompt.len() as u32 + kept as u32;
+        table.truncate(len, e.pool.alloc_mut());
+        for (i, &t) in rest[kept..rest.len() - 1].iter().enumerate() {
+            let p = prompt.len() + kept + i;
+            let got = e.decode(&mut [&mut table], &[t]).remove(0);
+            assert_eq!(got, e.logits(&whole[p]), "kept {kept}: position {p} after the verify differs from the stateless forward");
+        }
+        e.release_table(&mut table);
+    }
 }

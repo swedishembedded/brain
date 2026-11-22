@@ -87,7 +87,7 @@ impl Inkling2Resident {
         let ctx = u64::from(ctx).min(cfg.max_positions).max(u64::from(BLOCK)) as u32;
         let live = sizing.max_batch.max(1);
         let blocks = ctx.div_ceil(BLOCK).checked_mul(live).ok_or_else(|| format!("{id}: {live} sequences of {ctx} tokens overflow the block count"))?;
-        let opts = EngineOptions { kv_tier: KV_TIER, sizing: VisitPoolSizing { block_size: BLOCK, num_blocks: blocks, live_rows: live, snapshot_rows: live }, max_seq_len: ctx as usize, prefill_chunk: PREFILL_CHUNK };
+        let opts = EngineOptions { kv_tier: KV_TIER, sizing: VisitPoolSizing { block_size: BLOCK, num_blocks: blocks, live_rows: live, snapshot_rows: live, undo_rows: false }, max_seq_len: ctx as usize, prefill_chunk: PREFILL_CHUNK };
         // The layout is held to the engine's own check now, so a configuration it cannot serve is refused at the scan.
         Engine::layout(&cfg, KV_TIER)?;
         Ok(Inkling2Resident { id: id.to_string(), dir: path.to_path_buf(), cfg, opts })

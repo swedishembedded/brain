@@ -57,7 +57,7 @@ fn rel_err(got: &[f32], want: &[f32]) -> f32 {
 
 fn tiny_engine(chunk: u32) -> Engine {
     let dir = brain_testutil::testdata_path("golden/inkling2/tiny/checkpoint");
-    let sizing = VisitPoolSizing { block_size: 8, num_blocks: 64, live_rows: 4, snapshot_rows: 4 };
+    let sizing = VisitPoolSizing { block_size: 8, num_blocks: 64, live_rows: 4, snapshot_rows: 4, undo_rows: false };
     Engine::open(crate::tiny_parity::ops(), &dir, EngineOptions { kv_tier: KvTier::F32, sizing, max_seq_len: 128, prefill_chunk: chunk }).expect("the tiny engine")
 }
 
@@ -209,7 +209,7 @@ fn cached_greedy_decode_of_the_released_weights_is_the_uncached_forwards() {
         return;
     }
     let gold = golden(&gold_dir);
-    let sizing = VisitPoolSizing { block_size: 16, num_blocks: 8, live_rows: 1, snapshot_rows: 0 };
+    let sizing = VisitPoolSizing { block_size: 16, num_blocks: 8, live_rows: 1, snapshot_rows: 0, undo_rows: false };
     let mut e = Engine::open(crate::tiny_parity::ops(), &dir, EngineOptions { kv_tier: KvTier::F32, sizing, max_seq_len: 128, prefill_chunk: 16 }).unwrap();
     let v = e.vocab();
     const NEW: usize = 6;

@@ -506,7 +506,7 @@ the draft's forward, not its acceptance), the acceptance rate and speedup, and t
 not settle. The target taps are taken as the OUTPUT of decoder layer `i` (as the Qwen3.8 port established, and as the
 GGUF's one-higher index shows), and the block's noise embedding is the target's `embed_tokens` row as stored, WITHOUT
 `embed_scale` (the README says "token embeddings"; the scaled embedding is what the target's first layer reads). Both
-are one line to flip (`RicursiveEngine::tap_layers` offset, `DraftHost::embed`) and the first run on a card settles them
+are one line to flip (`RicursiveEngine::tap_depths` offset, `DraftHost::embed`) and the first run on a card settles them
 by `spec_accept_rate`: a wrong convention shows as an acceptance near the random draft's.
 
 ### Step 7: trained through the generic paths (CPU backend and the software Vulkan adapter, 2026-11-07)
