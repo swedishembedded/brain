@@ -297,6 +297,10 @@ pub struct ZeroOptimizer {
     shard: Option<DeviceBuffer>,
     /// The device tier's one gradient slice every unit shares, when units are updated one at a time.
     transient: Option<GradSlice>,
+    /// The unit whose norm [`Self::reduce_unit`] issued on the card, and the partials' count to collect.
+    measured: std::sync::Mutex<Option<(usize, u32)>>,
+    /// Per staging buffer, the unit gathered into it ([`Self::prefetch_unit`]) and not yet placed into its parameters.
+    unplaced: std::sync::Mutex<[Option<usize>; 2]>,
     kernels: Option<DeviceKernels>,
     /// The tensor each unit member is, by tensor: its unit.
     unit_of: Vec<usize>,
@@ -454,7 +458,7 @@ impl ZeroOptimizer {
             units.push(UnitState { value_dtype, grad_dtype, lr_mult: first.lr_mult, slice });
         }
         gpu.poll_wait();
-        Ok(ZeroOptimizer { sharding, layout, rank, gpu, params: params.tensors, units, staging, shard, transient, kernels, unit_of, step: 0 })
+        Ok(ZeroOptimizer { sharding, layout, rank, gpu, params: params.tensors, units, staging, shard, transient, measured: std::sync::Mutex::new(None), unplaced: std::sync::Mutex::new([None; 2]), kernels, unit_of, step: 0 })
     }
 
     pub fn sharding(&self) -> Sharding {
@@ -548,6 +552,7 @@ impl ZeroOptimizer {
     /// memory), each rank's gradient weighted by `scale`. Units alternate between two staging buffers, so the next
     /// unit is packed while the last one's collective runs.
     pub fn reduce_unit(&mut self, coll: &dyn Collective, u: usize, scale: f32) -> CollectiveResult<()> {
+        self.place_staged(u % 2);
         let gpu = &self.gpu;
         let staging = &self.staging[u % 2];
         let dtype = self.units[u].grad_dtype;
@@ -570,6 +575,14 @@ impl ZeroOptimizer {
                 k.gpu.submit(&[], &[k.gpu.step(k.unpack, &[g16, &g.g], &[n as u32], n as u32)]);
                 k.gpu.flush();
             }
+            // A parameter-sharded unit is measured next ([`Self::unit_sum_sq`]): issue its norm behind the reduction
+            // now, so reading it later waits for nothing that could not run under the trainer's next work.
+            if self.sharding == Sharding::Parameters {
+                gpu.flush();
+                let parts = k.norm.issue(&k.gpu, NormItem { buf: &g.g, numel: n as usize, dtype: grad_dtype(CollectiveDtype::F32) });
+                k.gpu.flush();
+                *self.measured.lock().unwrap_or_else(|e| e.into_inner()) = Some((u, parts));
+            }
         }
         if let Slice::Host(h) = &mut self.units[u].slice {
             match dtype {
@@ -582,7 +595,11 @@ impl ZeroOptimizer {
 
     /// This rank's sum of squares of unit `u`'s reduced gradient slice (after [`Self::reduce_unit`]).
     pub fn unit_sum_sq(&self, u: usize) -> f64 {
-        self.sum_sq_of(&[u])
+        let issued = self.measured.lock().unwrap_or_else(|e| e.into_inner()).take();
+        match (issued, &self.kernels) {
+            (Some((at, parts)), Some(k)) if at == u => k.norm.collect(&k.gpu, parts),
+            _ => self.sum_sq_of(&[u]),
+        }
     }
 
     /// This rank's sum of squares of the reduced gradient slices of `units`: one reduction on the card.
@@ -606,6 +623,17 @@ impl ZeroOptimizer {
     /// Gather unit `u`'s value slices from every rank into the model's buffers. On the device tier this is enqueued
     /// behind the unit's update and ordered on the device; [`Self::settle`] waits for it.
     pub fn gather_unit(&self, coll: &dyn Collective, u: usize) -> CollectiveResult<()> {
+        self.prefetch_unit(coll, u)?;
+        self.place_unit(u);
+        Ok(())
+    }
+
+    /// Gather unit `u`'s value slices from every rank into a staging buffer only: [`Self::place_unit`] writes them into
+    /// the model's buffers where the unit is used. The copies into those buffers run on the model's stream, so issued
+    /// now they would order the model's next work (the layer computing while this one is fetched) after the gather.
+    /// The unit is placed before anything else reuses its staging buffer.
+    pub fn prefetch_unit(&self, coll: &dyn Collective, u: usize) -> CollectiveResult<()> {
+        self.place_staged(u % 2);
         let gpu = &self.gpu;
         let state = &self.units[u];
         let dtype = state.value_dtype;
@@ -620,16 +648,35 @@ impl ZeroOptimizer {
             }
         };
         all_gather(coll, self.rank, gpu, send, staging, n, dtype)?;
-        for &(tensor, offset, count) in &self.layout.units[u].members {
-            gpu.copy_to(staging, offset * dtype.bytes(), gpu, &self.params[tensor].value, 0, 4 * words(count, dtype));
-        }
+        self.lock_unplaced()[u % 2] = Some(u);
         Ok(())
+    }
+
+    /// Write unit `u`'s gathered values into the model's buffers if [`Self::prefetch_unit`] left them staged.
+    pub fn place_unit(&self, u: usize) {
+        if self.lock_unplaced()[u % 2] == Some(u) {
+            self.place_staged(u % 2);
+        }
+    }
+
+    fn lock_unplaced(&self) -> std::sync::MutexGuard<'_, [Option<usize>; 2]> {
+        self.unplaced.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Place the unit waiting in staging buffer `s`, if any.
+    fn place_staged(&self, s: usize) {
+        let Some(u) = self.lock_unplaced()[s].take() else { return };
+        let dtype = self.units[u].value_dtype;
+        for &(tensor, offset, count) in &self.layout.units[u].members {
+            self.gpu.copy_to(&self.staging[s], offset * dtype.bytes(), &self.gpu, &self.params[tensor].value, 0, 4 * words(count, dtype));
+        }
     }
 
     /// Gather unit `u`'s f32 master slices from every rank into a staging buffer, which then holds the unit's flat f32
     /// vector (members at their layout offsets); returns it. Every rank calls; the buffer is valid until the next
     /// collective of the unit's parity.
     pub fn gather_master(&self, coll: &dyn Collective, u: usize) -> CollectiveResult<&DeviceBuffer> {
+        self.place_staged(u % 2);
         let gpu = &self.gpu;
         let staging = &self.staging[u % 2];
         let n = self.layout.shard_len(u);

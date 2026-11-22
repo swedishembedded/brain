@@ -7,7 +7,8 @@
 
 //! Spec of the device gradient norm (`optim::gradnorm`): the sum of squares of f32 and bf16 gradient buffers, reduced
 //! on the device, equals the host's f64 sum to f32 accuracy, for buffers that span one to many workgroups and for
-//! more buffers than one round of partials holds.
+//! more buffers than one round of partials holds. A reduction issued without waiting and collected later is the same
+//! sum, bit for bit.
 
 use data::rng::Lcg;
 use gpu_core::Gpu;
@@ -46,6 +47,13 @@ fn the_device_sum_of_squares_matches_the_host_for_f32_and_bf16() {
         assert!((g16 - want16).abs() <= 1e-4 * want16, "bf16 n={n}: {g16} vs {want16}");
     }
     assert!((norm.sum_sq(&gpu, &items) - got.iter().sum::<f64>()).abs() < 1e-9);
+    // Issued now and collected after other work: what the waiting form returns for that item alone.
+    for (item, want) in items.iter().zip(&got) {
+        let parts = norm.issue(&gpu, *item);
+        let filler = gpu.storage(1024);
+        gpu.write_f32(&filler, &[1.0; 1024]);
+        assert_eq!(norm.collect(&gpu, parts).to_bits(), want.to_bits(), "n={} {:?}", item.numel, item.dtype);
+    }
 }
 
 #[test]

@@ -7,7 +7,8 @@
 
 //! The sharded optimizer ([`model::zero::ZeroOptimizer`]) on raw device tensors over in-process ranks: a checkpoint
 //! saved by one world size loads into another with the logical tensors unchanged, bf16 parameters shard and gather
-//! to the same bytes on every rank, and what cannot be sharded is refused by what it lacks.
+//! to the same bytes on every rank, and what cannot be sharded is refused by what it lacks. A parameter-sharded unit
+//! can be gathered ahead of its use and placed into the parameters only where it is used.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -291,4 +292,49 @@ fn the_fit_loop_refuses_a_sharded_run_it_cannot_shard() {
     assert!(why.contains("f32 AdamW"), "another state precision: {why}");
     let replicated = fit_error(Sharding::Replicated, true, "");
     assert!(!replicated.contains("sharded training"), "a replicated run is not refused for sharding: {replicated}");
+}
+
+#[test]
+fn a_prefetched_unit_reaches_the_parameters_when_placed_or_before_its_staging_is_reused() {
+    // Parameter sharding gathers the next layer while one computes. Writing the gathered values into the layer's
+    // buffers at once would order the computing layer's work (which shares the stream) after that gather; they reach
+    // the buffers when the layer is placed, or before anything else reuses the gather's staging.
+    let world = 2;
+    let coll = HostCollective::new(world);
+    std::thread::scope(|s| {
+        for rank in 0..world {
+            let coll = Arc::clone(&coll);
+            s.spawn(move || {
+                let gpu = gpu_core::testgpu::dev(zero::KERNELS);
+                let p = params(&gpu, 1, CollectiveDtype::F32);
+                let initial: Vec<Vec<f32>> = SIZES.iter().enumerate().map(|(i, &n)| values(31 + i as u32, n)).collect();
+                let read_initial = |t: usize, offset: u64, out: &mut [f32]| -> Result<(), String> {
+                    out.copy_from_slice(&initial[t][offset as usize..offset as usize + out.len()]);
+                    Ok(())
+                };
+                let mut read = read_initial;
+                // One unit per tensor.
+                let groups: Vec<u32> = (0..SIZES.len() as u32).collect();
+                let values_of = |p: &DeviceParams| -> Vec<Vec<f32>> { p.tensors.iter().map(|t| zero::read_elems(&gpu, &t.value, 0, t.numel, CollectiveDtype::F32)).collect() };
+                let blank = |p: &DeviceParams| p.tensors.iter().for_each(|t| zero::write_elems(&gpu, &t.value, 0, &vec![0.0; t.numel as usize], CollectiveDtype::F32));
+                let handles = DeviceParams { gpu: gpu.share(), tensors: p.tensors.clone() };
+                let opt = ZeroOptimizer::new_parameter_shards(p, &groups, &*coll, rank, &mut read).unwrap();
+                blank(&handles);
+                let (a, b) = (opt.unit_of(0), opt.unit_of(2));
+                assert_eq!(a % 2, b % 2, "units 0 and 2 share a staging buffer");
+                opt.prefetch_unit(&*coll, a).unwrap();
+                opt.settle(&*coll).unwrap();
+                assert!(values_of(&handles)[0].iter().all(|&x| x == 0.0), "rank {rank}: a prefetched unit is not in the parameters before it is placed");
+                opt.place_unit(a);
+                assert_eq!(values_of(&handles)[0], initial[0], "rank {rank}: placing the unit writes its gathered values");
+                blank(&handles);
+                // The next gather into the same staging places the waiting unit first.
+                opt.prefetch_unit(&*coll, a).unwrap();
+                opt.gather_unit(&*coll, b).unwrap();
+                opt.settle(&*coll).unwrap();
+                let got = values_of(&handles);
+                assert_eq!((&got[0], &got[2]), (&initial[0], &initial[2]), "rank {rank}: reusing the staging placed the waiting unit");
+            });
+        }
+    });
 }

@@ -720,6 +720,10 @@ struct PassState {
     running: f64,
     min_multiplier: f32,
     step: u32,
+    /// The layer (its tensors) of a parameter-sharded build whose reduction was issued and not yet read: its norm and
+    /// update wait for the next layer's finish or the end of the pass, so the reduction runs under the next layer's
+    /// backward instead of holding the host (and with it every later launch) until it completes.
+    reduced: Option<Vec<usize>>,
 }
 
 impl ResidentFullFt {
@@ -1198,7 +1202,7 @@ impl ResidentFullFt {
         #[cfg(target_arch = "wasm32")]
         let step = if updating { self.state.begin_step() } else { 0 };
         if let Some(w) = &mut self.window {
-            w.pass = Some(PassState { pass, tensor_sum: vec![None; n], updated: vec![false; n], running: 0.0, min_multiplier: f32::INFINITY, step });
+            w.pass = Some(PassState { pass, tensor_sum: vec![None; n], updated: vec![false; n], running: 0.0, min_multiplier: f32::INFINITY, step, reduced: None });
         }
         self.carry.iter_mut().for_each(|c| *c = None);
     }
@@ -1276,7 +1280,9 @@ impl ResidentFullFt {
     /// `layer`'s gradients are complete (its backward has been submitted): measure them on the device, and in an
     /// updating pass apply the update right away. The layer's new stored values are visible to the next load of it;
     /// no later layer of this pass reads them. With `defer_publication` the layer's new values wait in a
-    /// [`DeferredPublish`] store and reach the host copy together, so a layer is never half updated.
+    /// [`DeferredPublish`] store and reach the host copy together, so a layer is never half updated. A
+    /// parameter-sharded build only issues the layer's reduction here and measures and updates the layer at the next
+    /// layer's finish or [`Self::finish_reductions`] (the end of the pass), so the reduction overlaps that backward.
     pub fn finish_layer(&mut self, ops: &dyn DeviceIo, layer: usize) -> io::Result<()> {
         let w = self.window.as_mut().ok_or_else(|| invalid("finish_layer: this build keeps every layer resident".into()))?;
         let mut pass = w.pass.take().ok_or_else(|| invalid("finish_layer: no pass is open (call begin_pass)".into()))?;
@@ -1291,29 +1297,11 @@ impl ResidentFullFt {
     fn finish_layer_in(&mut self, ops: &dyn DeviceIo, pass: &mut PassState, tensors: &[usize]) -> io::Result<()> {
         #[cfg(not(target_arch = "wasm32"))]
         if let (Some(sh), Some(w)) = (&mut self.sharded, &mut self.window) {
-            let local = sh.reduce_layer(ops, tensors)?;
-            // A running clip needs the group's norm of every layer as it finishes (one scalar all-reduce); the other
-            // passes sum the ranks' shares once, at the end of the pass.
-            let (sum, updating) = match pass.pass {
-                StreamPass::Measure => (local, None),
-                StreamPass::Update { lr, grad_multiplier } => (local, Some((lr, grad_multiplier))),
-                StreamPass::Running { lr, clip, extra_scale } => {
-                    let global = sh.device_sum(ops.gpu(), local)?;
-                    (global, Some((lr, optim::grad_multiplier(pass.running + global, clip, extra_scale))))
-                }
-            };
-            if let Some((lr, multiplier)) = updating {
-                sh.update_layer(tensors, lr, multiplier, self.cfg.rule)?;
-                pass.min_multiplier = pass.min_multiplier.min(multiplier);
-            }
-            for (i, &ti) in tensors.iter().enumerate() {
-                pass.tensor_sum[ti] = Some(if i == 0 { sum } else { 0.0 });
-                if updating.is_some() {
-                    pass.updated[ti] = true;
-                    w.versions[ti] += 1;
-                }
-            }
-            pass.running += sum;
+            // The previous layer's reduction ran under this layer's backward: read it now, before this layer's
+            // reduction joins the queue its scalar all-reduce would otherwise wait behind.
+            complete_sharded(sh, &mut w.versions, pass, self.cfg.rule)?;
+            sh.reduce_layer(ops, tensors)?;
+            pass.reduced = Some(tensors.to_vec());
             return Ok(());
         }
         let items: Vec<NormItem<'_>> = tensors.iter().map(|&ti| NormItem { buf: &self.grads[ti], numel: self.specs[ti].n as usize * self.specs[ti].k as usize, dtype: self.cfg.grad }).collect();
@@ -1354,8 +1342,23 @@ impl ResidentFullFt {
         Ok(())
     }
 
+    /// Read the reduction of the last finished layer of a parameter-sharded pass and apply what it decides (its norm,
+    /// and in an updating pass its update), which [`Self::finish_layer`] leaves for the next layer's finish. The end of
+    /// the pass does it; a trainer that issues other collectives after the backward calls it first, so every rank's
+    /// operations keep the layers' order. A no-op otherwise.
+    pub fn finish_reductions(&mut self) -> io::Result<()> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let (Some(sh), Some(w)) = (&mut self.sharded, &mut self.window) {
+            if let Some(pass) = w.pass.as_mut() {
+                return complete_sharded(sh, &mut w.versions, pass, self.cfg.rule);
+            }
+        }
+        Ok(())
+    }
+
     /// Close the pass opened by [`Self::begin_pass`]: every tensor of the model must have been finished.
     pub fn end_pass(&mut self) -> io::Result<PassReport> {
+        self.finish_reductions()?;
         let w = self.window.as_mut().ok_or_else(|| invalid("end_pass: this build keeps every layer resident".into()))?;
         let pass = w.pass.take().ok_or_else(|| invalid("end_pass: no pass is open".into()))?;
         let updating = !matches!(pass.pass, StreamPass::Measure);
@@ -1775,6 +1778,7 @@ pub fn adamw_step(host: &dyn ResidentBackward, ft: &RefCell<ResidentFullFt>, ops
         // A parameter-sharded rank holds the remainder whole: its gradient is the group's, summed now.
         #[cfg(not(target_arch = "wasm32"))]
         if ft.borrow().parameter_sharded() {
+            ft.borrow_mut().finish_reductions()?;
             host.flush_backward();
             let grads = host.remainder_grads().map_err(|why| invalid(format!("parameter sharding: {why}")))?;
             ft.borrow().reduce_remainder(&grads)?;
@@ -1817,6 +1821,37 @@ pub fn adamw_step(host: &dyn ResidentBackward, ft: &RefCell<ResidentFullFt>, ops
     ft.borrow_mut().update_tables(ops, lr, multiplier)?;
     host.update_remainder(args, multiplier);
     Ok(norm(sum_sq))
+}
+
+/// Read the reduction `pass` left pending on `sh` (see [`PassState::reduced`]): add the layer's norm to the pass and,
+/// in an updating pass, update its slices by the multiplier the norm so far decides and mark its stored values stale.
+#[cfg(not(target_arch = "wasm32"))]
+fn complete_sharded(sh: &mut crate::resident_shard::ShardedLayers, versions: &mut [u64], pass: &mut PassState, rule: Rule) -> io::Result<()> {
+    let Some(tensors) = pass.reduced.take() else { return Ok(()) };
+    let local = sh.layer_sum_sq(&tensors);
+    // A running clip needs the group's norm of every layer as it finishes (one scalar all-reduce); the other passes
+    // sum the ranks' shares once, at the end of the pass.
+    let (sum, updating) = match pass.pass {
+        StreamPass::Measure => (local, None),
+        StreamPass::Update { lr, grad_multiplier } => (local, Some((lr, grad_multiplier))),
+        StreamPass::Running { lr, clip, extra_scale } => {
+            let global = sh.device_sum(local)?;
+            (global, Some((lr, optim::grad_multiplier(pass.running + global, clip, extra_scale))))
+        }
+    };
+    if let Some((lr, multiplier)) = updating {
+        sh.update_layer(&tensors, lr, multiplier, rule)?;
+        pass.min_multiplier = pass.min_multiplier.min(multiplier);
+    }
+    for (i, &ti) in tensors.iter().enumerate() {
+        pass.tensor_sum[ti] = Some(if i == 0 { sum } else { 0.0 });
+        if updating.is_some() {
+            pass.updated[ti] = true;
+            versions[ti] += 1;
+        }
+    }
+    pass.running += sum;
+    Ok(())
 }
 
 fn lcm(a: u64, b: u64) -> u64 {

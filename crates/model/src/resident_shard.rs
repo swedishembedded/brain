@@ -89,6 +89,8 @@ pub(crate) struct ShardedLayers {
     reduced: Vec<bool>,
     /// The layer loaded last: the direction a prefetch follows.
     last_layer: Option<u32>,
+    /// The unit prefetched for the next load and still staged ([`ZeroOptimizer::prefetch_unit`]).
+    prefetched: Option<usize>,
     /// One word on the card the per-layer norm is summed in.
     scalar: std::sync::OnceLock<DeviceBuffer>,
     /// The first collective failure: once set, no further collective or update runs (module documentation).
@@ -113,7 +115,7 @@ impl ShardedLayers {
         let zero = ZeroOptimizer::new_parameter_shards(DeviceParams { gpu: gpu.share(), tensors }, &groups, &*group.collective, group.rank, &mut read)?;
         gpu_core::profile::stage_time("parameter sharding: read this rank's slices and build the state on the card", clock);
         let units = zero.unit_count();
-        Ok(ShardedLayers { group, zero, step: 0, scale: 1.0, reduced: vec![false; units], last_layer: None, scalar: std::sync::OnceLock::new(), failed: std::sync::OnceLock::new() })
+        Ok(ShardedLayers { group, zero, step: 0, scale: 1.0, reduced: vec![false; units], last_layer: None, prefetched: None, scalar: std::sync::OnceLock::new(), failed: std::sync::OnceLock::new() })
     }
 
     /// The group's collective failed (the first failure's cause): this rank's state is no step's result any more.
@@ -163,15 +165,25 @@ impl ShardedLayers {
     /// Gather the units of `tensors` whose slots do not hold their current values into those slots. When `tensors`
     /// is a layer and the previous load was its neighbour, the next layer in the same direction is gathered too
     /// (prefetched) where its slots are not this layer's: its collective then runs while this layer computes.
+    ///
+    /// A prefetched layer stays in its staging buffer until it is loaded (or its staging is reused): its copies into
+    /// the slots run on the model's stream, where issued at the prefetch they would hold this layer's work until the
+    /// prefetch's gather completed.
     pub(crate) fn load(&mut self, ops: &dyn DeviceIo, tensors: &[usize], slot_holds: &mut [Option<(usize, u64)>], slot_of: &[usize], versions: &[u64], by_layer: &BTreeMap<u32, Vec<usize>>) -> io::Result<()> {
         let layer = by_layer.iter().find(|(_, t)| t.as_slice() == tensors).map(|(l, _)| *l);
-        self.gather_missing(ops, tensors, slot_holds, slot_of, versions)?;
+        // The prefetched unit is placed now, whichever layer this is: its slots claim its values (`slot_holds`), and
+        // a gather into them below must land after it.
+        if let Some(u) = self.prefetched.take() {
+            ops.gpu().flush();
+            self.zero.place_unit(u);
+        }
+        self.gather_missing(ops, tensors, slot_holds, slot_of, versions, false)?;
         if let (Some(l), Some(last)) = (layer, self.last_layer) {
             let next = if last + 1 == l { l.checked_add(1) } else if l + 1 == last { l.checked_sub(1) } else { None };
             if let Some(next) = next.and_then(|n| by_layer.get(&n)) {
                 let busy: Vec<usize> = tensors.iter().map(|&t| slot_of[t]).collect();
                 if next.iter().all(|&t| !busy.contains(&slot_of[t])) {
-                    self.gather_missing(ops, next, slot_holds, slot_of, versions)?;
+                    self.gather_missing(ops, next, slot_holds, slot_of, versions, true)?;
                 }
             }
         }
@@ -181,7 +193,10 @@ impl ShardedLayers {
         Ok(())
     }
 
-    fn gather_missing(&mut self, ops: &dyn DeviceIo, tensors: &[usize], slot_holds: &mut [Option<(usize, u64)>], slot_of: &[usize], versions: &[u64]) -> io::Result<()> {
+    /// Gather the units of `tensors` whose slots do not hold their current values; `prefetch` leaves them staged
+    /// (one unit at most: the next layer) for the next [`Self::load`] to place.
+    #[allow(clippy::too_many_arguments)] // the window's bookkeeping, passed through from the build
+    fn gather_missing(&mut self, ops: &dyn DeviceIo, tensors: &[usize], slot_holds: &mut [Option<(usize, u64)>], slot_of: &[usize], versions: &[u64], prefetch: bool) -> io::Result<()> {
         let mut units: Vec<usize> = tensors.iter().filter(|&&ti| slot_holds[slot_of[ti]] != Some((ti, versions[ti]))).map(|&ti| self.zero.unit_of(ti)).collect();
         units.dedup();
         if units.is_empty() {
@@ -192,8 +207,14 @@ impl ShardedLayers {
         // the gather's copies are ordered after it.
         ops.gpu().flush();
         let coll = &*self.group.collective;
+        let staged = prefetch && units.len() == 1;
         for u in units {
-            self.checked(self.zero.gather_unit(coll, u))?;
+            if staged {
+                self.checked(self.zero.prefetch_unit(coll, u))?;
+                self.prefetched = Some(u);
+            } else {
+                self.checked(self.zero.gather_unit(coll, u))?;
+            }
             for ti in (0..slot_of.len()).filter(|&ti| self.zero.unit_of(ti) == u) {
                 slot_holds[slot_of[ti]] = Some((ti, versions[ti]));
             }
@@ -201,12 +222,16 @@ impl ShardedLayers {
         Ok(())
     }
 
-    /// Reduce the unit of `tensors` to its owners; this rank's sum of squares of its slice.
-    pub(crate) fn reduce_layer(&mut self, ops: &dyn DeviceIo, tensors: &[usize]) -> io::Result<f64> {
-        let Some(&first) = tensors.first() else { return Ok(0.0) };
-        let u = self.zero.unit_of(first);
-        self.reduce(ops, u)?;
-        Ok(self.zero.unit_sum_sq(u))
+    /// Issue the reduction of the unit of `tensors` to its owners. On the card it is stream-ordered: nothing here waits
+    /// for it, so it runs under whatever the trainer issues next. [`Self::layer_sum_sq`] reads its result.
+    pub(crate) fn reduce_layer(&mut self, ops: &dyn DeviceIo, tensors: &[usize]) -> io::Result<()> {
+        let Some(&first) = tensors.first() else { return Ok(()) };
+        self.reduce(ops, self.zero.unit_of(first))
+    }
+
+    /// This rank's sum of squares of its slice of the (reduced) unit of `tensors`: waits for the reduction.
+    pub(crate) fn layer_sum_sq(&self, tensors: &[usize]) -> f64 {
+        tensors.first().map_or(0.0, |&first| self.zero.unit_sum_sq(self.zero.unit_of(first)))
     }
 
     /// Update the (reduced) unit of `tensors` with every gradient multiplied by `multiplier`.
@@ -218,9 +243,10 @@ impl ShardedLayers {
 
     /// The group's sum of `local` over its ranks on the device collective (a scalar all-reduce of microseconds there;
     /// through the transport's payload op where the group has no device path): what a running clip needs per layer.
-    pub(crate) fn device_sum(&self, gpu: &Gpu, local: f64) -> io::Result<f64> {
+    pub(crate) fn device_sum(&self, local: f64) -> io::Result<f64> {
         self.healthy()?;
         let coll = &*self.group.collective;
+        let gpu = self.zero.gpu();
         let buf = self.scalar.get_or_init(|| gpu.storage(1));
         gpu.write_f32(buf, &[local as f32]);
         if self.checked(pollster::block_on(coll.all_reduce_device(self.group.rank, gpu, &[(buf, 1)], CollectiveDtype::F32, 1.0)))? {

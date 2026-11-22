@@ -29,6 +29,8 @@ pub struct DeviceGradNorm {
     part_bf16: usize,
     parts: DeviceBuffer,
     capacity: u32,
+    /// The uniform of [`Self::issue`]'s dispatch: kept, so issuing allocates (and frees) nothing.
+    issued: DeviceBuffer,
 }
 
 /// Partials one reduction can hold before it is split into rounds.
@@ -38,7 +40,13 @@ impl DeviceGradNorm {
     /// Resolve the kernels on `gpu`; an error names the missing one.
     pub fn new(gpu: &Gpu) -> Result<DeviceGradNorm, String> {
         let find = |n: &str| gpu.kernel_index(n).ok_or_else(|| format!("device gradient norm: kernel '{n}' is not registered on this device"));
-        Ok(DeviceGradNorm { part_f32: find("gradnorm_part")?, part_bf16: find("gradnorm_part_bf16")?, parts: gpu.storage(u64::from(PARTS_CAPACITY)), capacity: PARTS_CAPACITY })
+        Ok(DeviceGradNorm {
+            part_f32: find("gradnorm_part")?,
+            part_bf16: find("gradnorm_part_bf16")?,
+            parts: gpu.storage(u64::from(PARTS_CAPACITY)),
+            capacity: PARTS_CAPACITY,
+            issued: gpu.uniform_dynamic(3),
+        })
     }
 
     /// The sum of squares of each item, in the order given (f64 sums of the device's f32 partials). Items are
@@ -68,15 +76,38 @@ impl DeviceGradNorm {
         self.sum_sq_each(gpu, items).iter().sum()
     }
 
+    /// Issue the reduction of one `item` without waiting for it: its partials land in this reduction's buffer, where
+    /// [`Self::collect`] reads them (the same arithmetic as [`Self::sum_sq`] of that item alone). Any other use of
+    /// this reduction in between overwrites them. Returns the partials' count, which `collect` takes.
+    pub fn issue(&self, gpu: &Gpu, item: NormItem<'_>) -> u32 {
+        let nwg = paramstore::gradnorm_parts(item.numel);
+        assert!(nwg <= self.capacity, "one item's {nwg} partials exceed the reduction's {}", self.capacity);
+        gpu.write(&self.issued, &[item.numel as u32, 0, nwg]);
+        gpu.submit(&[], &[gpu.step_buf(self.kernel(&item), &self.issued, &[item.buf, &self.parts], nwg * 64)]);
+        nwg
+    }
+
+    fn kernel(&self, item: &NormItem<'_>) -> usize {
+        assert!(item.dtype == GradDtype::F32 || item.numel.is_multiple_of(2), "a bf16 gradient has an even element count (got {})", item.numel);
+        if item.dtype == GradDtype::Bf16 {
+            self.part_bf16
+        } else {
+            self.part_f32
+        }
+    }
+
+    /// The sum of squares [`Self::issue`] started (`parts` partials): waits for it.
+    pub fn collect(&self, gpu: &Gpu, parts: u32) -> f64 {
+        gpu.read(&self.parts, parts as usize).iter().map(|&p| f64::from(p)).sum::<f64>()
+    }
+
     fn reduce_round(&self, gpu: &Gpu, round: &[(NormItem<'_>, u32, u32)], used: u32, out: &mut Vec<f64>) {
         let mut uniforms = Vec::with_capacity(round.len());
         let mut steps = Vec::with_capacity(round.len());
         for (item, off, nwg) in round {
-            assert!(item.dtype == GradDtype::F32 || item.numel.is_multiple_of(2), "a bf16 gradient has an even element count (got {})", item.numel);
-            let kernel = if item.dtype == GradDtype::Bf16 { self.part_bf16 } else { self.part_f32 };
             let ub = gpu.uniform_dynamic(3);
             gpu.write(&ub, &[item.numel as u32, *off, *nwg]);
-            steps.push(gpu.step_buf(kernel, &ub, &[item.buf, &self.parts], nwg * 64));
+            steps.push(gpu.step_buf(self.kernel(item), &ub, &[item.buf, &self.parts], nwg * 64));
             uniforms.push(ub);
         }
         gpu.submit(&[], &steps);

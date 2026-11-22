@@ -657,6 +657,30 @@ Scope: Running one training job as ranks across machines, and serving one model 
   29 s: 80k cuMemAlloc/cuMemFree calls, each free waiting for the device,
   took 85-95% of the host's time (knowledge 311's mechanism).
 
+- **Communication overlap of the parameter-sharded (ZeRO-3) step, 4 GH200s of
+  n442 (2026-11-22, brain 3996c12d7 = before, this change = after;
+  Qwen3.8-27B-FP8's first 16 layers, block 1024, window 2, running clip,
+  `measure_sharded_parameters_rank`, nsys on rank 0 over 3 steady steps; exposed
+  = NCCL kernel time not covered by any compute or copy on the card, E = 1 -
+  exposed / NCCL busy).** Before: 0.80 s a step, NCCL busy 0.19 s a step,
+  exposed 8.2-8.7% of the step (E 0.51-0.52); every layer's reduce-scatter was
+  wholly exposed (1.9 ms of 1.9 ms), because the layer's finish read its slice's
+  norm back on the host (waiting for the reduce-scatter) before the next layer's
+  backward was issued. After (three runs): 0.77 s, exposed 4.9-5.5% (E
+  0.73-0.75), a layer's reduce-scatter 0.65 ms exposed of 2.4 ms. What is left
+  is the step boundary (the two vocabulary tables' reduce-scatters, 6 ms each,
+  and their gathers before the forward: nothing computes there), the last
+  layer's reduction, and the scalar all-reduce of the running clip waiting for
+  the slowest rank. With NCCL forced onto the NIC (`NCCL_P2P_DISABLE=1
+  NCCL_SHM_DISABLE=1`, one node's Slingshot loopback, about the bandwidth of the
+  two-node runs), block 4096, the deferred read alone: 3.35 -> 3.02 s, exposed 30.5% -> 21.8% (E 0.33 ->
+  0.58); the rest is the forward (its gathers take 25 ms a layer against 9 ms
+  of compute) and the tables, which no reordering hides at that bandwidth. The
+  NIC-loopback step times vary run to run by up to 10% (steady inside a run),
+  so only paired runs under nsys are compared. Repeated runs of one binary do
+  not reproduce the norms bit for bit on the cards (third significant digit of
+  the loss after 4 steps), before and after this change alike.
+
 - **`brain finetune`, parameter-sharded full fine-tune of Qwen3.8-27B-FP8
   end to end, 8 GH200s on n442+n467 (2026-11-22, brain 59d739e70 plus the
   bounded collectives, NCCL 2.32.3 over the libfabric plugin with
@@ -1049,6 +1073,26 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         as a qwen3 checkpoint within bf16 rounding of the single-rank run).
         End to end on cards (2026-11-22): `brain finetune` of Qwen3-4B over
         2 GH200s trains, exports and the export generates (Measured).
+        Overlap (2026-11-22): a layer's finish only issues its reduce-scatter
+        (and its norm behind it on the card); the norm read, the running
+        clip's scalar all-reduce and the owner's update come at the next
+        layer's finish, after that layer's backward is issued, or at
+        `ResidentFullFt::finish_reductions` (the end of the pass); a prefetched
+        layer stays in its staging buffer until it is loaded
+        (`ZeroOptimizer::prefetch_unit` / `place_unit`), so its copies into the
+        slots no longer hold the computing layer behind the gather. Same
+        arithmetic and collective order (a step's bytes unchanged), same
+        failure semantics (the device fault test passes). Exposed
+        communication at 4 ranks 8.5% -> 5% of the step (Measured). Tests:
+        `resident_shard`
+        `a_layers_reduction_is_read_only_after_the_next_layers_backward_is_issued`,
+        `zero_shard`
+        `a_prefetched_unit_reaches_the_parameters_when_placed_or_before_its_staging_is_reused`,
+        `device_gradnorm` (an issued norm collects to the waiting form's bits).
+        Open: the tables' reductions and gathers at the step boundary (the
+        head's gradient is complete after the first segment but its update
+        needs the step's final multiplier); the forward's gathers when the
+        network is slower than the forward computes.
       - [x] The 27B gate (2026-11-21): a full-parameter fine-tune step of
         Qwen3.8-27B-FP8 (all 64 layers, bf16 values from the FP8 checkpoint,
         f32 master and AdamW state) parameter-sharded over 8 GH200s on two

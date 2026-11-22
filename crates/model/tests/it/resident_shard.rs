@@ -10,11 +10,12 @@
 //! reduce-scattered and updated by its owners once its gradient is complete, follows the single-rank layer-streamed
 //! run (every rank given the same batch, so the group's mean gradient is that batch's) within the rounding of the
 //! sharded update, with no clip, the two-pass global clip and the single-pass running clip, with a window of one or
-//! two layers (the second prefetches), and every rank sees the same losses bit for bit. What
+//! two layers (the second prefetches), and every rank sees the same losses bit for bit. Finishing a layer issues its
+//! reduction and nothing that reads it, so on the card the reduction runs under the next layer's backward. What
 //! the sharded build does not run is refused by name.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use data::rng::Lcg;
 use gpu_core::provider::library::GemmPrecision;
@@ -23,6 +24,7 @@ use model::memplan::{Authorized, Capacity};
 use model::ops::{training_kernel_list, GradDtype, Ops, Weight};
 use model::resident_ft::{ClipPass, LayerWindow, ResidentBudget, ResidentFtConfig, ResidentFullFt, ResidentSpec, ResidentValue, StreamPass};
 use model::zero::ShardGroup;
+use model::collective::{CollectiveFuture, Payload};
 use model::{Collective, HostCollective};
 use optim::rule::Rule;
 use optim::Adam;
@@ -100,6 +102,11 @@ fn forward(ops: &Ops, w: &Weight, x: &DeviceBuffer, y: &DeviceBuffer) {
 /// One layer-streamed step (the protocol a model drives): load each layer in the forward, then per backward pass
 /// load, backward and finish each layer in reverse. Returns the loss before the update.
 fn step(ops: &Ops, ft: &mut ResidentFullFt, task: &Task, clip: Option<f32>, running: bool) -> f64 {
+    step_marked(ops, ft, task, clip, running, &|_| {})
+}
+
+/// [`step`], calling `mark(event)` before each layer's finish and before each pass's end.
+fn step_marked(ops: &Ops, ft: &mut ResidentFullFt, task: &Task, clip: Option<f32>, running: bool, mark: &dyn Fn(String)) -> f64 {
     let g = ops.gpu();
     let mut x = upload(ops, &task.x);
     let mut inputs = Vec::new();
@@ -129,9 +136,11 @@ fn step(ops: &Ops, ft: &mut ResidentFullFt, task: &Task, clip: Option<f32>, runn
             ft.weight_grad(ops, &mut s, 2 * l, &inputs[2 * l], &dh, M as u32);
             g.submit(&[], &s);
             g.flush();
+            mark(format!("finish {l}"));
             ft.finish_layer(ops, l).unwrap();
             dy = dx;
         }
+        mark("end".into());
         ft.end_pass().unwrap()
     };
     match clip {
@@ -206,4 +215,73 @@ fn what_the_sharded_build_does_not_run_is_refused() {
     assert!(ResidentFullFt::new(&ops, f32_grads, specs(), &task.init, &roomy()).err().unwrap().contains("bf16 gradients"));
     let mut ft = ResidentFullFt::new(&ops, config(group(), 1), specs(), &task.init, &roomy()).unwrap();
     assert!(ft.read_master(&ops, 0).unwrap_err().to_string().contains("this rank's slices"));
+}
+
+/// The host transport, logging every operation a rank makes (and the markers the test adds) in order.
+struct Logged {
+    inner: Arc<dyn Collective>,
+    log: Mutex<Vec<Vec<String>>>,
+}
+
+impl Logged {
+    fn note(&self, rank: usize, what: impl Into<String>) {
+        self.log.lock().unwrap()[rank].push(what.into());
+    }
+}
+
+impl Collective for Logged {
+    fn world_size(&self) -> usize {
+        self.inner.world_size()
+    }
+    fn all_reduce<'a>(&'a self, rank: usize, local: Payload) -> CollectiveFuture<'a, Payload> {
+        self.note(rank, "all-reduce");
+        self.inner.all_reduce(rank, local)
+    }
+    fn all_gather<'a>(&'a self, rank: usize, local: Payload) -> CollectiveFuture<'a, Payload> {
+        self.note(rank, "all-gather");
+        self.inner.all_gather(rank, local)
+    }
+    fn reduce_scatter<'a>(&'a self, rank: usize, local: Payload) -> CollectiveFuture<'a, Payload> {
+        self.note(rank, "reduce-scatter");
+        self.inner.reduce_scatter(rank, local)
+    }
+    fn broadcast<'a>(&'a self, rank: usize, local: Payload, root: usize) -> CollectiveFuture<'a, Payload> {
+        self.note(rank, "broadcast");
+        self.inner.broadcast(rank, local, root)
+    }
+}
+
+#[test]
+fn a_layers_reduction_is_read_only_after_the_next_layers_backward_is_issued() {
+    // The running clip reads each layer's group norm (one scalar all-reduce) before it updates the layer. Read in the
+    // layer's own finish, that read waits for the layer's reduction on the card while nothing else is queued: the
+    // reduction is exposed. Finishing a layer therefore issues its reduction only; the norm, the update and their
+    // scalar all-reduce come at the next layer's finish (after its backward was issued) or at the end of the pass.
+    let task = task();
+    let world = 2;
+    let logged = Arc::new(Logged { inner: HostCollective::new(world), log: Mutex::new(vec![Vec::new(); world]) });
+    std::thread::scope(|s| {
+        for rank in 0..world {
+            let logged = Arc::clone(&logged);
+            let task = &task;
+            s.spawn(move || {
+                let ops = ops();
+                let coll: Arc<dyn Collective> = logged.clone();
+                let mut ft = ResidentFullFt::new(&ops, config(Some(ShardGroup { collective: coll, rank }), 2), specs(), &task.init, &roomy()).unwrap();
+                ft.set_shard_weight(1.0 / world as f32).unwrap();
+                logged.note(rank, "step");
+                step_marked(&ops, &mut ft, task, Some(1e-2), true, &|m| logged.note(rank, m));
+            });
+        }
+    });
+    let log = logged.log.lock().unwrap();
+    // The loads' gathers (the window prefetches) are not what this is about.
+    let backward: Vec<String> = log[0].iter().skip_while(|e| !e.starts_with("finish")).filter(|e| *e != "all-gather").cloned().collect();
+    let mut want = vec![format!("finish {}", LAYERS - 1), "reduce-scatter".into()];
+    for l in (0..LAYERS - 1).rev() {
+        want.extend([format!("finish {l}"), "all-reduce".into(), "reduce-scatter".into()]);
+    }
+    want.extend(["end".into(), "all-reduce".into()]);
+    assert_eq!(backward, want, "rank 0's backward");
+    assert_eq!(log[0], log[1], "the ranks issue the same operations");
 }
