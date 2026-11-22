@@ -9,10 +9,13 @@
 //! tensor in `hf_quant_config.json`'s `parameter_groups`) load into one resident [`MicroBank`] per projection through
 //! per-expert views, in their stored encoding:
 //! - an MXFP8 bank (E4M3 elements, U8-stored E8M0 scale per 32) whose gather and grouped products equal the f64
-//!   product of the decoded weights and agree with each other to the bit;
+//!   product of the decoded weights and agree with each other to the bit where both run the WGSL tier;
 //! - an NVFP4 bank whose per-expert second level is the release's `amax / outer_scale_denominator`, folded once at
 //!   open, carried into the bank's `global`, whose gather and grouped products likewise equal the decoded product and
-//!   agree with each other to the bit.
+//!   agree with each other to the bit on the WGSL tier.
+//!
+//! A product a native kernel serves (`gpu_core::native_upgrade`: on a CUDA device both NVFP4 products go to native
+//! twins that sum in other orders) is held to the decoded product alone, as `gpu-core`'s `moe_nvfp4` gate holds them.
 
 use checkpoint::packed::{BoundedWorkspace, CodecRegistry, MemoryBudget, PackedReader, PackedSource, PackedTensorReader, SlicedReader, Tile, TileBuf};
 use data::rng::Lcg;
@@ -104,6 +107,17 @@ fn route(ids: &[u32]) -> (Vec<u32>, Vec<u32>) {
     (slots.into_iter().chain(tiles).collect(), perm)
 }
 
+/// Whether a native kernel serves `bank`'s gather or grouped product for these slots: then the two are not one order
+/// of arithmetic.
+fn native_product(ops: &Ops, bank: &MicroBank, ids: &[u32], xdiv: u32) -> bool {
+    let g = ops.gpu();
+    let fmt = if bank.kind == MicroScaled::Nvfp4 { "nvfp4" } else { "mxfp8" };
+    let slots = ids.len() as u32;
+    let tiles = E as u32 + slots.div_ceil(MICRO_GROUPED_SLOTS);
+    let native = |op: &str, params: &[u32]| g.kernel_index(&format!("moe_{fmt}_{op}")).and_then(|i| g.native_kernel_for(i, params)).is_some();
+    native("gemv_gather", &[slots, bank.k, bank.n, xdiv]) || native("grouped", &[tiles, bank.k, bank.n, xdiv, E as u32])
+}
+
 fn products(ops: &Ops, bank: &MicroBank, x: &[f32], ids: &[u32], xdiv: u32) -> (Vec<f32>, Vec<f32>) {
     let g = ops.gpu();
     let slots = ids.len() as u32;
@@ -158,15 +172,23 @@ fn stacked_expert_projections_load_into_banks_and_multiply_as_decoded() {
     let mx = bank(&ops, &dir, "mx_weight");
     assert_eq!((mx.kind, mx.blocks, mx.n, mx.k), (MicroScaled::Mxfp8E4m3, E as u32, N as u32, K as u32));
     let (gather, grouped) = products(&ops, &mx, &x, &ids, xdiv as u32);
-    check("mxfp8 gather", &gather, &decoded(&reader, "mx_weight"), &x, &ids, xdiv);
-    assert_eq!(gather.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), grouped.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), "grouped is the gather's arithmetic");
+    let want = decoded(&reader, "mx_weight");
+    check("mxfp8 gather", &gather, &want, &x, &ids, xdiv);
+    check("mxfp8 grouped", &grouped, &want, &x, &ids, xdiv);
+    if !native_product(&ops, &mx, &ids, xdiv as u32) {
+        assert_eq!(gather.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), grouped.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), "grouped is the gather's arithmetic");
+    }
 
     let nv = bank(&ops, &dir, "nv_weight");
     assert_eq!(nv.kind, MicroScaled::Nvfp4);
     let got: Vec<u32> = ops.gpu().read(&nv.global, E).iter().map(|v| v.to_bits()).collect();
     assert_eq!(got, globals.map(f32::to_bits), "each expert's global is its amax over the denominator, folded once");
     let (gather, grouped) = products(&ops, &nv, &x, &ids, xdiv as u32);
-    check("nvfp4 gather", &gather, &decoded(&reader, "nv_weight"), &x, &ids, xdiv);
-    assert_eq!(gather.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), grouped.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), "nvfp4 grouped is the gather's arithmetic");
+    let want = decoded(&reader, "nv_weight");
+    check("nvfp4 gather", &gather, &want, &x, &ids, xdiv);
+    check("nvfp4 grouped", &grouped, &want, &x, &ids, xdiv);
+    if !native_product(&ops, &nv, &ids, xdiv as u32) {
+        assert_eq!(gather.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), grouped.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), "nvfp4 grouped is the gather's arithmetic");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
