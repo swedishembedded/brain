@@ -8,6 +8,7 @@
 //! Spec: the training build computes the inference forward's function and learns.
 
 use inkling2::train::{init_weights, tiny_config, Inkling2Train};
+use model::serve::PagedDecoder;
 use model::Model;
 
 fn batch(b: usize, t: usize, vocab: u32) -> (Vec<u32>, Vec<u32>) {
@@ -50,7 +51,9 @@ fn the_training_forward_reproduces_the_reference_logits_and_its_loss() {
     let gold: std::collections::HashMap<String, Vec<f32>> = checkpoint::safetensors::read(&dir.join("golden.safetensors").to_string_lossy()).unwrap().into_iter().map(|t| (t.name, t.data)).collect();
     let tokens: Vec<u32> = gold["tokens"].iter().map(|&v| v as u32).collect();
     let t = tokens.len();
-    let m = Inkling2Train::from_dir(&dir.join("checkpoint"), 1, t as u32).unwrap();
+    let mut m = Inkling2Train::from_dir(&dir.join("checkpoint"), 1, t as u32).unwrap();
+    // The reference is held to the exact products (a checkpoint build defaults to the device's tensor cores).
+    m.set_gemm_precision(gpu_core::provider::library::GemmPrecision::Fp32Reference);
     let cfg = m.config().clone();
     let logits = m.logits(&tokens).unwrap();
     let valid = cfg.valid_vocab as usize;
@@ -240,11 +243,18 @@ fn the_serving_engine_serves_what_the_trainer_trains() {
     }
     let ckpt = dir.join("checkpoint");
     let tokens: Vec<u32> = vec![3, 17, 5, 40, 9, 22, 61, 8, 12];
-    let trainer = Inkling2Train::from_dir(&ckpt, 1, tokens.len() as u32).unwrap();
+    let mut trainer = Inkling2Train::from_dir(&ckpt, 1, tokens.len() as u32).unwrap();
+    // Both sides at the exact products: the device's default arithmetic rounds the two recipes' products differently.
+    trainer.set_gemm_precision(gpu_core::provider::library::GemmPrecision::Fp32Reference);
     let want = trainer.logits(&tokens).unwrap();
     let valid = trainer.config().valid_vocab as usize;
     let tiers = model::ops::TierPolicy::uniform(gpu_core::select::Dtype::F32);
-    let mut engine = inkling2::finetune::Inkling2Trainer::serving_engine(&ckpt, &tiers, None, tokens.len() as u32).expect("the family serves").unwrap();
+    let served = inkling2::finetune::Inkling2Trainer::serving_engine(&ckpt, &tiers, None, tokens.len() as u32).expect("the family serves");
+    assert!(served.is_ok(), "the family's serving engine opens the checkpoint");
+    drop(served);
+    let sizing = model::serve::visit_state::VisitPoolSizing { block_size: 16, num_blocks: tokens.len().div_ceil(16) as u32 + 1, live_rows: 1, snapshot_rows: 0, undo_rows: false };
+    let options = inkling2::serve::EngineOptions { kv_tier: model::kv_tier::KvTier::F32, sizing, max_seq_len: tokens.len(), prefill_chunk: tokens.len() as u32 };
+    let mut engine = inkling2::serve::Engine::open(crate::tiny_parity::ops(), &ckpt, options).unwrap();
     let positions: Vec<usize> = (0..tokens.len()).collect();
     for (p, hidden) in engine.hidden_at(&tokens, &positions).into_iter().enumerate() {
         let got = engine.logits(&hidden);

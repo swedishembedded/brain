@@ -58,7 +58,9 @@ fn trained_adapter(dir: &Path, seed: u64, seq: u32, out: &Path) -> Inkling2Train
 fn trained_adapter_over(dir: &Path, targets: &[&str], seed: u64, seq: u32, out: &Path) -> Inkling2Train {
     let lora = LoraCfg::new(RANK, 4.0, targets.iter().map(|s| s.to_string()).collect());
     let base = model::ops::TierPolicy::uniform(gpu_core::select::Dtype::F32);
-    let t = Inkling2Train::from_dir_lora(dir, lora, &BuildOptions { batch: 1, seq, base: &base, seed, continue_from: None }).expect("a LoRA build over the release");
+    let mut t = Inkling2Train::from_dir_lora(dir, lora, &BuildOptions { batch: 1, seq, base: &base, seed, continue_from: None }).expect("a LoRA build over the release");
+    // The engine runs the exact products (`tiny_parity::ops`); so does the trainer, on every device.
+    t.set_gemm_precision(gpu_core::provider::library::GemmPrecision::Fp32Reference);
     let mut rng = data::rng::Lcg::new(seed);
     // Factors of a size training reaches: every site of every layer moves the logits well past the comparison's
     // tolerance, without driving the looped stack where f32 rounding differences between the two recipes grow.
