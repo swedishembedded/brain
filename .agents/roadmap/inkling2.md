@@ -885,6 +885,13 @@ The first trainable target needs no streaming: the base is about 19.5 GB.
     training forward allocates per stage and syncs on the host once per MoE call (the compacted routing reads the
     gate) - no recorded tape, no CUDA run; `export_checkpoint` refuses to fold an adapter (its expert pairs correct
     quantized banks).
+  - Done (2026-11-22): the training suites on CUDA (one GH200, `BRAIN_BACKEND=cuda`): `inkling2` it `training`,
+    `vision_train`, `image_text`, `real_lora` 18/18; `gradcheck` it `inkling2_fd` 3/3; rl `conformance`
+    `inkling2_conforms`; `grpo_inkling2` 2/2. Defect fixed: every training build ran the device's default arithmetic
+    (`GemmPrecision::Auto`: bf16/TF32 tensor-core products), so on CUDA the finite-difference checks, conformance, the
+    bf16-vs-rounded-f32 and packed-row equalities failed (analytic vs central differences off by up to 4x). A build over
+    in-memory tensors (`Model::new`, `from_tensors`, `load`: the tiny configurations every check trains) now pins
+    `GemmPrecision::Fp32Reference`, as ouro's `Model::new` does; a build over a checkpoint directory keeps `Auto`.
 - **I4.4** `model::train` + `data`: packed rows with document-boundary resets of
   attention, every conv state and the relative-position origin. Gate: no supervision or
   state crosses a boundary.

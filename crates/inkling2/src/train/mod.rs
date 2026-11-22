@@ -41,6 +41,7 @@ use std::sync::Arc;
 
 use checkpoint::packed::{BoundedWorkspace, MemoryBudget, QuantEncoding};
 use checkpoint::TensorSource;
+use gpu_core::provider::library::GemmPrecision;
 use gpu_core::select::Dtype;
 use gpu_core::{DeviceBuffer, Gpu};
 use model::adapter::device::{lora_names, LoraCfg};
@@ -324,7 +325,7 @@ impl Inkling2Train {
                 micro.len()
             ));
         }
-        Inkling2Train::build(tc, &src, &[], b, t, None)
+        Inkling2Train::build(tc, &src, &[], b, t, None, GemmPrecision::Auto)
     }
 
     /// A LoRA build over the checkpoint directory `dir`: the base frozen as published (`opts.base` names the linears'
@@ -351,14 +352,15 @@ impl Inkling2Train {
             Some(map) => map,
             None => &src,
         };
-        Inkling2Train::build_with(tc, &src, init, &micro, opts.batch, opts.seq, Some((opts.base, opts.seed)))
+        Inkling2Train::build_with(tc, &src, init, &micro, opts.batch, opts.seq, Some((opts.base, opts.seed)), GemmPrecision::Auto)
     }
 
     /// A build over in-memory f32 tensors in the published names (`init`): a full fine-tune, or a LoRA build when
-    /// `tc` carries an adapter (its tensors drawn from `seed` unless `init` holds them).
+    /// `tc` carries an adapter (its tensors drawn from `seed` unless `init` holds them). Its products run the exact fp32
+    /// reference tier ([`GemmPrecision::Fp32Reference`]) on every device.
     pub fn from_tensors(tc: TrainConfig, init: &HashMap<String, Vec<f32>>, b: u32, t: u32, base: &TierPolicy, seed: u64) -> Result<Inkling2Train, String> {
         let lora = tc.lora.is_some();
-        let mut m = Inkling2Train::build(tc, init, &[], b, t, lora.then_some((base, seed)))?;
+        let mut m = Inkling2Train::build(tc, init, &[], b, t, lora.then_some((base, seed)), GemmPrecision::Fp32Reference)?;
         if lora {
             let names: Vec<String> = names::text_manifest(&m.tc.cfg).into_iter().map(|e| e.name).collect();
             m.host_base = Some(names.into_iter().filter_map(|n| init.get(&n).map(|v| (n, v.clone()))).collect());
@@ -379,17 +381,21 @@ impl Inkling2Train {
                 // The adapter's tensors are in the file: no draw happens, so the seed is never read.
                 Inkling2Train::from_tensors(tc, &tensors, b, t, &TierPolicy::uniform(Dtype::F32), u64::MAX)
             }
-            None => Inkling2Train::build(TrainConfig::from_value(header)?, &tensors, &[], b, t, None),
+            None => Inkling2Train::build(TrainConfig::from_value(header)?, &tensors, &[], b, t, None, GemmPrecision::Fp32Reference),
         }
     }
 
-    fn build(tc: TrainConfig, src: &dyn TensorSource, micro: &[String], b: u32, t: u32, lora: Option<(&TierPolicy, u64)>) -> Result<Inkling2Train, String> {
-        Inkling2Train::build_with(tc, src, src, micro, b, t, lora)
+    fn build(tc: TrainConfig, src: &dyn TensorSource, micro: &[String], b: u32, t: u32, lora: Option<(&TierPolicy, u64)>, gemm: GemmPrecision) -> Result<Inkling2Train, String> {
+        Inkling2Train::build_with(tc, src, src, micro, b, t, lora, gemm)
     }
 
     /// [`Self::build`] with the adapter's starting tensors read from `adapter_src` (where it holds them).
+    ///
+    /// `gemm` is the arithmetic of the dense products: a build over in-memory tensors (the tiny configurations the
+    /// gradient checks, conformance and parity tests train) pins the exact fp32 reference tier those checks are stated
+    /// against, a build over a checkpoint directory takes the device's tensor cores ([`GemmPrecision::Auto`]).
     #[allow(clippy::too_many_arguments)]
-    fn build_with(tc: TrainConfig, src: &dyn TensorSource, adapter_src: &dyn TensorSource, micro: &[String], b: u32, t: u32, lora: Option<(&TierPolicy, u64)>) -> Result<Inkling2Train, String> {
+    fn build_with(tc: TrainConfig, src: &dyn TensorSource, adapter_src: &dyn TensorSource, micro: &[String], b: u32, t: u32, lora: Option<(&TierPolicy, u64)>, gemm: GemmPrecision) -> Result<Inkling2Train, String> {
         let cfg = tc.cfg.clone();
         if b == 0 || t == 0 {
             return Err("inkling2: a training batch needs rows and tokens".into());
@@ -405,7 +411,8 @@ impl Inkling2Train {
             LIST.get_or_init(|| Box::leak(kernels().into_boxed_slice()))
         };
         let gpu = Gpu::new(static_list);
-        let ops = Ops::new(gpu.share())?;
+        let mut ops = Ops::new(gpu.share())?;
+        ops.set_gemm_precision(gemm);
         let k = recipe::Kernels::resolve(&gpu)?;
         let need = |name: &str| gpu.kernel_index(name).ok_or_else(|| format!("inkling2: kernel {name} is not registered"));
         let opt = Optim::new(need("adamw")?, need("gradnorm_sq")?, need("grad_scale")?, need("clip_coef")?, need("grad_scale_buf")?);
