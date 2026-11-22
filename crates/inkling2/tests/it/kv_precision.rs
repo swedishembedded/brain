@@ -151,7 +151,7 @@ fn the_bf16_tier_stays_within_its_measured_spread_of_f32_on_the_released_weights
     let narrow: Vec<Vec<f32>> = seqs.iter().flat_map(|s| served_rows(&mut bf16, s)).collect();
     let s = spread(&reference, &narrow);
     eprintln!("released weights, bf16 K/V vs f32 over {} positions: {s:?}", reference.len());
-    // Measured 2026-11-22 (CPU, 97 positions): mean KL 1.4e-3 nats, max 2.0e-2, top-1 100%.
+    // Measured 2026-11-22 (CPU, 97 positions): mean KL 1.4e-3 nats, max 2.0e-2, top-1 agreement 1.0.
     assert!(s.mean_kl < 3e-3 && s.max_kl < 5e-2, "{s:?}");
     assert!(s.top1 >= 0.95, "{s:?}");
 }
