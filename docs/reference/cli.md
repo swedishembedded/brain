@@ -178,7 +178,16 @@ training curve and the selected step.
 of `--continue FILE`; `adapter:FILE` is another adapter on the same base. A setting that an objective does not read
 (`--loss` beside `feedback`, `--weight-decay` beside `distill`) is a usage error that names it, never ignored.
 
+A full fine-tune chooses how it stores what it trains with `--train-precision SPEC` (one model-agnostic value, see
+`docs/guides/training/optimizer-state.md`). A run whose linears are held resident in a narrower encoding
+(`weights=bf16|fp8|...`, optionally streamed through `window=N` layers) keeps their f32 master copy and optimizer
+moments off the card, in host memory by default; `--optimizer-state-dir DIR` keeps them in the file
+`DIR/optimizer.state` instead (`DIR` is created; the file must not exist yet), about 12 bytes per streamed parameter
+with an f32 master and AdamW. Put it on a fast local disk. Without `weights=` the flag is refused by name.
+
 ```bash
+brain finetune thinkingmachines/Inkling-2-Mini --train-precision weights=bf16,window=1 \
+    --optimizer-state-dir /local/scratch/run-state --dataset chat.jsonl --out runs/full
 brain finetune Qwen/Qwen3-4B --lora 16 --objective preference --loss simpo --gamma 0.5 \
     --dataset pairs.jsonl --held-out held_out_pairs.jsonl --out runs/prefs
 brain finetune Qwen/Qwen3-4B --lora 16 --objective feedback --dataset judged.jsonl --out runs/kto

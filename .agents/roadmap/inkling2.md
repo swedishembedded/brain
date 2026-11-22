@@ -1172,8 +1172,8 @@ The first trainable target needs no streaming: the base is about 19.5 GB.
   (`cargo test -p brain-inkling2 --test it -- --ignored real_full_ft`).
 - Left (I6): the step is host-bound - measure the update / load / carry split (`ResidentFullFt::host_times`) and
   overlap the next layer's load with the current visit (window=2 needs 8 GB more on the card); the fit loop (CLI
-  `--train-precision weights=bf16,window=1`) keeps the state in memory (about 300 GB of host RAM): no CLI key for
-  `state_dir` yet; ZeRO across cards cannot carry revisited layers or widened slots (refused by name); the full
+  `--train-precision weights=bf16,window=1`) keeps the state in memory (about 300 GB of host RAM) unless
+  `--optimizer-state-dir DIR` (`TrainPrecision::state_dir`, done 2026-11-22 fix2) puts it in `DIR/optimizer.state`; ZeRO across cards cannot carry revisited layers or widened slots (refused by name); the full
   fine-tune routes through the router's f32 product like the forward, the released bias stays frozen.
 
 ### Phase 7: throughput

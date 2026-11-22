@@ -337,7 +337,9 @@ expert banks).
 
 The run asks for it with one model-agnostic value (the SDK's
 `train_precision`, the CLI's `--train-precision`):
-`state=int8,master=f32,weights=fp8,window=2,clip=two-pass`. Every trainer
+`state=int8,master=f32,weights=fp8,window=2,clip=two-pass`. A resident run's off-device master and moments live in
+host memory unless `TrainPrecision::state_dir` (the CLI's `--optimizer-state-dir DIR`) names a directory for their
+file. Every trainer
 declares what it supports (`ChatTrainer::TRAIN_PRECISION`) and a request outside
 it is refused by name before anything loads.
 

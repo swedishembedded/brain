@@ -192,8 +192,8 @@ brain finetune thinkingmachines/Inkling-2-Mini --lora 16 --objective policy-grad
   AdamW state on the host, every other weight trains in f32 on the card, and the
   trained model is saved with bf16 banks, which the server holds as bf16. Without
   a window the release is refused by name. The state is about 300 GB of host
-  memory; the library can keep it in a file instead
-  (`ResidentFtConfig::state_dir`).
+  memory; `--optimizer-state-dir DIR` (the library's `TrainPrecision::state_dir`)
+  keeps it in the file `DIR/optimizer.state` instead.
 - A trained adapter is served beside its base as a model of its own (see
   Adapters); its expert pairs are applied on the routed rows, never folded into
   the quantized banks.

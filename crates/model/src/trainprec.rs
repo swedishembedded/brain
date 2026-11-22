@@ -42,6 +42,11 @@ pub struct TrainPrecision {
     /// or only the residual between layers (in f32, bf16 or fp8) with each layer replayed before its backward.
     /// `None` leaves the build's own choice.
     pub activations: Option<crate::saved::SavedPolicy>,
+    /// Where a resident full fine-tune keeps its off-device optimizer state (the master copy and the moments, file
+    /// `optimizer.state`, created with the directory) instead of host memory: for a model whose state is larger than
+    /// the host can spare. `None` keeps it in memory. Only a resident run ([`Self::resident`]) has such a state; any
+    /// other run that names a directory is refused by [`Self::resident_config`].
+    pub state_dir: Option<std::path::PathBuf>,
 }
 
 /// How the per-layer linears of a full fine-tune are held: their encoding and, when the model is larger than the
@@ -58,13 +63,13 @@ pub struct ResidentRequest {
 impl Default for TrainPrecision {
     /// The historical layout: everything fp32, no master, no narrowing.
     fn default() -> Self {
-        TrainPrecision { policy: PrecisionPolicy::uniform(ParamPrecision::FP32), narrow_state: false, resident: None, host_moments: false, activations: None }
+        TrainPrecision { policy: PrecisionPolicy::uniform(ParamPrecision::FP32), narrow_state: false, resident: None, host_moments: false, activations: None, state_dir: None }
     }
 }
 
 impl TrainPrecision {
     pub fn uniform(p: ParamPrecision) -> TrainPrecision {
-        TrainPrecision { policy: PrecisionPolicy::uniform(p), narrow_state: false, resident: None, host_moments: false, activations: None }
+        TrainPrecision { policy: PrecisionPolicy::uniform(p), narrow_state: false, resident: None, host_moments: false, activations: None, state_dir: None }
     }
 
     /// Whether the parameter store's optimizer state lives in host memory: asked for (`moments=host`), or a state
@@ -76,15 +81,20 @@ impl TrainPrecision {
 
     /// Whether this is the default (all fp32): a resume file only records a precision that departs from it.
     pub fn is_default(&self) -> bool {
-        self.policy.rules.is_empty() && self.policy.default == ParamPrecision::FP32 && !self.narrow_state && self.resident.is_none() && !self.host_moments && self.activations.is_none()
+        self.policy.rules.is_empty() && self.policy.default == ParamPrecision::FP32 && !self.narrow_state && self.resident.is_none() && !self.host_moments && self.activations.is_none() && self.state_dir.is_none()
     }
 
     /// The resident full fine-tune this precision asks for, `None` for a plain one: the encoding and window of the
     /// linears, the master copy (an f32 master unless one was named: a low-precision weight cannot be trained without
     /// one), the optimizer state and gradient dtype of the policy, AdamW with the run's hyper-parameters set at each
-    /// step. `seed` keys the stochastic rounding.
+    /// step, the state in [`Self::state_dir`] when one is named. `seed` keys the stochastic rounding.
     pub fn resident_config(&self, seed: Option<u64>) -> Result<Option<ResidentFtConfig>, String> {
-        let Some(r) = self.resident else { return Ok(None) };
+        let Some(r) = self.resident else {
+            return match &self.state_dir {
+                Some(dir) => Err(format!("an optimizer-state directory ({}) holds a resident full fine-tune's state; name its encoding with 'weights'", dir.display())),
+                None => Ok(None),
+            };
+        };
         if !self.policy.rules.is_empty() {
             return Err("a resident full fine-tune takes one uniform precision (no per-group rules)".into());
         }
@@ -104,7 +114,7 @@ impl TrainPrecision {
             stochastic_state: p.stochastic_rounding,
             seed,
             tile_elems: 1 << 26,
-            state_dir: None,
+            state_dir: self.state_dir.clone(),
             defer_publication: false,
             window: r.window.map(|layers| LayerWindow { layers }),
             clip_pass: r.clip_pass,
@@ -203,7 +213,7 @@ impl TrainPrecision {
             return Err("train precision: 'window' and 'clip' describe a resident full fine-tune and need 'weights' (f32, bf16, fp8, int8 or nf4)".into());
         }
         let resident = weights.map(|weights| ResidentRequest { weights, window, clip_pass });
-        Ok(TrainPrecision { policy: PrecisionPolicy::uniform(p), narrow_state, resident, host_moments, activations })
+        Ok(TrainPrecision { policy: PrecisionPolicy::uniform(p), narrow_state, resident, host_moments, activations, state_dir: None })
     }
 
     /// The precision of each of `params` under this policy, checked against what the trainer runs. The device
@@ -232,7 +242,7 @@ impl TrainPrecision {
 
     /// This precision with the optimizer state in `state` for every parameter (a uniform policy only).
     fn with_state(&self, state: StateFormat) -> TrainPrecision {
-        TrainPrecision { policy: PrecisionPolicy::uniform(ParamPrecision { state, ..self.policy.default }), narrow_state: self.narrow_state, resident: self.resident, host_moments: self.host_moments, activations: self.activations }
+        TrainPrecision { policy: PrecisionPolicy::uniform(ParamPrecision { state, ..self.policy.default }), ..self.clone() }
     }
 
     /// Plan the device footprint of a full fine-tune before anything loads. The optimizer state is held in the
@@ -446,19 +456,8 @@ pub fn check_resume_with_host_moments<M: crate::Model>(name: &str, build: impl F
 /// `build` makes a fresh trainable model (the same initial weights every call) for a vocabulary of at least 16, a
 /// batch of one and a block of `block` tokens; `scratch` is an empty directory the run may write.
 pub fn check_exact_resume<M: crate::Model>(name: &str, build: impl Fn() -> M, block: u32, scratch: &std::path::Path, precision: &str) -> Result<(), String> {
-    use data::binio::{self, Meta};
     let err = |e: std::io::Error| format!("{name}: {e}");
-    // A masked prompt/answer corpus over tokens 2..=15.
-    let (mut tokens, mut mask) = (Vec::new(), Vec::new());
-    for i in 0..200u32 {
-        tokens.extend_from_slice(&[2 + i % 5, 7, 9, 15]);
-        mask.extend_from_slice(&[false, false, false, true]);
-    }
-    binio::write_u32_bin(&scratch.join("train.u32.bin"), &tokens).map_err(err)?;
-    binio::write_mask_bin(&scratch.join("train.mask.bin"), &mask).map_err(err)?;
-    binio::write_u32_bin(&scratch.join("val.u32.bin"), &[]).map_err(err)?;
-    binio::write_mask_bin(&scratch.join("val.mask.bin"), &[]).map_err(err)?;
-    std::fs::write(scratch.join("meta.json"), Meta::vocab_only(16)).map_err(err)?;
+    write_check_corpus(scratch).map_err(err)?;
     let opts = crate::FitOpts {
         steps: 6,
         batch_size: 1,
@@ -507,6 +506,59 @@ pub fn check_exact_resume<M: crate::Model>(name: &str, build: impl Fn() -> M, bl
         return Err(format!("{name}: {n} differs between the resumed and the uninterrupted run"));
     }
     Ok(())
+}
+
+/// The prepared dataset the fit-loop checks here train on, written into `scratch`: a masked prompt/answer corpus over
+/// tokens 2..=15 (a vocabulary of 16) with an empty validation split.
+pub fn write_check_corpus(scratch: &std::path::Path) -> std::io::Result<()> {
+    use data::binio::{self, Meta};
+    let (mut tokens, mut mask) = (Vec::new(), Vec::new());
+    for i in 0..200u32 {
+        tokens.extend_from_slice(&[2 + i % 5, 7, 9, 15]);
+        mask.extend_from_slice(&[false, false, false, true]);
+    }
+    binio::write_u32_bin(&scratch.join("train.u32.bin"), &tokens)?;
+    binio::write_mask_bin(&scratch.join("train.mask.bin"), &mask)?;
+    binio::write_u32_bin(&scratch.join("val.u32.bin"), &[])?;
+    binio::write_mask_bin(&scratch.join("val.mask.bin"), &[])?;
+    std::fs::write(scratch.join("meta.json"), Meta::vocab_only(16))
+}
+
+/// The contract of [`TrainPrecision::state_dir`] through the shared fit loop: a resident run of `precision` (a spec
+/// with `weights=`) over [`write_check_corpus`] in `scratch`, its state directory `scratch/optimizer-state`, keeps its
+/// off-device state in `optimizer-state/optimizer.state` - the file exists while the steps run and holds at least the
+/// f32 master and two f32 moments of every one of the `streamed` elements - and trains (a finite loss every step).
+pub fn check_state_in_dir<M: crate::Model>(name: &str, build: impl Fn() -> M, block: u32, scratch: &std::path::Path, precision: &str, streamed: u64) -> Result<(), String> {
+    let err = |e: std::io::Error| format!("{name}: {e}");
+    write_check_corpus(scratch).map_err(err)?;
+    let dir = scratch.join("optimizer-state");
+    let mut precision = TrainPrecision::parse(precision)?;
+    precision.state_dir = Some(dir.clone());
+    let opts = crate::FitOpts { steps: 2, batch_size: 1, block_size: block, lr: 1e-2, min_lr: 1e-3, warmup: 0, decay_iters: 2, eval_interval: 0, eval_batches: 0, seed: data::rng::random_seed(), precision, ..Default::default() };
+    let (train, val, bcfg, _, itos) = crate::load_dataset_with_itos(scratch, &opts).map_err(err)?;
+    let file = dir.join("optimizer.state");
+    let mut seen: Vec<Result<u64, String>> = Vec::new();
+    let mut on_step = |r: &crate::StepReport| {
+        let len = std::fs::metadata(&file).map(|m| m.len()).map_err(|e| format!("step {}: {}: {e}", r.step, file.display()));
+        seen.push(if r.loss.is_finite() { len } else { Err(format!("step {} ends at loss {}", r.step, r.loss)) });
+        true
+    };
+    let control = crate::FitControl { on_step: Some(&mut on_step), ..Default::default() };
+    let (report, _) = crate::fit_controlled(build(), crate::causal_lm::<M>(train, val, bcfg, itos), &opts, None, control).map_err(err)?;
+    if seen.is_empty() {
+        return Err(format!("{name}: the run took no step"));
+    }
+    let least = streamed * 3 * 4;
+    for len in seen {
+        let len = len.map_err(|e| format!("{name}: the optimizer state is not in the named directory: {e}"))?;
+        if len < least {
+            return Err(format!("{name}: the state file holds {len} bytes, fewer than the f32 master and moments of {streamed} elements ({least})"));
+        }
+    }
+    match report.final_loss {
+        Some(loss) if loss.is_finite() => Ok(()),
+        other => Err(format!("{name}: the run with its state on disk ends at loss {other:?}")),
+    }
 }
 
 /// What a model family's full fine-tune supports of [`TrainPrecision`], declared once by the trainer

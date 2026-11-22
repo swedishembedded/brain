@@ -138,3 +138,14 @@ fn bf16_banks_under_an_f32_master_train_save_serve_and_resume() {
     let start = init_weights(&small.cfg, data::rng::random_seed());
     model::trainprec::check_exact_resume("inkling2", || Inkling2Train::new(small.clone(), 1, 8, &start), 8, &resume, "weights=bf16,window=1").unwrap();
 }
+
+/// `--optimizer-state-dir` (`TrainPrecision::state_dir`): a bf16-bank run through the fit loop keeps the banks' master
+/// and moments in the named directory, not in host memory.
+#[test]
+fn the_streamed_banks_keep_their_optimizer_state_in_the_named_directory() {
+    let tc = tiny_config();
+    let init = init_weights(&tc.cfg, data::rng::random_seed());
+    let streamed: u64 = bank_names(&tc.cfg).iter().map(|n| init[n].len() as u64).sum();
+    let scratch = brain_testutil::Scratch::dir("inkling2-state-dir");
+    model::trainprec::check_state_in_dir("inkling2", || Inkling2Train::new(tc.clone(), 1, 8, &init), 8, scratch.path(), "weights=bf16,window=1", streamed).unwrap();
+}

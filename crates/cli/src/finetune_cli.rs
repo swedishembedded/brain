@@ -117,6 +117,11 @@ brain finetune BASE --dataset FILE --out DIR [options]
                      their f32 master copy and the optimizer state off it, `window=N` to keep only N layers on the
                      device (the rest streamed from the host), `clip=two-pass|running`. An architecture that does not
                      run a choice refuses it by name.
+  --optimizer-state-dir DIR
+                     with --train-precision weights=...: keep the off-device master copy and optimizer moments in the
+                     file DIR/optimizer.state (DIR is created) instead of host memory, for a model whose state does not
+                     fit the host (about 12 bytes per streamed parameter with f32 master and moments). The file
+                     must not exist yet. Put it on a fast local disk.
   --no-thinking      render records without the reasoning block.
   --job-plan FILE --job-rank N --job-secret FILE
                      train as rank N of the distributed job the plan names (the same three on every rank, a different
@@ -167,6 +172,8 @@ struct Args {
     activations: Option<model::saved::SavedPolicy>,
     no_thinking: bool,
     train_precision: Option<model::TrainPrecision>,
+    /// `--optimizer-state-dir`, folded into [`Self::train_precision`] once both are parsed.
+    optimizer_state_dir: Option<std::path::PathBuf>,
     held_out: Option<String>,
     modules_to_save: Vec<String>,
     policy_gradient: bool,
@@ -251,6 +258,7 @@ fn parse(argv: &[String]) -> Result<Args, String> {
                 let spec = need(&mut i, &flag)?;
                 a.train_precision = Some(model::TrainPrecision::parse(&spec).map_err(|e| format!("brain finetune: --train-precision {spec:?}: {e}"))?);
             }
+            "--optimizer-state-dir" => a.optimizer_state_dir = Some(need(&mut i, &flag)?.into()),
             "--held-out" => a.held_out = Some(need(&mut i, &flag)?),
             "--modules-to-save" => a.modules_to_save = need(&mut i, &flag)?.split(',').map(str::trim).filter(|p| !p.is_empty()).map(String::from).collect(),
             "--policy-gradient" => a.policy_gradient = true,
@@ -334,6 +342,12 @@ fn parse(argv: &[String]) -> Result<Args, String> {
     }
     if a.lora.is_some() && a.train_precision.is_some() {
         return Err("brain finetune: --train-precision stores a full fine-tune's weights and optimizer state; an adapter run takes --base-format".to_string());
+    }
+    if let Some(dir) = a.optimizer_state_dir.take() {
+        match a.train_precision.as_mut() {
+            Some(precision) if precision.resident.is_some() => precision.state_dir = Some(dir),
+            _ => return Err("brain finetune: --optimizer-state-dir holds a resident full fine-tune's optimizer state; give --train-precision weights=...".to_string()),
+        }
     }
     if let (Some(precision), Some(policy)) = (a.train_precision.as_mut(), a.activations) {
         crate::args::merge_activations(Some(policy), precision).map_err(|e| format!("brain finetune: {e}"))?;
@@ -723,6 +737,12 @@ mod tests {
         assert!(parse(&argv("base --lora 4 --train-precision weights=bf16")).unwrap_err().contains("--base-format"));
         assert!(parse(&argv("base --train-precision weights=quantum")).unwrap_err().contains("--train-precision"));
         assert!(parse(&argv("base --train-precision activations=keep --activations recompute")).unwrap_err().contains("conflicts"));
+        let on_disk = parse(&argv("base --train-precision weights=bf16,window=1 --optimizer-state-dir run-state")).unwrap();
+        let resident = on_disk.train_precision.unwrap().resident_config(None).unwrap().expect("a resident run");
+        assert_eq!(resident.state_dir.as_deref(), Some(std::path::Path::new("run-state")), "the directory reaches the resident state");
+        for refused in ["base --optimizer-state-dir s", "base --train-precision state=bf16 --optimizer-state-dir s"] {
+            assert!(parse(&argv(refused)).unwrap_err().contains("--optimizer-state-dir"), "{refused}");
+        }
     }
 
     #[test]
@@ -844,7 +864,7 @@ mod tests {
 
     #[test]
     fn the_usage_names_every_flag_the_parser_takes() {
-        for flag in ["--dataset", "--out", "--lora", "--alpha", "--continue", "--adapter-id", "--arch", "--models-dir", "--steps", "--lr", "--weight-decay", "--grad-accum", "--strict-updates", "--stages", "--native-sparse", "--lsa-window", "--lsa-sink", "--lsa-top-k", "--lsa-top-p", "--lsa-cluster-block", "--lsa-window-only", "--seed", "--max-block", "--base-format", "--activations", "--no-thinking", "--train-precision", "--held-out", "--modules-to-save", "--policy-gradient", "--algorithm", "--loss-agg", "--loss-agg-length", "--truncated", "--advantage-floor", "--ratio-clip", "--kl-beta", "--behaviour", "--ratio-clip-high", "--dual-clip", "--importance", "--max-step-kl", "--max-step-grad-norm", "--numerics-gate", "--gate-max-mean-gap", "--gate-max-gap", "--gate-max-mismatch-kl", "--gate-min-sequence-ess", "--gate-max-grad-norm", "--kv-roundtrip", "--objective", "--loss", "--gamma", "--beta", "--nll-weight", "--keep-reasoning", "--desirable-weight", "--undesirable-weight", "--teacher", "--top-k"] {
+        for flag in ["--dataset", "--out", "--lora", "--alpha", "--continue", "--adapter-id", "--arch", "--models-dir", "--steps", "--lr", "--weight-decay", "--grad-accum", "--strict-updates", "--stages", "--native-sparse", "--lsa-window", "--lsa-sink", "--lsa-top-k", "--lsa-top-p", "--lsa-cluster-block", "--lsa-window-only", "--seed", "--max-block", "--base-format", "--activations", "--no-thinking", "--train-precision", "--optimizer-state-dir", "--held-out", "--modules-to-save", "--policy-gradient", "--algorithm", "--loss-agg", "--loss-agg-length", "--truncated", "--advantage-floor", "--ratio-clip", "--kl-beta", "--behaviour", "--ratio-clip-high", "--dual-clip", "--importance", "--max-step-kl", "--max-step-grad-norm", "--numerics-gate", "--gate-max-mean-gap", "--gate-max-gap", "--gate-max-mismatch-kl", "--gate-min-sequence-ess", "--gate-max-grad-norm", "--kv-roundtrip", "--objective", "--loss", "--gamma", "--beta", "--nll-weight", "--keep-reasoning", "--desirable-weight", "--undesirable-weight", "--teacher", "--top-k"] {
             assert!(USAGE.contains(flag), "{flag} is parsed but absent from the usage");
         }
     }
