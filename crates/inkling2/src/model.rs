@@ -42,10 +42,10 @@ use model::flash_ext::{self, AttnInputs, AttnOptions, Contiguous, DistanceBias, 
 use model::glu::{expert_fwd_glu, glu_act_step, GatedAct, GluIds, GluLayout, GluScratch, GluSpec, GluWeights};
 use model::head_transform::HeadTransform;
 use model::looped::{Attention, LoopShape, Segment, Visit, VisitPlan};
-use model::message_gate::{MessageGate, MessageGateIds, MessageGateWeights};
+use model::message_gate::{GateProduct, MessageGate, MessageGateIds, MessageGateWeights};
 use model::moe::{MoeIds, MoeShape};
 use model::ops::{upload_micro_bank, upload_preserved, MicroBank, MicroRoute, Ops, Weight};
-use model::adapter::bank::AdapterBank;
+use model::adapter::bank::{AdapterBank, MergedRows};
 use model::paged::BlockTable;
 use model::policy::LinearActivations;
 use model::saved::RetainedStates;
@@ -125,14 +125,25 @@ pub(crate) enum Rows<'a> {
     /// One whole sequence from position 0 that keeps no state: the reference forward.
     Whole,
     /// One prompt chunk of one served sequence at positions `start ..`, under the adapter bank's current row slots.
-    Chunk { pool: &'a Pool, table: &'a BlockTable, start: u32, bank: Option<&'a AdapterBank> },
+    Chunk { pool: &'a Pool, table: &'a BlockTable, start: u32, bank: Option<Banked<'a>> },
     /// One new token of each served sequence, at the last position its table backs, under the bank's row slots.
-    Decode { pool: &'a Pool, tables: &'a [&'a BlockTable], bank: Option<&'a AdapterBank> },
+    Decode { pool: &'a Pool, tables: &'a [&'a BlockTable], bank: Option<Banked<'a>> },
+}
+
+/// The served adapter bank of a pass and each row's slot in it (written to the bank's slot buffer for the pass).
+#[derive(Clone, Copy)]
+pub(crate) struct Banked<'a> {
+    pub(crate) bank: &'a AdapterBank,
+    pub(crate) slots: &'a [u32],
 }
 
 impl Rows<'_> {
     /// The adapter bank correcting these rows' products (the served engine's, its row slots written for the pass).
     fn bank(&self) -> Option<&AdapterBank> {
+        self.banked().map(|b| b.bank)
+    }
+
+    fn banked(&self) -> Option<Banked<'_>> {
         match self {
             Rows::Whole => None,
             Rows::Chunk { bank, .. } | Rows::Decode { bank, .. } => *bank,
@@ -458,6 +469,40 @@ impl Inkling2 {
         self.w.layers.iter().all(|l| matches!(l.experts, Experts::Micro { .. }))
     }
 
+    /// The resident values of the depth-attention query matrix published as `name` (a layer's `attn_queries` or
+    /// `mlp_queries`, the `output_query`, or either message-query tensor, `[rows, hidden]` row-major as published), read
+    /// back from the device: the base a served adapter bank adds an adapter's delta to. `None` for any other name.
+    pub fn query_matrix(&self, name: &str) -> Option<Vec<f32>> {
+        let (g, d) = (self.g(), self.cfg.hidden as usize);
+        let read = |b: &DeviceBuffer, rows: usize| g.read(b, rows * d);
+        if name == names::output_query() {
+            return Some(read(&self.w.output_query, 1));
+        }
+        if let Some(l) = self.cfg.looped.filter(|_| name == names::message_queries() || name == names::message_kv_queries()) {
+            let kv = name == names::message_kv_queries();
+            let mut out = vec![0.0f32; 2 * l.layers() as usize * d];
+            for (c, buf) in self.w.message_queries.iter().enumerate() {
+                let core = read(buf, 4);
+                for (q, &(is_kv, row)) in names::message_query_rows(c as u32).iter().enumerate() {
+                    if is_kv == kv {
+                        out[row as usize * d..(row as usize + 1) * d].copy_from_slice(&core[q * d..(q + 1) * d]);
+                    }
+                }
+            }
+            return Some(out);
+        }
+        (0..self.cfg.n_layers).find_map(|l| {
+            let lw = &self.w.layers[l as usize];
+            if name == names::mlp_queries(l) {
+                return Some(read(&lw.mlp_queries, 1));
+            }
+            match &lw.attn_queries {
+                Some(q) if name == names::attn_queries(l) => Some(read(q, self.cfg.attn_queries(l) as usize)),
+                _ => None,
+            }
+        })
+    }
+
     pub fn ops(&self) -> &Ops {
         &self.ops
     }
@@ -606,10 +651,13 @@ impl Inkling2 {
             let messages = match (&previous, v.segment == Segment::Core && v.pass > 0) {
                 (Some((blocks, partial)), true) => {
                     let c = v.layer - core_start;
+                    let sources: Vec<(String, u32)> = names::message_query_rows(c as u32).iter().map(|&(kv, row)| (if kv { names::message_kv_queries() } else { names::message_queries() }, row)).collect();
+                    let (query, per_row) = self.queries(s, rows, &self.w.message_queries[c], &sources);
                     let da = DepthAttn::new(&store, blocks, 4, DEPTH_EPS)?;
+                    let da = if per_row { da.with_row_queries() } else { da };
                     let out = g.storage(da.out_len());
                     let stats = g.storage(da.stats_len());
-                    s.push(da.forward(g, &self.k.depth, &store, partial, &self.w.message_queries[c], &out, &stats));
+                    s.push(da.forward(g, &self.k.depth, &store, partial, &query, &out, &stats));
                     self.tap(s, probe, &format!("visit{}.messages", v.index), &out, 4 * t * d);
                     Some(out)
                 }
@@ -634,10 +682,12 @@ impl Inkling2 {
             self.tap(s, probe, &key("out"), &x, t * d);
         }
 
+        let (query, per_row) = self.queries(s, rows, &self.w.output_query, &[(names::output_query(), 0)]);
         let da = DepthAttn::new(&store, &stack, 1, DEPTH_EPS)?;
+        let da = if per_row { da.with_row_queries() } else { da };
         let mixed = g.storage(da.out_len());
         let stats = g.storage(da.stats_len());
-        s.push(da.forward(g, &self.k.depth, &store, &x, &self.w.output_query, &mixed, &stats));
+        s.push(da.forward(g, &self.k.depth, &store, &x, &query, &mixed, &stats));
         self.tap(s, probe, "final_in", &mixed, t * d);
         let normed = self.rms(s, &mixed, &self.w.final_norm, t);
         self.tap(s, probe, "final_norm", &normed, t * d);
@@ -671,10 +721,13 @@ impl Inkling2 {
         let mut inputs: Vec<DeviceBuffer> = match &lw.attn_queries {
             None => vec![x.clone()],
             Some(q) => {
+                let sources: Vec<(String, u32)> = (0..nq).map(|i| (names::attn_queries(layer), i)).collect();
+                let (query, per_row) = self.queries(s, rows, q, &sources);
                 let da = DepthAttn::new(store, stack, nq, DEPTH_EPS)?;
+                let da = if per_row { da.with_row_queries() } else { da };
                 let out = g.storage(da.out_len());
                 let stats = g.storage(da.stats_len());
-                s.push(da.forward(g, &self.k.depth, store, x, q, &out, &stats));
+                s.push(da.forward(g, &self.k.depth, store, x, &query, &out, &stats));
                 self.tap(s, probe, &key("attn_in"), &out, nq * n);
                 (0..nq).map(|i| self.rows(s, &out, i * n, n)).collect()
             }
@@ -683,7 +736,7 @@ impl Inkling2 {
         let gated = |s: &mut Vec<Step>, probe: &mut Option<&mut dyn Probe>, site: usize, h: &DeviceBuffer, name: &str| -> DeviceBuffer {
             match (message(site as u32, s), &lw.gates) {
                 (Some(m), Some(gates)) => {
-                    let out = self.message_gate(s, &gates[site], h, &m, t);
+                    let out = self.message_gate(s, rows, layer, site, &gates[site], h, &m, t);
                     self.tap(s, probe, &key(name), &out, n);
                     out
                 }
@@ -735,10 +788,12 @@ impl Inkling2 {
         };
 
         // 3. The MoE input, the experts, their output convolution and the residual.
+        let (query, per_row) = self.queries(s, rows, &lw.mlp_queries, &[(names::mlp_queries(layer), 0)]);
         let da = DepthAttn::new(store, stack, 1, DEPTH_EPS)?;
+        let da = if per_row { da.with_row_queries() } else { da };
         let mlp_in = g.storage(da.out_len());
         let stats = g.storage(da.stats_len());
-        s.push(da.forward(g, &self.k.depth, store, &residual, &lw.mlp_queries, &mlp_in, &stats));
+        s.push(da.forward(g, &self.k.depth, store, &residual, &query, &mlp_in, &stats));
         self.tap(s, probe, &key("mlp_in"), &mlp_in, n);
         let mlp_in = gated(s, probe, 3, &mlp_in, "gated_mlp");
         let hn = self.rms(s, &mlp_in, &lw.mlp_norm, t);
@@ -964,14 +1019,65 @@ impl Inkling2 {
         out
     }
 
-    fn message_gate(&self, s: &mut Vec<Step>, w: &GateWeights, x: &DeviceBuffer, m: &DeviceBuffer, t: u32) -> DeviceBuffer {
+    /// The message gate `site` (q, k, v, MLP) of `layer` over `t` rows; a served adapter bank corrects each of its three
+    /// products on the rows whose sequence runs under an adapter.
+    #[allow(clippy::too_many_arguments)]
+    fn message_gate(&self, s: &mut Vec<Step>, rows: &Rows, layer: u32, site: usize, w: &GateWeights, x: &DeviceBuffer, m: &DeviceBuffer, t: u32) -> DeviceBuffer {
         let cfg = &self.cfg;
         let rank = cfg.looped.expect("message gates belong to a loop").gate_rank;
         let gate = MessageGate::new(t, cfg.hidden, rank, cfg.eps).expect("a validated shape");
         let acts = gate.acts(self.g());
         let y = self.g().storage(u64::from(t * cfg.hidden));
-        gate.forward(s, self.g(), &self.k.gate, &self.ops, &MessageGateWeights { down: &w.down, forget: &w.forget, gain: &w.gain }, x, m, &acts, &y);
+        let weights = MessageGateWeights { down: &w.down, forget: &w.forget, gain: &w.gain };
+        match rows.bank() {
+            None => gate.forward(s, self.g(), &self.k.gate, &self.ops, &weights, x, m, &acts, &y),
+            Some(bank) => {
+                let [down, forget, gain] = LayerNames::new(layer).gate(GateSite::ALL[site]);
+                gate.forward_corrected(s, self.g(), &self.k.gate, &self.ops, &weights, x, m, &acts, &y, &mut |s, product, input, output| {
+                    let (name, n) = match product {
+                        GateProduct::Down => (&down, rank),
+                        GateProduct::Forget => (&forget, cfg.hidden),
+                        GateProduct::Gain => (&gain, cfg.hidden),
+                    };
+                    bank.correct_named(self.g(), s, name, input, output, t, n, 0);
+                });
+            }
+        }
         y
+    }
+
+    /// The query operand of a depth attention whose `nq` queries are `sources` (query `q` is part `sources[q].1`, one
+    /// row of the hidden width, of the published matrix `sources[q].0`) over the pass's rows: the model's own `[nq,
+    /// hidden]` matrix `own` (`false`), or, where a served adapter bank serves one of the matrices and a row runs under
+    /// an adapter, its rows' effective matrices: one `[nq, hidden]` set shared by every row (`false`) or `[nq, rows,
+    /// hidden]` (`true`, for [`DepthAttn::with_row_queries`]).
+    fn queries(&self, s: &mut Vec<Step>, rows: &Rows, own: &DeviceBuffer, sources: &[(String, u32)]) -> (DeviceBuffer, bool) {
+        let Some(served) = rows.banked() else { return (own.clone(), false) };
+        let reads: Vec<MergedRows> = sources.iter().map(|(name, _)| served.bank.merged_rows(name, served.slots)).collect();
+        let Some(table_rows) = reads.iter().find_map(|r| match r {
+            MergedRows::Rows(rows) => Some(rows.clone()),
+            MergedRows::Base => None,
+        }) else {
+            return (own.clone(), false);
+        };
+        let (g, d) = (self.g(), self.cfg.hidden);
+        let r = table_rows.len() as u32;
+        let out = g.storage(u64::from(sources.len() as u32 * r * d));
+        for (q, ((name, part), read)) in sources.iter().zip(&reads).enumerate() {
+            let rows_q = match read {
+                MergedRows::Rows(_) => served.bank.gather_merged(g, s, name, &table_rows, &[*part], d),
+                // A matrix the bank does not serve: the model's own query, one copy per row.
+                MergedRows::Base => {
+                    let index = g.storage(u64::from(r));
+                    g.write(&index, &vec![q as u32; r as usize]);
+                    let copy = g.storage(u64::from(r * d));
+                    s.push(g.step(self.k.gather_rows, &[&index, own, &copy], &[d, r], r * d));
+                    copy
+                }
+            };
+            s.push(g.step(self.k.copy, &[&rows_q, &out], &[r * d, 0, q as u32 * r * d], r * d));
+        }
+        (out, r > 1)
     }
 
     /// `y = x @ W^T` for `t` rows.

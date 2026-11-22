@@ -16,6 +16,9 @@
 //! z[q,i] = scale * <query[q], n_i>,  w[q,:] = softmax_i z[q,:],  out[q] = sum_i w[q,i] n_i
 //! ```
 //!
+//! With [`DepthAttn::with_row_queries`] each row has its own queries instead (`[nq, rows, width]`): a served batch whose
+//! rows run under different adapters, each with its own effective query matrix. That form is forward-only.
+//!
 //! The output mixes the NORMED states. A layer reads its input this way instead of from the plain residual stream;
 //! a plain residual is the degenerate stack whose softmax puts all mass on the partial. The backward fans the
 //! gradient into every state of the stack: into the store's per-slot gradient, which every consumer of a retained
@@ -68,6 +71,8 @@ pub struct DepthAttn {
     slots: Vec<u32>,
     nq: u32,
     eps: f32,
+    /// Queries per row (`[nq, rows, width]`) instead of shared (`[nq, width]`).
+    row_queries: bool,
 }
 
 impl DepthAttn {
@@ -91,7 +96,20 @@ impl DepthAttn {
                 return Err(format!("depth attention: slot {s} appears twice in one stack"));
             }
         }
-        Ok(DepthAttn { rows: store.rows(), dim: store.width(), capacity: store.capacity(), slots: slots.to_vec(), nq, eps })
+        Ok(DepthAttn { rows: store.rows(), dim: store.width(), capacity: store.capacity(), slots: slots.to_vec(), nq, eps, row_queries: false })
+    }
+
+    /// This consumer with a query set per row: [`Self::forward`] reads `query` as `[nq, rows, width]`, row `r`'s query
+    /// `q` at `(q * rows + r) * width` (the layout of the output). Forward only: [`Self::backward`] refuses it.
+    #[must_use]
+    pub fn with_row_queries(mut self) -> DepthAttn {
+        self.row_queries = true;
+        self
+    }
+
+    /// Elements of the `query` buffer [`Self::forward`] reads: `nq * width`, times the rows with per-row queries.
+    pub fn query_len(&self) -> u64 {
+        self.nq as u64 * self.dim as u64 * if self.row_queries { self.rows as u64 } else { 1 }
     }
 
     /// States in the stack: the retained slots plus the partial.
@@ -120,7 +138,7 @@ impl DepthAttn {
 
     fn params(&self) -> Vec<u32> {
         let scale = (self.dim as f32).powf(-0.5);
-        let mut p = vec![self.rows, self.dim, self.slots.len() as u32, self.nq, self.eps.to_bits(), scale.to_bits(), 0, 0];
+        let mut p = vec![self.rows, self.dim, self.slots.len() as u32, self.nq, self.eps.to_bits(), scale.to_bits(), u32::from(self.row_queries), 0];
         p.extend(self.slots.iter().copied().chain(std::iter::repeat(0)).take(MAX_RETAINED));
         p
     }
@@ -139,7 +157,8 @@ impl DepthAttn {
     }
 
     /// The forward: `out` (`[nq, rows, width]`) and the saved `stats` ([`Self::stats_len`]) from the stack of `store`'s
-    /// slots plus `partial` (`[rows, width]`), mixed by `query` (`[nq, width]`).
+    /// slots plus `partial` (`[rows, width]`), mixed by `query` (`[nq, width]`, or `[nq, rows, width]` with
+    /// [`Self::with_row_queries`]).
     #[allow(clippy::too_many_arguments)]
     pub fn forward(&self, gpu: &Gpu, ids: &DepthAttnIds, store: &RetainedStates, partial: &DeviceBuffer, query: &DeviceBuffer, out: &DeviceBuffer, stats: &DeviceBuffer) -> Step {
         self.check_store(store);
@@ -164,6 +183,7 @@ impl DepthAttn {
         dquery: &DeviceBuffer,
     ) -> Vec<Step> {
         self.check_store(store);
+        assert!(!self.row_queries, "depth attention backward: per-row queries are a serving form; a trained query matrix is shared by every row");
         let grads = store.grads().expect("depth attention backward: an inference store has no gradients");
         let params = self.params();
         vec![

@@ -77,6 +77,21 @@ pub struct MessageGateWeights<'a> {
     pub gain: &'a DeviceBuffer,
 }
 
+/// One of the gate's three products, named to a caller that corrects it ([`MessageGate::forward_corrected`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GateProduct {
+    /// `h = Wd [rms(x); rms(m)]`: input `[rows, 2 width]`, output `[rows, rank]`.
+    Down,
+    /// `Wf h`: input `[rows, rank]`, output `[rows, width]` (before its tanh).
+    Forget,
+    /// `Wg h`: input `[rows, rank]`, output `[rows, width]` (before its tanh).
+    Gain,
+}
+
+/// A correction recorded right after one of the gate's products: `(steps, which product, its input, its output)`; it
+/// changes the output in place (a served adapter's `x dW^T` per row).
+pub type GateCorrection<'a> = dyn FnMut(&mut Vec<Step>, GateProduct, &DeviceBuffer, &DeviceBuffer) + 'a;
+
 /// What the forward keeps for the backward, plus its own scratch.
 pub struct MessageGateActs {
     xn: DeviceBuffer,
@@ -177,15 +192,26 @@ impl MessageGate {
     /// `y = (1 - tanh(Wf h)) * x + tanh(Wg h) * m` for `x` and the message `m` (`[rows, width]` each).
     #[allow(clippy::too_many_arguments)]
     pub fn forward(&self, s: &mut Vec<Step>, gpu: &Gpu, ids: &MessageGateIds, ops: &Ops, w: &MessageGateWeights, x: &DeviceBuffer, m: &DeviceBuffer, a: &MessageGateActs, y: &DeviceBuffer) {
+        self.forward_corrected(s, gpu, ids, ops, w, x, m, a, y, &mut |_, _, _, _| {});
+    }
+
+    /// [`Self::forward`] with `correct` recorded after each product (down, then forget, then gain), before anything reads
+    /// the product: the gate of corrected weights without forming them (a served batch whose rows run under different
+    /// adapters). Forward only: a trained gate forms its weights whole ([`crate::adapter::merged::MergedLora`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_corrected(&self, s: &mut Vec<Step>, gpu: &Gpu, ids: &MessageGateIds, ops: &Ops, w: &MessageGateWeights, x: &DeviceBuffer, m: &DeviceBuffer, a: &MessageGateActs, y: &DeviceBuffer, correct: &mut GateCorrection<'_>) {
         let (rows, d, k, n) = (self.rows, self.width, self.rank, self.n());
         let (down, forget, gain) = self.weights(w);
         s.push(self.norm(gpu, ids, x, &a.xn));
         s.push(self.norm(gpu, ids, m, &a.mn));
         s.push(gpu.step(ids.concat, &[&a.xn, &a.mn, &a.cat], &[rows, d, d, 1, 1], 2 * n));
         ops.matmul(s, &down, &ops.act_f32(&a.cat, 0, rows, 2 * d), &a.code, 0);
+        correct(s, GateProduct::Down, &a.cat, &a.code);
         ops.matmul(s, &forget, &ops.act_f32(&a.code, 0, rows, k), &a.pre_forget, 0);
+        correct(s, GateProduct::Forget, &a.code, &a.pre_forget);
         s.push(gpu.step(ids.tanh, &[&a.pre_forget, &a.forget], &[n], n));
         ops.matmul(s, &gain, &ops.act_f32(&a.code, 0, rows, k), &a.pre_gain, 0);
+        correct(s, GateProduct::Gain, &a.code, &a.pre_gain);
         s.push(gpu.step(ids.tanh, &[&a.pre_gain, &a.gain], &[n], n));
         s.push(gpu.step(ids.mul, &[&a.forget, x, &a.tmp], &[n], n));
         s.push(gpu.step(ids.sub, &[x, &a.tmp, &a.kept], &[n, 0, 0], n));

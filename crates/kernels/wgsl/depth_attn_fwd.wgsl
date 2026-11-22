@@ -15,6 +15,9 @@
 // @quant none
 // @dtype f32
 //
+// With `row_queries` set, every row has its own query set: query is [nq, rows, dim], query q of row r at
+// (q * rows + r) * dim (a served batch whose rows run under different adapters). The backward takes shared queries.
+//
 // The stack of row r is [store[slot_0][r], ..., store[slot_{count-1}][r], partial[r]] (n = count + 1 states of
 // `dim`). Each state is RMS-normed without a gain, n_i = s_i * rsqrt(mean(s_i^2) + eps), and every query q (`nq` of
 // them, shared by all rows) mixes the normed states:
@@ -24,8 +27,10 @@
 // Composing it from rmsnorm + matmul + softmax kernels would write and re-read every normed state per consumer; here
 // each state is read twice and only the nq outputs are written.
 //
-//   store: [slots, rows, dim]  partial: [rows, dim]  query: [nq, dim]  out: [nq, rows, dim]  stats: [rows, n*(1+nq)]
-//   params: rows, dim, count (<= 32), nq (<= 4), eps (f32), scale (f32), two pad words, then 32 slot indices
+//   store: [slots, rows, dim]  partial: [rows, dim]  query: [nq, dim] (or [nq, rows, dim])  out: [nq, rows, dim]
+//   stats: [rows, n*(1+nq)]
+//   params: rows, dim, count (<= 32), nq (<= 4), eps (f32), scale (f32), row_queries (0/1), a pad word, then 32 slot
+//   indices
 // Dispatch: rows invocations.
 
 const MAX_STATES: u32 = 33u;
@@ -37,7 +42,7 @@ struct Params {
     nq: u32,
     eps: f32,
     scale: f32,
-    pad0: u32,
+    row_queries: u32,
     pad1: u32,
     slots: array<vec4<u32>, 8>,
 };
@@ -57,11 +62,13 @@ fn state(i: u32, row: u32, j: u32) -> f32 {
     return partial[row * p.dim + j];
 }
 
-// Lane q of a vec4 holds query q; lanes past nq read zero.
-fn queries_at(j: u32) -> vec4<f32> {
+// Lane q of a vec4 holds query q (row `row`'s own with row_queries); lanes past nq read zero.
+fn queries_at(row: u32, j: u32) -> vec4<f32> {
     var q = vec4<f32>(0.0);
+    let rows = select(1u, p.rows, p.row_queries != 0u);
+    let r = select(0u, row, p.row_queries != 0u);
     for (var k = 0u; k < p.nq; k = k + 1u) {
-        q[k] = query[k * p.dim + j];
+        q[k] = query[(k * rows + r) * p.dim + j];
     }
     return q;
 }
@@ -82,7 +89,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
         for (var j = 0u; j < p.dim; j = j + 1u) {
             let v = state(i, row, j);
             ss = ss + v * v;
-            dots = dots + v * queries_at(j);
+            dots = dots + v * queries_at(row, j);
         }
         let r = inverseSqrt(ss / f32(p.dim) + p.eps);
         rms[i] = r;

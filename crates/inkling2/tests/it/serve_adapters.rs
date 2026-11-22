@@ -7,13 +7,14 @@
 
 //! Spec of the served engine's adapter bank (`Engine::enable_adapters`):
 //!
-//! - an adapter the trainer saved (rank 2 over every linear site and both stacked expert sites, over a release with
-//!   published NVFP4 banks) is served with the logits of the trainer's own adapted forward at every position, prefilled
-//!   whole or in chunks and decoded, beside a base sequence that keeps the base's logits in the same batches;
+//! - an adapter the trainer saved (rank 2 over every site it trains: the linears, the message gates' factors, the
+//!   depth, readout and message query banks and both stacked expert sites, over a release with published NVFP4 banks)
+//!   is served with the logits of the trainer's own adapted forward at every position, prefilled whole or in chunks and
+//!   decoded, beside a base sequence that keeps the base's logits in the same batches; so is one over the query banks
+//!   and gates alone;
 //! - the engine passes the generic serving conformance suite with adapters (no K/V shared across adapters and the base,
 //!   embedded prompts under adapters, mixed batches);
-//! - an adapter that carries a merged site (a matrix the forward reads whole) is refused by name, and so are expert
-//!   targets over a checkpoint whose experts are dense.
+//! - expert targets over a checkpoint whose experts are dense are refused by name.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -31,8 +32,10 @@ use model::Model;
 
 /// The f32 reference's own spread, relative to the tensor's scale; the trainer sums its corrections in its own order.
 const TOL: f32 = 1e-4;
-/// Every site the engine serves: the linears and the two stacked expert banks.
-const SERVED: [&str; 9] = ["wq_du", "wk_dv", "wv_dv", "wo_ud", "gate_attn", "attn_sink_proj", "wr_du", "w13_weight", "w2_weight"];
+/// Every site the engine serves: every site the trainer adapts.
+const SERVED: &[&str] = inkling2::train::sites::DEFAULT_TARGETS;
+/// The sites the forward does not correct beside a linear product in training: the query banks and the gates' factors.
+const MERGED: [&str; 8] = ["attn_queries", "mlp_queries", "output_query", "middle_cycle_cross_pass_queries", "middle_cycle_cross_pass_kv_queries", "down_weight", "forget_weight", "gain_weight"];
 const RANK: u32 = 2;
 
 fn options(chunk: u32) -> EngineOptions {
@@ -41,14 +44,14 @@ fn options(chunk: u32) -> EngineOptions {
 
 fn engine(dir: &Path, chunk: u32) -> Engine {
     let mut e = Engine::open(crate::tiny_parity::ops(), dir, options(chunk)).expect("the release opens");
-    e.enable_adapters(AdapterBankConfig::new(2, RANK, &SERVED)).expect("the bank fits");
+    e.enable_adapters(AdapterBankConfig::new(2, RANK, SERVED)).expect("the bank fits");
     e
 }
 
 /// A trainer's LoRA build over `dir` with every served site, its adapter factors drawn from `seed` (B too, so the
 /// adapter moves the logits), saved where the trainer saves an adapter. Returns the build and the file.
 fn trained_adapter(dir: &Path, seed: u64, seq: u32, out: &Path) -> Inkling2Train {
-    trained_adapter_over(dir, &SERVED, seed, seq, out)
+    trained_adapter_over(dir, SERVED, seed, seq, out)
 }
 
 /// [`trained_adapter`] over the sites `targets` names.
@@ -57,9 +60,11 @@ fn trained_adapter_over(dir: &Path, targets: &[&str], seed: u64, seq: u32, out: 
     let base = model::ops::TierPolicy::uniform(gpu_core::select::Dtype::F32);
     let t = Inkling2Train::from_dir_lora(dir, lora, &BuildOptions { batch: 1, seq, base: &base, seed, continue_from: None }).expect("a LoRA build over the release");
     let mut rng = data::rng::Lcg::new(seed);
+    // Factors of a size training reaches: every site of every layer moves the logits well past the comparison's
+    // tolerance, without driving the looped stack where f32 rounding differences between the two recipes grow.
     for name in t.param_names() {
         let n = t.read_weight(&name).len();
-        t.write_weight(&name, &rng.vec_scaled(n, 0.3));
+        t.write_weight(&name, &rng.vec_scaled(n, 0.15));
     }
     inkling2::finetune::save_adapter_file(&t, out).expect("the adapter saves");
     t
@@ -102,13 +107,24 @@ fn prefill(e: &mut Engine, table: &mut BlockTable, prompt: &[u32], slice: usize)
 
 #[test]
 fn a_trained_adapter_is_served_with_the_trainers_adapted_logits_beside_the_base() {
-    let Some(dir) = crate::declared_tier::declared_release("adapters") else { return };
+    served_at_the_trainers_logits("adapters", SERVED);
+}
+
+#[test]
+fn an_adapter_of_the_query_banks_and_gates_alone_is_served_with_the_trainers_adapted_logits() {
+    served_at_the_trainers_logits("merged-adapters", &MERGED);
+}
+
+/// An adapter the trainer saved over `targets`, served beside the base: the trainer's adapted logits on its rows, the
+/// base's on the base's, prefilled whole or in slices and decoded in batches mixing the two.
+fn served_at_the_trainers_logits(tag: &str, targets: &[&str]) {
+    let Some(dir) = crate::declared_tier::declared_release(tag) else { return };
     let seq: Vec<u32> = (0..20u32).map(|i| (i * 17 + 4) % 60 + 3).collect();
     let prompt = 8;
     let scratch = brain_testutil::Scratch::dir("inkling2-served-adapter");
     let path = scratch.path().join("adapter.safetensors");
     // seed: any factors; both sides read the same file.
-    let trainer = trained_adapter(&dir, 41, seq.len() as u32, &path);
+    let trainer = trained_adapter_over(&dir, targets, 41, seq.len() as u32, &path);
     let want = trainer.logits(&seq).unwrap();
     drop(trainer);
     let mut e = engine(&dir, 4);
@@ -204,21 +220,7 @@ fn the_engine_with_adapters_passes_the_serving_conformance_suite() {
 }
 
 #[test]
-fn merged_sites_and_expert_targets_over_dense_experts_are_refused_by_name() {
-    let Some(dir) = crate::declared_tier::declared_release("adapter-refusals") else { return };
-    // A trainer's adapter of the served sites, with a pair for a merged site added (a depth query of layer 1).
-    let scratch = brain_testutil::Scratch::dir("inkling2-merged-adapter");
-    let path = scratch.path().join("adapter.safetensors");
-    trained_adapter(&dir, 5, 8, &path);
-    let mut with_merged = verified(&path, 5);
-    let d = inkling2::Inkling2Config::from_dir(&dir).unwrap().hidden as usize;
-    let queries = inkling2::Inkling2Config::from_dir(&dir).unwrap().attn_queries(1) as usize;
-    with_merged.adapter.sites.push(model::lora::device_adapter::AdapterSite { base: inkling2::names::attn_queries(1), a: vec![0.1; RANK as usize * d], b: vec![0.1; queries * RANK as usize] });
-    let mut e = Engine::open(crate::tiny_parity::ops(), &dir, options(4)).unwrap();
-    e.enable_adapters(AdapterBankConfig::new(2, RANK, &SERVED)).unwrap();
-    let err = format!("{:?}", e.load_adapter(with_merged).unwrap_err());
-    assert!(err.contains("attn_queries") && err.contains("merged site"), "{err}");
-    std::fs::remove_dir_all(&dir).ok();
+fn expert_targets_over_dense_experts_are_refused_by_name() {
     // The tiny reference checkpoint stores its experts dense f32: no served expert product to correct.
     let dense = brain_testutil::testdata_path("golden/inkling2/tiny/checkpoint");
     let mut e = Engine::open(crate::tiny_parity::ops(), &dense, options(4)).unwrap();

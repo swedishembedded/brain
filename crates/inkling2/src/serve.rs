@@ -47,8 +47,8 @@ use model::serve::{AdapterId, ContentKey, PagedDecoder, PrefillProgress, PromptE
 use model::snapshot_prefix::Prompt;
 
 use crate::config::{Inkling2Config, LayerKind};
-use crate::model::{Inkling2, Pool, Rows};
-use crate::train::sites::{expert_sites, lora_sites, SiteKind};
+use crate::model::{Banked, Inkling2, Pool, Rows};
+use crate::train::sites::{expert_sites, lora_sites};
 
 /// Tokens before a prompt's end where its prefix entry is filed (knowledge #347).
 pub const CHECKPOINT_TAIL: usize = 16;
@@ -88,18 +88,28 @@ pub struct Engine {
     bank: Option<AdapterBank>,
 }
 
-/// The adapter sites the served engine corrects: the trainer's linear sites ([`crate::train::sites`], each product
-/// corrected after it) and its stacked expert sites (each routed bank product corrected after it). The merged sites
-/// (depth and message queries, message-gate factors) are matrices an operator reads whole, not products a row's
-/// adapter can correct, so an adapter that carries one is refused by name ([`Engine::load_adapter`]).
+/// The adapter sites the served engine corrects, every site the trainer adapts ([`crate::train::sites`]):
+/// - its linear sites and the message gates' factors as products, each corrected after it on the rows under an adapter
+///   (the gate's three products through [`model::message_gate::MessageGate::forward_corrected`]; the trainer forms
+///   those factors whole, which is the same function);
+/// - its stacked expert sites, each routed bank product corrected after it;
+/// - the depth-attention query banks (depth, readout and message queries) as merged sites: a matrix depth attention
+///   reads whole, served as each bank slot's effective matrix and handed to depth attention per row
+///   ([`model::depth_attn::DepthAttn::with_row_queries`]) when the rows of a pass run under different adapters.
 pub struct ServedSites<'a>(pub &'a Inkling2Config);
+
+/// The leaves of the sites a forward reads whole: the depth-attention query banks.
+pub const QUERY_LEAVES: [&str; 5] = ["attn_queries", "mlp_queries", "output_query", "middle_cycle_cross_pass_queries", "middle_cycle_cross_pass_kv_queries"];
 
 impl LoraSites for ServedSites<'_> {
     fn lora_sites(&self) -> Vec<LinearSite> {
-        lora_sites(self.0).into_iter().filter(|(_, kind)| *kind == SiteKind::Linear).map(|(site, _)| site).collect()
+        lora_sites(self.0).into_iter().map(|(site, _)| site).filter(|site| !QUERY_LEAVES.contains(&site.leaf)).collect()
     }
     fn expert_sites(&self) -> Vec<ExpertSite> {
         expert_sites(self.0)
+    }
+    fn merged_sites(&self) -> Vec<LinearSite> {
+        lora_sites(self.0).into_iter().map(|(site, _)| site).filter(|site| QUERY_LEAVES.contains(&site.leaf)).collect()
     }
 }
 
@@ -182,7 +192,7 @@ impl Engine {
     /// [`ServedSites`] targeting `cfg.targets`, with room for the larger of a decode batch and a prefill chunk. Call once,
     /// before serving. Expert targets need the published microscaled banks (a dense f32 bank has no served expert
     /// product to correct). The engine registers the bank's kernels ([`crate::kernels`]).
-    pub fn enable_adapters(&mut self, cfg: AdapterBankConfig) -> Result<(), AdapterError> {
+    pub fn enable_adapters(&mut self, mut cfg: AdapterBankConfig) -> Result<(), AdapterError> {
         if self.bank.is_some() {
             return Err(AdapterError::BadConfig("the adapter bank is already enabled".into()));
         }
@@ -192,20 +202,20 @@ impl Engine {
             return Err(AdapterError::BadConfig("inkling2: expert adapters are served over the published NVFP4/MXFP8 banks; this checkpoint stores its experts dense".into()));
         }
         let rows = (self.pool.max_batch() as u32).max(self.prefill_chunk);
-        self.bank = Some(AdapterBank::new_with_experts(self.g(), &sites.lora_sites(), &experts, cfg, rows, 0..self.m.config().n_layers as usize)?);
+        cfg.merged = sites.merged_sites();
+        let served: Vec<String> = cfg.merged.iter().filter(|m| cfg.targets.iter().any(|t| t == m.leaf)).map(|m| m.name.clone()).collect();
+        let mut bank = AdapterBank::new_with_experts(self.g(), &sites.lora_sites(), &experts, cfg, rows, 0..self.m.config().n_layers as usize)?;
+        for name in served {
+            let values = self.m.query_matrix(&name).ok_or_else(|| AdapterError::BadConfig(format!("inkling2: {name} is a served query bank the model does not hold")))?;
+            bank.set_base_saved(self.g(), &name, &values).map_err(AdapterError::BadConfig)?;
+        }
+        self.bank = Some(bank);
         Ok(())
     }
 
     /// Register a verified adapter (host memory only; it reaches a slot when the scheduler first asks about it) and
-    /// return the id the scheduler addresses it by. A pair for a merged site is refused by name.
+    /// return the id the scheduler addresses it by.
     pub fn load_adapter(&mut self, adapter: VerifiedAdapter) -> Result<AdapterId, AdapterError> {
-        let merged: Vec<String> = lora_sites(self.m.config()).into_iter().filter(|(_, kind)| *kind == SiteKind::Merged).map(|(site, _)| site.name).collect();
-        if let Some(site) = adapter.adapter.sites.iter().find(|s| merged.contains(&s.base)) {
-            return Err(AdapterError::Incompatible(format!(
-                "{}: a merged site (a matrix the forward reads whole) is trained but not served; serve an adapter of the linear and expert sites",
-                site.base
-            )));
-        }
         self.bank.as_mut().ok_or(AdapterError::NoBank)?.register(adapter)
     }
 
@@ -226,16 +236,16 @@ impl Engine {
         self.bank.as_ref().map_or_else(Vec::new, AdapterBank::infos)
     }
 
-    /// Write the bank's row slots for a pass over `tables` (`rows_each` rows per sequence) and return the bank, or
-    /// `None` without one (every sequence must then run under the base).
-    fn bank_for(&self, tables: &[&BlockTable], rows_each: usize) -> Option<&AdapterBank> {
+    /// Write the bank's row slots for a pass over `tables` (`rows_each` rows per sequence) and return the bank with
+    /// them, or `None` without one (every sequence must then run under the base).
+    fn bank_for(&self, tables: &[&BlockTable], rows_each: usize) -> Option<(&AdapterBank, Vec<u32>)> {
         let Some(bank) = &self.bank else {
             assert!(tables.iter().all(|t| t.kv_namespace() == BASE_KV_NAMESPACE), "inkling2 serve: a sequence runs under an adapter but this engine has no adapter bank");
             return None;
         };
         let slots: Vec<u32> = tables.iter().flat_map(|t| std::iter::repeat_n(bank.slot_of(t.kv_namespace()), rows_each)).collect();
         bank.write_slots(self.g(), &slots);
-        Some(bank)
+        Some((bank, slots))
     }
 
     /// Where a prompt of `len` tokens is filed: short of its end by [`CHECKPOINT_TAIL`] when that leaves an entry
@@ -276,7 +286,8 @@ impl Engine {
         }
         let recording = table.routing_log_mut().is_some();
         let mut routes = recording.then(Vec::new);
-        let bank = self.bank_for(&[&*table], n);
+        let served = self.bank_for(&[&*table], n);
+        let bank = served.as_ref().map(|(bank, slots)| Banked { bank, slots });
         let normed = self.m.trunk(&mut s, &Rows::Chunk { pool: &self.pool, table, start, bank }, x, n as u32, &mut None, routes.as_mut()).expect("an admitted prompt runs");
         self.m.flush(&mut s);
         if let Some(routes) = routes {
@@ -326,7 +337,8 @@ impl Engine {
         let mut routes = recording.then(Vec::new);
         let logits = {
             let refs: Vec<&BlockTable> = tables.iter().map(|t| &**t).collect();
-            let bank = self.bank_for(&refs, 1);
+            let served = self.bank_for(&refs, 1);
+            let bank = served.as_ref().map(|(bank, slots)| Banked { bank, slots });
             let normed = self.m.trunk(&mut s, &Rows::Decode { pool: &self.pool, tables: &refs, bank }, x, b, &mut None, routes.as_mut()).expect("an admitted batch runs");
             self.m.head(&mut s, &normed, b)
         };

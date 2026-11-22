@@ -27,7 +27,7 @@ fn pipes() -> &'static [(&'static str, &'static str)] {
     static P: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
     P.get_or_init(|| {
         let mut v: Vec<(&str, &str)> = model::ops::kernel_list().to_vec();
-        for k in model::message_gate::kernels() {
+        for k in model::message_gate::kernels().iter().chain(model::adapter::merged::KERNELS) {
             if !v.iter().any(|(n, _)| *n == k.0) {
                 v.push(*k);
             }
@@ -196,4 +196,46 @@ fn inkling2_tiny_golden_message_gates_are_reproduced() {
         }
     }
     assert!(checked >= 16, "only {checked} gates checked");
+}
+
+/// Spec: `forward_corrected` hands each product's input and output to the caller right after the product, so a caller
+/// that adds `x dW^T` to each (an adapter's correction of `Wd`, `Wf` and `Wg`) gets the gate of the corrected weights:
+/// the f64 oracle over `W + dW`, each of the three corrected.
+#[test]
+fn a_corrected_forward_is_the_gate_of_the_corrected_weights() {
+    use model::message_gate::GateProduct;
+    use model::ops::Weight;
+    let g = gpu_core::testgpu::dev(pipes());
+    let mut rng = Lcg::new(random_seed());
+    let (rows, d, k) = (3usize, 8usize, 4usize);
+    let gate = MessageGate::new(rows as u32, d as u32, k as u32, EPS).unwrap();
+    let (x, m) = (rng.vec_scaled(rows * d, 1.0), rng.vec_scaled(rows * d, 1.0));
+    let (wd, wf, wg) = (rng.vec_scaled(k * 2 * d, 0.3), rng.vec_scaled(d * k, 0.3), rng.vec_scaled(d * k, 0.3));
+    let (dd, df, dg) = (rng.vec_scaled(k * 2 * d, 0.2), rng.vec_scaled(d * k, 0.2), rng.vec_scaled(d * k, 0.2));
+    let ops = ops(&g);
+    let ids = MessageGateIds::resolve(&g).unwrap();
+    let axpy = g.kernel_index("axpy").expect("axpy is registered");
+    let b = |name: &str, v: &[f32]| g.storage_init(name, v);
+    let (xb, mb, wdb, wfb, wgb) = (b("x", &x), b("m", &m), b("wd", &wd), b("wf", &wf), b("wg", &wg));
+    let deltas = [(GateProduct::Down, Weight::dense_f32(b("dd", &dd), k as u32, 2 * d as u32)), (GateProduct::Forget, Weight::dense_f32(b("df", &df), d as u32, k as u32)), (GateProduct::Gain, Weight::dense_f32(b("dg", &dg), d as u32, k as u32))];
+    let acts = gate.acts(&g);
+    let y = g.storage((rows * d) as u64);
+    let mut s = Vec::new();
+    let mut seen = Vec::new();
+    gate.forward_corrected(&mut s, &g, &ids, &ops, &MessageGateWeights { down: &wdb, forget: &wfb, gain: &wgb }, &xb, &mb, &acts, &y, &mut |s, product, input, output| {
+        seen.push(product);
+        let w = &deltas.iter().find(|(p, _)| *p == product).unwrap().1;
+        let n = rows as u32 * w.n();
+        let tmp = g.storage(u64::from(n));
+        ops.matmul(s, w, &ops.act_f32(input, 0, rows as u32, w.k()), &tmp, 0);
+        s.push(g.step(axpy, &[output, &tmp], &[n, 1.0f32.to_bits()], n));
+    });
+    g.submit(&[], &s);
+    assert_eq!(seen, [GateProduct::Down, GateProduct::Forget, GateProduct::Gain], "each product once, in the forward's order");
+    let to64 = |v: &[f32]| v.iter().map(|a| *a as f64).collect::<Vec<f64>>();
+    let sum64 = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(p, q)| *p as f64 + *q as f64).collect::<Vec<f64>>();
+    let want = gate64(&to64(&x), &to64(&m), &sum64(&wd, &dd), &sum64(&wf, &df), &sum64(&wg, &dg), rows, d, k);
+    for (i, (a, w)) in g.read(&y, rows * d).iter().zip(&want).enumerate() {
+        assert!((*a as f64 - w).abs() < 1e-5, "y[{i}] {a} vs oracle {w}");
+    }
 }

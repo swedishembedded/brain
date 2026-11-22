@@ -65,7 +65,7 @@ use super::sites::{ExpertSite, LoraSites, SavedSite};
 use super::LinearSite;
 use crate::dispatch::{lora_bank_group_rows, lora_bank_rows, rank_word, LoraBank, LoraBankKernels, LoraBankRows, LoraGroupBank, LoraGroupOut, LORA_GROUP_MAX, LORA_SLOT_NONE};
 use crate::lora::device_adapter::ExpertPair;
-use crate::lora::device_adapter::DeviceAdapter;
+use crate::lora::device_adapter::{AdapterSite, DeviceAdapter};
 use crate::paged::{KvNamespace, NamespaceIds, BASE_KV_NAMESPACE};
 use crate::serve::{AdapterAvailability, AdapterId};
 
@@ -86,7 +86,7 @@ pub trait AdapterServing: LoraSites {
     /// `all` group.
     fn all_leaves(&self) -> Vec<&'static str> {
         let mut leaves: Vec<&'static str> = Vec::new();
-        for leaf in self.lora_sites().iter().map(|s| s.leaf).chain(self.expert_sites().iter().map(|s| s.leaf)) {
+        for leaf in self.lora_sites().iter().map(|s| s.leaf).chain(self.expert_sites().iter().map(|s| s.leaf)).chain(self.merged_sites().iter().map(|s| s.leaf)) {
             if !leaves.contains(&leaf) {
                 leaves.push(leaf);
             }
@@ -253,6 +253,7 @@ impl AdapterBankRequest {
         let mut cfg = AdapterBankConfig::new(self.slots, self.rank_cap, &self.targets.resolve(model)?);
         cfg.max_registered = self.max_registered;
         cfg.groups = model.input_groups().into_iter().map(|g| g.into_iter().map(str::to_string).collect()).collect();
+        cfg.merged = model.merged_sites();
         Ok(cfg)
     }
 }
@@ -271,6 +272,11 @@ impl AdapterBankConfig {
         for site in model.expert_sites().iter().filter(|s| self.targets_expert(s)) {
             if let Some(l) = site.layer.filter(|&l| l < n_layers) {
                 by_layer[l] += self.expert_unit_bytes(site);
+            }
+        }
+        for table in self.merged_tables(&model.merged_sites(), &(0..usize::MAX)) {
+            if let Some(l) = table.layer.filter(|&l| l < n_layers) {
+                by_layer[l] += SavedBank::bytes_of(std::slice::from_ref(&table), self.slots);
             }
         }
         by_layer
@@ -328,6 +334,9 @@ pub struct AdapterBankConfig {
     /// The base tensors an adapter may carry in full (`modules_to_save`) that this bank gathers per row
     /// ([`SavedBank`]); an adapter carrying any other is refused. Device cost is `(slots + 1) * numel * 4` bytes each.
     pub saved: Vec<SavedSite>,
+    /// The model's merged sites ([`LoraSites::merged_sites`]): the targeted ones are served as a per-slot effective
+    /// matrix ([`AdapterBank::gather_merged`]). Device cost is `(slots + 1) * out * in * 4` bytes each.
+    pub merged: Vec<LinearSite>,
 }
 
 impl AdapterBankConfig {
@@ -336,7 +345,7 @@ impl AdapterBankConfig {
     /// upload quantum. Names are checked against the model when the bank is
     /// built ([`AdapterBank::new`]).
     pub fn new<T: SiteLeaf>(slots: u32, r_max: u32, targets: &[T]) -> AdapterBankConfig {
-        AdapterBankConfig { slots, r_max, targets: targets.iter().map(|t| t.site_leaf().to_string()).collect(), max_registered: 64, upload_quantum_bytes: 4 << 20, groups: Vec::new(), saved: Vec::new() }
+        AdapterBankConfig { slots, r_max, targets: targets.iter().map(|t| t.site_leaf().to_string()).collect(), max_registered: 64, upload_quantum_bytes: 4 << 20, groups: Vec::new(), saved: Vec::new(), merged: Vec::new() }
     }
 
     /// A bank with `model`'s default size, correcting what `targets` resolves
@@ -344,6 +353,7 @@ impl AdapterBankConfig {
     pub fn for_model<M: AdapterServing + ?Sized>(model: &M, targets: &AdapterTargets) -> Result<AdapterBankConfig, String> {
         let mut cfg = AdapterBankConfig::new(model.default_slots(), model.default_rank_cap(), &targets.resolve(model)?);
         cfg.groups = model.input_groups().into_iter().map(|g| g.into_iter().map(str::to_string).collect()).collect();
+        cfg.merged = model.merged_sites();
         Ok(cfg)
     }
 
@@ -353,6 +363,11 @@ impl AdapterBankConfig {
 
     fn targets_expert(&self, site: &ExpertSite) -> bool {
         self.targets.iter().any(|t| t == site.leaf)
+    }
+
+    /// The table each targeted merged site of `merged` (in `layers`) takes, as a full tensor of `out * in` values.
+    fn merged_tables(&self, merged: &[LinearSite], layers: &std::ops::Range<usize>) -> Vec<SavedSite> {
+        merged.iter().filter(|m| self.targets_site(m) && m.layer.is_none_or(|l| layers.contains(&l))).map(|m| SavedSite { name: m.name.clone(), numel: m.spec.out * m.spec.inn, layer: m.layer }).collect()
     }
 
     /// Device bytes of one targeted expert site: `slots * experts` sub-slots of factors and rank words.
@@ -435,7 +450,8 @@ impl AdapterBankConfig {
         let experts = model.expert_sites();
         let targeted: Vec<&ExpertSite> = experts.iter().filter(|s| self.targets_expert(s)).collect();
         let expert_units: u64 = targeted.iter().map(|s| self.expert_unit_bytes(s)).sum();
-        units + expert_units + self.row_scratch_bytes(rows) + self.expert_scratch_bytes(&targeted, rows) + SavedBank::bytes_of(&self.saved, self.slots)
+        let merged = SavedBank::bytes_of(&self.merged_tables(&model.merged_sites(), &(0..usize::MAX)), self.slots);
+        units + expert_units + self.row_scratch_bytes(rows) + self.expert_scratch_bytes(&targeted, rows) + SavedBank::bytes_of(&self.saved, self.slots) + merged
     }
 }
 
@@ -484,6 +500,15 @@ impl fmt::Display for AdapterError {
 
 impl std::error::Error for AdapterError {}
 
+/// Where the rows of a batch read a merged site from ([`AdapterBank::merged_rows`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MergedRows {
+    /// Every row reads the model's own matrix: nothing to gather.
+    Base,
+    /// The table rows to gather: one shared by every row of the batch, or one per row.
+    Rows(Vec<u32>),
+}
+
 /// What an unload did.
 #[derive(Debug, PartialEq, Eq)]
 pub enum UnloadStatus {
@@ -529,6 +554,8 @@ enum SiteState {
     Elsewhere,
     /// A stacked expert bank corrected here: index into the bank's expert sites.
     Expert(usize),
+    /// A merged site served here as a per-slot effective matrix: its table in the bank's [`SavedBank`].
+    Merged(usize),
 }
 
 /// One banked stacked-expert projection: `slots * experts` sub-slots of one [`LoraBank`], adapter slot `a`'s expert
@@ -608,6 +635,8 @@ struct Entry {
     sites: Vec<HostUnit>,
     /// The full tensors this adapter carries that the bank holds: `(table index, values)`.
     saved: Vec<(usize, Vec<f32>)>,
+    /// The merged sites it corrects: `(table index, (alpha / rank) B A)`, added to the base's matrix in its slot.
+    merged: Vec<(usize, Vec<f32>)>,
     phase: Phase,
     pins: u32,
     draining: bool,
@@ -628,8 +657,9 @@ pub struct AdapterBank {
     /// Per layer, the bank index of each banked site by leaf.
     by_layer: Vec<HashMap<&'static str, usize>>,
     slot_buf: DeviceBuffer,
-    /// The per-slot tables of the full tensors adapters may carry.
+    /// The per-slot tables of the full tensors adapters may carry (the first `n_saved`), then of the merged sites.
     saved: SavedBank,
+    n_saved: usize,
     /// `[rows, r_max · largest group]` projection scratch shared by every corrected linear.
     tscr: DeviceBuffer,
     entries: HashMap<AdapterId, Entry>,
@@ -672,9 +702,10 @@ impl AdapterBank {
         if cfg.slots == 0 || cfg.r_max == 0 || cfg.targets.is_empty() || cfg.max_registered < cfg.slots {
             return Err(AdapterError::BadConfig("needs slots > 0, r_max > 0, at least one target and max_registered >= slots".into()));
         }
-        if let Some(unknown) = cfg.targets.iter().find(|t| !sites.iter().map(|s| s.leaf).chain(expert_sites.iter().map(|s| s.leaf)).any(|leaf| leaf == t.as_str())) {
+        let all_leaves = || sites.iter().map(|s| s.leaf).chain(expert_sites.iter().map(|s| s.leaf)).chain(cfg.merged.iter().map(|s| s.leaf));
+        if let Some(unknown) = cfg.targets.iter().find(|t| !all_leaves().any(|leaf| leaf == t.as_str())) {
             let mut known: Vec<&str> = Vec::new();
-            for leaf in sites.iter().map(|s| s.leaf).chain(expert_sites.iter().map(|s| s.leaf)) {
+            for leaf in all_leaves() {
                 if !known.contains(&leaf) {
                     known.push(leaf);
                 }
@@ -777,13 +808,28 @@ impl AdapterBank {
                 })
             }
         };
+        for site in &cfg.merged {
+            if site.layer.is_some_and(|l| !layers.contains(&l)) {
+                model_sites.insert(site.name.clone(), SiteState::Elsewhere);
+            } else if !cfg.targets_site(site) {
+                model_sites.insert(site.name.clone(), SiteState::Untargeted);
+            }
+        }
+        let merged_tables = cfg.merged_tables(&cfg.merged, &layers);
+        for (i, table) in merged_tables.iter().enumerate() {
+            if model_sites.insert(table.name.clone(), SiteState::Merged(cfg.saved.len() + i)).is_some() {
+                return Err(AdapterError::BadConfig(format!("{} is listed both as a merged site and as another kind of site", table.name)));
+            }
+        }
         let slot_buf = gpu.storage(rows as u64);
-        let saved = SavedBank::new(gpu, &cfg.saved, cfg.slots).map_err(AdapterError::BadConfig)?;
+        let n_saved = cfg.saved.len();
+        let tables: Vec<SavedSite> = cfg.saved.iter().cloned().chain(merged_tables).collect();
+        let saved = SavedBank::new(gpu, &tables, cfg.slots).map_err(AdapterError::BadConfig)?;
         bytes += saved.bytes();
         let tscr = gpu.storage(rows as u64 * cfg.scratch_width());
         bytes += cfg.row_scratch_bytes(rows);
         let slot_owner = vec![None; cfg.slots as usize];
-        Ok(AdapterBank { cfg, kernels, sites: banked, groups: grouped, experts, expert_scratch, model_sites, by_layer, slot_buf, saved, tscr, entries: HashMap::new(), by_digest: HashMap::new(), slot_owner, resident_slot: HashMap::new(), ids: NamespaceIds::default(), offered: None, pending_purge: Vec::new(), tick: 0, bytes })
+        Ok(AdapterBank { cfg, kernels, sites: banked, groups: grouped, experts, expert_scratch, model_sites, by_layer, slot_buf, saved, n_saved, tscr, entries: HashMap::new(), by_digest: HashMap::new(), slot_owner, resident_slot: HashMap::new(), ids: NamespaceIds::default(), offered: None, pending_purge: Vec::new(), tick: 0, bytes })
     }
 
     /// Device bytes the bank occupies.
@@ -795,6 +841,29 @@ impl AdapterBank {
     /// replaying a tape that holds [`AdapterBank::correct`] steps.
     pub fn slot_buf(&self) -> &DeviceBuffer {
         &self.slot_buf
+    }
+
+    /// The table rows the rows of a batch (their `slots`, [`Self::slot_of`]) read a merged site `base` from:
+    /// [`MergedRows::Base`] when the bank does not serve the site or every row is the base's (the model reads its own
+    /// matrix), else one row when every row reads the same slot, else one per row ([`Self::gather_merged`]).
+    pub fn merged_rows(&self, base: &str, slots: &[u32]) -> MergedRows {
+        let Some(SiteState::Merged(_)) = self.model_sites.get(base) else { return MergedRows::Base };
+        if slots.iter().all(|&s| s == LORA_SLOT_NONE) {
+            return MergedRows::Base;
+        }
+        let rows: Vec<u32> = slots.iter().map(|&s| self.saved.table_row(s)).collect();
+        if rows.iter().all(|&r| r == rows[0]) {
+            return MergedRows::Rows(vec![rows[0]]);
+        }
+        MergedRows::Rows(rows)
+    }
+
+    /// Record the gather of `parts` (each `width` values of the merged site `base`'s `[out, in]` matrix, part `p` at
+    /// `p * width`) for the table `rows` [`Self::merged_rows`] named: `[parts.len(), rows.len(), width]`, part-major
+    /// (the layout of a per-row query operand). Panics for a site [`Self::merged_rows`] answers `Base` for.
+    pub fn gather_merged(&self, gpu: &Gpu, steps: &mut Vec<Step>, base: &str, rows: &[u32], parts: &[u32], width: u32) -> DeviceBuffer {
+        let Some(&SiteState::Merged(ix)) = self.model_sites.get(base) else { panic!("gather_merged: {base} is not a merged site this bank serves") };
+        self.saved.gather_parts(gpu, steps, ix, rows, parts, width)
     }
 
     /// Does the bank correct any site named by `leaves`?
@@ -885,7 +954,7 @@ impl AdapterBank {
 
     /// Does the bank hold full tensors adapters may carry?
     pub fn has_saved(&self) -> bool {
-        !self.saved.is_empty()
+        self.n_saved > 0
     }
 
     /// Set the base's value of the full tensor `name`: what base rows read, and what a slot reads for an adapter that
@@ -940,11 +1009,16 @@ impl AdapterBank {
         let r = rank as usize;
         let mut units: Vec<HostUnit> = Vec::with_capacity(a.adapter.sites.len());
         let mut group_members: Vec<(usize, Vec<Option<HostSite>>)> = Vec::new();
+        let mut merged = Vec::new();
         for site in &a.adapter.sites {
             let state = match self.model_sites.get(&site.base) {
                 None => return Err(bad(format!("{} is not a linear of this model", site.base))),
                 Some(SiteState::Untargeted) => return Err(bad(format!("{} is not a site this bank targets", site.base))),
                 Some(SiteState::Elsewhere) => continue,
+                Some(&SiteState::Merged(ix)) => {
+                    merged.push((ix, self.merged_delta(ix, site, rank, scale).map_err(bad)?));
+                    continue;
+                }
                 Some(&state) => state,
             };
             let (k, n) = match state {
@@ -986,7 +1060,7 @@ impl AdapterBank {
         }
         let sites = units;
         // The full tensors: the ones this bank holds are kept for the upload; the others belong to another stage's bank.
-        if self.saved.is_empty() {
+        if self.n_saved == 0 {
             if let Some(t) = a.adapter.saved.first() {
                 return Err(bad(format!("{}: the adapter carries this tensor in full (modules_to_save), which this model's bank does not apply", t.base)));
             }
@@ -994,6 +1068,9 @@ impl AdapterBank {
         let mut saved = Vec::new();
         for t in &a.adapter.saved {
             if let Some(ix) = self.saved.site_index(&t.base) {
+                if ix >= self.n_saved {
+                    return Err(bad(format!("{}: the adapter carries this merged site in full; it is served from its pair", t.base)));
+                }
                 if t.data.len() != self.saved.numel_of(ix) {
                     return Err(bad(format!("{}: the adapter carries {} values for a tensor of {}", t.base, t.data.len(), self.saved.numel_of(ix))));
                 }
@@ -1002,8 +1079,26 @@ impl AdapterBank {
         }
         let id = AdapterId::new(self.ids.fresh()).expect("fresh namespaces are never the base's");
         self.by_digest.insert(a.digest.clone(), id);
-        self.entries.insert(id, Entry { label: a.label, digest: a.digest, rank, sites, saved, phase: Phase::Cold, pins: 0, draining: false, last_used: 0 });
+        self.entries.insert(id, Entry { label: a.label, digest: a.digest, rank, sites, saved, merged, phase: Phase::Cold, pins: 0, draining: false, last_used: 0 });
         Ok(id)
+    }
+
+    /// The delta `(alpha / rank) B A` a pair adds to merged table `ix`, its shapes checked against the site; refused
+    /// until the model has set the site's base value ([`Self::set_base_saved`]), which every slot's matrix adds to.
+    fn merged_delta(&self, ix: usize, site: &AdapterSite, rank: u32, scale: f32) -> Result<Vec<f32>, String> {
+        let numel = self.saved.numel_of(ix);
+        let r = rank as usize;
+        let (out, inn) = (site.b.len() / r, site.a.len() / r);
+        let shaped = self.cfg.merged.iter().find(|m| m.name == site.base).is_some_and(|m| (m.spec.out, m.spec.inn) == (out, inn) && out * inn == numel);
+        if !shaped || site.a.len() != r * inn || site.b.len() != out * r {
+            return Err(format!("{} is a merged site of {numel} values but the rank-{rank} pair holds A {} / B {} values", site.base, site.a.len(), site.b.len()));
+        }
+        if !self.saved.base_is_set(ix) {
+            return Err(format!("{}: the model has not given the bank this merged site's base value (AdapterBank::set_base_saved)", site.base));
+        }
+        let mut delta = vec![0.0f32; numel];
+        crate::lora::device_adapter::fold_delta(&mut delta, &site.a, &site.b, r, scale);
+        Ok(delta)
     }
 
     /// The host form of a stacked pair for expert site `ix`: its shapes checked against the site, each expert's `B`
@@ -1074,7 +1169,7 @@ impl AdapterBank {
             return false;
         }
         // The full tensors with the factors: a slot that is named by a row has every one of them in.
-        self.saved.upload(gpu, slot, &e.saved);
+        self.saved.upload(gpu, slot, &e.saved, &e.merged);
         // Ranks last: a row can only name this slot once every factor is in.
         // A linear the adapter does not correct gets rank 0 (row untouched); a
         // group gets the width of its stacked rank axis when the adapter

@@ -28,6 +28,8 @@ struct Table {
     site: SavedSite,
     device: DeviceBuffer,
     host: Vec<f32>,
+    /// Whether the base's value arrived ([`SavedBank::set_base`]).
+    base_set: bool,
 }
 
 /// The tables of one bank (one pipeline stage's worth of tensors).
@@ -53,7 +55,7 @@ impl SavedBank {
             if words * 4 > gpu.max_storage_binding_bytes() {
                 return Err(format!("{}: {} slots of {} values exceed one storage binding", site.name, slots, site.numel));
             }
-            tables.push(Table { site: site.clone(), device: gpu.storage(words), host: vec![0.0; words as usize] });
+            tables.push(Table { site: site.clone(), device: gpu.storage(words), host: vec![0.0; words as usize], base_set: false });
         }
         Ok(SavedBank { slots, tables, by_name, gather })
     }
@@ -92,20 +94,58 @@ impl SavedBank {
             row.copy_from_slice(values);
         }
         gpu.write_f32(&t.device, &t.host);
+        t.base_set = true;
         Ok(())
     }
 
+    /// Whether the base's value of table `ix` was set ([`Self::set_base`]): until it is, every row holds zeros.
+    pub fn base_is_set(&self, ix: usize) -> bool {
+        self.tables[ix].base_set
+    }
+
     /// Put an adapter in `slot`: each table's row becomes the adapter's tensor `(table index, values)` when it carries
-    /// one, the base's value otherwise, so nothing of the slot's previous adapter survives.
-    pub fn upload(&mut self, gpu: &Gpu, slot: u32, carried: &[(usize, Vec<f32>)]) {
+    /// one, the base's value plus the adapter's delta `(table index, delta)` when it adds one (a merged site's
+    /// `(alpha / rank) B A`), the base's value otherwise, so nothing of the slot's previous adapter survives.
+    pub fn upload(&mut self, gpu: &Gpu, slot: u32, carried: &[(usize, Vec<f32>)], added: &[(usize, Vec<f32>)]) {
         assert!(slot < self.slots, "SavedBank::upload: slot {slot} of {}", self.slots);
         for (ix, t) in self.tables.iter_mut().enumerate() {
             let n = t.site.numel;
-            let base_row: Vec<f32> = t.host[self.slots as usize * n..(self.slots as usize + 1) * n].to_vec();
-            let values: &[f32] = carried.iter().find(|(i, _)| *i == ix).map_or(base_row.as_slice(), |(_, v)| v.as_slice());
-            t.host[slot as usize * n..(slot as usize + 1) * n].copy_from_slice(values);
-            gpu.write_f32_at(&t.device, slot as u64 * n as u64, values);
+            let mut values: Vec<f32> = t.host[self.slots as usize * n..(self.slots as usize + 1) * n].to_vec();
+            if let Some((_, v)) = carried.iter().find(|(i, _)| *i == ix) {
+                values.copy_from_slice(v);
+            }
+            if let Some((_, delta)) = added.iter().find(|(i, _)| *i == ix) {
+                values.iter_mut().zip(delta).for_each(|(w, d)| *w += d);
+            }
+            t.host[slot as usize * n..(slot as usize + 1) * n].copy_from_slice(&values);
+            gpu.write_f32_at(&t.device, slot as u64 * n as u64, &values);
         }
+    }
+
+    /// The table row a row at `slot` reads: the slot's, or the base's for [`crate::dispatch::LORA_SLOT_NONE`].
+    pub fn table_row(&self, slot: u32) -> u32 {
+        if slot == crate::dispatch::LORA_SLOT_NONE {
+            self.slots
+        } else {
+            slot
+        }
+    }
+
+    /// Record the gather of `parts` of tensor `ix` (each `width` values: part `p` is values `p * width ..`) for the table
+    /// rows `rows` ([`Self::table_row`]), part-major: `[parts.len(), rows.len(), width]`, part `parts[p]` of table row
+    /// `rows[r]` at `(p * rows.len() + r) * width`.
+    pub fn gather_parts(&self, gpu: &Gpu, steps: &mut Vec<Step>, ix: usize, rows: &[u32], parts: &[u32], width: u32) -> DeviceBuffer {
+        let t = &self.tables[ix];
+        let per = t.site.numel as u32 / width;
+        assert!(width > 0 && t.site.numel as u32 == per * width && parts.iter().all(|&p| p < per), "SavedBank::gather_parts: parts {parts:?} of width {width} of a tensor of {}", t.site.numel);
+        assert!(rows.iter().all(|&r| r <= self.slots), "SavedBank::gather_parts: table rows {rows:?} of {}", self.slots + 1);
+        let index: Vec<u32> = parts.iter().flat_map(|&p| rows.iter().map(move |&r| r * per + p)).collect();
+        let index_buf = gpu.storage(index.len().max(1) as u64);
+        gpu.write(&index_buf, &index);
+        let n = index.len() as u32;
+        let out = gpu.storage(u64::from(n) * u64::from(width));
+        steps.push(gpu.step(self.gather, &[&index_buf, &t.device, &out], &[width, n], n * width));
+        out
     }
 
     /// The table row each row of a batch reads: its slot, or the base's row for a row of the base

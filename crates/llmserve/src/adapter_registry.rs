@@ -153,6 +153,7 @@ impl AdapterBankSettings {
     pub fn bank_config<M: AdapterServing + ?Sized>(&self, model: &M) -> Result<AdapterBankConfig, String> {
         let mut cfg = AdapterBankConfig::new(self.slots, self.rank_cap, &self.targets.resolve(model)?);
         cfg.max_registered = MAX_SERVED_ADAPTERS;
+        cfg.merged = model.merged_sites();
         Ok(cfg)
     }
 

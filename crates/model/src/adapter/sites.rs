@@ -34,6 +34,14 @@ pub trait LoraSites {
     fn expert_sites(&self) -> Vec<ExpertSite> {
         Vec::new()
     }
+
+    /// The small matrices an operator reads whole (a bank of learned queries, a gate's factors read by a fused
+    /// operator), which an adapter corrects with an ordinary pair (`{name}.lora_a [r, in]`, `{name}.lora_b [out, r]`)
+    /// but a serving bank cannot correct beside a product: it serves each as a per-slot effective matrix
+    /// `W + (alpha / rank) B A` ([`crate::adapter::bank::AdapterBank::gather_merged`]). None by default.
+    fn merged_sites(&self) -> Vec<LinearSite> {
+        Vec::new()
+    }
 }
 
 /// One projection of a mixture-of-experts layer stored as a stacked bank of `experts` matrices `[out, in]` (one

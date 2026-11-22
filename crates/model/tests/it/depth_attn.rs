@@ -159,6 +159,46 @@ fn depth_attention_matches_the_host_reference_and_its_backward_matches_finite_di
     }
 }
 
+/// Spec: with per-row queries (`[nq, rows, width]`, query `q` of row `r` at `(q * rows + r) * width`), every row is
+/// mixed by its own queries: row `r` of the output is the host reference's row `r` under row `r`'s query set, as when
+/// every row of a batch runs under its own adapter's queries. The backward takes shared queries only and refuses.
+#[test]
+fn per_row_queries_mix_each_row_with_its_own_queries() {
+    let g = gpu_core::testgpu::dev(pipes());
+    let mut rng = Lcg::new(random_seed());
+    let (rows, d, nq) = (4usize, 8usize, 3usize);
+    let case = Case::new(&mut rng, rows, d, 4);
+    let slots = [2u32, 0];
+    let per_row = rng.vec_scaled(nq * rows * d, 2.0);
+    let (store, partial) = case.upload(&g);
+    let ids = DepthAttnIds::resolve(&g).unwrap();
+    let da = DepthAttn::new(&store, &slots, nq as u32, EPS).unwrap().with_row_queries();
+    let query = g.storage_init("query", &per_row);
+    let (out, stats) = (g.storage(da.out_len()), g.storage(da.stats_len()));
+    g.submit(&[], &[da.forward(&g, &ids, &store, &partial, &query, &out, &stats)]);
+    let out = g.read(&out, da.out_len() as usize);
+    let stack: Vec<&[f32]> = slots.iter().map(|s| case.state(*s as usize)).chain([case.partial.as_slice()]).collect();
+    for r in 0..rows {
+        let own: Vec<f32> = (0..nq).flat_map(|q| per_row[(q * rows + r) * d..(q * rows + r + 1) * d].iter().copied()).collect();
+        let want = model::hostmath::depth_attention(&stack, rows, d, &own, nq, EPS);
+        for q in 0..nq {
+            for j in 0..d {
+                let (a, b) = (out[(q * rows + r) * d + j], want[(q * rows + r) * d + j]);
+                assert!((a - b).abs() < 1e-5, "row {r} query {q} [{j}]: {a} vs host {b}");
+            }
+        }
+    }
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let dz = g.storage(da.dz_len());
+        da.backward(&g, &ids, &store, &partial, &query, &stats, &out_buf(&g, &da), &g.storage((rows * d) as u64), &dz, &g.storage((nq * d) as u64))
+    }));
+    assert!(refused.is_err(), "the backward refuses per-row queries");
+}
+
+fn out_buf(g: &Gpu, da: &DepthAttn) -> DeviceBuffer {
+    g.storage(da.out_len())
+}
+
 #[test]
 fn a_retained_state_read_by_two_consumers_receives_the_sum_of_their_gradients() {
     let g = gpu_core::testgpu::dev(pipes());

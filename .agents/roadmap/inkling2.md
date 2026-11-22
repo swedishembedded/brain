@@ -748,6 +748,20 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
   - Done (2026-11-22, adapt): an adapter saved with merged sites reads back - the writer records each pair's declared
     leaf in the adapter config (`leaves`, `model::lora::device_adapter::LEAVES_KEY`) and the reader checks the card
     against it (knowledge #564); gate `serve_adapters::an_adapter_over_every_site_kind_reads_back_with_the_trainers_factors`.
+  - Done (2026-11-22, adapt): the engine serves every site the trainer adapts. Generic: `LoraSites::merged_sites` (a
+    matrix an operator reads whole), `AdapterBankConfig::merged`, `AdapterBank::{merged_rows, gather_merged}` +
+    `MergedRows` (each bank slot's effective matrix `W + (alpha/rank) B A` in the `SavedBank` tables, base row set by the
+    model with `set_base_saved`; one shared row when every row reads one slot, else part-major per-row rows),
+    `DepthAttn::with_row_queries` (forward-only `[nq, rows, width]` queries: the `depth_attn_fwd` param word that was
+    padding), `MessageGate::forward_corrected` + `GateProduct` (a correction after each of the gate's three products).
+    Inkling 2: `serve::QUERY_LEAVES` are the merged sites (depth, readout, message queries; `Inkling2::query_matrix`
+    hands the bank their base), the gate factors are corrected as products (`correct_named`). Gates (CPU):
+    `serve_adapters` - an adapter over every site (`DEFAULT_TARGETS`) and one over the query banks and gates alone are
+    served at the trainer's adapted logits (1e-4 of scale; the query/gate-only adapter within 1e-5), whole/sliced
+    prefill and mixed decode beside a base row; conformance with adapters over every site; model
+    `adapter_merged::a_bank_serves_a_merged_site_as_each_slots_effective_matrix`, `depth_attn::per_row_queries_*`,
+    `message_gate::a_corrected_forward_is_the_gate_of_the_corrected_weights`. The rank-2 fixture factors are 0.15 (at
+    0.3 on all 17 leaves the f32 spread of the linear corrections, about 5e-5 alone, grew to 2.6e-4 at one position).
 - **I3.5** Acceptance through the public API with the vendor's published verification
   suite (coding, vision, long context to 1M), after operator parity.
 
