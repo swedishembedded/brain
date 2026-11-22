@@ -133,7 +133,7 @@ mod tests {
     fn a_continued_adapter_must_be_the_runs_rank() {
         let cfg = TrainConfig::tiny().with_lora(LoraCfg::new(2, 4.0, default_targets()));
         let base = TrainConfig::tiny().tiny_weights(1);
-        let wrong = model::lora::device_adapter::DeviceAdapter { rank: 3, alpha: 4.0, sites: Vec::new(), saved: Vec::new(), experts: Vec::new() };
+        let wrong = model::lora::device_adapter::DeviceAdapter { rank: 3, alpha: 4.0, sites: Vec::new(), saved: Vec::new(), experts: Vec::new(), leaves: Default::default() };
         assert!(AdapterInit::continued(&cfg, &base, &wrong).err().unwrap().contains("rank 3"));
     }
 }

@@ -92,3 +92,33 @@ fn full_tensors_are_read_as_the_card_lists_them_and_a_disagreeing_file_is_refuse
     assert!(unlisted.contains("blocks.0.ln.weight.saved") && unlisted.contains("does not list"), "{unlisted}");
     assert!(read_adapter(write("plain", Some(&["wq"]), &["blocks.0.attn.wq.weight"]).as_str()).unwrap().saved.is_empty(), "an adapter of factors only has no full tensors");
 }
+
+/// [`write`] with the config's recorded leaves (`leaves`: base name -> the leaf of its site).
+fn write_leaves(name: &str, card_targets: &[&str], tensor_bases: &[&str], leaves: serde_json::Value) -> brain_testutil::Scratch {
+    let path = brain_testutil::Scratch::file(&format!("brain-adapter-contract-{name}"), ".safetensors");
+    let mut card = ModelCard::new("contract", "qwen");
+    card.adapter = Some(Adapter { kind: "lora".to_string(), rank: Some(2), alpha: Some(4.0), targets: Some(card_targets.iter().map(|s| s.to_string()).collect()), ..Default::default() });
+    let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = tensor_bases.iter().flat_map(|b| [(format!("{b}.lora_a"), vec![2, 4], vec![0.1f32; 8]), (format!("{b}.lora_b"), vec![4, 2], vec![0.1f32; 8])]).collect();
+    checkpoint::st::save_safetensors(path.as_str(), &tensors, &serde_json::json!({"rank": 2, "alpha": 4.0, "leaves": leaves}), Some(&card)).unwrap();
+    path
+}
+
+/// A site's leaf is the model's to say: a bank of queries stored as `attn_res.attn_queries.0` is an `attn_queries` site.
+/// The writer records each pair's leaf and the reader checks the card against it; a recorded map that disagrees with the
+/// pairs is refused by name.
+#[test]
+fn recorded_leaves_decide_what_a_pair_corrects() {
+    let bases = ["model.attn_res.attn_queries.0", "model.attn_res.attn_queries.1", "model.layers.0.wq"];
+    let leaves = serde_json::json!({ bases[0]: "attn_queries", bases[1]: "attn_queries", bases[2]: "wq" });
+    let ok = write_leaves("leaves-ok", &["attn_queries", "wq"], &bases, leaves.clone());
+    assert_eq!(read_adapter(ok.as_str()).unwrap().sites.len(), 3);
+    let wrong_card = read_adapter(write_leaves("leaves-card", &["0", "1", "wq"], &bases, leaves).as_str()).err().expect("refused").to_string();
+    assert!(wrong_card.contains("attn_queries"), "{wrong_card}");
+    let unrecorded = read_adapter(write_leaves("leaves-missing", &["attn_queries", "wq"], &bases, serde_json::json!({ bases[0]: "attn_queries", bases[2]: "wq" })).as_str()).err().expect("refused").to_string();
+    assert!(unrecorded.contains(bases[1]) && unrecorded.contains("no leaf"), "{unrecorded}");
+    let stray = serde_json::json!({ bases[0]: "attn_queries", bases[1]: "attn_queries", bases[2]: "wq", "model.layers.9.wk": "wk" });
+    let extra = read_adapter(write_leaves("leaves-extra", &["attn_queries", "wq"], &bases, stray).as_str()).err().expect("refused").to_string();
+    assert!(extra.contains("model.layers.9.wk"), "{extra}");
+    let malformed = read_adapter(write_leaves("leaves-malformed", &["attn_queries", "wq"], &bases, serde_json::json!(["attn_queries"])).as_str()).err().expect("refused").to_string();
+    assert!(malformed.contains("leaves"), "{malformed}");
+}

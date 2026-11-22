@@ -128,7 +128,7 @@ impl EngineRollout {
         }
         sites.sort_by(|x, y| x.base.cmp(&y.base));
         let version = self.versions + 1;
-        let adapter = DeviceAdapter { rank: lora.rank, alpha: lora.scale() * lora.rank as f32, sites, saved: Vec::new(), experts: Vec::new() };
+        let adapter = DeviceAdapter { rank: lora.rank, alpha: lora.scale() * lora.rank as f32, sites, saved: Vec::new(), experts: Vec::new(), leaves: Default::default() };
         // The identity of a policy is its version: every sync is new weights.
         Ok(VerifiedAdapter { label: format!("policy-{version}"), digest: format!("policy-{version}"), adapter })
     }

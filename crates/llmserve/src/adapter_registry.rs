@@ -260,10 +260,11 @@ impl AdapterRegistry {
             ));
         }
         let mut missing: Vec<&str> = Vec::new();
-        for site in &loaded.adapter.sites {
-            let leaf = site.base.rsplit('.').nth(1).unwrap_or_default();
+        let a = &loaded.adapter;
+        for base in a.sites.iter().map(|s| s.base.as_str()).chain(a.experts.iter().map(|p| p.base.as_str())) {
+            let leaf = a.leaf(base);
             if !self.family.all.contains(&leaf) {
-                return Err(format!("adapter {id} holds a pair for {}, which is not a linear of a {} block (it has {})", site.base, self.family.tag, self.family.all.join(", ")));
+                return Err(format!("adapter {id} holds a pair for {base}, which is not an adapter site of a {} model (it has {})", self.family.tag, self.family.all.join(", ")));
             }
             if !settings.targets.admits(leaf, &self.family.attention) && !missing.contains(&leaf) {
                 missing.push(leaf);

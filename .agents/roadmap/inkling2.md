@@ -745,6 +745,9 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
     `read_adapter_with_experts` (its card names `attn_queries` while the reader takes the tensors' last segment, `0`,
     as the leaf); the trainer's `serving_engine` hook still refuses an adapter (scoring runs base-namespace sequences);
     nothing of this lane ran on CUDA/Vulkan.
+  - Done (2026-11-22, adapt): an adapter saved with merged sites reads back - the writer records each pair's declared
+    leaf in the adapter config (`leaves`, `model::lora::device_adapter::LEAVES_KEY`) and the reader checks the card
+    against it (knowledge #564); gate `serve_adapters::an_adapter_over_every_site_kind_reads_back_with_the_trainers_factors`.
 - **I3.5** Acceptance through the public API with the vendor's published verification
   suite (coding, vision, long context to 1M), after operator parity.
 

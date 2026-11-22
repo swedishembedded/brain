@@ -190,14 +190,14 @@ mod tests {
     #[test]
     fn an_adapter_that_fits_its_sites_validates_and_may_skip_sites() {
         let sites = [site("w0", 6, 5), site("w1", 4, 7)];
-        let adapter = DeviceAdapter { rank: 2, alpha: 2.0, sites: vec![pair(&sites[1], 2)], saved: Vec::new(), experts: Vec::new() };
+        let adapter = DeviceAdapter { rank: 2, alpha: 2.0, sites: vec![pair(&sites[1], 2)], saved: Vec::new(), experts: Vec::new(), leaves: Default::default() };
         assert_eq!(validate(&adapter, &sites), Ok(()));
     }
 
     #[test]
     fn an_unknown_site_is_named() {
         let sites = [site("w0", 6, 5)];
-        let adapter = DeviceAdapter { rank: 2, alpha: 2.0, sites: vec![AdapterSite { base: "nope".into(), a: vec![0.0; 10], b: vec![0.0; 12] }], saved: Vec::new(), experts: Vec::new() };
+        let adapter = DeviceAdapter { rank: 2, alpha: 2.0, sites: vec![AdapterSite { base: "nope".into(), a: vec![0.0; 10], b: vec![0.0; 12] }], saved: Vec::new(), experts: Vec::new(), leaves: Default::default() };
         assert_eq!(validate(&adapter, &sites), Err(SiteMismatch::UnknownSite { name: "nope".into() }));
     }
 
@@ -205,7 +205,7 @@ mod tests {
     fn full_tensors_are_refused_unless_the_model_applies_them_at_their_size() {
         let sites = [site("w0", 6, 5)];
         let gain = SavedSite { name: "norm.weight".into(), numel: 6, layer: Some(0) };
-        let mut adapter = DeviceAdapter { rank: 2, alpha: 2.0, sites: vec![pair(&sites[0], 2)], saved: vec![SavedTensor { base: "norm.weight".into(), data: vec![1.0; 6] }], experts: Vec::new() };
+        let mut adapter = DeviceAdapter { rank: 2, alpha: 2.0, sites: vec![pair(&sites[0], 2)], saved: vec![SavedTensor { base: "norm.weight".into(), data: vec![1.0; 6] }], experts: Vec::new(), leaves: Default::default() };
         // A model that knows nothing of them never drops them silently.
         let err = validate(&adapter, &sites).unwrap_err();
         assert_eq!(err, SiteMismatch::UnsavableTensor { name: "norm.weight".into() });
@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn a_wrong_rank_or_transposed_factor_is_refused_with_the_expected_shapes() {
         let sites = [site("w0", 6, 5)];
-        let mut adapter = DeviceAdapter { rank: 2, alpha: 2.0, sites: vec![pair(&sites[0], 3)], saved: Vec::new(), experts: Vec::new() };
+        let mut adapter = DeviceAdapter { rank: 2, alpha: 2.0, sites: vec![pair(&sites[0], 3)], saved: Vec::new(), experts: Vec::new(), leaves: Default::default() };
         let err = validate(&adapter, &sites).unwrap_err();
         assert!(matches!(err, SiteMismatch::Shape { rank: 2, expected_a: [2, 5], expected_b: [6, 2], .. }), "{err:?}");
         assert!(err.to_string().contains("w0") && err.to_string().contains("[2, 5]"), "{err}");

@@ -1507,6 +1507,14 @@ pub mod device_adapter {
         if !dims.is_empty() {
             config["sites"] = dims.iter().map(|(k, (o, i))| (k.clone(), serde_json::json!([o, i]))).collect::<serde_json::Map<_, _>>().into();
         }
+        // The leaf each pair's site answers to, as the model names it: a card's `targets` are leaves, and a site's leaf
+        // is the model's to say (`attn_res.attn_queries.0` is an `attn_queries` site), not its name's last segment.
+        let paired: std::collections::BTreeSet<&str> = tensors.iter().filter_map(|(n, _, _)| n.strip_suffix(LORA_A)).collect();
+        let site_leaves: std::collections::BTreeMap<String, &str> =
+            model.adapter_sites().into_iter().map(|s| (s.name, s.leaf)).chain(model.adapter_expert_sites().into_iter().map(|s| (s.name, s.leaf))).filter(|(name, _)| paired.contains(name.as_str())).collect();
+        if !site_leaves.is_empty() {
+            config[LEAVES_KEY] = serde_json::to_value(&site_leaves).expect("a map of strings serializes");
+        }
         let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = tensors.into_iter().chain(saved_tensors).collect();
         checkpoint::st::save_safetensors(path, &tensors, &config, Some(&card))
     }
@@ -1548,6 +1556,10 @@ pub mod device_adapter {
         /// readers that take them fill it ([`read_adapter_with_experts`], [`parse_adapter_with_experts`]); the linear
         /// readers refuse a file that holds one, so a consumer that knows only [`Self::sites`] never drops one.
         pub experts: Vec<ExpertPair>,
+        /// The leaf of the site each pair corrects as the model that saved it declares the site, by pair base name,
+        /// when the file records it ([`LEAVES_KEY`]); empty for a file that records none. Read it through
+        /// [`DeviceAdapter::leaf`].
+        pub leaves: std::collections::BTreeMap<String, String>,
     }
 
     /// One stacked expert pair as an adapter file stores it: `A [experts, r, in]` and `B [experts, out, r]`,
@@ -1590,6 +1602,12 @@ pub mod device_adapter {
         /// The factor the low-rank product is scaled by: `alpha / rank`.
         pub fn scale(&self) -> f32 {
             self.alpha / self.rank as f32
+        }
+
+        /// The leaf of the site the pair over `base` corrects (the unit a card's `targets` and a bank's targets name):
+        /// the recorded one ([`Self::leaves`]), else the base name's last component without `.weight`.
+        pub fn leaf<'a>(&'a self, base: &'a str) -> &'a str {
+            self.leaves.get(base).map_or_else(|| leaf_of(base), String::as_str)
         }
     }
 
@@ -1712,8 +1730,10 @@ pub mod device_adapter {
         if sites.is_empty() && experts.is_empty() {
             return Err(invalid(adapter_path, "contains no adapter pairs".into()));
         }
+        let bases: Vec<&str> = sites.iter().map(|s| s.base.as_str()).chain(experts.iter().map(|p| p.base.as_str())).collect();
+        let leaves = recorded_leaves(&st, &bases).map_err(|why| invalid(adapter_path, why))?;
         if let Some(declared) = a.targets.as_deref() {
-            check_declared_targets(declared, sites.iter().map(|s| s.base.as_str()).chain(experts.iter().map(|p| p.base.as_str()))).map_err(|why| invalid(adapter_path, why))?;
+            check_declared_targets(declared, bases.iter().map(|b| leaves.get(*b).map_or_else(|| leaf_of(b), String::as_str))).map_err(|why| invalid(adapter_path, why))?;
         }
         // The full tensors: the card lists them, the file holds each as `<name>.saved`; a listed one the file lacks,
         // or one the card does not list, is a file that disagrees with its card.
@@ -1728,24 +1748,44 @@ pub mod device_adapter {
         if let Some(unlisted) = st.tensors.keys().find(|n| n.ends_with(SAVED_SUFFIX)) {
             return Err(invalid(adapter_path, format!("{unlisted} is a saved tensor its card does not list in modules_to_save")));
         }
-        Ok((DeviceAdapter { rank, alpha, sites, saved, experts }, card))
+        Ok((DeviceAdapter { rank, alpha, sites, saved, experts, leaves }, card))
     }
 
-    /// The leaf a site corrects: its base weight's last name component, the
-    /// unit a card's `targets` are written in (`blocks.0.attn.wq.weight` is
-    /// `wq`).
+    /// The key of the adapter config's map from each pair's base name to the leaf of the site it corrects, as the model
+    /// that saved it declares the site ([`crate::adapter::LinearSite::leaf`], [`crate::adapter::sites::ExpertSite::leaf`]).
+    pub const LEAVES_KEY: &str = "leaves";
+
+    /// The base-to-leaf map a writer recorded ([`LEAVES_KEY`]) for the pairs over `bases`, empty for a file written
+    /// before writers recorded it. A config that does not parse, a map that is not an object of strings, one that names
+    /// a tensor the file holds no pair for, or one that misses a pair, is refused.
+    fn recorded_leaves(st: &checkpoint::st::StModel, bases: &[&str]) -> Result<std::collections::BTreeMap<String, String>, String> {
+        let Some(text) = st.metadata.get(checkpoint::st::CONFIG_KEY) else { return Ok(Default::default()) };
+        let config: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("its config does not parse: {e}"))?;
+        let Some(map) = config.get(LEAVES_KEY) else { return Ok(Default::default()) };
+        let map: std::collections::BTreeMap<String, String> = serde_json::from_value(map.clone()).map_err(|e| format!("its config's {LEAVES_KEY:?} is not a map of tensor names to leaf names: {e}"))?;
+        if let Some(extra) = map.keys().find(|k| !bases.contains(&k.as_str())) {
+            return Err(format!("its config records the leaf of {extra}, which the file holds no pair for"));
+        }
+        if let Some(missing) = bases.iter().find(|b| !map.contains_key(**b)) {
+            return Err(format!("its config records no leaf for {missing}"));
+        }
+        Ok(map)
+    }
+
+    /// The leaf a site corrects when the file records none: its base weight's last name component
+    /// (`blocks.0.attn.wq.weight` is `wq`).
     fn leaf_of(base: &str) -> &str {
         let name = base.strip_suffix(".weight").unwrap_or(base);
         name.rsplit('.').next().unwrap_or(name)
     }
 
     /// The card's declared `targets` must be exactly the leaves its tensors
-    /// correct. A card claiming attention over MLP tensors (or the reverse)
+    /// correct (`found`, one per pair). A card claiming attention over MLP tensors (or the reverse)
     /// would be bound and served as something it is not; the message names
     /// both sets so the mismatch is visible without opening the file.
-    fn check_declared_targets<'a>(declared: &[String], bases: impl Iterator<Item = &'a str>) -> Result<(), String> {
+    fn check_declared_targets<'a>(declared: &[String], found: impl Iterator<Item = &'a str>) -> Result<(), String> {
+        let found: std::collections::BTreeSet<&str> = found.collect();
         let declared: std::collections::BTreeSet<&str> = declared.iter().map(String::as_str).collect();
-        let found: std::collections::BTreeSet<&str> = bases.map(leaf_of).collect();
         if declared == found {
             return Ok(());
         }

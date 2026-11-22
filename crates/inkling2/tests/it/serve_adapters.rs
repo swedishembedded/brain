@@ -48,7 +48,12 @@ fn engine(dir: &Path, chunk: u32) -> Engine {
 /// A trainer's LoRA build over `dir` with every served site, its adapter factors drawn from `seed` (B too, so the
 /// adapter moves the logits), saved where the trainer saves an adapter. Returns the build and the file.
 fn trained_adapter(dir: &Path, seed: u64, seq: u32, out: &Path) -> Inkling2Train {
-    let lora = LoraCfg::new(RANK, 4.0, SERVED.iter().map(|s| s.to_string()).collect());
+    trained_adapter_over(dir, &SERVED, seed, seq, out)
+}
+
+/// [`trained_adapter`] over the sites `targets` names.
+fn trained_adapter_over(dir: &Path, targets: &[&str], seed: u64, seq: u32, out: &Path) -> Inkling2Train {
+    let lora = LoraCfg::new(RANK, 4.0, targets.iter().map(|s| s.to_string()).collect());
     let base = model::ops::TierPolicy::uniform(gpu_core::select::Dtype::F32);
     let t = Inkling2Train::from_dir_lora(dir, lora, &BuildOptions { batch: 1, seq, base: &base, seed, continue_from: None }).expect("a LoRA build over the release");
     let mut rng = data::rng::Lcg::new(seed);
@@ -132,6 +137,33 @@ fn a_trained_adapter_is_served_with_the_trainers_adapted_logits_beside_the_base(
         e.release_table(&mut adapted);
         e.release_table(&mut plain);
         e.unpin_adapter(id);
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Spec: an adapter the trainer saves over every site kind (linear, merged and stacked expert) reads back through the
+/// reader a serving bank uses, every pair with the trainer's bits, under the card's declared targets.
+#[test]
+fn an_adapter_over_every_site_kind_reads_back_with_the_trainers_factors() {
+    let Some(dir) = crate::declared_tier::declared_release("adapter-roundtrip") else { return };
+    let scratch = brain_testutil::Scratch::dir("inkling2-adapter-roundtrip");
+    let path = scratch.path().join("adapter.safetensors");
+    let trainer = trained_adapter_over(&dir, inkling2::train::sites::DEFAULT_TARGETS, 7, 8, &path);
+    let read = model::lora::device_adapter::read_adapter_with_experts(path.to_str().unwrap()).expect("the saved adapter reads back");
+    let cfg = inkling2::Inkling2Config::from_dir(&dir).unwrap();
+    let kinds = inkling2::train::sites::lora_sites(&cfg);
+    assert!(kinds.iter().any(|(_, k)| *k == inkling2::train::sites::SiteKind::Merged) && kinds.iter().any(|(_, k)| *k == inkling2::train::sites::SiteKind::Linear));
+    for (site, _) in &kinds {
+        let pair = read.sites.iter().find(|p| p.base == site.name).unwrap_or_else(|| panic!("{} is not read back", site.name));
+        assert_eq!(pair.a, trainer.read_weight(&format!("{}.lora_a", site.name)), "{} A", site.name);
+        assert_eq!(pair.b, trainer.read_weight(&format!("{}.lora_b", site.name)), "{} B", site.name);
+    }
+    let experts = inkling2::train::sites::expert_sites(&cfg);
+    assert_eq!(read.sites.len(), kinds.len(), "one linear pair per linear and merged site");
+    assert_eq!(read.experts.len(), experts.len(), "one stacked pair per expert site");
+    for site in &experts {
+        let pair = read.experts.iter().find(|p| p.base == site.name).unwrap_or_else(|| panic!("{} is not read back", site.name));
+        assert_eq!(pair.a, trainer.read_weight(&format!("{}.lora_a", site.name)), "{} A", site.name);
     }
     std::fs::remove_dir_all(&dir).ok();
 }
