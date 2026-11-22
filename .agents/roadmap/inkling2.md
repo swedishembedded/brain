@@ -1465,3 +1465,12 @@ the Phase 7 gap list:
    `router_gate_sigmoid` 3.1% (0.31 ms for 25 x 128 scores, barrier-free).
 4. Host: about 3,500 `cuMemAlloc`/`cuMemFree` pairs and 3,000 launches a forward (2.5 s in `cuMemFree` over the run):
    per-step storage instead of retained blocks or a step arena.
+
+## Left (2026-11-22): `make check/samples` budget defect
+
+`llmserve` gained a `brain-imaging` dependency for `image_frontend`, which pushed the five `text` samples (embed, embed-train,
+encoder-finetune, retrieve, retrieve-json) to 39 brain crates against `max-brain-crates` 35. The fix (not landed, only
+compile-checked plus the crate-layers gate on the touched crates) is on origin branch `ink-deps-wip` (`162a3f1fb`): `Rgb8`, `Rgba8`,
+`Decoded` and the byte/unit casts move to `capability::pixels`, `imaging` re-exports them, `llmserve` drops `brain-imaging`.
+Left: run `make check/samples` with the original budgets, `cargo tree -p sample-text-embed`, and the inkling2/qwen35 image serving
+tests on CPU, then rebase and land.
