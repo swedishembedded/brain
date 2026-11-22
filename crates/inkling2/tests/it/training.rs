@@ -119,12 +119,14 @@ fn a_bf16_base_trains_the_adapters_the_f32_base_does() {
         (loss, m.param_names().into_iter().map(|n| (n.clone(), m.read_grad(&n))).collect::<Vec<_>>())
     };
     let ((lw, want), (lg, got)) = (grads(&f32m), grads(&bf16m));
-    assert!((lw - lg).abs() <= 1e-5 * lw.abs(), "loss {lg} over the bf16 base, {lw} over its rounded values");
+    assert!((lw - lg).abs() <= 1e-5 * lw.abs().max(1.0), "loss {lg} over the bf16 base, {lw} over its rounded values");
     let mut compared = 0;
     for ((name, w), (_, g)) in want.iter().zip(&got) {
         let norm = w.iter().map(|v| v * v).sum::<f32>().sqrt();
         let diff = w.iter().zip(g).map(|(a, b)| (a - b) * (a - b)).sum::<f32>().sqrt();
-        assert!(diff <= 1e-4 * norm + 1e-7, "{name}: the bf16 base's gradient differs by {diff} at a norm of {norm}");
+        // The two builds sum their products in different orders (the bf16 tier decodes in tiles): f32 rounding,
+        // measured up to 2.7e-4 of a tensor's norm; a bf16 rounding of the weights moves them by percents.
+        assert!(diff <= 1e-3 * norm + 1e-7, "{name}: the bf16 base's gradient differs by {diff} at a norm of {norm}");
         compared += 1;
     }
     assert!(compared > 10, "only {compared} adapter tensors");

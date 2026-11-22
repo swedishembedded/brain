@@ -788,6 +788,15 @@ The first trainable target needs no streaming: the base is about 19.5 GB.
     bf16 base == f32 over rounded values; packed row == documents alone; LoRA run lowers the loss and its saved adapter
     reloads; `rl/tests/grpo_inkling2.rs` (on-policy ratio, routing replay applied and exact on the trainer's own
     routing); capability matrix rows.
+  - Done (2026-11-22): image-text training - `train::image_text::ImageTextTrainer` over `Inkling2Train` and a
+    `VisionTower::new_trainable` on the decoder's device (the training kernel list carries `vision::train_pipelines`):
+    `encode_train`, `splice_embeds` into the batch's flattened rows (`Inkling2Train::set_image_rows`, after the
+    embedding norm as the reference scatters), the decoder's forward and backward, the image rows' gradient taken out
+    of the embedding gradient (`take_image_gradients` via `PromptEmbeds::take_row_gradients`, so the placeholder's token
+    row gets none) into `VisionTower::backward`; frozen tower by default, tower and merger LoRA opt-in, one AdamW per
+    store (each clipped to its own norm). Gate `tests/it/image_text.rs`: tiny decoder + tiny tower, the tower adapters'
+    gradient equals central differences of the whole image-text loss (decoder routing pinned), and both adapters lower
+    the loss.
   - Left: the real-weight QLoRA smoke run (see below); `serving_engine` (lane "engine": `inkling2::serve::Engine` not
     on main yet); C8 (chunked head) and C9 (tiers) are not run by the conformance subject (the tiny rows fit one head
     chunk; bf16 is gated in `training.rs` with the routing pinned); expert pairs over float banks (the shared op

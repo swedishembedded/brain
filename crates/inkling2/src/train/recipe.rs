@@ -453,6 +453,13 @@ impl Inkling2Train {
             None => s.push(g.step(self.k.embed, &[&rows.tokens, self.ps.w(&names::embed()), &raw], &[d, n], n * d)),
         }
         let x0 = self.rms(&mut s, &raw, &names::embed_norm(), n);
+        if let (true, Some(rows)) = (train, self.image_rows.borrow().as_ref()) {
+            // The spliced rows replace the normed embeddings at their positions.
+            let src = g.storage_init("inkling2.image_rows", rows.rows());
+            for (i, &p) in rows.positions().iter().enumerate() {
+                s.push(g.step(self.k.copy, &[&src, &x0], &[d, i as u32 * d, p * d], d));
+            }
+        }
         let mq = self.message_queries(&mut s);
         let sched = self.schedule();
         let store = RetainedStates::new(g, sched.capacity.max(1), n, d, train)?;
@@ -799,6 +806,13 @@ impl Inkling2Train {
             self.flush(&mut s);
         }
 
+        // Spliced rows: their gradient is the tower's, and the token embedding at those positions gets none.
+        if let Some(rows) = self.image_rows.borrow().as_ref() {
+            self.flush(&mut s);
+            let mut d0 = g.read(&db[0], nn as usize);
+            *self.image_grads.borrow_mut() = Some(rows.take_row_gradients(&mut d0)?);
+            g.write_f32(&db[0], &d0);
+        }
         // The embedding norm and the embedding.
         let d_raw = self.rms_bwd(&mut s, &fwd.raw, &names::embed_norm(), &db[0], n);
         if self.frozen.is_none() {

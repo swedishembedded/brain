@@ -29,6 +29,7 @@
 //! every consumer (the depth attentions of later visits, the messages of the next pass, the readout) and is collected
 //! into its producer's partial when the backward reaches the visit that retained it.
 
+pub mod image_text;
 mod recipe;
 pub mod objectives;
 pub mod sites;
@@ -105,6 +106,8 @@ pub fn kernels() -> Vec<(&'static str, &'static str)> {
     all.extend_from_slice(model::moe::EXPERT_LORA_KERNELS);
     all.extend_from_slice(model::head_ce::kernels());
     all.extend_from_slice(model::adapter::merged::KERNELS);
+    // The vision tower trains on the decoder's device ([`image_text`]).
+    all.extend_from_slice(crate::vision::train_pipelines());
     model::ops::extend_kernel_list(&mut list, &all);
     list
 }
@@ -274,6 +277,10 @@ pub struct Inkling2Train {
     /// The f32 base of a LoRA build made from in-memory tensors, kept so [`model::Model::save`] writes a file
     /// [`Inkling2Train::load`] rebuilds the same model from (a build over a checkpoint directory saves its adapter).
     host_base: Option<HashMap<String, Vec<f32>>>,
+    /// Embedding rows spliced over the normed token embeddings of the batch (an image's features at its placeholder
+    /// positions, positions counting the batch's flattened rows), and the gradient the last backward found at them.
+    image_rows: RefCell<Option<model::serve::PromptEmbeds>>,
+    image_grads: RefCell<Option<Vec<f32>>>,
     /// Per visit, the experts every row of the last forward selected (`[rows, top_k]`).
     taken: RefCell<Vec<Vec<u32>>>,
     detach_router: Cell<bool>,
@@ -430,7 +437,7 @@ impl Inkling2Train {
             Some((policy, seed)) => {
                 let lcfg = tc.lora.clone().expect("checked above");
                 let adapters = tc.adapter_params();
-                let init = adapter_init(&adapters, adapter_src, &lcfg, seed);
+                let init = adapter_init(&tc, adapter_src, seed);
                 let roles = adapters.iter().map(|(n, c)| (n.clone(), *c, model::adapter::device::role_of(n, &lcfg.hp_for(n)))).collect();
                 let ps = ParamStore::new_with_roles(&gpu, roles, &init);
                 let frozen = load_frozen(&ops, &cfg, &shapes, src, micro, policy)?;
@@ -490,6 +497,8 @@ impl Inkling2Train {
             logit_scale: Cell::new(1.0),
             replay: RefCell::new(None),
             taken: RefCell::new(Vec::new()),
+            image_rows: RefCell::new(None),
+            image_grads: RefCell::new(None),
             host_base: None,
             detach_router: Cell::new(false),
         })
@@ -509,6 +518,34 @@ impl Inkling2Train {
 
     pub fn ops(&self) -> &Ops {
         &self.ops
+    }
+
+    /// The device the model runs on (a vision tower trained with it is built on the same one).
+    pub fn gpu(&self) -> &Gpu {
+        self.ops.gpu()
+    }
+
+    /// Splice `rows` over the normed token embeddings of the batches trained from now on (`None` stops): row `i` of
+    /// `rows` replaces position `positions[i]` of the batch's flattened `[b * t]` rows, after the embedding norm, as the
+    /// reference scatters image features. The backward takes the gradient at those positions out of the embedding's
+    /// ([`Self::take_image_gradients`]).
+    pub fn set_image_rows(&self, rows: Option<model::serve::PromptEmbeds>) -> Result<(), String> {
+        if let Some(r) = &rows {
+            if r.width() != self.tc.cfg.hidden as usize {
+                return Err(format!("inkling2: embedding rows of width {}, the decoder's is {}", r.width(), self.tc.cfg.hidden));
+            }
+            if let Some(&p) = r.positions().iter().find(|&&p| p >= self.rows()) {
+                return Err(format!("inkling2: an embedding row at position {p}, the batch holds {} rows", self.rows()));
+            }
+        }
+        *self.image_rows.borrow_mut() = rows;
+        *self.saved.borrow_mut() = None;
+        Ok(())
+    }
+
+    /// The gradient of the last backward at the spliced rows (`[rows, hidden]` in their order), taken once.
+    pub fn take_image_gradients(&self) -> Option<Vec<f32>> {
+        self.image_grads.borrow_mut().take()
     }
 
     fn g(&self) -> &Gpu {
@@ -659,27 +696,27 @@ impl Inkling2Train {
     }
 }
 
-/// Initial adapter tensors: the source's when it holds them, else `A` drawn from `seed` and `B` zero.
-fn adapter_init(adapters: &[(String, usize)], src: &dyn TensorSource, lora: &LoraCfg, seed: u64) -> HashMap<String, Vec<f32>> {
+/// Initial adapter tensors of `tc`'s adapter: the source's when it holds them, else `A` drawn from `seed`
+/// (Kaiming-uniform over the corrected matrix's input width) and `B` zero.
+fn adapter_init(tc: &TrainConfig, src: &dyn TensorSource, seed: u64) -> HashMap<String, Vec<f32>> {
     let mut rng = data::rng::Lcg::new(seed);
-    adapters
-        .iter()
+    let fan_in: HashMap<String, usize> = lora_sites(&tc.cfg).into_iter().map(|(s, _)| (s.name, s.spec.inn)).chain(expert_sites(&tc.cfg).into_iter().map(|s| (s.name, s.inn))).collect();
+    tc.adapter_params()
+        .into_iter()
         .map(|(name, numel)| {
-            let mut v = Vec::with_capacity(*numel);
-            if src.with_tensor_chunks(name, 1 << 20, &mut |_, c| v.extend_from_slice(c)) && v.len() == *numel {
-                return (name.clone(), v);
+            let mut v = Vec::with_capacity(numel);
+            if src.with_tensor_chunks(&name, 1 << 20, &mut |_, c| v.extend_from_slice(c)) && v.len() == numel {
+                return (name, v);
             }
-            let values = match model::adapter::device::init_of(name) {
+            let values = match model::adapter::device::init_of(&name) {
                 Some(model::adapter::ParamInit::Drawn) => {
-                    // Kaiming-uniform over the input width, as the shared LoRA initialisation draws.
-                    let rank = lora.hp_for(name.trim_end_matches(model::adapter::kind::LORA_A)).rank.max(1);
-                    let inn = (*numel / rank).max(1);
-                    let bound = (1.0 / inn as f32).sqrt();
-                    (0..*numel).map(|_| rng.scaled(bound)).collect()
+                    let base = name.trim_end_matches(model::adapter::kind::LORA_A);
+                    let bound = (1.0 / fan_in.get(base).copied().unwrap_or(1).max(1) as f32).sqrt();
+                    (0..numel).map(|_| rng.scaled(bound)).collect()
                 }
-                _ => vec![0.0; *numel],
+                _ => vec![0.0; numel],
             };
-            (name.clone(), values)
+            (name, values)
         })
         .collect()
 }
@@ -755,8 +792,8 @@ impl model::Model for Inkling2Train {
     /// The decoder's weights and, for a LoRA configuration, its adapter (`A` drawn, `B` zero).
     fn init_weights(cfg: &TrainConfig, seed: u64) -> HashMap<String, Vec<f32>> {
         let mut out = init_weights(&cfg.cfg, seed);
-        if let Some(lora) = &cfg.lora {
-            out.extend(adapter_init(&cfg.adapter_params(), &HashMap::<String, Vec<f32>>::new(), lora, seed));
+        if cfg.lora.is_some() {
+            out.extend(adapter_init(cfg, &HashMap::<String, Vec<f32>>::new(), seed));
         }
         out
     }
