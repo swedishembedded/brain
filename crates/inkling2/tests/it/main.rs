@@ -7,6 +7,7 @@
 mod activation_tier;
 mod image_text;
 mod layout;
+mod real_lora;
 mod real_parity;
 mod serve;
 mod tiny_parity;

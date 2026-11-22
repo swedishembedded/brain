@@ -800,6 +800,15 @@ The first trainable target needs no streaming: the base is about 19.5 GB.
   - Done (2026-11-22): `Inkling2Trainer::serving_engine` opens `serve::Engine` over the release (f32 K/V, one
     sequence) for `served_loss` and precision searches; its served logits equal the trainer's at every position
     (`the_serving_engine_serves_what_the_trainer_trains`). An adapter is refused by name.
+  - Done (2026-11-22): real-weight QLoRA smoke run (`tests/it/real_lora.rs`, skips by name without the store entry):
+    the release as published (NVFP4 layers 0-19 and MXFP8 20-23 read in place, bf16 dense linears), a rank-4 adapter
+    on every site including the stacked expert pairs, one 19-token row, AdamW 2e-3: loss 1.240 -> 0.958/0.690 -> 0.204/
+    0.145 -> 0.008 after three steps (two seeds); the adapter saved and read back (`continue_from`) over a fresh load
+    computes the trained loss within 1e-4. CPU backend, release build: load 47 s, about 450 s per step (forward,
+    per-visit recompute and backward); in about half of the stack samples taken during the steps a single one of the
+    288 threads was busy, which fits the CPU backend running a dispatch of at most 16Ki invocations on the calling
+    thread (the per-expert bank and adapter products are that small) - a hypothesis, not measured per kernel (the CPU
+    backend has no kernel timing).
   - Left: the served engine applies no adapter (no `AdapterBank` in `serve::Engine`; the stacked expert pairs cannot
     be folded into quantized banks), so a trained adapter is not served yet and `serving_engine(.., Some(adapter), ..)`
     refuses; C8 (chunked head) and C9 (tiers) are not run by the conformance subject (the tiny rows fit one head
