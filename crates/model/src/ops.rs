@@ -1621,7 +1621,7 @@ mod sink;
 mod upload_source;
 mod tiled;
 mod decoded;
-pub use sink::{micro_bank_kernels, rewrite_tile, upload_micro_bank, DeviceWeightSink, MicroBank, MICRO_GROUPED_SLOTS};
+pub use sink::{micro_bank_kernels, rewrite_tile, upload_micro_bank, DeviceWeightSink, MicroBank, MicroRoute, MICRO_GROUPED_SLOTS};
 pub use device_io::{store_device_kernels, DeviceIo, StoreDevice};
 mod device_io;
 pub use upload_source::{stored_tier, stored_tier_policy, upload_fused_from_source, upload_from_source, upload_group_preserved, upload_preserved, FusedGroup};

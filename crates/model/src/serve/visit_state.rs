@@ -47,7 +47,9 @@
 //! before writing into it), and its snapshot row holds every ring and every convolution state as they stood after the
 //! cached prompt. A prompt that extends a cached one adopts the blocks, copies the snapshot over its own state row and
 //! prefills only the rest; a repeat of the cached prompt computes nothing ([`Resumed::exact`]). Entries are keyed by
-//! KV namespace (adapter) and the exact token prefix, as every entry of that cache is.
+//! KV namespace (adapter) and the exact token prefix, as every entry of that cache is, and for a prompt carrying
+//! embedding rows by their content ([`Prompt`] with a [`ContentKey`]; [`VisitPool::file_prefix_content`]), so two
+//! prompts with the same placeholders and other images never share state.
 
 use gpu_core::{DeviceBuffer, Gpu};
 
@@ -56,7 +58,8 @@ use crate::gqa_mixer::{ring_chunk_attend, ring_copy_pipelines, RingChunk, RingCo
 use crate::kv_tier::{copy_words_within, KvLayer, KvTier};
 use crate::looped::{Attention, VisitPlan};
 use crate::paged::{BlockAllocator, BlockTable, KvNamespace};
-use crate::snapshot_prefix::{Entry, SnapshotPrefixCache};
+use crate::serve::ContentKey;
+use crate::snapshot_prefix::{Entry, Prompt, SnapshotPrefixCache};
 
 /// The shortest prompt worth a prefix entry: copying a sequence's whole state row for a handful of tokens costs more
 /// than prefilling them again. [`VisitPool::with_min_cached_tokens`] changes it.
@@ -424,7 +427,8 @@ impl<P: Clone> VisitPool<P> {
     /// Start the sequence of `table` (fresh: no blocks, no state row) on `prompt`: give it a state row with every
     /// convolution state zeroed, and resume it from the longest cached prefix of `prompt` in its namespace. Panics
     /// when every live row is taken (more running sequences than [`Self::max_batch`]).
-    pub fn begin(&mut self, g: &Gpu, table: &mut BlockTable, prompt: &[u32]) -> Resumed<P> {
+    pub fn begin<'p>(&mut self, g: &Gpu, table: &mut BlockTable, prompt: impl Into<Prompt<'p>>) -> Resumed<P> {
+        let prompt: Prompt<'p> = prompt.into();
         assert!(table.is_empty() && table.state_row().is_none(), "visit state: begin expects a fresh sequence");
         let row = self.free_rows.pop().unwrap_or_else(|| panic!("visit state: no free state row: more running sequences than the {} live rows", self.sizing.live_rows));
         table.set_state_row(row);
@@ -435,7 +439,7 @@ impl<P: Clone> VisitPool<P> {
         }
         g.submit(&[], &steps);
         let fresh = Resumed { rows: 0, exact: None };
-        if prompt.len() < self.min_cached || !self.cache.enabled() {
+        if prompt.tokens.len() < self.min_cached || !self.cache.enabled() {
             return fresh;
         }
         let Some(hit) = self.cache.lookup(table.kv_namespace(), prompt) else { return fresh };
@@ -443,7 +447,7 @@ impl<P: Clone> VisitPool<P> {
         let bs = self.sizing.block_size;
         let rows = entry.tokens.len() as u32;
         let (snap, shared) = (entry.snap_row, entry.table.blocks()[..rows.div_ceil(bs) as usize].to_vec());
-        let exact = (rows as usize == prompt.len()).then(|| entry.payload.clone());
+        let exact = (rows as usize == prompt.tokens.len()).then(|| entry.payload.clone());
         table.adopt_rows(&shared, rows, &mut self.alloc);
         if !rows.is_multiple_of(bs) {
             // The entry keeps serving later prompts from this block, so the one this sequence writes next is a copy.
@@ -480,20 +484,32 @@ impl<P: Clone> VisitPool<P> {
     /// past them), as a prefix entry carrying `payload`: its blocks are shared with the entry, its state row is
     /// snapshotted. Entries it supersedes or evicts give their blocks back.
     pub fn file_prefix(&mut self, g: &Gpu, table: &BlockTable, prompt: &[u32], payload: P) {
+        self.file_prefix_content(g, table, prompt, None, payload);
+    }
+
+    /// [`Self::file_prefix`] for a prompt carrying embedding rows: `content` is the key of the prompt's rows (of the
+    /// whole request; only the part inside `prompt` is compared), so only a prompt with the same rows resumes from it.
+    pub fn file_prefix_content(&mut self, g: &Gpu, table: &BlockTable, prompt: &[u32], content: Option<std::sync::Arc<ContentKey>>, payload: P) {
         if prompt.len() < self.min_cached || !self.cache.enabled() {
             return;
         }
         assert_eq!(table.len() as usize, prompt.len(), "visit state: a prefix entry is the state after exactly its prompt");
         let row = table.state_row().expect("visit state: a sequence files a prefix while it holds its state row");
         let ns = table.kv_namespace();
-        let (snap, evicted) = self.cache.take_row(ns, prompt);
+        let key = content.clone().unwrap_or_else(|| std::sync::Arc::new(ContentKey::none()));
+        let (snap, evicted) = self.cache.take_row(ns, Prompt::new(prompt, &key));
         if let Some(mut gone) = evicted {
             gone.release(&mut self.alloc);
         }
         let Some(snap) = snap else { return };
         self.copy_state(g, row, self.snapshot_row(snap));
         let shared = table.fork(&mut self.alloc);
-        for mut gone in self.cache.insert(Entry::new(prompt.to_vec(), shared, snap, payload)) {
+        let entry = Entry::new(prompt.to_vec(), shared, snap, payload);
+        let entry = match content {
+            Some(c) => entry.with_content(c),
+            None => entry,
+        };
+        for mut gone in self.cache.insert(entry) {
             gone.release(&mut self.alloc);
         }
     }
@@ -501,8 +517,9 @@ impl<P: Clone> VisitPool<P> {
     /// Blocks a fresh prefill of `prompt` in `namespace` adopts from the cache as it stands: the whole blocks of the
     /// longest cached prefix (a partly filled tail is copied, not adopted).
     #[must_use]
-    pub fn cached_prefix_blocks(&self, namespace: KvNamespace, prompt: &[u32]) -> u32 {
-        if prompt.len() < self.min_cached {
+    pub fn cached_prefix_blocks<'p>(&self, namespace: KvNamespace, prompt: impl Into<Prompt<'p>>) -> u32 {
+        let prompt: Prompt<'p> = prompt.into();
+        if prompt.tokens.len() < self.min_cached {
             return 0;
         }
         self.cache.peek(namespace, prompt).map_or(0, |i| self.cache.entry(i).tokens.len() as u32 / self.sizing.block_size)
@@ -515,7 +532,8 @@ impl<P: Clone> VisitPool<P> {
     }
 
     /// [`Self::reclaim`] sparing the entry `prompt` (in `namespace`) is about to resume from.
-    pub fn reclaim_keeping(&mut self, want: u32, namespace: KvNamespace, prompt: &[u32]) -> u32 {
+    pub fn reclaim_keeping<'p>(&mut self, want: u32, namespace: KvNamespace, prompt: impl Into<Prompt<'p>>) -> u32 {
+        let prompt: Prompt<'p> = prompt.into();
         self.reclaim_with(want, |c| c.evict_lru_keeping(namespace, prompt))
     }
 

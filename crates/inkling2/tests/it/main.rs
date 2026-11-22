@@ -6,6 +6,7 @@
 
 mod layout;
 mod real_parity;
+mod serve;
 mod tiny_parity;
 mod vision;
 mod vision_train;

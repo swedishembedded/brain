@@ -1224,8 +1224,12 @@ pub const MOE_NVFP4_GEMV_GATHER: &str = include_str!("../wgsl/moe_nvfp4_gemv_gat
 pub const MOE_NVFP4_GROUPED: &str = include_str!("../wgsl/moe_nvfp4_grouped.wgsl");
 /// `wgsl/moe_route_count.wgsl`
 pub const MOE_ROUTE_COUNT: &str = include_str!("../wgsl/moe_route_count.wgsl");
+/// `wgsl/moe_route_count_serial.wgsl`
+pub const MOE_ROUTE_COUNT_SERIAL: &str = include_str!("../wgsl/moe_route_count_serial.wgsl");
 /// `wgsl/moe_route_emit.wgsl`
 pub const MOE_ROUTE_EMIT: &str = include_str!("../wgsl/moe_route_emit.wgsl");
+/// `wgsl/moe_route_emit_serial.wgsl`
+pub const MOE_ROUTE_EMIT_SERIAL: &str = include_str!("../wgsl/moe_route_emit_serial.wgsl");
 /// `wgsl/moe_route_scan.wgsl`
 pub const MOE_ROUTE_SCAN: &str = include_str!("../wgsl/moe_route_scan.wgsl");
 /// `wgsl/moe_router_topk.wgsl`
@@ -2392,7 +2396,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("moe_nvfp4_gemv_gather", MOE_NVFP4_GEMV_GATHER),
     ("moe_nvfp4_grouped", MOE_NVFP4_GROUPED),
     ("moe_route_count", MOE_ROUTE_COUNT),
+    ("moe_route_count_serial", MOE_ROUTE_COUNT_SERIAL),
     ("moe_route_emit", MOE_ROUTE_EMIT),
+    ("moe_route_emit_serial", MOE_ROUTE_EMIT_SERIAL),
     ("moe_route_scan", MOE_ROUTE_SCAN),
     ("moe_router_topk", MOE_ROUTER_TOPK),
     ("moe_scatter_scaled_add", MOE_SCATTER_SCALED_ADD),

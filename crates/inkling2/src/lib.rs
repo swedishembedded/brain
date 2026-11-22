@@ -10,13 +10,15 @@
 //! states, optionally with a looped core that passes messages between passes.
 //!
 //! This crate holds only what is particular to the model: the typed configuration ([`config`]), the published name map
-//! with two-way coverage ([`names`]), and the layer recipe wiring brain's shared operators in the reference order.
+//! with two-way coverage ([`names`]), the layer recipe wiring brain's shared operators in the reference order
+//! ([`model`]), and the served engine over brain's visit-state pool ([`serve`]).
 //! Every operator it runs lives in `model` (attention with window, sink and distance bias, short convolutions, depth
 //! attention, the message gate, the gated expert activation, microscaled expert banks).
 
 pub mod config;
 pub mod model;
 pub mod names;
+pub mod serve;
 pub mod vision;
 
 pub use config::{Family, Inkling2Config, LayerKind};

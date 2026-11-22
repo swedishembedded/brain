@@ -470,10 +470,13 @@ pub fn upload_micro_bank(ops: &Ops, src: &dyn checkpoint::TensorSource, names: &
 }
 
 /// The pipelines [`MicroBank::gather`], [`MicroBank::grouped`] and their input gradients [`MicroBank::gather_dx`] /
-/// [`MicroBank::grouped_dx`] dispatch, for a model's kernel list (with the routing kernels `moe_route_count` /
-/// `moe_route_scan` / `moe_route_emit` that build a grouped product's table).
+/// [`MicroBank::grouped_dx`] dispatch, for a model's kernel list, with the routing kernels [`MicroRoute`] dispatches to
+/// build a grouped product's table.
 pub fn micro_bank_kernels() -> Vec<(&'static str, &'static str)> {
     vec![
+        ("moe_route_count_serial", kernels::MOE_ROUTE_COUNT_SERIAL),
+        ("moe_route_scan", kernels::MOE_ROUTE_SCAN),
+        ("moe_route_emit_serial", kernels::MOE_ROUTE_EMIT_SERIAL),
         ("moe_nvfp4_gemv_gather", kernels::MOE_NVFP4_GEMV_GATHER),
         ("moe_nvfp4_grouped", kernels::MOE_NVFP4_GROUPED),
         ("moe_mxfp8_gemv_gather", kernels::MOE_MXFP8_GEMV_GATHER),
@@ -487,6 +490,42 @@ pub fn micro_bank_kernels() -> Vec<(&'static str, &'static str)> {
 
 /// Slots of an expert a grouped product applies one weight pass to (`MR` of `moe_*_grouped.wgsl`).
 pub const MICRO_GROUPED_SLOTS: u32 = 8;
+
+/// The routing table and slot order [`MicroBank::grouped`] reads, built on the device from the slots' expert ids by
+/// barrier-free kernels (`moe_route_count_serial`, `moe_route_scan`, `moe_route_emit_serial`), so the grouped product
+/// runs on every backend, the CPU JIT included. Sized for `slots` slots over `ne` experts.
+pub struct MicroRoute {
+    counts: DeviceBuffer,
+    /// `[2 * (ne + 1)]`: slot and tile offsets per expert.
+    pub tab: DeviceBuffer,
+    /// `[slots]`: the slots in expert-major order, ascending within an expert.
+    pub perm: DeviceBuffer,
+    pub slots: u32,
+    pub ne: u32,
+}
+
+impl MicroRoute {
+    pub fn new(gpu: &Gpu, slots: u32, ne: u32) -> MicroRoute {
+        MicroRoute { counts: gpu.storage(u64::from(ne)), tab: gpu.storage(2 * (u64::from(ne) + 1)), perm: gpu.storage(u64::from(slots)), slots, ne }
+    }
+
+    /// The tile count bound [`MicroBank::grouped`] takes.
+    #[must_use]
+    pub fn tiles(&self) -> u32 {
+        self.ne + self.slots.div_ceil(MICRO_GROUPED_SLOTS)
+    }
+
+    /// The steps filling [`Self::tab`] and [`Self::perm`] from `ids` (`[slots]` expert ids).
+    pub fn steps(&self, gpu: &Gpu, ids: &DeviceBuffer) -> Result<Vec<gpu_core::Step>, String> {
+        let k = |name: &str| gpu.kernel_index(name).ok_or_else(|| format!("kernel '{name}' is not registered on this Gpu: add model::ops::micro_bank_kernels() to the kernel list"));
+        let threads = gpu_core::Dispatch::Workgroups(self.ne.div_ceil(64));
+        Ok(vec![
+            gpu.dispatch(k("moe_route_count_serial")?, &[ids, &self.counts], &[self.slots, self.ne], threads),
+            gpu.dispatch(k("moe_route_scan")?, &[&self.counts, &self.tab], &[self.ne, MICRO_GROUPED_SLOTS], gpu_core::Dispatch::Workgroups(1)),
+            gpu.dispatch(k("moe_route_emit_serial")?, &[ids, &self.tab, &self.perm], &[self.slots, self.ne], threads),
+        ])
+    }
+}
 /// Weight rows one workgroup of the bank products serves (`COLS` of the kernels).
 const MICRO_BANK_COLS: u32 = 4;
 /// A whole-buffer binding in a sliced dispatch.

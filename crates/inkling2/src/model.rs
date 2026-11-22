@@ -41,9 +41,11 @@ use model::head_transform::HeadTransform;
 use model::looped::{Attention, LoopShape, Segment, Visit, VisitPlan};
 use model::message_gate::{MessageGate, MessageGateIds, MessageGateWeights};
 use model::moe::{MoeIds, MoeShape};
-use model::ops::{upload_micro_bank, upload_preserved, MicroBank, Ops, Weight};
+use model::ops::{upload_micro_bank, upload_preserved, MicroBank, MicroRoute, Ops, Weight};
+use model::paged::BlockTable;
 use model::saved::RetainedStates;
-use model::short_conv::{short_conv_fwd, BaseLayout, DynTaps, ShortConvIds, ShortConvShape};
+use model::serve::visit_state::VisitPool;
+use model::short_conv::{conv_state_tail_step, short_conv_fwd, short_conv_step, BaseLayout, DynTaps, ShortConvIds, ShortConvShape};
 
 use crate::config::{Inkling2Config, LayerKind};
 use crate::names::{self, GateSite, LayerNames};
@@ -55,7 +57,8 @@ const CLIP_EPS: f32 = 1e-6;
 /// Host staging a single tile upload may take.
 const STAGING_BYTES: u64 = 64 << 20;
 
-/// Every kernel the forward dispatches, for the `Gpu` its [`Ops`] is built on.
+/// Every kernel the forward and the served engine ([`crate::serve::Engine`]) dispatch, for the `Gpu` its [`Ops`] is
+/// built on.
 pub fn kernels() -> Vec<(&'static str, &'static str)> {
     let mut list = model::ops::kernel_list().to_vec();
     let mut more: Vec<(&'static str, &'static str)> = vec![
@@ -82,6 +85,9 @@ pub fn kernels() -> Vec<(&'static str, &'static str)> {
     more.extend_from_slice(model::message_gate::kernels());
     more.extend(model::ops::micro_bank_kernels());
     more.extend(model::head_transform::KERNELS);
+    // The served engine's: the visit-state pool and the device readout.
+    more.extend(model::serve::visit_state::VisitPool::<Vec<f32>>::pipelines());
+    more.extend([("argmax_part", kernels::ARGMAX_PART), ("argmax_final", kernels::ARGMAX_FINAL), ("topk_extract_step", kernels::TOPK_EXTRACT_STEP)]);
     model::ops::extend_kernel_list(&mut list, &more);
     list
 }
@@ -95,6 +101,29 @@ pub trait Probe {
         true
     }
     fn record(&mut self, key: &str, values: Vec<f32>);
+}
+
+/// The per-sequence state of the served engine: what a prefill entry carries is the final normalised row of its last
+/// position.
+pub(crate) type Pool = VisitPool<Vec<f32>>;
+
+/// Which rows a pass over the decoder runs and where their attention and convolution state lives. Everything else in
+/// the recipe is row-wise (depth attention, messages, router, experts), so one recipe serves all three.
+pub(crate) enum Rows<'a> {
+    /// One whole sequence from position 0 that keeps no state: the reference forward.
+    Whole,
+    /// One prompt chunk of one served sequence at positions `start ..`.
+    Chunk { pool: &'a Pool, table: &'a BlockTable, start: u32 },
+    /// One new token of each served sequence, at the last position its table backs.
+    Decode { pool: &'a Pool, tables: &'a [&'a BlockTable] },
+}
+
+/// The taps of one short convolution.
+enum ConvTaps<'b> {
+    /// A published depthwise weight `[channels, taps]`: `(conv(x) + x) / sqrt(taps + 1)`.
+    Static(&'b DeviceBuffer),
+    /// Static taps `[taps, channels]` plus per-token taps read from a projection output: `(dyn(x) + x) / sqrt(2 taps + 1)`.
+    Dynamic { base: &'b DeviceBuffer, taps: &'b DeviceBuffer, layout: DynTaps },
 }
 
 struct Kernels {
@@ -345,14 +374,15 @@ impl Inkling2 {
         }
     }
 
-    fn flush(&self, s: &mut Vec<Step>) {
+    pub(crate) fn flush(&self, s: &mut Vec<Step>) {
         if !s.is_empty() {
             self.g().submit(&[], s);
             s.clear();
         }
     }
 
-    fn run(&self, tokens: &[u32], mut probe: Option<&mut dyn Probe>) -> Result<Vec<f32>, String> {
+    /// `tokens` as a row count, refused when empty, past the model's positions or outside its embedding rows.
+    pub(crate) fn check_tokens(&self, tokens: &[u32]) -> Result<u32, String> {
         let cfg = &self.cfg;
         let t = u32::try_from(tokens.len()).map_err(|_| "inkling2: too many tokens".to_string())?;
         if t == 0 {
@@ -364,15 +394,57 @@ impl Inkling2 {
         if let Some(bad) = tokens.iter().find(|&&id| id >= cfg.vocab) {
             return Err(format!("inkling2: token {bad} is outside the {} embedding rows", cfg.vocab));
         }
-        let (g, d) = (self.g(), cfg.hidden);
+        Ok(t)
+    }
+
+    fn run(&self, tokens: &[u32], mut probe: Option<&mut dyn Probe>) -> Result<Vec<f32>, String> {
+        let t = self.check_tokens(tokens)?;
+        let (cfg, d) = (&self.cfg, self.cfg.hidden);
         let mut s = Vec::new();
+        let x = self.embed(&mut s, tokens);
+        self.tap(&mut s, &mut probe, "embed", &x, t * d);
+        let normed = self.trunk(&mut s, &Rows::Whole, x, t, &mut probe, None)?;
+        let vocab = cfg.vocab;
+        let logits = self.head(&mut s, &normed, t);
+        self.flush(&mut s);
+        let all = self.g().read(&logits, (t * vocab) as usize);
+        let valid = cfg.valid_vocab as usize;
+        let out: Vec<f32> = all.chunks(vocab as usize).flat_map(|row| row[..valid].iter().copied()).collect();
+        if let Some(p) = probe {
+            p.record("logits", out.clone());
+        }
+        Ok(out)
+    }
+
+    /// The normalised embedding rows `[t, hidden]` of `tokens` (checked by the caller).
+    pub(crate) fn embed(&self, s: &mut Vec<Step>, tokens: &[u32]) -> DeviceBuffer {
+        let (g, d, t) = (self.g(), self.cfg.hidden, tokens.len() as u32);
         let tok = g.storage(u64::from(t));
         g.write(&tok, tokens);
         let raw = g.storage(u64::from(t * d));
-        self.ops.embed(&mut s, &self.w.embed, &tok, t, &raw);
-        let mut x = self.rms(&mut s, &raw, &self.w.embed_norm, t);
-        self.tap(&mut s, &mut probe, "embed", &x, t * d);
+        self.ops.embed(s, &self.w.embed, &tok, t, &raw);
+        self.rms(s, &raw, &self.w.embed_norm, t)
+    }
 
+    /// The head over `t` final normalised rows: logits `[t, vocab]` (the stored rows), soft-capped, the padding rows
+    /// floored so no readout picks them.
+    pub(crate) fn head(&self, s: &mut Vec<Step>, normed: &DeviceBuffer, t: u32) -> DeviceBuffer {
+        let logits = self.proj(s, &self.w.unembed, normed, t);
+        s.extend(self.head_transform().step(self.g(), self.k.head, &logits, t, self.cfg.vocab));
+        logits
+    }
+
+    /// The soft cap and the valid-vocabulary bound the head applies.
+    pub(crate) fn head_transform(&self) -> HeadTransform {
+        HeadTransform { softcap: Some(self.cfg.logit_cap), valid_vocab: Some(self.cfg.valid_vocab) }
+    }
+
+    /// Every visit over the `t` rows `x` (normalised embeddings) and the readout's depth mix and final norm: the final
+    /// normalised rows `[t, hidden]`. With `routes`, each visit's `[t, top_k]` expert ids (ascending per row) are pushed
+    /// in visit order.
+    pub(crate) fn trunk(&self, s: &mut Vec<Step>, rows: &Rows, x: DeviceBuffer, t: u32, probe: &mut Option<&mut dyn Probe>, mut routes: Option<&mut Vec<DeviceBuffer>>) -> Result<DeviceBuffer, String> {
+        let (cfg, g, d) = (&self.cfg, self.g(), self.cfg.hidden);
+        let mut x = x;
         let (retain, capacity) = block_slots(cfg, &self.plan);
         let store = RetainedStates::new(g, capacity.max(1), t, d, false)?;
         let mut stack: Vec<u32> = Vec::new();
@@ -399,49 +471,38 @@ impl Inkling2 {
                     let out = g.storage(da.out_len());
                     let stats = g.storage(da.stats_len());
                     s.push(da.forward(g, &self.k.depth, &store, partial, &self.w.message_queries[c], &out, &stats));
-                    self.tap(&mut s, &mut probe, &format!("visit{}.messages", v.index), &out, 4 * t * d);
+                    self.tap(s, probe, &format!("visit{}.messages", v.index), &out, 4 * t * d);
                     Some(out)
                 }
                 _ => None,
             };
             let key = |name: &str| format!("visit{}.{name}", v.index);
-            self.tap(&mut s, &mut probe, &key("in"), &x, t * d);
+            self.tap(s, probe, &key("in"), &x, t * d);
             if probe.as_deref().is_some_and(|p| p.wants(&key("block_states"))) {
-                self.flush(&mut s);
+                self.flush(s);
                 let states: Vec<f32> = stack.iter().flat_map(|&slot| store.read_value(g, slot)).collect();
                 if let Some(p) = probe.as_deref_mut() {
                     p.record(&key("block_states"), states);
                 }
             }
             let boundary = retain[v.index];
-            x = self.visit(&mut s, v, &x, &store, &mut stack, boundary, messages.as_ref(), t, &mut probe)?;
+            x = self.visit(s, rows, v, &x, &store, &mut stack, boundary, messages.as_ref(), t, probe, routes.as_deref_mut())?;
             if let Some((slot, _)) = boundary {
                 if v.segment == Segment::Core && v.layer != core_start {
                     pass_blocks.push(slot);
                 }
             }
-            self.tap(&mut s, &mut probe, &key("out"), &x, t * d);
+            self.tap(s, probe, &key("out"), &x, t * d);
         }
 
         let da = DepthAttn::new(&store, &stack, 1, DEPTH_EPS)?;
         let mixed = g.storage(da.out_len());
         let stats = g.storage(da.stats_len());
         s.push(da.forward(g, &self.k.depth, &store, &x, &self.w.output_query, &mixed, &stats));
-        self.tap(&mut s, &mut probe, "final_in", &mixed, t * d);
-        let normed = self.rms(&mut s, &mixed, &self.w.final_norm, t);
-        self.tap(&mut s, &mut probe, "final_norm", &normed, t * d);
-        let vocab = cfg.vocab;
-        let logits = self.proj(&mut s, &self.w.unembed, &normed, t);
-        let head = HeadTransform { softcap: Some(cfg.logit_cap), valid_vocab: Some(cfg.valid_vocab) };
-        s.extend(head.step(g, self.k.head, &logits, t, vocab));
-        self.flush(&mut s);
-        let all = g.read(&logits, (t * vocab) as usize);
-        let valid = cfg.valid_vocab as usize;
-        let out: Vec<f32> = all.chunks(vocab as usize).flat_map(|row| row[..valid].iter().copied()).collect();
-        if let Some(p) = probe {
-            p.record("logits", out.clone());
-        }
-        Ok(out)
+        self.tap(s, probe, "final_in", &mixed, t * d);
+        let normed = self.rms(s, &mixed, &self.w.final_norm, t);
+        self.tap(s, probe, "final_norm", &normed, t * d);
+        Ok(normed)
     }
 
     /// One visit: the layer recipe over the partial `x`, returning the next partial.
@@ -449,6 +510,7 @@ impl Inkling2 {
     fn visit(
         &self,
         s: &mut Vec<Step>,
+        rows: &Rows,
         v: &Visit,
         x: &DeviceBuffer,
         store: &RetainedStates,
@@ -457,6 +519,7 @@ impl Inkling2 {
         messages: Option<&DeviceBuffer>,
         t: u32,
         probe: &mut Option<&mut dyn Probe>,
+        routes: Option<&mut Vec<DeviceBuffer>>,
     ) -> Result<DeviceBuffer, String> {
         let (cfg, g, d) = (&self.cfg, self.g(), self.cfg.hidden);
         let layer = v.layer as u32;
@@ -512,9 +575,9 @@ impl Inkling2 {
         };
 
         // 2. Attention, its output convolution and the residual.
-        let attn = self.attention(s, v, &qh, &kh, &vh, t, probe)?;
+        let attn = self.attention(s, rows, v, &qh, &kh, &vh, t, probe)?;
         self.tap(s, probe, &key("attn"), &attn, n);
-        let attn_conv = self.static_conv(s, &attn, &lw.attn_conv, t, d);
+        let attn_conv = self.conv(s, rows, v.index, 2, &attn, ConvTaps::Static(&lw.attn_conv), t, d);
         self.conv_state(s, probe, &key("conv2"), &attn, t, d);
         self.tap(s, probe, &key("attn_conv"), &attn_conv, n);
         let residual = match boundary {
@@ -540,9 +603,9 @@ impl Inkling2 {
         self.tap(s, probe, &key("mlp_in"), &mlp_in, n);
         let mlp_in = gated(s, probe, 3, &mlp_in, "gated_mlp");
         let hn = self.rms(s, &mlp_in, &lw.mlp_norm, t);
-        let moe = self.moe(s, v, &hn, t, probe);
+        let moe = self.moe(s, v, &hn, t, !matches!(rows, Rows::Decode { .. }), probe, routes);
         self.tap(s, probe, &key("mlp"), &moe, n);
-        let mlp_conv = self.static_conv(s, &moe, &lw.mlp_conv, t, d);
+        let mlp_conv = self.conv(s, rows, v.index, 3, &moe, ConvTaps::Static(&lw.mlp_conv), t, d);
         self.conv_state(s, probe, &key("conv3"), &moe, t, d);
         self.tap(s, probe, &key("mlp_conv"), &mlp_conv, n);
         let out = g.storage(u64::from(n));
@@ -551,7 +614,7 @@ impl Inkling2 {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn attention(&self, s: &mut Vec<Step>, v: &Visit, qh: &DeviceBuffer, kh: &DeviceBuffer, vh: &DeviceBuffer, t: u32, probe: &mut Option<&mut dyn Probe>) -> Result<DeviceBuffer, String> {
+    fn attention(&self, s: &mut Vec<Step>, rows: &Rows, v: &Visit, qh: &DeviceBuffer, kh: &DeviceBuffer, vh: &DeviceBuffer, t: u32, probe: &mut Option<&mut dyn Probe>) -> Result<DeviceBuffer, String> {
         let (cfg, g) = (&self.cfg, self.g());
         let layer = v.layer as u32;
         let lw = &self.w.layers[v.layer];
@@ -566,14 +629,11 @@ impl Inkling2 {
             let pre = self.proj(s, w, input, t);
             self.conv_state(s, probe, &key(&format!("conv{j}")), &pre, t, a.kv_dim());
             let conv = match &lw.kv_conv[j] {
-                KvConv::Static(base) => self.static_conv(s, &pre, base, t, a.kv_dim()),
+                KvConv::Static(base) => self.conv(s, rows, v.index, j, &pre, ConvTaps::Static(base), t, a.kv_dim()),
                 KvConv::Dynamic { taps, proj } => {
                     let dyn_taps = self.proj(s, proj, input, t);
-                    let shape = ShortConvShape::dynamic_taps(t, a.kv_dim(), cfg.conv_taps, DynTaps { group_size: a.head_dim, stride: a.kv_heads * cfg.conv_taps, off: 0 })
-                        .residual_scaled(1.0 / ((2 * cfg.conv_taps + 1) as f32).sqrt());
-                    let y = g.storage(u64::from(t * a.kv_dim()));
-                    s.push(short_conv_fwd(g, &self.k.conv, &shape, &pre, Some(&dyn_taps), taps, None, None, &y));
-                    y
+                    let layout = DynTaps { group_size: a.head_dim, stride: a.kv_heads * cfg.conv_taps, off: 0 };
+                    self.conv(s, rows, v.index, j, &pre, ConvTaps::Dynamic { base: taps, taps: &dyn_taps, layout }, t, a.kv_dim())
                 }
             };
             let normed = if j == 0 {
@@ -600,9 +660,22 @@ impl Inkling2 {
             documents: false,
         };
         let inputs = AttnInputs { sink: Some(&sink), rel: Some(&rel), bank: Some(&lw.rel_bank), doc_pos: None };
-        let out = g.storage(u64::from(t * a.q_dim()));
-        let lse = g.storage(u64::from(t * a.heads));
-        s.extend(flash_ext::flash_ext_fwd(g, &self.k.flash, &heads, &opts, &inputs, Contiguous { b: 1, t, pos0: 0 }, &q, &kv[0], &kv[1], &out, &lse));
+        let out = match rows {
+            Rows::Whole => {
+                let out = g.storage(u64::from(t * a.q_dim()));
+                let lse = g.storage(u64::from(t * a.heads));
+                s.extend(flash_ext::flash_ext_fwd(g, &self.k.flash, &heads, &opts, &inputs, Contiguous { b: 1, t, pos0: 0 }, &q, &kv[0], &kv[1], &out, &lse));
+                out
+            }
+            Rows::Chunk { pool, table, start } => {
+                self.flush(s);
+                pool.attend_chunk(g, v.index, table, *start, &heads, &opts, &inputs, &q, &kv[0], &kv[1], t)
+            }
+            Rows::Decode { pool, tables } => {
+                self.flush(s);
+                pool.attend_decode(g, v.index, tables, &heads, &opts, &inputs, &q, &kv[0], &kv[1])
+            }
+        };
 
         // The output gate: sigmoid(gate_attn x) * attention, then the output projection.
         let gate = self.proj(s, &lw.gate_attn, qh, t);
@@ -614,7 +687,10 @@ impl Inkling2 {
         Ok(self.proj(s, &lw.wo, &gated, t))
     }
 
-    fn moe(&self, s: &mut Vec<Step>, v: &Visit, x: &DeviceBuffer, t: u32, probe: &mut Option<&mut dyn Probe>) -> DeviceBuffer {
+    /// The routed experts over `t` rows. `grouped`: the published banks multiply slots grouped by expert (one weight
+    /// pass per expert, the prefill regime) instead of one gather per slot (decode); the arithmetic is the same.
+    #[allow(clippy::too_many_arguments)]
+    fn moe(&self, s: &mut Vec<Step>, v: &Visit, x: &DeviceBuffer, t: u32, grouped: bool, probe: &mut Option<&mut dyn Probe>, routes: Option<&mut Vec<DeviceBuffer>>) -> DeviceBuffer {
         let (cfg, g, d) = (&self.cfg, self.g(), self.cfg.hidden);
         let lw = &self.w.layers[v.layer];
         let key = |name: &str| format!("visit{}.{name}", v.index);
@@ -641,6 +717,17 @@ impl Inkling2 {
         }
         let spec = GluSpec { act: GatedAct::SoftcapSigmoid { gate_cap: cfg.gate_cap, up_cap: cfg.up_cap }, layout: GluLayout::Interleaved };
         let out = g.storage(u64::from(t * d));
+        // One slot per (token, chosen expert), in ascending expert order per token: the reference's own accumulation
+        // order, and what a routing log records.
+        let slots = t * k;
+        let ids = (routes.is_some() || matches!(lw.experts, Experts::Micro { .. })).then(|| {
+            let ids = g.storage(u64::from(slots));
+            s.push(g.step(self.k.topk, &[&gate, &ids], &[t, e, k], t));
+            ids
+        });
+        if let (Some(routes), Some(ids)) = (routes, &ids) {
+            routes.push(ids.clone());
+        }
         match &lw.experts {
             Experts::Dense { w13, w2 } => {
                 let (gate_up, h, expert_out) = (g.storage(u64::from(t * 2 * ff)), g.storage(u64::from(t * ff)), g.storage(u64::from(t * d)));
@@ -651,17 +738,20 @@ impl Inkling2 {
                 }
             }
             Experts::Micro { w13, w2 } => {
-                // One slot per (token, chosen expert), in ascending expert order per token: the reference's own
-                // accumulation order.
-                let slots = t * k;
-                let ids = g.storage(u64::from(slots));
-                s.push(g.step(self.k.topk, &[&gate, &ids], &[t, e, k], t));
-                let gate_up = g.storage(u64::from(slots * 2 * ff));
-                s.push(w13.gather(g, x, &ids, &gate_up, slots, k).expect("the bank's kernels are registered"));
-                let h = g.storage(u64::from(slots * ff));
-                s.push(glu_act_step(g, &self.k.glu, &spec, slots, ff, &gate_up, None, &h));
-                let y = g.storage(u64::from(slots * d));
-                s.push(w2.gather(g, &h, &ids, &y, slots, 1).expect("the bank's kernels are registered"));
+                let ids = ids.expect("the slots' experts are chosen for a published bank");
+                let (gate_up, h, y) = (g.storage(u64::from(slots * 2 * ff)), g.storage(u64::from(slots * ff)), g.storage(u64::from(slots * d)));
+                const REGISTERED: &str = "the bank's kernels are registered";
+                if grouped {
+                    let route = MicroRoute::new(g, slots, e);
+                    s.extend(route.steps(g, &ids).expect(REGISTERED));
+                    s.push(w13.grouped(g, x, &route.tab, &route.perm, &gate_up, route.tiles(), k, e).expect(REGISTERED));
+                    s.push(glu_act_step(g, &self.k.glu, &spec, slots, ff, &gate_up, None, &h));
+                    s.push(w2.grouped(g, &h, &route.tab, &route.perm, &y, route.tiles(), 1, e).expect(REGISTERED));
+                } else {
+                    s.push(w13.gather(g, x, &ids, &gate_up, slots, k).expect(REGISTERED));
+                    s.push(glu_act_step(g, &self.k.glu, &spec, slots, ff, &gate_up, None, &h));
+                    s.push(w2.gather(g, &h, &ids, &y, slots, 1).expect(REGISTERED));
+                }
                 let identity = g.storage(u64::from(slots));
                 g.write(&identity, &(0..slots).collect::<Vec<u32>>());
                 s.push(g.step(self.k.combine, &[&gate, &ids, &identity, &y, &out], &[t, d, e, k], t * d));
@@ -705,12 +795,33 @@ impl Inkling2 {
         y
     }
 
-    /// `(conv(x) + x) / sqrt(taps + 1)` with a published depthwise weight.
-    fn static_conv(&self, s: &mut Vec<Step>, x: &DeviceBuffer, base: &DeviceBuffer, t: u32, c: u32) -> DeviceBuffer {
-        let taps = self.cfg.conv_taps;
-        let shape = ShortConvShape::static_taps(t, c, taps, BaseLayout::ChannelMajor).residual_scaled(1.0 / ((taps + 1) as f32).sqrt());
-        let y = self.g().storage(u64::from(t * c));
-        s.push(short_conv_fwd(self.g(), &self.k.conv, &shape, x, None, base, None, None, &y));
+    /// Convolution state `state` (0 K, 1 V, 2 the attention output, 3 the MoE output) of visit `visit` over the `t`
+    /// rows `x [t, c]`: a whole sequence from zero history, a prompt chunk continuing and leaving its sequence's state,
+    /// or one token of each decoding sequence stepping its state.
+    #[allow(clippy::too_many_arguments)]
+    fn conv(&self, s: &mut Vec<Step>, rows: &Rows, visit: usize, state: usize, x: &DeviceBuffer, taps: ConvTaps, t: u32, c: u32) -> DeviceBuffer {
+        let (g, k) = (self.g(), self.cfg.conv_taps);
+        let (shape, dynamic, base) = match taps {
+            ConvTaps::Static(base) => (ShortConvShape::static_taps(t, c, k, BaseLayout::ChannelMajor).residual_scaled(1.0 / ((k + 1) as f32).sqrt()), None, base),
+            ConvTaps::Dynamic { base, taps, layout } => (ShortConvShape::dynamic_taps(t, c, k, layout).residual_scaled(1.0 / ((2 * k + 1) as f32).sqrt()), Some(taps), base),
+        };
+        let y = g.storage(u64::from(t * c));
+        match rows {
+            Rows::Whole => s.push(short_conv_fwd(g, &self.k.conv, &shape, x, dynamic, base, None, None, &y)),
+            Rows::Chunk { pool, table, .. } => {
+                self.flush(s);
+                let hist = pool.conv_rows(g, visit, state, &[table]);
+                let tail = g.storage(u64::from(c * (k - 1)));
+                g.submit(&[], &[short_conv_fwd(g, &self.k.conv, &shape.with_history(), x, dynamic, base, None, Some(&hist), &y), conv_state_tail_step(g, &self.k.conv, t, c, k, x, &hist, &tail)]);
+                pool.store_conv_rows(g, visit, state, &[table], &tail);
+            }
+            Rows::Decode { pool, tables } => {
+                self.flush(s);
+                let hist = pool.conv_rows(g, visit, state, tables);
+                g.submit(&[], &[short_conv_step(g, &self.k.conv, &shape, x, dynamic, base, &hist, &y)]);
+                pool.store_conv_rows(g, visit, state, tables, &hist);
+            }
+        }
         y
     }
 

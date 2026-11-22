@@ -17,7 +17,7 @@
 use checkpoint::packed::{BoundedWorkspace, CodecRegistry, MemoryBudget, PackedReader, PackedSource, PackedTensorReader, SlicedReader, Tile, TileBuf};
 use data::rng::Lcg;
 use gpu_core::Gpu;
-use model::ops::{micro_bank_kernels, training_kernel_list, upload_micro_bank, MicroBank, MicroScaled, Ops, MICRO_GROUPED_SLOTS};
+use model::ops::{micro_bank_kernels, training_kernel_list, upload_micro_bank, MicroBank, MicroRoute, MicroScaled, Ops, MICRO_GROUPED_SLOTS};
 
 const E: usize = 3;
 const N: usize = 32;
@@ -119,6 +119,13 @@ fn products(ops: &Ops, bank: &MicroBank, x: &[f32], ids: &[u32], xdiv: u32) -> (
     let steps = [bank.gather(g, &xb, &idb, &gather, slots, xdiv).unwrap(), bank.grouped(g, &xb, &tb, &pb, &grouped, tiles, xdiv, E as u32).unwrap()];
     g.submit(&[], &steps);
     g.poll_wait();
+    // The device-built table is the host's, word for word.
+    let route = MicroRoute::new(g, slots, E as u32);
+    assert_eq!(route.tiles(), tiles);
+    g.submit(&[], &route.steps(g, &idb).unwrap());
+    g.poll_wait();
+    let words = |b: &gpu_core::DeviceBuffer, n: usize| g.read(b, n).into_iter().map(f32::to_bits).collect::<Vec<u32>>();
+    assert_eq!((words(&route.tab, tab.len()), words(&route.perm, perm.len())), (tab.clone(), perm.clone()), "MicroRoute builds the grouped product's table");
     (g.read(&gather, slots as usize * N), g.read(&grouped, slots as usize * N))
 }
 
