@@ -675,6 +675,16 @@ Scope: Running one training job as ranks across machines, and serving one model 
   with the bounded collectives every rank then fails 120 s later with
   "collective 31 was not done 120.0s after the ones before it" (op timeout
   120 s; before, it spun for 30+ minutes).
+- **Export dtype follows the trained tier (2026-11-22, same Qwen3-4B
+  2-rank run, 2 steps, gpu0-1 of n442).** `brain finetune` used to export the
+  Hugging Face directory as f32 whatever the run trained in; the qwen3 export
+  now takes the tier the trained linears are stored at (bf16 stays bf16, f16
+  stays f16, fp32 or decoded encodings stay f32), norms included, as the
+  published Qwen3 checkpoints do. `model.safetensors` of the 4B run: 16.1 GB
+  -> 8.04 GB; the export generates 16 tokens (same text as the f32 export) in
+  10 s with the load. Spec: `finetune_export_dtype` (bf16 file exports bf16 and
+  reloads within bf16 rounding; fp32 file exports f32). Other families copy
+  their brain checkpoint byte for byte, so they already keep the stored tier.
 - **`brain finetune`, parameter-sharded full fine-tune of Qwen3-4B end to
   end, 2 GH200s of n442 (gpu0-1, one process per card, 2026-11-22, brain
   88124f957, NCCL 2.32.3 over NVLink, the 256-record chat set, `--max-block
