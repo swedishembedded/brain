@@ -121,6 +121,9 @@ impl TrainResident {
         }
         self.check_digests(&request.data.digests())?;
         let base_dir = job::resolve_base(self.env.models_dir.as_deref(), &request.params.base)?;
+        if let Some(teacher) = &request.params.distill_teacher {
+            job::resolve_model(self.env.models_dir.as_deref(), "distill_teacher", teacher)?;
+        }
         let cards = request.params.cards;
         if cards as usize > self.devices {
             return Err(format!("train: cards {cards}: this server trains on at most {} card(s) at once", self.devices));

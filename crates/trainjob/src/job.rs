@@ -185,12 +185,17 @@ pub fn stage(data: &DataRefs, blobs: &BTreeMap<String, Blob>, store: Option<&Art
 /// `<vendor>/<repo>` reference: it is parsed by the one parser that refuses separators, dot segments and
 /// adapter suffixes, and resolved against the store, never against the filesystem as given.
 pub fn resolve_base(models_dir: Option<&Path>, base: &str) -> Result<PathBuf, String> {
-    let reference = brain_modelref::ModelRef::parse(base).map_err(|e| format!("train: base \"{base}\": {e}"))?;
+    resolve_model(models_dir, "base", base)
+}
+
+/// [`resolve_base`] for the model the request's `field` names (`base`, `distill_teacher`).
+pub fn resolve_model(models_dir: Option<&Path>, field: &str, model: &str) -> Result<PathBuf, String> {
+    let reference = brain_modelref::ModelRef::parse(model).map_err(|e| format!("train: {field} \"{model}\": {e}"))?;
     if reference.adapter().is_some() {
-        return Err(format!("train: base \"{base}\" names an adapter; a base is a plain <vendor>/<repo>"));
+        return Err(format!("train: {field} \"{model}\" names an adapter; a model is a plain <vendor>/<repo>"));
     }
-    let root = models_dir.ok_or("train: this server has no model store to resolve the base in")?;
-    brain_modelstore::Store::new(root).local(&reference).map(|local| local.dir).ok_or_else(|| format!("train: base \"{base}\" is not in the model store"))
+    let root = models_dir.ok_or_else(|| format!("train: this server has no model store to resolve the {field} in"))?;
+    brain_modelstore::Store::new(root).local(&reference).map(|local| local.dir).ok_or_else(|| format!("train: {field} \"{model}\" is not in the model store"))
 }
 
 /// The footprints already worked out, by what they depend on, so the door check and the placement ask
@@ -344,7 +349,8 @@ impl RunFiles {
 }
 
 /// The trainer for `request` over the files `staged`, writing where `files` says, on the device this thread is scoped to.
-pub fn build_fine_tune(request: &Request, base_dir: &Path, staged: &Staged, files: &RunFiles) -> Result<brain::ChatFineTune, String> {
+/// `teacher_dir` is the model store directory of the request's `distill_teacher`, when it names one.
+pub fn build_fine_tune(request: &Request, base_dir: &Path, teacher_dir: Option<&Path>, staged: &Staged, files: &RunFiles) -> Result<brain::ChatFineTune, String> {
     let p = &request.params;
     let mut ft = brain::ChatFineTune::from_pretrained(utf8(base_dir)?)
         .placed(true)
@@ -362,6 +368,9 @@ pub fn build_fine_tune(request: &Request, base_dir: &Path, staged: &Staged, file
         .keep_best(p.eval_every > 0);
     if p.objective == Objective::PolicyGradient {
         ft = ft.policy_gradient(policy_gradient_config(p)?);
+    }
+    if let Some(dir) = teacher_dir {
+        ft = ft.distill_teacher(utf8(dir)?);
     }
     if let Some(arch) = &p.arch {
         ft = ft.arch(arch.as_str());
@@ -717,8 +726,9 @@ pub(crate) fn trainer_failure(e: brain::Error) -> String {
     }
 }
 
-fn train_chat(request: &Request, base_dir: &Path, staged: &Staged, files: &RunFiles, cancel: &capability::CancelToken, began: Instant, progress: &mut dyn FnMut(Progress)) -> Result<Trained, String> {
-    let fine_tune = build_fine_tune(request, base_dir, staged, files)?;
+#[allow(clippy::too_many_arguments)]
+fn train_chat(request: &Request, base_dir: &Path, teacher_dir: Option<&Path>, staged: &Staged, files: &RunFiles, cancel: &capability::CancelToken, began: Instant, progress: &mut dyn FnMut(Progress)) -> Result<Trained, String> {
+    let fine_tune = build_fine_tune(request, base_dir, teacher_dir, staged, files)?;
     let outcome = fine_tune.run_with(cancel, |step| progress(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64())))).map_err(trainer_failure)?;
     trained_chat(request, files, outcome)
 }
@@ -729,7 +739,7 @@ fn train_chat(request: &Request, base_dir: &Path, staged: &Staged, files: &RunFi
 /// outcome is the run's; the ranks share the run's cancellation and stop after the same step ([`run_ranks`] for
 /// what a failing rank does).
 #[allow(clippy::too_many_arguments)]
-fn train_chat_ranks(request: &Request, base_dir: &Path, staged: &Staged, files: &RunFiles, work: &Workdir, devices: &[residency::Device], cancel: &capability::CancelToken, began: Instant, progress: &mut dyn FnMut(Progress)) -> Result<Trained, String> {
+fn train_chat_ranks(request: &Request, base_dir: &Path, teacher_dir: Option<&Path>, staged: &Staged, files: &RunFiles, work: &Workdir, devices: &[residency::Device], cancel: &capability::CancelToken, began: Instant, progress: &mut dyn FnMut(Progress)) -> Result<Trained, String> {
     let p = &request.params;
     // Every rank must draw the same batch order and initialisation: the resumable run's seed, the request's, or one
     // drawn here for all of them.
@@ -738,7 +748,7 @@ fn train_chat_ranks(request: &Request, base_dir: &Path, staged: &Staged, files: 
     let rank_files: Vec<RunFiles> = (0..devices.len()).map(|r| files.for_rank(r, work.path())).collect();
     let body = |rank: brain::DataParallel, frames: Option<std::sync::mpsc::Sender<Progress>>| -> Result<Trained, String> {
         let files = &rank_files[rank.rank()];
-        let fine_tune = build_fine_tune(request, base_dir, staged, files)?.seed(seed).data_parallel(rank);
+        let fine_tune = build_fine_tune(request, base_dir, teacher_dir, staged, files)?.seed(seed).data_parallel(rank);
         let outcome = fine_tune
             .run_with(cancel, |step| {
                 if let Some(frames) = &frames {
@@ -869,6 +879,7 @@ pub fn run(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], progre
         None => None,
     };
     let base_dir = resolve_base(env.models_dir.as_deref(), &p.base)?;
+    let teacher_dir = p.distill_teacher.as_deref().map(|teacher| resolve_model(env.models_dir.as_deref(), "distill_teacher", teacher)).transpose()?;
     let steps = p.steps;
     let work = Workdir::create(env)?;
     progress(Progress::event(0, steps, json!({"type": "stage", "stage": "staging the datasets"})));
@@ -894,8 +905,8 @@ pub fn run(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], progre
             };
             train_distill(&request, &base_dir, &staged, teacher.as_deref(), &files, &inv.cancel, began, progress)?
         }
-        Objective::Sft | Objective::PolicyGradient if devices.len() > 1 => train_chat_ranks(&request, &base_dir, &staged, &files, &work, devices, &inv.cancel, began, progress)?,
-        Objective::Sft | Objective::PolicyGradient => train_chat(&request, &base_dir, &staged, &files, &inv.cancel, began, progress)?,
+        Objective::Sft | Objective::PolicyGradient if devices.len() > 1 => train_chat_ranks(&request, &base_dir, teacher_dir.as_deref(), &staged, &files, &work, devices, &inv.cancel, began, progress)?,
+        Objective::Sft | Objective::PolicyGradient => train_chat(&request, &base_dir, teacher_dir.as_deref(), &staged, &files, &inv.cancel, began, progress)?,
     };
     work.ensure_within_quota()?;
     let mut result = Outcome::new();

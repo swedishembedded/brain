@@ -206,6 +206,13 @@ pub use rl::objective::grpo::LossAgg;
 /// How a policy-gradient run turns each group's rewards into advantages ([`PolicyGradientConfig::advantage_norm`]).
 #[cfg(feature = "study")]
 pub use rl::objective::advantage::{AdvantageFloor, AdvantageNorm};
+/// On-policy distillation from a teacher model ([`ChatFineTune::distill_teacher`]): which estimator a teacher's
+/// tokenizer admits, and why token-level distillation is refused.
+#[cfg(feature = "study")]
+pub use rl::objective::onpolicy_distill::{DistillEstimator, DistillRefusal};
+/// Whether two checkpoints share one tokenizer: the check that decides the on-policy distillation estimator.
+#[cfg(feature = "study")]
+pub use data::tokenizer_identity::{TokenizerDifferences, TokenizerIdentity, TokenizerSize};
 #[cfg(feature = "study")]
 pub use rl::objective::dpo::{PairLoss, DEFAULT_SIMPO_GAMMA};
 #[cfg(feature = "study")]

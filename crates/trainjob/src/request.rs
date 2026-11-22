@@ -138,6 +138,7 @@ fn spec_without_defaults() -> ActionSpec {
         .param(ParamSpec::new("loss_agg_length", ParamType::Int, "policy gradient with loss_agg constant-length: the constant, in tokens, every sequence's token sum is divided by (default max_block)").min(1.0).max(1_048_576.0).step(1.0))
         .param(optional_f("temperature", "policy gradient: the temperature the rollouts were sampled at", 0.0, 100.0))
         .param(ParamSpec::new("teacher", ParamType::Str, "policy gradient with teacher contexts: the frozen policy that scores the student's tokens in the privileged context, `base` or `start`; distill: the policy of the same base that teaches, `base`, `start` (the start_adapter) or `adapter:<blake3 digest>` (an adapter in the artifact store)"))
+        .param(ParamSpec::new("distill_teacher", ParamType::Str, "policy gradient: on-policy distillation from another model, `<vendor>/<repo>` in the server's model store: the teacher whose scores of the sampled answers the rollout records carry. Its tokenizer is compared with the base's; per-token scores (`teacher_logprobs`) train only for identical tokenizers and are refused otherwise, per-answer scores (`teacher_logprob`, the higher-variance sequence-level estimator) train for any teacher. Only its tokenizer is read"))
         .param(ParamSpec::new("top_k", ParamType::Int, "distill: the teacher's most likely tokens kept per position (default 16)").min(1.0).max(256.0).step(1.0))
         .param(optional_f("advantage_bound", "policy gradient with teacher contexts: each token's advantage is clipped to [-bound, bound]", 0.0, 1e6))
         .param(optional_f("sequence_advantage_cap", "policy gradient with teacher contexts: the most the magnitudes of a sequence's token advantages may sum to", 0.0, 1e9))
@@ -369,6 +370,7 @@ pub struct Params {
     pub loss_agg_length: Option<u32>,
     pub temperature: Option<f32>,
     pub teacher: Option<String>,
+    pub distill_teacher: Option<String>,
     pub top_k: Option<u32>,
     pub advantage_bound: Option<f32>,
     pub sequence_advantage_cap: Option<f32>,
@@ -417,6 +419,7 @@ impl Request {
             (params.loss_agg_length.is_some(), "loss_agg_length"),
             (params.temperature.is_some(), "temperature"),
             (params.teacher.is_some(), "teacher"),
+            (params.distill_teacher.is_some(), "distill_teacher"),
             (params.advantage_bound.is_some(), "advantage_bound"),
             (params.sequence_advantage_cap.is_some(), "sequence_advantage_cap"),
             (params.advantage_norm.is_some(), "advantage_norm"),
@@ -648,7 +651,7 @@ mod tests {
         assert_eq!(crate::job::policy_gradient_config(&named.params).unwrap(), brain::PolicyGradientConfig::default(), "the declared defaults are the trainer's");
         let pg = brain::PolicyGradientConfig::default();
         assert_eq!((pg.clip_eps_high, pg.max_step_kl, pg.max_step_grad_norm, pg.advantage_bound, pg.sequence_advantage_cap), (None, None, None, None, None));
-        assert_eq!(off, ["algorithm", "clip_eps_high", "max_step_kl", "max_step_grad_norm", "loss_agg_length", "advantage_bound", "sequence_advantage_cap"], "only the settings the trainer leaves off, or that depend on the request (the constant length is max_block's), are undeclared");
+        assert_eq!(off, ["algorithm", "clip_eps_high", "max_step_kl", "max_step_grad_norm", "loss_agg_length", "distill_teacher", "advantage_bound", "sequence_advantage_cap"], "only the settings the trainer leaves off, or that depend on the request (the constant length is max_block's), are undeclared");
         for p in spec.params.iter().filter(|p| p.help.starts_with("preference") || p.help.starts_with("feedback:")) {
             assert!(defaults.contains_key(&p.name), "{}: a preference setting declares its default", p.name);
         }
@@ -735,6 +738,13 @@ mod tests {
         let e = request(json!({"base": "a/b", "data": data, "kl_beta": 0.1, "teacher": "start"}), &[]).unwrap_err();
         assert!(e.contains("kl_beta, teacher") && e.contains("sft"), "{e}");
         assert!(request(json!({"base": "a/b", "data": data, "objective": "policy_gradient", "kl_beta": 0.1, "teacher": "start", "reference": "base", "loss_agg": "token-sum"}), &[]).is_ok());
+        // On-policy distillation names its teacher model beside the policy gradient, and nowhere else.
+        let distilled = request(json!({"base": "a/b", "data": data, "objective": "policy_gradient", "distill_teacher": "c/d"}), &[]).unwrap();
+        assert_eq!(distilled.params.distill_teacher.as_deref(), Some("c/d"));
+        for objective in ["sft", "distill", "preference"] {
+            let e = request(json!({"base": "a/b", "data": data, "objective": objective, "distill_teacher": "c/d"}), &[]).unwrap_err();
+            assert!(e.contains("distill_teacher"), "{objective}: {e}");
+        }
         assert!(request(json!({"base": "a/b", "data": data, "keep_evaluations": true}), &[]).unwrap_err().contains("eval_every"));
         let e = request(json!({"base": "a/b", "data": data, "max_step_kl": 0.1}), &[]).unwrap_err();
         assert!(e.contains("max_step_kl") && e.contains("sft"), "the step guard belongs to the policy gradient: {e}");

@@ -138,6 +138,8 @@ pub struct ChatFineTune {
     activations: Option<model::saved::SavedPolicy>,
     /// Train with the clipped policy-gradient objective on rollout records ([`ChatFineTune::policy_gradient`]).
     policy_gradient: Option<PolicyGradientConfig>,
+    /// The teacher model whose scores the rollout records carry ([`ChatFineTune::distill_teacher`]).
+    distill_teacher: Option<String>,
     /// This run as one rank of a data-parallel group.
     parallel: Option<crate::DataParallel>,
     /// Pipeline stages ([`ChatFineTune::stages`]).
@@ -649,6 +651,7 @@ impl ChatFineTune {
             pack_answers: false,
             activations: None,
             policy_gradient: None,
+            distill_teacher: None,
             parallel: None,
         }
     }
@@ -849,6 +852,36 @@ impl ChatFineTune {
     pub fn policy_gradient(mut self, config: PolicyGradientConfig) -> Self {
         self.policy_gradient = Some(config);
         self
+    }
+
+    /// On-policy distillation from another model ([`rl::objective::onpolicy_distill`]): `teacher` (a model reference
+    /// or a checkpoint directory, resolved like the base) is the model whose scores of the student's sampled answers
+    /// the rollout records carry. Its tokenizer is compared with the base's
+    /// ([`data::tokenizer_identity::TokenizerIdentity::check`]) and the answer decides what the run trains:
+    /// per-token scores (`teacher_logprobs`, token-level reverse KL) only for identical tokenizers, refused otherwise;
+    /// per-answer scores (`teacher_logprob`, the sequence-level estimator, higher variance) for any teacher. Only the
+    /// teacher's tokenizer is read. Needs [`ChatFineTune::policy_gradient`]; the comparison is on the outcome's
+    /// settings (`teacher_tokenizer`).
+    pub fn distill_teacher(mut self, teacher: impl Into<String>) -> Self {
+        self.distill_teacher = Some(teacher.into());
+        self
+    }
+
+    /// The policy-gradient configuration the run trains with: the one asked for, with the comparison of the
+    /// distillation teacher's tokenizer with the base's (`model_dir`) when a teacher is named.
+    fn policy_gradient_for(&self, model_dir: &Path) -> Result<Option<PolicyGradientConfig>> {
+        let Some(teacher) = &self.distill_teacher else { return Ok(self.policy_gradient) };
+        let Some(config) = self.policy_gradient else {
+            return Err(Error::InvalidRequest("ChatFineTune: distill_teacher names the teacher whose scores rollout records carry, and the run trains no policy_gradient; call .policy_gradient(..)".to_string()));
+        };
+        let teacher_dir = if Path::new(teacher).is_dir() {
+            PathBuf::from(teacher)
+        } else {
+            let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
+            loader::model_dir::resolve_base(teacher, store_root.as_deref()).map_err(Error::ModelNotFound)?.1
+        };
+        let identity = data::tokenizer_identity::TokenizerIdentity::check(model_dir, &teacher_dir).map_err(|e| Error::InvalidRequest(format!("ChatFineTune: distill_teacher {teacher}: {e}")))?;
+        Ok(Some(PolicyGradientConfig { teacher_tokenizer: Some(identity), ..config }))
     }
 
     /// Where the adapter, its training record, the packed dataset and any
@@ -1164,6 +1197,7 @@ impl ChatFineTune {
             return Err(Error::InvalidRequest(format!("ChatFineTune: native sparse attention training is not available for {}", arch.id)));
         }
         self.check_policy_gradient_setup(arch.id)?;
+        let policy_gradient = self.policy_gradient_for(&model_dir)?;
         if !self.modules_to_save.is_empty() && !arch.chat.is_some_and(|chat| chat.modules_to_save) {
             return Err(Error::InvalidRequest(format!("ChatFineTune: {} does not train base tensors in full beside an adapter (modules_to_save)", arch.id)));
         }
@@ -1198,7 +1232,7 @@ impl ChatFineTune {
             ("held-out text", carries(held_out_text.as_deref())),
             ("monitoring", carries(monitor.as_deref())),
         ])?;
-        if let Some(config) = &self.policy_gradient {
+        if let Some(config) = &policy_gradient {
             check_rollouts_together(&train_samples, &replay_samples, &weighted_samples, config.truncated, tok.digest())?;
         }
         if self.eval_every == 0 && self.evaluations_dir.is_some() {
@@ -1293,7 +1327,7 @@ impl ChatFineTune {
             native_sparse: self.native_sparse,
             ..fit_opts(self.steps, block, self.lr, seed)
         };
-        let checks: Vec<&dyn model::training_plan::PlanCheck> = self.policy_gradient.iter().map(|c| c as &dyn model::training_plan::PlanCheck).collect();
+        let checks: Vec<&dyn model::training_plan::PlanCheck> = policy_gradient.iter().map(|c| c as &dyn model::training_plan::PlanCheck).collect();
         let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &checks).map_err(|e| Error::InvalidRequest(format!("ChatFineTune: {e}")))?.into_opts();
         let base_digest = base_digest(&open)?;
         let identity = serde_json::json!({
@@ -1319,7 +1353,7 @@ impl ChatFineTune {
             "thinking": self.thinking,
             "pack_answers": self.pack_answers,
             "modules_to_save": self.modules_to_save,
-            "policy_gradient": self.policy_gradient.map(|c| serde_json::json!({
+            "policy_gradient": policy_gradient.map(|c| serde_json::json!({
                 "clip_eps_bits": c.clip_eps.to_bits(),
                 "clip_eps_high_bits": c.clip_eps_high.map(f32::to_bits),
                 "dual_clip_bits": c.dual_clip.map(f32::to_bits),
@@ -1339,6 +1373,7 @@ impl ChatFineTune {
                 "advantage_norm": c.advantage_norm.name(),
                 "advantage_floor": c.advantage_floor.name(),
                 "truncated": c.truncated.name(),
+                "teacher_tokenizer": c.teacher_tokenizer.map(|t| t.to_string()),
             })),
         });
         let mut step_work: Vec<model::StepWork> = Vec::new();
@@ -1361,7 +1396,7 @@ impl ChatFineTune {
         };
         let control = model::FitControl { on_step: Some(&mut on_step), state: Some(&state_path), state_every: self.checkpoint_every, identity, snapshots, grad_sync: self.parallel.as_ref().map(crate::DataParallel::grad_sync) };
         let held_out_refs: Vec<&Path> = held_out_dirs.iter().map(PathBuf::as_path).collect();
-        let (report, trained, scored, policy_gradient) = match self.policy_gradient {
+        let (report, trained, scored, policy_gradient) = match policy_gradient {
             Some(config) => {
                 let (report, trained, stats, scored) = family.train_policy_gradient(&open, &prepared_dir, &opts, rank, alpha, self.tuning, self.continue_from.as_deref(), control, config, &held_out_refs, &self.modules_to_save).map_err(|e| crate::error::training_error("training", e))?;
                 (report, trained, scored, Some(PolicyGradientOutcome { config, stats }))
@@ -1432,7 +1467,7 @@ impl ChatFineTune {
         let adapter_id = self.adapter_id.clone().unwrap_or_else(|| format!("{base_id}:local:chat:latest"));
         let provenance = checkpoint::st::TrainingProvenance {
             code_revision: format!("brain {}", env!("CARGO_PKG_VERSION")),
-            regime: if self.policy_gradient.is_some() { "policy_gradient_lora" } else { "sft_lora" }.to_string(),
+            regime: if outcome.policy_gradient.is_some() { "policy_gradient_lora" } else { "sft_lora" }.to_string(),
             seed,
             hyperparams: serde_json::json!({
                 "rank": rank,
@@ -1628,6 +1663,8 @@ impl PolicyGradientOutcome {
         let measured = serde_json::json!({
             "behaviour": s.behaviour.name(),
             "sequences_with_teacher": s.sequences_with_teacher,
+            "sequences_with_teacher_logprobs": s.sequences_with_teacher_logprobs,
+            "sequences_with_teacher_logprob": s.sequences_with_teacher_logprob,
             "sequences_capped": s.sequences_capped,
             "sequences_with_advantage": s.sequences_with_advantage,
             "sequences_imitation": s.sequences_imitation,
@@ -1681,6 +1718,8 @@ impl PolicyGradientOutcome {
             "advantage_floor": c.advantage_floor.name(),
             "truncated": c.truncated.name(),
             "kv_roundtrip": c.kv_roundtrip.map(|e| format!("{e:?}")),
+            "teacher_tokenizer": c.teacher_tokenizer.map(|t| t.to_string()),
+            "distill_estimator": c.teacher_tokenizer.map(|t| rl::objective::onpolicy_distill::DistillEstimator::for_tokenizers(&t).name()),
         })
     }
 }
@@ -2689,6 +2728,27 @@ mod tests {
         let err = job.check_policy_gradient_setup("qwen35moe").expect_err("qwen35moe's trainer does not declare it").to_string();
         assert!(err.contains("qwen35moe") && err.contains("policy_gradient"), "{err}");
         job.check_policy_gradient_setup("qwen3").expect("qwen3's trainer declares it");
+    }
+
+    /// Spec: naming a distillation teacher compares its tokenizer with the base's and records the answer on the
+    /// policy-gradient configuration the run trains with; it needs the policy-gradient objective.
+    #[test]
+    fn a_distillation_teacher_is_checked_against_the_bases_tokenizer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let write = |name: &str, merges: serde_json::Value| {
+            let dir = tmp.path().join(name);
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(dir.join("tokenizer.json"), serde_json::json!({"model": {"type": "BPE", "vocab": {"a": 0, "b": 1, "ab": 2}, "merges": merges}}).to_string()).unwrap();
+            dir
+        };
+        let (base, same, other) = (write("base", serde_json::json!([["a", "b"]])), write("same", serde_json::json!(["a b"])), write("other", serde_json::json!([])));
+        let config = rl::objective::external::PolicyGradientConfig::default();
+        let teacher = |dir: &Path| ChatFineTune::from_pretrained("base").policy_gradient(config).distill_teacher(dir.to_str().unwrap()).policy_gradient_for(&base).unwrap().unwrap().teacher_tokenizer.expect("compared");
+        assert!(teacher(&same).is_identical());
+        assert_eq!(teacher(&other).differences().names(), ["merges"]);
+        assert_eq!(ChatFineTune::from_pretrained("base").policy_gradient(config).policy_gradient_for(&base).unwrap(), Some(config), "no teacher, nothing compared");
+        let err = ChatFineTune::from_pretrained("base").distill_teacher(same.to_str().unwrap()).policy_gradient_for(&base).expect_err("no policy gradient").to_string();
+        assert!(err.contains("distill_teacher") && err.contains("policy_gradient"), "{err}");
     }
 
     /// Spec: a Qwen3.5 LoRA run takes the base's default without a choice, keeps on request, recomputes on request
