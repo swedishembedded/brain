@@ -80,6 +80,14 @@ fn run(dir: &Path, opts: &model::FitOpts, m: Qwen, sync: Option<GradSync<'_>>, o
     model::fit_controlled(m, model::causal_lm::<Qwen>(train, val, bcfg, itos), opts, Some(out), control).unwrap();
 }
 
+/// Every tensor's stored dtype in the safetensors file `path`, by name.
+fn dtypes(path: &Path) -> std::collections::BTreeMap<String, String> {
+    let bytes = std::fs::read(path).unwrap();
+    let n = u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
+    let header: serde_json::Value = serde_json::from_slice(&bytes[8..8 + n]).unwrap();
+    header.as_object().unwrap().iter().filter(|(k, _)| *k != "__metadata__").map(|(k, v)| (k.clone(), v["dtype"].as_str().unwrap().to_string())).collect()
+}
+
 /// Spec: a parameter-sharded run of qwen3 ends by writing its trained model, never failing at the save; the file
 /// opens as a qwen3 checkpoint whose every weight is the single-rank run's within bf16 rounding and the sharded
 /// update's rounding.
@@ -102,6 +110,11 @@ fn a_parameter_sharded_run_writes_a_checkpoint_of_the_trained_model() {
         }
     });
     run(&dir, &opts(Sharding::Replicated, seed), build(None), None, &single_out);
+    // One save for a resident build, sharded or not: the linears and tables at the bf16 they trained in, the norms f32
+    // (so the exported checkpoint keeps that tier, not f32 at twice the size).
+    let (sharded_tiers, single_tiers) = (dtypes(&sharded_out), dtypes(&single_out));
+    assert_eq!(single_tiers, sharded_tiers, "the single-rank resident run writes its tensors at the tiers the sharded save does");
+    assert!(single_tiers.iter().any(|(_, t)| t == "BF16") && single_tiers.iter().any(|(_, t)| t == "F32"), "{single_tiers:?}");
     let (got, want) = (Qwen::load(sharded_out.to_str().unwrap(), 1, T), Qwen::load(single_out.to_str().unwrap(), 1, T));
     let o = opts(Sharding::Parameters, seed);
     let names = want.param_names();

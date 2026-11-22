@@ -4324,33 +4324,41 @@ impl Qwen {
         self.save_with_itos(path, None);
     }
 
-    /// [`Self::save`] of a parameter-sharded resident build ([`model::resident_ft::ResidentFullFt::save_parameter_sharded`]):
-    /// every rank of its group calls it, the rank given `path` writes a qwen3 checkpoint with the resident linears and
-    /// tables in bf16 and the norms in f32, no rank holding more than one layer.
+    /// [`Self::save`] of a resident build, parameter-sharded or not
+    /// ([`model::resident_ft::ResidentFullFt::save_checkpoint`]): every rank of a sharded group calls it, the rank
+    /// given `path` writes a qwen3 checkpoint with the resident linears and tables at the tier they train in (bf16 for
+    /// a bf16 build) and the norms in f32, no rank holding more than one layer.
     pub fn save_sharded(&self, path: Option<&str>) -> Result<(), String> {
-        let ft = self.resident.as_ref().ok_or("qwen3: save_sharded: this build does not shard its parameters")?;
+        self.save_resident(path, self.cfg.to_json())
+    }
+
+    fn save_resident(&self, path: Option<&str>, config: Value) -> Result<(), String> {
+        let ft = self.resident.as_ref().ok_or("qwen3: save_sharded: this build has no resident state to save")?;
         self.gpu.flush();
-        let card = self.cfg.lora.is_none().then(|| checkpoint::st::ModelCard::new(crate::caps::MODEL, crate::spec::CARD_FAMILY));
         let read = |name: &str| self.ps.read_weight(&self.gpu, name);
-        ft.borrow_mut().save_parameter_sharded(&self.ops, path.map(std::path::Path::new), &self.ps.params, &read, &self.cfg.to_json(), card.as_ref())
+        ft.borrow_mut().save_checkpoint(&self.ops, path.map(std::path::Path::new), &self.ps.params, &read, &config, self.card().as_ref())
+    }
+
+    /// A base checkpoint carries the `qwen` card, so the model store resolves it (`crate::spec::Qwen3Spec`); a
+    /// checkpoint extended with LoRA tensors is a training artifact, not a base.
+    fn card(&self) -> Option<checkpoint::st::ModelCard> {
+        self.cfg.lora.is_none().then(|| checkpoint::st::ModelCard::new(crate::caps::MODEL, crate::spec::CARD_FAMILY))
     }
 
     pub fn save_with_itos(&self, path: &str, itos: Option<&[char]>) {
-        let mut plan: Vec<(String, Vec<u64>)> = self.ps.params.iter().map(|(name, _)| (name.clone(), vec![self.ps.numel(name) as u64])).collect();
-        // A resident build keeps its linears outside the parameter store: they are saved from their masters.
-        if let Some(ft) = &self.resident {
-            plan.extend(ft.borrow().specs().iter().map(|s| (s.name.clone(), vec![s.n as u64 * s.k as u64])));
-        }
         let mut config = self.cfg.to_json();
         if let Some(itos) = itos {
             let arr: Vec<Value> = itos.iter().map(|c| Value::from(c.to_string())).collect();
             config["itos"] = Value::Array(arr);
         }
-        // One tensor at a time off the device or the master, written while the next is read.
-        // A base checkpoint carries the `qwen` card, so the model store resolves it (`crate::spec::Qwen3Spec`); a
-        // checkpoint extended with LoRA tensors is a training artifact, not a base.
-        let card = self.cfg.lora.is_none().then(|| checkpoint::st::ModelCard::new(crate::caps::MODEL, crate::spec::CARD_FAMILY));
-        checkpoint::weightio::save_streamed(path, &config, card.as_ref(), &plan, |name| self.read_weight(name)).expect("save safetensors");
+        // A resident build keeps its linears outside the parameter store: they are saved from their masters, at the
+        // tier they train in.
+        if self.resident.is_some() {
+            return self.save_resident(Some(path), config).unwrap_or_else(|e| panic!("qwen3: saving {path}: {e}"));
+        }
+        let plan: Vec<(String, Vec<u64>)> = self.ps.params.iter().map(|(name, _)| (name.clone(), vec![self.ps.numel(name) as u64])).collect();
+        // One tensor at a time off the device, written while the next is read.
+        checkpoint::weightio::save_streamed(path, &config, self.card().as_ref(), &plan, |name| self.read_weight(name)).expect("save safetensors");
     }
 }
 

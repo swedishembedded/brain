@@ -1538,17 +1538,18 @@ impl ResidentFullFt {
         Ok(self.specs.iter().zip(dst).map(|(s, e)| TensorDescriptor::new(s.name.clone(), vec![s.n as u64, s.k as u64], e.clone())).collect())
     }
 
-    /// Write the trained model of a parameter-sharded build as a model's brain checkpoint (what
-    /// [`crate::Model::save_sharded`] asks of every family with such a build): every rank of the group calls it, the
-    /// rank given `path` writes. The resident linears and tables are written in bf16 (the encoding they train in),
-    /// streamed from their masters one unit at a time ([`Self::export_collective`]); the model's other parameters
-    /// (`rest`, every rank holds them whole: the norms) in f32 from `read_rest`. The file carries `config` and `card`.
-    pub fn save_parameter_sharded(&mut self, ops: &dyn DeviceIo, path: Option<&std::path::Path>, rest: &[(String, usize)], read_rest: &dyn Fn(&str) -> Vec<f32>, config: &serde_json::Value, card: Option<&checkpoint::st::ModelCard>) -> Result<(), String> {
-        if !self.parameter_sharded() {
-            return Err("save_parameter_sharded: this build does not shard its parameters".into());
-        }
+    /// Write the trained model of a resident build as a model's brain checkpoint, whether its parameters are sharded or
+    /// not (what [`crate::Model::save_sharded`] and a family's save of a resident build ask): every rank of a
+    /// parameter-sharded group calls it and the rank given `path` writes; a build that is not sharded writes on the one
+    /// rank, so `path` is required. The resident linears and tables are written streamed from their masters one unit
+    /// at a time ([`Self::export_collective`]) at the tier they train in: f32 for an f32 build, bf16 for every
+    /// narrower one (the bf16 a sharded build runs, and for an fp8, int8 or nf4 build the master's bf16 rather than a
+    /// lossy re-encoding), so the checkpoint and its export keep that tier instead of widening it to f32. The model's
+    /// other parameters (`rest`, held whole: the norms) are f32 from `read_rest`. The file carries `config` and `card`.
+    pub fn save_checkpoint(&mut self, ops: &dyn DeviceIo, path: Option<&std::path::Path>, rest: &[(String, usize)], read_rest: &dyn Fn(&str) -> Vec<f32>, config: &serde_json::Value, card: Option<&checkpoint::st::ModelCard>) -> Result<(), String> {
         ops.gpu().flush();
-        let encodings = vec![ResidentValue::Bf16.encoding(); self.specs.len()];
+        let tier = if self.cfg.value == ResidentValue::F32 { ResidentValue::F32 } else { ResidentValue::Bf16 };
+        let encodings = vec![tier.encoding(); self.specs.len()];
         let Some(path) = path else {
             return self.export_collective(ops, &encodings, None).map_err(|e| e.to_string());
         };

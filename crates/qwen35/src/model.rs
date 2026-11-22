@@ -7741,26 +7741,27 @@ impl Qwen35 {
         Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg, b, t, &reader, &TrainOpts::default())
     }
 
-    /// [`Self::save`] of a parameter-sharded resident build: every rank of its group calls it, the rank given `path`
-    /// writes. The resident linears and tables are written in bf16 (the encoding they train in), streamed from their
-    /// masters one layer at a time; the remaining parameters (the norms, which every rank holds) in f32. The file opens
-    /// as this family's brain checkpoint ([`crate::base_source::open_base`]).
+    /// [`Self::save`] of a resident build, parameter-sharded or not
+    /// ([`model::resident_ft::ResidentFullFt::save_checkpoint`]): every rank of a sharded group calls it, the rank
+    /// given `path` writes. The resident linears and tables are written at the tier they train in (bf16 for a bf16
+    /// build), streamed from their masters one layer at a time; the remaining parameters (the norms) in f32. The file
+    /// opens as this family's brain checkpoint ([`crate::base_source::open_base`]).
     pub fn save_sharded(&self, path: Option<&str>) -> Result<(), String> {
-        let ft = self.resident.as_ref().ok_or("qwen35: save_sharded: this build does not shard its parameters")?;
+        let ft = self.resident.as_ref().ok_or("qwen35: save_sharded: this build has no resident state to save")?;
         self.gpu.flush();
         let card = checkpoint::st::ModelCard::new("brain/qwen35", "qwen35");
         let read = |name: &str| self.ps.read_weight(&self.gpu, name);
-        ft.borrow_mut().save_parameter_sharded(&self.ops, path.map(std::path::Path::new), &self.ps.params, &read, &self.cfg.to_json(), Some(&card))
+        ft.borrow_mut().save_checkpoint(&self.ops, path.map(std::path::Path::new), &self.ps.params, &read, &self.cfg.to_json(), Some(&card))
     }
 
     pub fn save(&self, path: &str) {
-        let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> =
-            self.ps.params.iter().map(|(name, _)| (name.clone(), vec![self.ps.numel(name) as u64], self.read_weight(name))).collect();
-        // A resident build keeps its linears outside the parameter store: they are saved from their masters.
-        if let Some(ft) = &self.resident {
-            let names: Vec<(String, u64)> = ft.borrow().specs().iter().map(|s| (s.name.clone(), s.n as u64 * s.k as u64)).collect();
-            tensors.extend(names.into_iter().map(|(name, numel)| (name.clone(), vec![numel], self.read_weight(&name))));
+        // A resident build keeps its linears outside the parameter store: they are saved from their masters, at the
+        // tier they train in.
+        if self.resident.is_some() {
+            return self.save_sharded(Some(path)).unwrap_or_else(|e| panic!("qwen35: saving {path}: {e}"));
         }
+        let tensors: Vec<(String, Vec<u64>, Vec<f32>)> =
+            self.ps.params.iter().map(|(name, _)| (name.clone(), vec![self.ps.numel(name) as u64], self.read_weight(name))).collect();
         let config = self.cfg.to_json();
         checkpoint::save_carded(path, config, &tensors, &checkpoint::st::ModelCard::new("brain/qwen35", "qwen35"));
     }

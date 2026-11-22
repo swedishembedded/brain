@@ -709,6 +709,16 @@ Scope: Running one training job as ranks across machines, and serving one model 
   10 s with the load. Spec: `finetune_export_dtype` (bf16 file exports bf16 and
   reloads within bf16 rounding; fp32 file exports f32). Other families copy
   their brain checkpoint byte for byte, so they already keep the stored tier.
+  The served `full_train` exports through the same function; a one-card
+  resident run (`train_precision weights=bf16,grad=bf16,window=2`) still wrote
+  16.1 GB because its trained file was saved f32 from the masters while the
+  sharded save wrote bf16. Both now save through
+  `ResidentFullFt::save_checkpoint` (qwen3 and qwen35): served Qwen3-4B, 1
+  GH200, 20 steps: 16,089,918,232 -> 8,044,982,080 bytes, and the export
+  serves on one card and answers the arithmetic prompt (n442, 2026-11-22). A
+  default (fp32) full fine-tune trains f32 weights and still exports f32 by
+  design: its lr-1e-6 updates are far below bf16's spacing. Spec: qwen3
+  `sharded_parameters` (the one-rank and sharded files store the same tiers).
 - **`brain finetune`, parameter-sharded full fine-tune of Qwen3-4B end to
   end, 2 GH200s of n442 (gpu0-1, one process per card, 2026-11-22, brain
   88124f957, NCCL 2.32.3 over NVLink, the 256-record chat set, `--max-block
@@ -1130,7 +1140,8 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         `FI_CXI_DISABLE_HOST_REGISTER=1` on a CXI fabric (knowledge 552). Open:
         selection on held-out loss and timed model saves are not run for such
         a run. The sharded save is one implementation since 2026-11-22
-        (`ResidentFullFt::save_parameter_sharded`: resident linears and tables
+        (`ResidentFullFt::save_checkpoint`, the save of every resident build,
+        sharded or not, since the same day: resident linears and tables
         bf16 from the masters unit by unit, the rest f32, the family's config
         and card); qwen35 and qwen3 call it, so a qwen3 parameter-sharded run
         writes its model instead of failing at the end ("this model does not
