@@ -36,16 +36,15 @@ run() {
 }
 
 run "gradcheck suite — CPU backend"    env BRAIN_DEVICE=cpu    cargo test --release -q -p brain-gradcheck
-# Vulkan line, two deliberate differences from the CPU line (knowledge #300):
-#  - --test-threads=1: concurrent tests on the one shared Vulkan device give
-#    wrong results (cross-group leaks) and ERROR_DEVICE_LOST, at the baseline
-#    commit too; serial execution is what makes the kernel check meaningful.
-#    The shared-device race itself is tracked in .agents/roadmap/.
-#  - --skip bf16_train::: that gate needs a device with bf16 storage, which
-#    this Vulkan device lacks (its own assertion fails with that reason). It
-#    runs, and is required to pass, on the CPU line above.
+# Vulkan line, one deliberate difference from the CPU line (knowledge #300):
+# --test-threads=1: concurrent tests on the one shared Vulkan device give
+# wrong results (cross-group leaks) and ERROR_DEVICE_LOST, at the baseline
+# commit too; serial execution is what makes the kernel check meaningful.
+# The shared-device race itself is tracked in .agents/roadmap/. The bf16
+# training gate runs here too since the Vulkan backend reports its bf16 storage
+# tier (knowledge #558).
 run "gradcheck suite — Vulkan backend (incl. CPU==GPU forward parity)" \
-                                       env BRAIN_DEVICE=vulkan cargo test --release -q -p brain-gradcheck --no-fail-fast -- --test-threads=1 --skip bf16_train::
+                                       env BRAIN_DEVICE=vulkan cargo test --release -q -p brain-gradcheck --no-fail-fast -- --test-threads=1
 
 # CUDA line: the whole suite, no skips (three tests that failed here were fixed or shown to be properties of the check;
 # see .agents/roadmap/cuda.md and knowledge 408).
