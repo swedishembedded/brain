@@ -29,6 +29,7 @@ use llmserve::adapter_registry::{AdapterHost, LiveAdapters};
 use llmserve::adapter_release::{load_adapter, verify_adapter, LoadedAdapter, ManifestFollower, ManifestPoll};
 use catalog::resident_llm::QwenResident;
 use catalog::resident_qwen35::Qwen35GgufServed;
+use catalog::resident_inkling2::Inkling2Resident;
 use ricursive::resident::RicursiveResident;
 use residency::{Executor, ResidentModel};
 
@@ -111,7 +112,7 @@ impl Follow {
 /// for a model the operator did not ask for. A manifest that does not
 /// exist yet offers the base alone until one is published.
 pub fn start_adapter_mode<R: AdapterHost>(mode: AdapterMode, resident: Option<&Arc<R>>, executor: &Executor) -> Result<(Option<Follow>, Option<String>), String> {
-    let required = |flag: &str| resident.ok_or_else(|| format!("{flag} needs a served Qwen3, Qwen3.8 or Ripple to put the adapter on; name a Qwen3 checkpoint with --checkpoint <dir-or-file>, or serve one released Qwen3.8 GGUF from the model directory"));
+    let required = |flag: &str| resident.ok_or_else(|| format!("{flag} needs a served Qwen3, Qwen3.8, Ripple or Inkling 2 to put the adapter on; name a Qwen3 checkpoint with --checkpoint <dir-or-file>, or serve one released Qwen3.8 GGUF from the model directory"));
     match mode {
         AdapterMode::Base => Ok((None, None)),
         AdapterMode::Latest(dir) => Ok((Some(Follow::latest(dir.to_path_buf())), None)),
@@ -188,8 +189,8 @@ impl ServedBases {
 }
 
 /// Where `--adapter`, `--adapter-manifest` and `--watch-adapters` put their
-/// adapter: the env-selected Qwen3, else the one released Qwen3.8 GGUF the
-/// model scan served. Which of several is ambiguous and is refused by name.
+/// adapter: the env-selected Qwen3, else the one served Qwen3.8 GGUF, Ripple or Inkling 2 the model scan found.
+/// Which of several is ambiguous and is refused by name.
 pub enum Host {
     /// Nothing the adapters could ride on.
     None,
@@ -197,22 +198,26 @@ pub enum Host {
     Qwen35(Arc<Qwen35GgufServed>),
     /// The one Ripple checkpoint served and no Qwen: `--adapter` offers its adapter as a model of its own.
     Ripple(Arc<RicursiveResident>),
-    /// Several released Qwen3.8 GGUFs are served and no Qwen3: the ids.
+    /// The one Inkling 2 checkpoint served and no Qwen: `--adapter` offers its adapter as a model of its own.
+    Inkling2(Arc<Inkling2Resident>),
+    /// Several adapter-capable bases are served and no Qwen3: the ids.
     Ambiguous(Vec<String>),
 }
 
 impl Host {
-    /// The host for a server that serves `qwen` and `qwen35`.
-    pub fn pick(qwen: Option<Arc<QwenResident>>, qwen35: &[Arc<Qwen35GgufServed>], ricursive: &[Arc<RicursiveResident>]) -> Host {
+    /// The host for a server that serves `qwen` and the scan's `qwen35`, `ricursive` and `inkling2` residents.
+    pub fn pick(qwen: Option<Arc<QwenResident>>, qwen35: &[Arc<Qwen35GgufServed>], ricursive: &[Arc<RicursiveResident>], inkling2: &[Arc<Inkling2Resident>]) -> Host {
         if let Some(q) = qwen {
             return Host::Qwen(q);
         }
         let mut ids: Vec<String> = qwen35.iter().map(|m| m.manifest().model).collect();
         ids.extend(ricursive.iter().map(|m| m.manifest().model));
-        match (qwen35, ricursive) {
-            ([], []) => Host::None,
-            ([one], []) => Host::Qwen35(one.clone()),
-            ([], [one]) => Host::Ripple(one.clone()),
+        ids.extend(inkling2.iter().map(|m| m.manifest().model));
+        match (qwen35, ricursive, inkling2) {
+            ([], [], []) => Host::None,
+            ([one], [], []) => Host::Qwen35(one.clone()),
+            ([], [one], []) => Host::Ripple(one.clone()),
+            ([], [], [one]) => Host::Inkling2(one.clone()),
             _ => Host::Ambiguous(ids),
         }
     }
@@ -232,6 +237,7 @@ impl Host {
             Host::Qwen(q) => start_adapter_mode(mode, Some(q), executor),
             Host::Qwen35(g) => start_adapter_mode(mode, Some(g), executor),
             Host::Ripple(r) => start_adapter_mode(mode, Some(r), executor),
+            Host::Inkling2(r) => start_adapter_mode(mode, Some(r), executor),
             Host::Ambiguous(ids) if mode != AdapterMode::Base => Err(format!("{} models could take the adapter ({}); serve one of them, or put the adapter in the model directory under the id of the one it rides on", ids.len(), ids.join(", "))),
             Host::None | Host::Ambiguous(_) => start_adapter_mode::<QwenResident>(mode, None, executor),
         }
@@ -243,6 +249,7 @@ impl Host {
             Host::Qwen(q) => spawn_adapter_watcher(follow, Some(q), executor),
             Host::Qwen35(g) => spawn_adapter_watcher(follow, Some(g), executor),
             Host::Ripple(r) => spawn_adapter_watcher(follow, Some(r), executor),
+            Host::Inkling2(r) => spawn_adapter_watcher(follow, Some(r), executor),
             Host::None | Host::Ambiguous(_) => spawn_adapter_watcher::<QwenResident>(follow, None, executor),
         }
     }
@@ -563,6 +570,38 @@ mod tests {
         assert!(warning.contains("IGNORED"), "it must say the flag is not in effect: {warning}");
         assert!(warning.contains("--checkpoint"), "and name the remedy: {warning}");
         assert!(warning.contains(&dir.display().to_string()), "and name the directory it is ignoring: {warning}");
+    }
+
+    /// An Inkling 2 resident over the tiny reference config (the resident reads no weights until it activates).
+    fn inkling2_resident(tag: &str) -> Option<Arc<Inkling2Resident>> {
+        let tiny = brain_testutil::testdata_path("golden/inkling2/tiny/checkpoint/config.json");
+        if !tiny.is_file() {
+            brain_testutil::skip("testdata/golden/inkling2/tiny absent (make testdata/fetch, or run tools/goldens/inkling2_dump_reference.py tiny)");
+            return None;
+        }
+        let dir = tmp(tag);
+        std::fs::copy(&tiny, dir.join("config.json")).unwrap();
+        write_byte_tokenizer(&dir);
+        std::fs::write(dir.join("generation_config.json"), serde_json::json!({"eos_token_id": 1}).to_string()).unwrap();
+        let sizing = catalog::resident_qwen35::Qwen35Sizing { ctx: 256, ctx_explicit: true, ..Default::default() };
+        Some(Arc::new(Inkling2Resident::from_hf_dir(dir.to_str().unwrap(), &format!("local/{tag}"), sizing).unwrap()))
+    }
+
+    /// `--adapter`, `--adapter-manifest` and `--watch-adapters` put their adapter on the one Inkling 2 a server serves,
+    /// as they do on the one Qwen3.8 or Ripple; two adapter-capable bases of any kinds are ambiguous and named.
+    #[test]
+    fn a_single_host_adapter_flag_reaches_the_one_served_inkling2() {
+        let (Some(one), Some(two)) = (inkling2_resident("host-one"), inkling2_resident("host-two")) else { return };
+        let host = Host::pick(None, &[], &[], std::slice::from_ref(&one));
+        assert!(matches!(&host, Host::Inkling2(r) if Arc::ptr_eq(r, &one)), "the one served Inkling 2 hosts the adapter");
+        let executor = cpu_executor(vec![one.clone()]);
+        // A pinned adapter reaches the resident's own verification: a missing file is refused by that, never by "no model to put it on".
+        let Err(err) = host.start(AdapterMode::Pinned(tmp("host-pinned").join("absent.safetensors")), &executor) else { panic!("a missing adapter file must not start") };
+        assert!(!err.contains("needs a served"), "the adapter was offered to the Inkling 2 resident: {err}");
+        assert!(matches!(host.start(AdapterMode::Base, &executor), Ok((None, None))), "no flag offers nothing");
+
+        let Host::Ambiguous(ids) = Host::pick(None, &[], &[], &[one.clone(), two.clone()]) else { panic!("two Inkling 2 are ambiguous") };
+        assert_eq!(ids, vec![one.manifest().model, two.manifest().model], "every candidate is named");
     }
 
     /// The flags pick exactly one source for the offered adapter.

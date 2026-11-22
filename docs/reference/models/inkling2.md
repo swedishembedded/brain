@@ -149,7 +149,9 @@ curl -s localhost:8788/v1/chat/completions -H "Authorization: Bearer $KEY" \
 The adapter must name the served base (its card's base id or digest); the bank's
 size follows the flags of the serving guide (`--adapter-slots`,
 `--adapter-rank-cap`, `--adapter-targets`; by default every site, at the highest
-rank of the adapters the store holds).
+rank of the adapters the store holds). `--adapter FILE`, `--adapter-manifest FILE` and
+`--watch-adapters DIR` put their adapter on the one Inkling 2 a server serves (with
+two adapter-capable bases and no Qwen3, they name the candidates and refuse).
 
 ## Training
 

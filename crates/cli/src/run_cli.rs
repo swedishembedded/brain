@@ -1769,7 +1769,7 @@ fn run_apis(a: RunApis) {
     // is the CONCRETE resident handle -- `adapter_view` is inherent, so the
     // erased one the executor holds could not do this.
     let bases = crate::continuous_train::ServedBases { qwen: qwen.iter().cloned().chain(qwen_scanned).collect(), qwen35: qwen35.clone(), ricursive: ricursive.clone(), inkling2 };
-    let host = crate::continuous_train::Host::pick(qwen, &qwen35, &ricursive);
+    let host = crate::continuous_train::Host::pick(qwen, &qwen35, &ricursive, &bases.inkling2);
     let follow = match host.start_with(a.adapter_mode, &bases, &executor) {
         Ok((follow, serving_line)) => {
             if let Some(line) = serving_line {
