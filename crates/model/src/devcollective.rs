@@ -286,6 +286,12 @@ impl<C: Collective> JobCollective<C> {
         match verdict {
             Ok(group) => {
                 eprintln!("brain: rank {rank}: gradients reduce on the device over {} ({world} ranks)", group.provider());
+                // Every operation is bounded by the op timeout on the card, not only when a wait is made for it: a rank
+                // whose thread is blocked on the card behind a collective a lost peer never completes (a read of its
+                // result, a full stream) would otherwise wait forever.
+                if let Err(why) = group.bound_in_flight(self.op_timeout) {
+                    eprintln!("brain: rank {rank}: a device collective is bounded by the op timeout only when it is waited for: {why}");
+                }
                 Ok(DevicePath::Device(Box::new(group)))
             }
             Err(why) if self.path == CollectivePath::Device => Err(CollectiveError::Transport(format!("the job plan asks for device collectives, but {why}"))),

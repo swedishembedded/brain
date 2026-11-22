@@ -198,7 +198,8 @@ fn rank_process() {
     let job = ctx.job_collective().unwrap_or_else(|e| fail(e.to_string()));
     let tier = if tier == "host" { StateTier::Host } else { StateTier::Device };
     // A handle without the sharded step's kernels: the optimizer registers them on a handle of its own.
-    let gpu = Gpu::new_on(gpu_core::testgpu::card(rank as u32), &[]);
+    // Rank r runs on the r-th selected card (`BRAIN_DEVICE` / `--device`), not on gpu r.
+    let gpu = Gpu::new_on(gpu_core::testgpu::cards()[rank], &[]);
     let p = params(&gpu, SEED, dtype);
     let handles = p.tensors.clone();
     let mut opt = ZeroOptimizer::new(p, ctx.plan().sharding, tier, &job, rank, UNIT).unwrap_or_else(|e| fail(e));

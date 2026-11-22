@@ -99,7 +99,12 @@ samples/shell/cluster/slurm/train.sh --nodes 2 \
 
 where `nccl-ofi-env.sh` puts the libfabric plugin on the library path and sets
 `NCCL_NET_PLUGIN=ofi`, `NCCL_NET=Libfabric` (a plugin that fails to load is
-then an error, not a fall back) and `FI_PROVIDER=cxi`. A Slingshot step gets a
+then an error, not a fall back), `FI_PROVIDER=cxi` and
+`FI_CXI_DISABLE_HOST_REGISTER=1`: with host registration on, the CXI provider
+registers new request buffers with CUDA from NCCL's proxy thread, which
+deadlocks against a rank blocked in the CUDA driver behind a collective (the
+proxy waits for a driver lock that rank holds while the collective waits for
+the proxy). A Slingshot step gets a
 network VNI only when it spans nodes, or with `--network=single_node_vni` on
 one node, which `train.sh` adds for a one-node step.
 

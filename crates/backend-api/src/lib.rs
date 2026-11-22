@@ -2367,6 +2367,15 @@ pub trait RankCollective: Send + Sync {
     /// Wait until everything enqueued on this communicator has completed. A peer's failure, or `timeout` passing
     /// first, aborts the communicator and is the `Err`.
     fn wait(&self, timeout: std::time::Duration) -> Result<(), String>;
+    /// Bound every operation enqueued from now on by `limit` on the device, whether or not anyone waits for it: one
+    /// not done `limit` after it was enqueued and every earlier one was done (a peer that is gone or stalled) aborts the communicator, which ends
+    /// the operation, so a host thread blocked on the card behind it (a read of its result, a full stream) goes on,
+    /// and every later call on the communicator fails with the reason. Without it only [`RankCollective::wait`]
+    /// bounds an operation. `Err` with the reason when this communicator cannot be bounded so.
+    fn bound_in_flight(&self, limit: std::time::Duration) -> Result<(), String> {
+        let _ = limit;
+        Err(format!("{} communicators bound an operation only when it is waited for", self.provider()))
+    }
 }
 
 /// Per-handle device-op counters - the queryable form of what

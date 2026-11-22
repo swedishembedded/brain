@@ -822,6 +822,17 @@ impl Context {
         Ok(PinnedMem { d: self.d, fns: self.fns, ctx: self.ctx, ptr: p as *mut u32, words, primary: self.primary.clone() })
     }
 
+    /// Write `value` into the first word of `mem` once everything enqueued on [`Self::stream`] before it has run
+    /// (`cuStreamWriteValue32`, no kernel). `Ok(false)` when the driver has no stream memory operations.
+    pub fn write_value(&self, mem: &PinnedMem, value: u32) -> Result<bool, String> {
+        let Some(write) = self.fns.stream_write_value32 else { return Ok(false) };
+        self.make_current()?;
+        // SAFETY: the block is page-locked host memory of this context, which unified addressing maps at the same
+        // address on the device; it outlives the write (the caller keeps it until the stream has drained).
+        self.d.check(unsafe { write(self.stream, mem.ptr as CuDevicePtr, value, 0) }, "cuStreamWriteValue32")?;
+        Ok(true)
+    }
+
     /// Copy host bytes into a device allocation.
     pub fn upload(&self, mem: &DeviceMem, src: &[u8]) -> Result<(), String> {
         if src.len() > mem.len {
@@ -1881,6 +1892,19 @@ impl PinnedMem {
         // destination range lies inside it, and the two regions cannot overlap
         // (one is page-locked driver memory, the other is the caller's).
         unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), self.ptr.add(word_offset), src.len()) };
+    }
+}
+
+impl PinnedMem {
+    /// The word at `index` as the device last wrote it: a volatile read, no driver call.
+    ///
+    /// # Panics
+    /// If `index` is outside the block.
+    pub fn read_word(&self, index: usize) -> u32 {
+        assert!(index < self.words.max(1), "backend-cuda: word {index} of a {}-word pinned block", self.words);
+        // SAFETY: in bounds (above); the block is live and aligned for u32; a volatile read observes a write the
+        // device made without the compiler caching an earlier value.
+        unsafe { std::ptr::read_volatile(self.ptr.add(index)) }
     }
 }
 

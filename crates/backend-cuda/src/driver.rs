@@ -232,6 +232,9 @@ pub struct ExecFns {
     pub(crate) launch_kernel_ex: Option<
         unsafe extern "C" fn(*const CuLaunchConfig, CuFunction, *mut *mut c_void, *mut *mut c_void) -> CuResult,
     >,
+    /// `cuStreamWriteValue32(stream, addr, value, flags)`: write a word once the work enqueued before it has run,
+    /// without a kernel. Optional: what marks a rank's collectives' progress where a host thread can read it.
+    pub(crate) stream_write_value32: Option<unsafe extern "C" fn(CuStream, CuDevicePtr, u32, u32) -> CuResult>,
 }
 
 /// `CUlaunchAttribute`: an id, padding to 8 bytes, and a 64-byte value union
@@ -624,6 +627,7 @@ unsafe fn load_exec(lib: &libloading::Library) -> Result<ExecFns, String> {
         func_set_attribute: sym(lib, b"cuFuncSetAttribute\0")?,
         occupancy_max_active_blocks: sym(lib, b"cuOccupancyMaxActiveBlocksPerMultiprocessor\0")?,
         launch_kernel_ex: sym(lib, b"cuLaunchKernelEx\0").ok(),
+        stream_write_value32: sym(lib, b"cuStreamWriteValue32_v2\0").or_else(|_| sym(lib, b"cuStreamWriteValue32\0")).ok(),
     })
 }
 

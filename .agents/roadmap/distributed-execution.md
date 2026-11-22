@@ -657,6 +657,32 @@ Scope: Running one training job as ranks across machines, and serving one model 
   29 s: 80k cuMemAlloc/cuMemFree calls, each free waiting for the device,
   took 85-95% of the host's time (knowledge 311's mechanism).
 
+- **`brain finetune`, parameter-sharded full fine-tune of Qwen3.8-27B-FP8
+  end to end, 8 GH200s on n442+n467 (2026-11-22, brain 59d739e70 plus the
+  bounded collectives, NCCL 2.32.3 over the libfabric plugin with
+  `FI_CXI_DISABLE_HOST_REGISTER=1`, the 256-record chat set, `--max-block
+  512`, `weights=bf16,grad=bf16,window=2,clip=running,activations=recompute`,
+  2 steps, rank 0, `--kernel-profile` stage times).** Build 3.7 s (read the
+  base) + 5.2 s (this rank's slices), initial loss probe 2.6 s, step 1
+  2.76 s (forward and backward 0.52 s, update 2.24 s), step 2 2.04 s; save
+  29.9 s, export to the checkpoint directory 14.2 s; checkpoint written 144
+  s after the processes started (148 s wall for the job). The export
+  generates on one card (`qwen35 generate --precision int8`, 43 s with the
+  load; "147 plus 592 is 7..." at 12 tokens); that load needed more than
+  200 GB of host memory (OOM at 200 GB, fine at 400 GB). Without the fabric
+  variable the run deadlocks in the probe's 31st all-gather (knowledge 552);
+  with the bounded collectives every rank then fails 120 s later with
+  "collective 31 was not done 120.0s after the ones before it" (op timeout
+  120 s; before, it spun for 30+ minutes).
+- **Cost of bounding every device collective (2026-11-22, n442 cards 2-3,
+  `brain bench collectives`, f32, 50 iterations, two runs each).** p50
+  before -> after: all-reduce 5.9-6.8 -> 7.7-8.1 us at 8 B, 28.7 -> 31.2-31.8
+  us at 1 MiB; all-gather 5.7-6.8 -> 7.7-8.0 us at 8 B; reduce-scatter 5.7 ->
+  7.9 us; broadcast 4.9 -> 7.2-7.7 us; 256 MiB unchanged (all-reduce 2.43 ->
+  2.44-2.47 ms). One stream mark per operation; a start mark as well cost
+  4 us, and the mark without its memory barrier is refused by the driver for
+  host memory.
+
 ## Plan: multi-node clusters (2026-11-21)
 
 Target machine class: Slurm allocations of GH200 nodes, 4 cards per node on
@@ -872,10 +898,16 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         checkpoint (bf16 linears and tables, f32 norms, card; rank 0 writes,
         no rank holds more than a layer), and each rank commits its slices into
         the C8 generation layout; a resumed run ends bit for bit where the
-        uninterrupted one does and writes the same file (CPU tests). Open:
+        uninterrupted one does and writes the same file (CPU tests). End to end
+        on cards (2026-11-22): `brain finetune` of Qwen3.8-27B-FP8 over 8
+        GH200s on two nodes trains, exports its checkpoint directory and the
+        export generates on one card (Measured); it needs
+        `FI_CXI_DISABLE_HOST_REGISTER=1` on a CXI fabric (knowledge 552). Open:
         selection on held-out loss and timed model saves are not run for such
-        a run; the `brain finetune` 27B run end to end (export, serve) is not
-        yet run on cards.
+        a run; qwen3's resident build trains parameter-sharded but has no
+        sharded save (`Model::save_sharded`), so `brain finetune` of a qwen3
+        base fails at the end ("this model does not shard its parameters",
+        Qwen3-4B on 2 cards, 2026-11-22) instead of being refused up front.
       - [x] The 27B gate (2026-11-21): a full-parameter fine-tune step of
         Qwen3.8-27B-FP8 (all 64 layers, bf16 values from the FP8 checkpoint,
         f32 master and AdamW state) parameter-sharded over 8 GH200s on two
@@ -990,8 +1022,29 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
       with the vote between them. The fault test runs a ZeRO-2 job too and
       kills a rank in the reduce-scatter, stalls one there, and kills one in
       the all-gather after the vote, with the same guarantees (host and NCCL).
-      Open: the parameter-sharded (ZeRO-3) step, which reduces inside the
-      model's own step, weight publication faults (C6), and shrink/regrow.
+      Every enqueued device collective is bounded on the card since
+      2026-11-22 (`RankCollective::bound_in_flight`, set by `JobCollective`
+      at the plan's op timeout): the stream marks each operation done in a
+      page-locked word the rank's watchdog reads without the driver, and an
+      operation not done that long after the ones before it aborts the
+      communicator. Before, only a wait on the group bounded one, so a rank
+      blocked on the card behind a collective a lost peer never finished (a
+      device read of a ZeRO-2 norm, an enqueue into a full stream) waited
+      forever: the NCCL ZeRO-2 fault cases failed with the survivor killed by
+      the launcher. Tests: `nccl_job`
+      `a_rank_blocked_on_the_card_behind_a_lost_peer_is_an_error_within_the_op_timeout`
+      (error after 5.8 s for a 5 s bound), the gpt2 device fault test (all 8
+      cases, gpu2-3 and gpu0-1 of n442). Cost: about 2 us more per small
+      operation (Measured).
+      Open: the parameter-sharded (ZeRO-3) step is not a transaction: the
+      resident trainer updates each unit as soon as its reduce-scatter
+      completes, inside the backward, so a vote would need every unit's
+      reduced slice kept until the end of the backward (a per-unit gradient
+      slice instead of the one transient slice: about 13.5 GB more a card for
+      27B on 8 ranks) and the updates deferred behind it. A lost peer there
+      now ends at the op timeout as an error, but as a panic in the model's
+      layer loader (exit 101), not the restart status. Also open: weight
+      publication faults (C6), and shrink/regrow.
 - [ ] **C9 qualification suite and traces.** Communication part delivered
       2026-11-21: `brain bench collectives` (`crates/bench/src/collectives.rs`,
       `make bench/collectives`) joins a job plan as one rank, forms the device

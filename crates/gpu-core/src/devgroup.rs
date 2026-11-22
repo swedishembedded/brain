@@ -199,4 +199,11 @@ impl RankGroup {
     pub fn wait(&self, timeout: Duration) -> Result<(), String> {
         self.comm.wait(timeout)
     }
+
+    /// Bound every operation enqueued from now on by `limit` on the card, waited for or not: one not done `limit`
+    /// after it was enqueued and every earlier one was done aborts the group, so nothing blocked behind it on the card waits forever, and every later
+    /// call fails with the reason. `Err` names why this group cannot be bounded so.
+    pub fn bound_in_flight(&self, limit: Duration) -> Result<(), String> {
+        self.comm.bound_in_flight(limit)
+    }
 }

@@ -376,6 +376,8 @@ pub fn run(ctx: &JobContext, gpu: &Gpu, cfg: &Config) -> Result<Option<Value>, S
     let group = rendezvous(host, rank, RankGroup::supported(gpu), || RankGroup::id(gpu), |id| RankGroup::join(gpu, id, world, rank, join_timeout))
         .map_err(|e| format!("the job's transport: {e}"))?
         .map_err(|e| format!("no device group: {e}"))?;
+    // Bounded on the card as a training job's group is, so the times are what the trainer's collectives cost.
+    group.bound_in_flight(cfg.op_timeout).map_err(|e| format!("bounding the device group's operations: {e}"))?;
     let device = gpu_core::devices::selected_device();
     let hosts = gather_text(host, rank, &host_name())?;
     let devices = gather_text(host, rank, &device.map_or(String::new(), |d| format!("{}\u{1f}{}", d.identity.name, d.identity.pci_bus.clone().unwrap_or_default())))?;

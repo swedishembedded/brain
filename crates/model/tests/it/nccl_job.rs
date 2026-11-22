@@ -243,6 +243,26 @@ fn a_rank_that_dies_is_an_error_within_the_op_timeout() {
     assert!(waited < 5_000.0 + 10_000.0, "the survivor waited {waited} ms, not the plan's bound");
 }
 
+/// A survivor whose host thread waits on the card itself (a read of a collective's result, not a wait on the group)
+/// behind a collective its lost peer never completes must also get an error within the op timeout: the deadline
+/// bounds every operation the group enqueued, whatever the rank's thread is blocked in.
+#[test]
+fn a_rank_blocked_on_the_card_behind_a_lost_peer_is_an_error_within_the_op_timeout() {
+    if !cards_for(2) {
+        return;
+    }
+    let job = Job::new("dies-read", 2, 5_000);
+    let survivor = job.spawn(0, "survive-read", &job.secret);
+    let quitter = job.spawn(1, "quit", &job.secret);
+    assert_eq!(job.wait(1, "quit", quitter, Duration::from_secs(120)), 0, "{}", job.log(1, "quit"));
+    assert_eq!(job.wait(0, "survive-read", survivor, Duration::from_secs(120)), 0, "{}", job.log(0, "survive-read"));
+    let got = job.result(0);
+    assert!(got["error"].as_str().is_some_and(|e| !e.is_empty()), "the survivor saw no error: {got}");
+    let waited = got["waited_ms"].as_f64().unwrap();
+    eprintln!("the survivor's error after {waited:.0} ms: {}", got["error"]);
+    assert!(waited < 5_000.0 + 10_000.0, "the survivor waited {waited} ms, not the plan's bound");
+}
+
 /// A process with the plan and the address but without the job secret never
 /// receives the rendezvous id: it is refused at the sealed handshake, and the
 /// real ranks form the device group and reduce as if it had not been there.
@@ -460,11 +480,12 @@ fn rank_process() {
         return;
     };
     let ctx = JobContext::from_plan_file(Path::new(&plan), rank, Path::new(&secret)).unwrap_or_else(|e| fail(rank, e));
-    let gpu = Gpu::new_on(gpu_core::testgpu::card(rank as u32), &[]);
+    // Rank r runs on the r-th selected card (`BRAIN_DEVICE` / `--device`), not on gpu r.
+    let gpu = Gpu::new_on(gpu_core::testgpu::cards()[rank], &[]);
     let doc = match case.as_str() {
         "ops" | "intrude" => ops(rank, &ctx, &gpu),
         "measure" => measure_rank(rank, &ctx, &gpu),
-        "quit" | "survive" => {
+        "quit" | "survive" | "survive-read" => {
             let job = ctx.job_collective().unwrap_or_else(|e| fail(rank, e));
             let buf = gpu.storage(N as u64);
             gpu.write_f32(&buf, &exact_input(rank, N));
@@ -476,8 +497,21 @@ fn rank_process() {
                 std::process::exit(0);
             }
             let started = Instant::now();
-            let outcome = pollster::block_on(job.all_reduce_device(rank, &gpu, &bufs, CollectiveDtype::F32, 1.0));
-            json!({ "error": outcome.err().map(|e| e.to_string()), "waited_ms": started.elapsed().as_secs_f64() * 1e3 })
+            if case == "survive-read" {
+                // Enqueued, not waited for: the read of its result is what blocks, on the card.
+                let gathered = gpu.storage((N * 2) as u64);
+                let enqueued = pollster::block_on(job.all_gather_device(rank, &gpu, &buf, &gathered, N as u64, CollectiveDtype::F32));
+                if let Err(e) = enqueued {
+                    return std::fs::write(Path::new(&out), json!({ "error": e.to_string(), "waited_ms": started.elapsed().as_secs_f64() * 1e3 }).to_string()).unwrap();
+                }
+                let _ = gpu.read(&gathered, N * 2);
+                // The group's next operation reports what became of the lost one.
+                let outcome = pollster::block_on(job.settle_device(rank, &gpu));
+                json!({ "error": outcome.err().map(|e| e.to_string()), "waited_ms": started.elapsed().as_secs_f64() * 1e3 })
+            } else {
+                let outcome = pollster::block_on(job.all_reduce_device(rank, &gpu, &bufs, CollectiveDtype::F32, 1.0));
+                json!({ "error": outcome.err().map(|e| e.to_string()), "waited_ms": started.elapsed().as_secs_f64() * 1e3 })
+            }
         }
         other => fail(rank, format!("unknown case {other}")),
     };

@@ -624,6 +624,20 @@ impl CudaBackend {
         self.ctx.make_current()
     }
 
+    /// One page-locked word of host memory, which this handle's stream can write ([`Self::mark_progress`]) and any host
+    /// thread can read without a driver call.
+    pub(crate) fn progress_word(&self) -> Result<crate::exec::PinnedMem, String> {
+        let word = self.ctx.pinned(1)?;
+        word.fill(&[0]);
+        Ok(word)
+    }
+
+    /// Write `value` into `word` once the work enqueued on this handle's stream before it has run. `Ok(false)` when
+    /// the driver cannot (no stream memory operations).
+    pub(crate) fn mark_progress(&self, word: &crate::exec::PinnedMem, value: u32) -> Result<bool, String> {
+        self.ctx.write_value(word, value)
+    }
+
     /// Whether everything enqueued on this handle's stream has run, without waiting for it.
     pub(crate) fn stream_idle(&self) -> Result<bool, String> {
         self.ctx.stream_idle()
