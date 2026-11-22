@@ -597,8 +597,9 @@ impl Inkling2 {
             sink: true,
             bias: Some(DistanceBias { extent: cfg.bias_extent(layer), d_rel: cfg.d_rel }),
             tau: full.then_some(LogPositionScale { alpha: cfg.log_alpha, n_floor: cfg.log_floor as f32, scales_bias: true }),
+            documents: false,
         };
-        let inputs = AttnInputs { sink: Some(&sink), rel: Some(&rel), bank: Some(&lw.rel_bank) };
+        let inputs = AttnInputs { sink: Some(&sink), rel: Some(&rel), bank: Some(&lw.rel_bank), doc_pos: None };
         let out = g.storage(u64::from(t * a.q_dim()));
         let lse = g.storage(u64::from(t * a.heads));
         s.extend(flash_ext::flash_ext_fwd(g, &self.k.flash, &heads, &opts, &inputs, Contiguous { b: 1, t, pos0: 0 }, &q, &kv[0], &kv[1], &out, &lse));
