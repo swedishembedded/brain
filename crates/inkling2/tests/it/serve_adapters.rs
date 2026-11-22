@@ -223,6 +223,10 @@ fn the_engine_with_adapters_passes_the_serving_conformance_suite() {
 fn expert_targets_over_dense_experts_are_refused_by_name() {
     // The tiny reference checkpoint stores its experts dense f32: no served expert product to correct.
     let dense = brain_testutil::testdata_path("golden/inkling2/tiny/checkpoint");
+    if !dense.join("config.json").is_file() {
+        brain_testutil::skip("testdata/golden/inkling2/tiny absent (make testdata/fetch, or run tools/goldens/inkling2_dump_reference.py tiny)");
+        return;
+    }
     let mut e = Engine::open(crate::tiny_parity::ops(), &dense, options(4)).unwrap();
     let err = format!("{:?}", e.enable_adapters(AdapterBankConfig::new(2, RANK, &["w13_weight"])).unwrap_err());
     assert!(err.contains("dense"), "{err}");
