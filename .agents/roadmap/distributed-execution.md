@@ -930,10 +930,15 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         export generates on one card (Measured); it needs
         `FI_CXI_DISABLE_HOST_REGISTER=1` on a CXI fabric (knowledge 552). Open:
         selection on held-out loss and timed model saves are not run for such
-        a run; qwen3's resident build trains parameter-sharded but has no
-        sharded save (`Model::save_sharded`), so `brain finetune` of a qwen3
-        base fails at the end ("this model does not shard its parameters",
-        Qwen3-4B on 2 cards, 2026-11-22) instead of being refused up front.
+        a run. The sharded save is one implementation since 2026-11-22
+        (`ResidentFullFt::save_parameter_sharded`: resident linears and tables
+        bf16 from the masters unit by unit, the rest f32, the family's config
+        and card); qwen35 and qwen3 call it, so a qwen3 parameter-sharded run
+        writes its model instead of failing at the end ("this model does not
+        shard its parameters", Qwen3-4B on 2 cards, 2026-11-22). Test: qwen3
+        `sharded_parameters` (2 in-process ranks, CPU: the written file opens
+        as a qwen3 checkpoint within bf16 rounding of the single-rank run).
+        Not yet re-run as `brain finetune` of Qwen3-4B on cards.
       - [x] The 27B gate (2026-11-21): a full-parameter fine-tune step of
         Qwen3.8-27B-FP8 (all 64 layers, bf16 values from the FP8 checkpoint,
         f32 master and AdamW state) parameter-sharded over 8 GH200s on two

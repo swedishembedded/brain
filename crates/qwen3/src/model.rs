@@ -4324,6 +4324,17 @@ impl Qwen {
         self.save_with_itos(path, None);
     }
 
+    /// [`Self::save`] of a parameter-sharded resident build ([`model::resident_ft::ResidentFullFt::save_parameter_sharded`]):
+    /// every rank of its group calls it, the rank given `path` writes a qwen3 checkpoint with the resident linears and
+    /// tables in bf16 and the norms in f32, no rank holding more than one layer.
+    pub fn save_sharded(&self, path: Option<&str>) -> Result<(), String> {
+        let ft = self.resident.as_ref().ok_or("qwen3: save_sharded: this build does not shard its parameters")?;
+        self.gpu.flush();
+        let card = self.cfg.lora.is_none().then(|| checkpoint::st::ModelCard::new(crate::caps::MODEL, crate::spec::CARD_FAMILY));
+        let read = |name: &str| self.ps.read_weight(&self.gpu, name);
+        ft.borrow_mut().save_parameter_sharded(&self.ops, path.map(std::path::Path::new), &self.ps.params, &read, &self.cfg.to_json(), card.as_ref())
+    }
+
     pub fn save_with_itos(&self, path: &str, itos: Option<&[char]>) {
         let mut plan: Vec<(String, Vec<u64>)> = self.ps.params.iter().map(|(name, _)| (name.clone(), vec![self.ps.numel(name) as u64])).collect();
         // A resident build keeps its linears outside the parameter store: they are saved from their masters.
@@ -4603,6 +4614,9 @@ impl model::Model for Qwen {
     }
     fn collective_failure(&self) -> Option<String> {
         self.resident.as_ref().and_then(|ft| ft.borrow().collective_failure())
+    }
+    fn save_sharded(&self, path: Option<&str>) -> Result<(), String> {
+        Qwen::save_sharded(self, path)
     }
     fn set_shard_weight(&self, share: f32) -> Result<(), String> {
         self.resident.as_ref().ok_or("this model does not shard its parameters")?.borrow_mut().set_shard_weight(share)

@@ -88,6 +88,7 @@ mod serve_conformance;
 mod served_prompt_template;
 mod shard_microbatch;
 mod shard_parity;
+mod sharded_parameters;
 mod sft_golden;
 mod sft_learning;
 mod sft_loss_weights;

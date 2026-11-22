@@ -1535,6 +1535,36 @@ impl ResidentFullFt {
         Ok(self.specs.iter().zip(dst).map(|(s, e)| TensorDescriptor::new(s.name.clone(), vec![s.n as u64, s.k as u64], e.clone())).collect())
     }
 
+    /// Write the trained model of a parameter-sharded build as a model's brain checkpoint (what
+    /// [`crate::Model::save_sharded`] asks of every family with such a build): every rank of the group calls it, the
+    /// rank given `path` writes. The resident linears and tables are written in bf16 (the encoding they train in),
+    /// streamed from their masters one unit at a time ([`Self::export_collective`]); the model's other parameters
+    /// (`rest`, every rank holds them whole: the norms) in f32 from `read_rest`. The file carries `config` and `card`.
+    pub fn save_parameter_sharded(&mut self, ops: &dyn DeviceIo, path: Option<&std::path::Path>, rest: &[(String, usize)], read_rest: &dyn Fn(&str) -> Vec<f32>, config: &serde_json::Value, card: Option<&checkpoint::st::ModelCard>) -> Result<(), String> {
+        if !self.parameter_sharded() {
+            return Err("save_parameter_sharded: this build does not shard its parameters".into());
+        }
+        ops.gpu().flush();
+        let encodings = vec![ResidentValue::Bf16.encoding(); self.specs.len()];
+        let Some(path) = path else {
+            return self.export_collective(ops, &encodings, None).map_err(|e| e.to_string());
+        };
+        let linear = self.export_descriptors(&encodings).map_err(|e| e.to_string())?;
+        let rest: Vec<TensorDescriptor> = rest.iter().map(|(n, numel)| TensorDescriptor::new(n.clone(), vec![*numel as u64], QuantEncoding::f32())).collect();
+        let all: Vec<TensorDescriptor> = linear.iter().chain(&rest).cloned().collect();
+        let shown = path.display();
+        let mut sink = checkpoint::packed::SafetensorsSink::create_carded(path, &all, config, card).map_err(|e| format!("{shown}: {e}"))?;
+        self.export_collective(ops, &encodings, Some(&mut sink)).map_err(|e| e.to_string())?;
+        for d in &rest {
+            let bytes: Vec<u8> = read_rest(&d.name).iter().flat_map(|v| v.to_le_bytes()).collect();
+            let elems = 0..bytes.len() as u64 / 4;
+            sink.begin(d)?;
+            sink.write_tile(d, &Tile { elems, payload: &bytes, scales: Vec::new() })?;
+            sink.finish(d)?;
+        }
+        sink.commit().map_err(|e| format!("{shown}: {e}"))
+    }
+
     /// Atomically commit values, master, moments, step, seed and the trainer's schedule.
     pub fn commit(&mut self, ops: &dyn DeviceIo, dir: &CheckpointDir, run: &RunState) -> io::Result<PathBuf> {
         // A parameter-sharded rank commits its slices (and the group's layout), one file of its own.
