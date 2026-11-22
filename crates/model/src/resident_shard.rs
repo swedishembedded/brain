@@ -49,10 +49,10 @@ fn invalid(msg: String) -> io::Error {
 pub(crate) fn check_config(cfg: &ResidentFtConfig) -> Result<(), String> {
     let refuse = |what: String| Err(format!("parameter sharding: {what}"));
     if cfg.window.is_none() {
-        return refuse("it gathers each layer where it is used, which needs a layer window (window=N)".into());
+        return refuse("it gathers each layer where it is used, which needs a layer window (train_precision window=N)".into());
     }
     if cfg.value != ResidentValue::Bf16 || cfg.grad != GradDtype::Bf16 {
-        return refuse(format!("the sharded units hold bf16 values and bf16 gradients, not {:?} values with {:?} gradients", cfg.value, cfg.grad));
+        return refuse(format!("the sharded units hold bf16 values and bf16 gradients (train_precision weights=bf16,grad=bf16), not {:?} values with {:?} gradients", cfg.value, cfg.grad));
     }
     if cfg.master != MasterPolicy::F32 || cfg.state != StateFormat::F32 || cfg.stochastic_state {
         return refuse(format!("the sharded state is an f32 master with f32 AdamW moments, not a {:?} master with {:?} state", cfg.master, cfg.state));

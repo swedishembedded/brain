@@ -1139,6 +1139,16 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         as a qwen3 checkpoint within bf16 rounding of the single-rank run).
         End to end on cards (2026-11-22): `brain finetune` of Qwen3-4B over
         2 GH200s trains, exports and the export generates (Measured).
+        Refused at submission (2026-11-22): `Sharding::admits` asks the
+        parameter-sharded build's own rule (`resident_shard::check_config` on
+        the precision's resident config), so a served `full_train` with
+        `sharding` parameters and `weights=bf16` alone (no `window`, or f32
+        gradients) is a 400 naming `window=N` / `grad=bf16` instead of four
+        ranks panicking at the first layer ("the device failed during the
+        run"). Test: `zero_shard`
+        `parameter_sharding_is_admitted_only_with_a_layer_window`. Open: a
+        one-card layer-streamed qwen3 full fine-tune with `grad_accum` > 1
+        still panics at the second backward instead of being refused.
         Overlap (2026-11-22): a layer's finish only issues its reduce-scatter
         (and its norm behind it on the card); the norm read, the running
         clip's scalar all-reduce and the owner's update come at the next

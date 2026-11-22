@@ -284,6 +284,20 @@ fn fit_error(sharding: Sharding, group: bool, precision: &str) -> String {
     }
 }
 
+/// Parameter sharding gathers each layer through a layer-streamed window into bf16 slots with bf16 gradient lanes: a
+/// resident precision the sharded build does not run is refused by the rule a plan consults before a model is built,
+/// with what to ask for, not when the build reaches its first layer.
+#[test]
+fn parameter_sharding_is_admitted_only_with_a_layer_window() {
+    let admits = |spec: &str| Sharding::Parameters.admits(&model::TrainPrecision::parse(spec).unwrap());
+    assert!(admits("weights=bf16,grad=bf16,window=2").is_ok());
+    let why = admits("weights=bf16,grad=bf16").unwrap_err();
+    assert!(why.contains("window=N"), "{why}");
+    let why = admits("weights=bf16,window=2").unwrap_err();
+    assert!(why.contains("grad=bf16"), "the build's bf16 gradient lanes: {why}");
+    assert!(admits("moments=host").unwrap_err().contains("weights=bf16"));
+}
+
 #[test]
 fn the_fit_loop_refuses_a_sharded_run_it_cannot_shard() {
     assert!(fit_error(Sharding::Gradients, false, "").contains("has none"), "no group");

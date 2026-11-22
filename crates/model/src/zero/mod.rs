@@ -105,8 +105,14 @@ impl Sharding {
                     Err("the sharded optimizer state is f32 AdamW over the parameters as the model holds them; a run asking for another parameter or state precision is not sharded".into())
                 }
             }
-            Sharding::Parameters if precision.resident.is_some() => Ok(()),
-            Sharding::Parameters => Err("parameter sharding gathers each block where it is used through a layer-streamed resident build; ask for one with train_precision weights=bf16".into()),
+            // The parameter-sharded build's own rule, applied before anything is built.
+            Sharding::Parameters => match precision.resident_config(None)? {
+                #[cfg(not(target_arch = "wasm32"))]
+                Some(resident) => crate::resident_shard::check_config(&resident),
+                #[cfg(target_arch = "wasm32")]
+                Some(_) => Err("parameter sharding needs a data-parallel group, which this target has none of".into()),
+                None => Err("parameter sharding gathers each block where it is used through a layer-streamed resident build; ask for one with train_precision weights=bf16,grad=bf16,window=N".into()),
+            },
         }
     }
 }

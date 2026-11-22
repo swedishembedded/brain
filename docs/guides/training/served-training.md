@@ -66,7 +66,8 @@ Two more actions of `brain/train` produce a checkpoint instead of an adapter.
   `replicated` (each holds the fp32 weights and gradients), `optimizer` (ZeRO-1: each also holds its slice of the
   f32 master copy and AdamW moments on the card), `gradients` (ZeRO-2: those and the reduced gradient slice, half
   the gradient traffic) or `parameters` (ZeRO-3: the weights too, gathered layer by layer; it needs a resident
-  `train_precision` such as `weights=bf16`). Every claimed card is charged one rank's footprint under that sharding.
+  `train_precision` with bf16 gradients and a layer window, such as `weights=bf16,grad=bf16,window=2`, and is
+  refused at submission otherwise). Every claimed card is charged one rank's footprint under that sharding.
   The optimizer and gradient stages take f32 AdamW state only (another `train_precision` than `moments=host` is
   refused) and keep every gradient in the model's own buffers, so they spare host memory and the update, not the
   card: only `parameters` makes a rank smaller than a replica. Unnamed, the run takes the **first of `replicated`,
