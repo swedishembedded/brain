@@ -91,6 +91,13 @@ pub fn stored_tier_policy<'a>(src: &dyn TensorSource, names: impl IntoIterator<I
     policy
 }
 
+/// Tiles as large as the caller's staging workspace allows: a load into a resident weight runs one tensor at a time,
+/// so it may lease the whole workspace, and a converted tile is decoded and encoded across the CPU pool, whose
+/// dispatch costs the same for a tile of 4 MB as for one of 64 MB. The workspace still bounds the host memory.
+fn staging_tiles() -> LoadConfig {
+    LoadConfig { tile_bytes: u64::MAX }
+}
+
 fn upload_packed(ops: &Ops, src: &dyn TensorSource, names: &[&str], n: usize, k: usize, want: Dtype, staging: &BoundedWorkspace) -> Option<Weight> {
     let mut rows = 0u64;
     for name in names {
@@ -104,7 +111,7 @@ fn upload_packed(ops: &Ops, src: &dyn TensorSource, names: &[&str], n: usize, k:
         return None;
     }
     let enc = encoding_of(ops, want)?;
-    let config = LoadConfig::default();
+    let config = staging_tiles();
     // Lossless layout change first (Q8_0 to int8 blocks, a per-tensor FP8 scale to an f32 tile grid, an f32 FP8 grid as
     // it is); an explicit numeric Convert otherwise.
     let mut policies = vec![LoadPolicy::Repack(enc.clone())];
@@ -185,7 +192,7 @@ pub enum FusedGroup {
 /// bf16, NF4 `gate` next to FP8 `up`) is split into per-part weights, never widened to f32.
 pub fn upload_group_preserved(ops: &Ops, src: &dyn TensorSource, names: &[&str], ns: &[usize], k: usize, staging: &BoundedWorkspace) -> Result<FusedGroup, String> {
     assert_eq!(names.len(), ns.len(), "one row count per part");
-    let config = LoadConfig::default();
+    let config = staging_tiles();
     let mut sink = DeviceWeightSink::new(ops);
     let req = LoadRequest { policy: &LoadPolicy::Preserve, workspace: staging, config: &config };
     if names.len() > 1 && src.load_packed(names, &req, &mut sink)?.is_some() {
@@ -209,7 +216,7 @@ pub fn upload_preserved(ops: &Ops, src: &dyn TensorSource, name: &str, n: usize,
     if desc.shape != [n as u64, k as u64] {
         return Err(format!("{name}: stored shape {:?}, expected [{n}, {k}]", desc.shape));
     }
-    let config = LoadConfig::default();
+    let config = staging_tiles();
     let mut sink = DeviceWeightSink::new(ops);
     let req = LoadRequest { policy: &LoadPolicy::Preserve, workspace: staging, config: &config };
     match src.load_packed(&[name], &req, &mut sink)? {

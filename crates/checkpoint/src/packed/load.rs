@@ -226,11 +226,18 @@ impl Loader<'_> {
             ));
         }
         let numel = src.numel();
-        let mut tile_elems = quantum;
-        while tile_elems.saturating_add(quantum) <= numel && cost(tile_elems + quantum) <= self.tile_cap() {
-            tile_elems += quantum;
+        // The most whole quanta whose staging fits the cap. The cost grows with the tile, so this is a binary search
+        // over the quantum count (a step per quantum was millions of steps a tensor at a large cap).
+        let (mut fits, mut over) = (1u64, numel.div_ceil(quantum).max(1) + 1);
+        while over - fits > 1 {
+            let mid = fits + (over - fits) / 2;
+            if mid * quantum <= numel && cost(mid * quantum) <= self.tile_cap() {
+                fits = mid;
+            } else {
+                over = mid;
+            }
         }
-        let tile_elems = tile_elems.min(numel);
+        let tile_elems = (fits * quantum).min(numel);
         Ok(LoadStep {
             tiles: numel.div_ceil(tile_elems),
             staging_bytes_per_tile: cost(tile_elems),
@@ -305,10 +312,14 @@ impl Loader<'_> {
                     sink.write_tile(&step.dst, &Tile { elems: elems.clone(), payload: &encoded.payload, scales: encoded.scales.iter().map(Vec::as_slice).collect() })?;
                 }
                 LoadOp::Convert => {
-                    decoded.clear();
-                    decoded.reserve_exact((elems.end - elems.start) as usize);
-                    self.codecs.decoder(&step.src.encoding)?.decode_tile(&step.src, &src_tile, &mut decoded)?;
-                    self.codecs.encoder(&step.dst.encoding)?.encode_tile(&step.dst, &elems, &decoded, &ctx, &mut encoded)?;
+                    let encoder = self.codecs.encoder(&step.dst.encoding)?;
+                    match encoder.transcode_tile(&step.src, &src_tile, &step.dst, &ctx, &mut encoded) {
+                        Some(done) => done?,
+                        None => {
+                            self.codecs.decoder(&step.src.encoding)?.decode_tile(&step.src, &src_tile, &mut decoded)?;
+                            encoder.encode_tile(&step.dst, &elems, &decoded, &ctx, &mut encoded)?;
+                        }
+                    }
                     sink.write_tile(&step.dst, &Tile { elems: elems.clone(), payload: &encoded.payload, scales: encoded.scales.iter().map(Vec::as_slice).collect() })?;
                 }
             }
@@ -335,8 +346,6 @@ impl Loader<'_> {
             let elems = start..(start + step.tile_elems).min(numel);
             self.reader.read_blocks(&step.src, &elems, read)?;
             let tile = Tile { elems: elems.clone(), payload: &read.payload, scales: read.scales.iter().map(Vec::as_slice).collect() };
-            decoded.clear();
-            decoded.reserve_exact((elems.end - elems.start) as usize);
             codec.decode_tile(&step.src, &tile, decoded)?;
             amax = decoded.iter().fold(amax, |m, &v| if v.is_nan() { m } else { m.max(v.abs()) });
             self.reader.release(&step.src, &elems);
@@ -445,6 +454,37 @@ mod tests {
         assert!(heap_peak as u64 <= cap + (64 << 10), "heap peak {heap_peak} B for a 16 MiB tensor under a {cap} B budget");
         assert_eq!(budget.stats(Pool::HostStaging).in_use, 0);
         eprintln!("MEASURED big-convert: tensor 16 MiB bf16 -> nf4, budget {cap} B, leased peak {} B, heap peak {heap_peak} B, {} tiles", report.peak_staging_bytes, report.tiles_written);
+    }
+
+    /// Only describes one huge bf16 tensor: planning reads no data.
+    struct Described(TensorDescriptor);
+
+    impl PackedTensorReader for Described {
+        fn names(&self) -> Vec<String> {
+            vec![self.0.name.clone()]
+        }
+        fn descriptor(&self, _: &str) -> Result<TensorDescriptor, String> {
+            Ok(self.0.clone())
+        }
+        fn read_blocks(&self, _: &TensorDescriptor, _: &Range<u64>, _: &mut TileBuf) -> Result<(), String> {
+            unreachable!("planning reads no data")
+        }
+        fn release(&self, _: &TensorDescriptor, _: &Range<u64>) {}
+    }
+
+    /// The plan takes the largest tile the cap allows, found without a step per quantum: a 2^40-element tensor under a
+    /// 1 GiB cap is a tile of 2^29 bf16 elements (its quantum is one element), and planning it is immediate.
+    #[test]
+    fn the_largest_tile_under_the_cap_is_planned_without_a_step_per_quantum() {
+        let r = Described(TensorDescriptor::new("w", vec![1 << 20, 1 << 20], QuantEncoding::bf16()));
+        let (codecs, budget) = (CodecRegistry::reference(), MemoryBudget::new(1 << 30, 0));
+        let l = loader(&r, &codecs, &budget, u64::MAX);
+        let started = std::time::Instant::now();
+        let preserve = l.plan("w", &LoadPolicy::Preserve).unwrap();
+        assert_eq!((preserve.tile_elems, preserve.staging_bytes_per_tile), (1 << 29, 1 << 30));
+        let convert = l.plan("w", &LoadPolicy::Convert(QuantEncoding::int8_blocked(32))).unwrap();
+        assert!(convert.staging_bytes_per_tile <= 1 << 30 && staging_bytes(&convert.src, &convert.dst, LoadOp::Convert, convert.tile_elems + 32) > 1 << 30, "{convert:?}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "planning took {:?}", started.elapsed());
     }
 
     /// Wraps a reader and records the largest range it was asked for.

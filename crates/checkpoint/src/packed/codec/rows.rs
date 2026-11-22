@@ -46,6 +46,19 @@ pub fn int8_pack_row(row: &[f32], group: usize, scales: &[f32], out: &mut [u32])
     }
 }
 
+/// [`int8_pack_row`] written as the int8 codes themselves, one byte each in element order: the bytes of the packed
+/// words on a little-endian file, without building the words first.
+#[inline]
+fn int8_codes(row: &[f32], group: usize, scales: &[f32], out: &mut [u8]) {
+    debug_assert_eq!(out.len(), scales.len() * group);
+    for ((blk, codes), &scale) in row.chunks_exact(group).zip(out.chunks_exact_mut(group)).zip(scales) {
+        let inv = 1.0 / scale;
+        for (c, &v) in codes.iter_mut().zip(blk) {
+            *c = round_half_away_i8(v * inv) as u8;
+        }
+    }
+}
+
 /// `v.round().clamp(-127.0, 127.0) as i8`, bit for bit, without `f32::round`:
 /// on the x86-64 baseline that is a `roundf` call per element, which kept
 /// this loop scalar. Truncation and the exact remainder (`v - trunc(v)`, exact
@@ -139,6 +152,9 @@ pub(super) fn encode_kind(enc: &QuantEncoding) -> Option<EncodeKind> {
 
 fn words_to_le(words: &[u32], out: &mut Vec<u8>) {
     out.clear();
+    #[cfg(target_endian = "little")]
+    out.extend_from_slice(bytemuck::cast_slice(words));
+    #[cfg(not(target_endian = "little"))]
     out.extend(words.iter().flat_map(|w| w.to_le_bytes()));
 }
 
@@ -161,6 +177,9 @@ fn bf16_bits(v: f32) -> u16 {
 /// Elements encoded per parallel work item.
 #[cfg(not(target_arch = "wasm32"))]
 const ENCODE_CHUNK: usize = 1 << 16;
+
+/// Whole blocks one parallel task of a blocked encoder scales and codes.
+const ENCODE_BLOCKS: usize = 8192;
 
 /// Encode every value of `vals` to a fixed-width little-endian code, replacing `out`. Elements are independent, so
 /// large tiles are cut into contiguous chunks run on the CPU scheduler's pool; the bytes are the serial loop's.
@@ -213,22 +232,77 @@ pub(super) fn encode(desc: &TensorDescriptor, elems: &Range<u64>, values: &[f32]
         EncodeKind::Float(_) => fill_encoded::<2>(values, &mut out.payload, |v| bf16_bits(v).to_le_bytes()),
         EncodeKind::Int8Block(n) => {
             let mut scales = vec![0f32; values.len() / n];
-            int8_block_scales(values, n, &mut scales);
-            let mut words = vec![0u32; values.len() / 4];
-            int8_pack_row(values, n, &scales, &mut words);
-            words_to_le(&words, &mut out.payload);
+            // Every byte is written below.
+            crate::sized_for_fill(&mut out.payload, values.len());
+            // Blocks are independent: each task scales and codes its own run of whole blocks, so the bytes are the
+            // serial loop's whatever the thread count.
+            #[cfg(not(target_arch = "wasm32"))]
+            backend_cpu::par::chunks2_mut(&mut out.payload, ENCODE_BLOCKS * n, &mut scales, ENCODE_BLOCKS, |i, codes, scales| {
+                let vals = &values[i * ENCODE_BLOCKS * n..][..codes.len()];
+                int8_block_scales(vals, n, scales);
+                int8_codes(vals, n, scales, codes);
+            });
+            #[cfg(target_arch = "wasm32")]
+            {
+                int8_block_scales(values, n, &mut scales);
+                int8_codes(values, n, &scales, &mut out.payload);
+            }
             out.scales.push(Vec::new());
             f32s_to_le(&scales, &mut out.scales[0]);
         }
         EncodeKind::Nf4Block(n) => {
             let mut scales = vec![0f32; values.len() / n];
             let mut words = vec![0u32; values.len() / 8];
+            #[cfg(not(target_arch = "wasm32"))]
+            backend_cpu::par::chunks2_mut(&mut words, ENCODE_BLOCKS * n / 8, &mut scales, ENCODE_BLOCKS, |i, words, scales| {
+                codebook4_quantize_row(&values[i * ENCODE_BLOCKS * n..][..scales.len() * n], n, &NF4_CODEBOOK, words, scales)
+            });
+            #[cfg(target_arch = "wasm32")]
             codebook4_quantize_row(values, n, &NF4_CODEBOOK, &mut words, &mut scales);
             words_to_le(&words, &mut out.payload);
             out.scales.push(Vec::new());
             f32s_to_le(&scales, &mut out.scales[0]);
         }
     }
+    Ok(())
+}
+
+/// Decodes a run of stored codes (its bytes) into the f32 values they hold.
+pub(super) type DecodeRun = fn(&[u8], &mut [f32]);
+
+/// The block size of an int8-blocked encoding, `None` for any other encoding.
+pub(super) fn int8_group(enc: &QuantEncoding) -> Option<usize> {
+    match encode_kind(enc)? {
+        EncodeKind::Int8Block(n) => Some(n),
+        _ => None,
+    }
+}
+
+/// [`encode`] of an int8-blocked tile `elems` straight from its stored codes (`width` bytes each, `decode` turning a
+/// run of them into f32): each parallel task decodes a run of whole blocks into its own buffer and scales and codes
+/// it, so the bytes are those of a decode followed by [`encode`], whatever the thread count.
+pub(super) fn transcode_to_int8(name: &str, elems: &Range<u64>, payload: &[u8], width: usize, decode: DecodeRun, n: usize, out: &mut TileBuf) -> Result<(), String> {
+    let len = (elems.end - elems.start) as usize;
+    if !(elems.start as usize).is_multiple_of(n) || !len.is_multiple_of(n) || payload.len() != len * width {
+        return Err(format!("{name}: tile {elems:?} is not whole {n}-element blocks of its {} payload bytes", payload.len()));
+    }
+    let mut scales = vec![0f32; len / n];
+    // Every byte is written below.
+    crate::sized_for_fill(&mut out.payload, len);
+    let run = ENCODE_BLOCKS * n;
+    let code_run = |i: usize, codes: &mut [u8], scales: &mut [f32]| {
+        let mut values = vec![0f32; codes.len()];
+        decode(&payload[i * run * width..][..codes.len() * width], &mut values);
+        int8_block_scales(&values, n, scales);
+        int8_codes(&values, n, scales, codes);
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    backend_cpu::par::chunks2_mut(&mut out.payload, run, &mut scales, ENCODE_BLOCKS, code_run);
+    #[cfg(target_arch = "wasm32")]
+    code_run(0, &mut out.payload, &mut scales);
+    out.scales.clear();
+    out.scales.push(Vec::new());
+    f32s_to_le(&scales, &mut out.scales[0]);
     Ok(())
 }
 
@@ -440,3 +514,4 @@ mod tests {
         }
     }
 }
+

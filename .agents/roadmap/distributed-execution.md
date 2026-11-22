@@ -704,8 +704,7 @@ Scope: Running one training job as ranks across machines, and serving one model 
   `ru_maxrss`).** Before (`--precision int8`; fp32 does not fit a card):
   198.4 GiB, 56.4 s wall. After: default (`stored`, bf16 on the card)
   0.49 GiB, 24-27 s; `bf16` 0.53 GiB, 27 s; `int8` 0.46-0.60 GiB, 77-80 s
-  (the bf16-to-int8 conversion through the tiled packed path is slower than
-  the old f32 route, which took 26 s at a 5 GiB peak; not yet profiled).
+  (the old f32 route took 26 s at a 5 GiB peak; fixed, see the next entry).
   The same 16 tokens at every precision. The load itself peaks at 0.68 GB
   of host memory; the rest of the old peak after streaming was the f32 host
   copy of the head that decoding projected through (5 GB, a 10 GB transient),
@@ -731,6 +730,23 @@ Scope: Running one training job as ranks across machines, and serving one model 
   answer 45.3 s over two servers against 21.2 s on one, both including the
   base load (each process reads the base itself; not a training-speed
   comparison).
+- **The packed load path, profiled per phase (2026-11-22, same n442 card 3
+  and 53.8 GB export, 16 greedy tokens; build seconds from per-phase timers
+  in the tile executor, wall and `ru_maxrss` per run).** The int8 build
+  spent 44 s encoding (one thread per tile), 8 s decoding and, for every
+  precision, about 16 s planning: the tile size was found one quantum (one
+  element for bf16) at a time, millions of steps a tensor. Fixed: the plan
+  is a binary search; a converted tile is as large as the 64 MB staging
+  workspace; an unscaled float tile is converted to int8 in one parallel pass
+  (each task decodes and codes its own 8192 blocks, the bytes of decode then
+  encode); a decode reuses the previous tile's buffer instead of fresh pages.
+  After: `int8` 17.6-17.8 s wall (build 13.2 s: read 4.0, convert 6.6-6.8,
+  device writes 1.0-1.3), 0.49-0.56 GiB; default and `bf16` 8.9-9.0 s
+  (build 4.7-4.9 s), 0.49-0.56 GiB; the same 16 tokens. `brain serve` builds
+  the export in 8.6 s (30.6 s before), 0.56 GiB. Conversion of one 8M-element
+  tile on n442's CPUs: decode then encode 9.2 ms, the fused pass 2.2 ms at
+  8192 blocks a task (3.7 ms at 2048, 4.2-4.5 ms at 512: dispatch over 288
+  threads dominates small tasks).
 - **Cost of bounding every device collective (2026-11-22, n442 cards 2-3,
   `brain bench collectives`, f32, 50 iterations, two runs each).** p50
   before -> after: all-reduce 5.9-6.8 -> 7.7-8.1 us at 8 B, 28.7 -> 31.2-31.8

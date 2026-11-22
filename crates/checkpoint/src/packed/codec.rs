@@ -78,13 +78,20 @@ pub trait Codec: Send + Sync {
     fn can_encode(&self, _enc: &QuantEncoding) -> bool {
         false
     }
-    /// Decode `tile` to f32 into `out` (cleared first; reserve ahead to keep it
-    /// allocation free). The tile must be aligned to the tensor's tile quantum.
+    /// Decode `tile` to f32 into `out`, replacing its contents; a buffer that
+    /// already holds the previous tile of the same length is overwritten in
+    /// place. The tile must be aligned to the tensor's tile quantum.
     fn decode_tile(&self, desc: &TensorDescriptor, tile: &Tile<'_>, out: &mut Vec<f32>) -> Result<(), String>;
     /// Encode `values` (the f32 values of tile `elems`) into `out`, replacing its
     /// contents. The tile must be aligned to [`TensorDescriptor::tile_quantum`].
     fn encode_tile(&self, desc: &TensorDescriptor, _elems: &Range<u64>, _values: &[f32], _ctx: &EncodeCtx, _out: &mut TileBuf) -> Result<(), String> {
         Err(format!("{}: codec {} cannot encode {}", desc.name, self.name(), desc.encoding))
+    }
+    /// Convert `tile` of `src` straight into `dst`'s encoding, the values the decode then the encode would give, in
+    /// one pass over the tile that never holds it as f32. `None` when this codec has no such pass for the pair; the
+    /// caller then decodes and encodes.
+    fn transcode_tile(&self, _src: &TensorDescriptor, _tile: &Tile<'_>, _dst: &TensorDescriptor, _ctx: &EncodeCtx, _out: &mut TileBuf) -> Option<Result<(), String>> {
+        None
     }
 }
 
@@ -163,8 +170,12 @@ pub(super) fn scale_at(f: FloatFormat, bytes: &[u8], i: usize) -> f32 {
 }
 
 /// Decode the unscaled element values of `n` codes.
+/// Decode `n` codes into `out`, replacing its contents. A float tile is decoded into `out` in place when it already
+/// holds `n` values (the previous tile's, in a load's loop): no fresh pages a tile.
 fn decode_elements(el: Element, payload: &[u8], n: usize, out: &mut Vec<f32>) -> Result<(), String> {
-    out.clear();
+    if !matches!(el, Element::Float(f) if matches!(f.bits(), 32 | 16 | 8)) {
+        out.clear();
+    }
     match el {
         Element::Float(f) => match f.bits() {
             // The checkpoint formats of weights get a loop of their own so the format match is outside it and the
@@ -305,6 +316,20 @@ impl Codec for ScalarCodec {
     fn encode_tile(&self, desc: &TensorDescriptor, elems: &Range<u64>, values: &[f32], ctx: &EncodeCtx, out: &mut TileBuf) -> Result<(), String> {
         rows::encode(desc, elems, values, ctx, out)
     }
+
+    /// An unscaled bf16, f16 or f32 tile into int8 blocks: each parallel task decodes a run of whole blocks into its
+    /// own small buffer and codes it while it is in cache.
+    fn transcode_tile(&self, src: &TensorDescriptor, tile: &Tile<'_>, dst: &TensorDescriptor, _ctx: &EncodeCtx, out: &mut TileBuf) -> Option<Result<(), String>> {
+        // The decodes are `decode_elements`' own, element for element.
+        let (decode, width): (rows::DecodeRun, usize) = match (src.encoding.element, src.encoding.scales.is_empty()) {
+            (Element::Float(FloatFormat::Bf16), true) => (|b, o| o.iter_mut().zip(b.as_chunks::<2>().0).for_each(|(v, c)| *v = f32::from_bits(u32::from(u16::from_le_bytes(*c)) << 16)), 2),
+            (Element::Float(FloatFormat::F16), true) => (|b, o| o.iter_mut().zip(b.as_chunks::<2>().0).for_each(|(v, c)| *v = decode_float_code(FloatFormat::F16, u32::from(u16::from_le_bytes(*c)))), 2),
+            (Element::Float(FloatFormat::F32), true) => (|b, o| o.iter_mut().zip(b.as_chunks::<4>().0).for_each(|(v, c)| *v = f32::from_le_bytes(*c)), 4),
+            _ => return None,
+        };
+        let group = rows::int8_group(&dst.encoding)?;
+        Some(check_tile(src, tile).and_then(|()| rows::transcode_to_int8(&dst.name, &tile.elems, tile.payload, width, decode, group, out)))
+    }
 }
 
 /// GGUF block formats (plain F32/F16/BF16 GGUF tensors resolve to float encodings instead).
@@ -355,6 +380,29 @@ mod tests {
         let mut out = Vec::new();
         CodecRegistry::reference().decoder(&desc.encoding).unwrap().decode_tile(desc, &tile, &mut out).unwrap();
         out
+    }
+
+    /// The one-pass float-to-int8 conversion gives the bytes and scales of a decode followed by an encode, for every
+    /// unscaled float source, on a tile that starts past the tensor's first block and spans several work items.
+    #[test]
+    fn a_float_tile_transcodes_to_the_int8_blocks_its_decode_and_encode_give() {
+        let codecs = CodecRegistry::reference();
+        let (rows, cols) = (96usize, 2048usize);
+        let vals: Vec<f32> = (0..rows * cols).map(|i| ((i * 7919 % 2003) as f32 - 1001.0) / 97.0).collect();
+        let f16: Vec<u8> = vals.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect();
+        let dst = TensorDescriptor::new("w", vec![rows as u64, cols as u64], QuantEncoding::int8_blocked(32));
+        for (enc, payload) in [(QuantEncoding::bf16(), bf16_bytes(&vals)), (QuantEncoding::f16(), f16), (QuantEncoding::f32(), f32_bytes(&vals))] {
+            let src = TensorDescriptor::new("w", vec![rows as u64, cols as u64], enc.clone());
+            let width = payload.len() / vals.len();
+            let elems = (cols as u64)..(rows * cols) as u64;
+            let tile = Tile { elems: elems.clone(), payload: &payload[cols * width..], scales: Vec::new() };
+            let mut decoded = Vec::new();
+            codecs.decoder(&enc).unwrap().decode_tile(&src, &tile, &mut decoded).unwrap();
+            let (mut want, mut got) = (TileBuf::default(), TileBuf::default());
+            codecs.encoder(&dst.encoding).unwrap().encode_tile(&dst, &elems, &decoded, &EncodeCtx { tensor_absmax: 0.0 }, &mut want).unwrap();
+            codecs.encoder(&dst.encoding).unwrap().transcode_tile(&src, &tile, &dst, &EncodeCtx { tensor_absmax: 0.0 }, &mut got).expect("a float tile transcodes").unwrap();
+            assert!(got.payload == want.payload && got.scales == want.scales, "{enc}: transcode differs from decode + encode");
+        }
     }
 
     #[test]
