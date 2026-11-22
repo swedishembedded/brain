@@ -94,6 +94,7 @@ pub fn kernels() -> Vec<(&'static str, &'static str)> {
         ("rmsnorm_nogain_dx", kernels::RMSNORM_NOGAIN_DX),
         ("l2clip_scale_dx", kernels::L2CLIP_SCALE_DX),
         ("l2clip_scale_ds", kernels::L2CLIP_SCALE_DS),
+        ("l2clip_branch", kernels::L2CLIP_BRANCH),
         ("sigmoid_bwd", kernels::SIGMOID_BWD),
         ("emb_bwd", kernels::EMB_BWD),
         ("router_bwd_sigmoid", kernels::ROUTER_BWD_SIGMOID),
@@ -295,6 +296,9 @@ pub struct Inkling2Train {
     image_grads: RefCell<Option<Vec<f32>>>,
     /// Per visit, the experts every row of the last forward selected (`[rows, top_k]`).
     taken: RefCell<Vec<Vec<u32>>>,
+    /// Pinned L2-clip branches ([`Inkling2Train::pin_clip_branches`]): `None` when off, else each clip's recorded
+    /// per-vector branch by (visit, site), recorded the first time that clip runs after pinning was turned on.
+    clip_pins: RefCell<Option<HashMap<(usize, recipe::ClipSite), DeviceBuffer>>>,
     detach_router: Cell<bool>,
     /// A layer-streamed full fine-tune: the expert banks' state and window ([`StreamedStore`]).
     streamed: Option<StreamedStore>,
@@ -586,6 +590,7 @@ impl Inkling2Train {
             logit_scale: Cell::new(1.0),
             replay: RefCell::new(None),
             taken: RefCell::new(Vec::new()),
+            clip_pins: RefCell::new(None),
             image_rows: RefCell::new(None),
             image_grads: RefCell::new(None),
             host_base: None,
@@ -654,6 +659,18 @@ impl Inkling2Train {
     /// of the input gradient only. Off by default: the router is differentiated, and in a full fine-tune it trains.
     pub fn set_detached_router(&self, detached: bool) {
         self.detach_router.set(detached);
+    }
+
+    /// Pin the branch of every L2 clip (the queries', keys' and relative states' clips of every visit): with `true`,
+    /// the next forward records per vector whether each clip scaled it down, and every later forward and backward
+    /// takes the recorded branch instead of comparing the norm with the threshold, until `false` drops the record. The
+    /// clip is not differentiable at its threshold, so a finite-difference step that carries a vector across it
+    /// measures neither branch; pinned, the loss is the recorded branch's smooth continuation, whose derivative at the
+    /// recorded point is the analytic gradient (knowledge #572). The clip analogue of a routing replay
+    /// ([`Self::taken_routing`]), and like it the record belongs to one batch.
+    pub fn pin_clip_branches(&self, on: bool) {
+        *self.clip_pins.borrow_mut() = on.then(HashMap::new);
+        *self.saved.borrow_mut() = None;
     }
 
     /// The routing the last forward took, as a replay of the batch: forced back on with

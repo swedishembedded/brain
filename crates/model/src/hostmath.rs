@@ -280,18 +280,27 @@ pub fn rmsnorm_nogain_rows(x: &[f32], rows: usize, d: usize, eps: f32) -> Vec<f3
 }
 
 /// Per-vector L2 clip of `x * scale` (`scale: [heads, d]`, optional), `a * min(1, thr / (|a| + eps))`: the reference of
-/// `kernels::L2CLIP_SCALE`. `x` is `[n_vec, d]` with vector `v` belonging to head `v % heads`.
-pub fn l2clip_scale_rows(x: &[f32], scale: Option<&[f32]>, heads: usize, d: usize, thr: f32, eps: f32) -> Vec<f32> {
+/// `kernels::L2CLIP_SCALE`. `x` is `[n_vec, d]` with vector `v` belonging to head `v % heads`. `branch` pins each
+/// vector's branch (`true`: clipped, `a * thr / (|a| + eps)` even below the threshold; `false`: `a`), the kernel's
+/// `pinned` mode; `None` takes the branch the comparison chooses.
+pub fn l2clip_scale_rows(x: &[f32], scale: Option<&[f32]>, branch: Option<&[bool]>, heads: usize, d: usize, thr: f32, eps: f32) -> Vec<f32> {
     assert_eq!(x.len() % d, 0, "l2clip_scale_rows: x is not a whole number of vectors");
     if let Some(s) = scale {
         assert_eq!(s.len(), heads * d, "l2clip_scale_rows: scale is not heads x d");
+    }
+    if let Some(b) = branch {
+        assert_eq!(b.len(), x.len() / d, "l2clip_scale_rows: one pinned branch per vector");
     }
     let mut out = Vec::with_capacity(x.len());
     for (v, row) in x.chunks_exact(d).enumerate() {
         let head = v % heads;
         let a: Vec<f32> = (0..d).map(|c| row[c] * scale.map_or(1.0, |s| s[head * d + c])).collect();
         let norm = a.iter().map(|t| t * t).sum::<f32>().sqrt();
-        let k = (thr / (norm + eps)).min(1.0);
+        let r = thr / (norm + eps);
+        let k = match branch {
+            Some(b) => if b[v] { r } else { 1.0 },
+            None => r.min(1.0),
+        };
         out.extend(a.iter().map(|t| t * k));
     }
     out

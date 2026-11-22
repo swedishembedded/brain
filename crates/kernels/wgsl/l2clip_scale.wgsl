@@ -17,9 +17,16 @@
 //   a = x * s                       (s: [heads, d]; absent when has_scale == 0)
 //   y = a * min(1, thr / (|a| + eps))
 //
-// x, y: [n_vec, d] where vector v belongs to head v % heads; params: n_vec, heads, d, has_scale, thr, eps (f32 bits).
-// With has_scale == 0 the `s` binding is never read (bind any buffer). Backward: l2clip_scale_dx.wgsl (dx and the
-// per-element scale partials) and l2clip_scale_ds.wgsl (the reduction over vectors).
+// x, y: [n_vec, d] where vector v belongs to head v % heads; params: n_vec, heads, d, has_scale, thr, eps (f32 bits),
+// pinned. With has_scale == 0 the `s` binding is never read (bind any buffer). Backward: l2clip_scale_dx.wgsl (dx and
+// the per-element scale partials) and l2clip_scale_ds.wgsl (the reduction over vectors).
+//
+// Pinned branches (pinned != 0): the clip is not differentiable where |a| + eps == thr, so a finite-difference check
+// whose step carries a vector across the threshold measures neither branch. `branch[v]` (1.0 clipped, 0.0 not, as
+// l2clip_branch.wgsl records them) then chooses each vector's branch instead of the comparison:
+//   y = a * (branch[v] != 0 ? thr / (|a| + eps) : 1)
+// which equals the unpinned clip wherever the recorded branch is the one the comparison takes, and continues that
+// branch smoothly past the threshold. With pinned == 0 the `branch` binding is never read (bind any buffer).
 // Dispatch: n_vec * 64 invocations (one workgroup per vector).
 
 struct Params {
@@ -29,12 +36,14 @@ struct Params {
     has_scale: u32,
     thr: f32,
     eps: f32,
+    pinned: u32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var<storage, read>       x: array<f32>;
 @group(0) @binding(2) var<storage, read>       s: array<f32>;
 @group(0) @binding(3) var<storage, read_write> y: array<f32>;
+@group(0) @binding(4) var<storage, read>       branch: array<f32>;
 
 var<workgroup> part: array<f32, 64>;
 
@@ -62,7 +71,9 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
     workgroupBarrier();
     var tot = 0.0;
     for (var i = 0u; i < 64u; i = i + 1u) { tot = tot + part[i]; }
-    let k = min(1.0, p.thr / (sqrt(tot) + p.eps));
+    let r = p.thr / (sqrt(tot) + p.eps);
+    var k = min(1.0, r);
+    if (p.pinned != 0u && live) { k = select(1.0, r, branch[v] != 0.0); }
     if (live) {
         for (var c = t; c < p.d; c = c + 64u) {
             y[v * p.d + c] = scaled(v, c) * k;

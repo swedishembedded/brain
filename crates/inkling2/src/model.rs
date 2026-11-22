@@ -1132,7 +1132,8 @@ impl Inkling2 {
     #[allow(clippy::too_many_arguments)]
     fn l2clip(&self, s: &mut Vec<Step>, x: &DeviceBuffer, scale: Option<&DeviceBuffer>, n_vec: u32, heads: u32, d: u32, thr: f32) -> DeviceBuffer {
         let y = self.g().storage(u64::from(n_vec * d));
-        s.push(self.g().dispatch(self.k.l2clip, &[x, scale.unwrap_or(x), &y], &[n_vec, heads, d, scale.is_some() as u32, f(thr), f(CLIP_EPS)], Dispatch::Workgroups(n_vec)));
+        // The fourth binding is the pinned branch, unread with `pinned` 0 (the last parameter).
+        s.push(self.g().dispatch(self.k.l2clip, &[x, scale.unwrap_or(x), &y, x], &[n_vec, heads, d, scale.is_some() as u32, f(thr), f(CLIP_EPS), 0], Dispatch::Workgroups(n_vec)));
         y
     }
 

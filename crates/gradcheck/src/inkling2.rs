@@ -27,15 +27,18 @@ use crate::{directional_check, elementwise_check_at, Report};
 const B: u32 = 2;
 const T: u32 = 6;
 
-/// Set the checked batch and pin the routing its forward takes: a finite-difference step must not flip a top-k
-/// selection (the loss is not differentiable there), and with the selection replayed the router is still
-/// differentiated through the weights it gives the pinned experts.
+/// Set the checked batch and pin the forward's non-smooth decisions, where the loss is not differentiable and a
+/// finite-difference step that crosses one measures neither side: the routing (a step must not flip a top-k selection;
+/// with the selection replayed the router is still differentiated through the weights it gives the pinned experts)
+/// and the L2 clips of queries, keys and relative states (a step must not carry a vector across the threshold; the
+/// pinned branch is still differentiated through the vector's norm).
 fn set_batch(m: &Inkling2Train, vocab: u32) {
     set_rows(m, vocab);
     let _ = m.forward();
     let taken = m.taken_routing().expect("the forward routed");
     model::training::TokenObjectives::set_routing_replay(m, Some(std::sync::Arc::new(taken))).expect("the model replays its own routing");
     set_rows(m, vocab);
+    m.pin_clip_branches(true);
 }
 
 fn set_rows(m: &Inkling2Train, vocab: u32) {
@@ -54,10 +57,9 @@ fn full_model(seed: u64) -> (Inkling2Train, TrainConfig) {
     (m, tc)
 }
 
-/// Every parameter of a full fine-tune, by directional finite differences. The step is small because the forward has
-/// kinks the routing pin does not remove (the L2 clips of queries, keys and relative states at their threshold): a step
-/// of 1e-3 in every entry of a tensor at once failed one run in ten (the routing pinned, the failing tensor not
-/// recorded), and the clips are the remaining non-smooth points it can cross.
+/// Every parameter of a full fine-tune, by directional finite differences. The step is small because a step of 1e-3 in
+/// every entry of a tensor at once failed one run in ten while only the routing was pinned (the failing tensor not
+/// recorded): the L2 clips, pinned since (knowledge #572), were the non-smooth points it could cross.
 pub fn check_inkling2(seed: u64) -> Report {
     let (m, _) = full_model(seed);
     directional_check(&m, 2e-4, 6, seed ^ 0x1A7)

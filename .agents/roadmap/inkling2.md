@@ -949,6 +949,13 @@ The first trainable target needs no streaming: the base is about 19.5 GB.
     (a tower lora_b entry 6 % from its central difference; four CPU runs pass); `gradcheck` `inkling2_fd` LoRA fails
     at seed 1778422313 on every backend, origin/main included (`wr_du.lora_b`: 2.035 vs 2.234, a kink the
     perturbation crosses); `optim` `parallel_update` fails on origin/main.
+  - Done (2026-11-22, fix2): the LoRA check's seed 1778422313 failure was a relative-state L2 clip threshold the step
+    crossed, not a gradient bug (knowledge #572). The clip's branch is now pinned like the routing:
+    `Inkling2Train::pin_clip_branches`, the generic `l2clip_branch` kernel and a `pinned` mode of `l2clip_scale` /
+    `l2clip_scale_dx`; the gradcheck pins both (`set_batch`), regression test at that seed.
+  - Left (fix2): the full fine-tune's directional check fails about one seed in ten (seen at 1832604347,
+    `layers.0.mlp.experts.w13_weight`): smooth, the step's truncation error along a ±1 direction of a whole bank
+    (knowledge #572 Evidence); the step or the estimate (Richardson) needs choosing per tensor.
 - **I4.4** `model::train` + `data`: packed rows with document-boundary resets of
   attention, every conv state and the relative-position origin. Gate: no supervision or
   state crosses a boundary.

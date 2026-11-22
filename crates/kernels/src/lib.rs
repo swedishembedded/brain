@@ -778,6 +778,8 @@ pub const L1SSIM_MAP_V: &str = include_str!("../wgsl/l1ssim_map_v.wgsl");
 pub const L1SSIM_MOMENTS_H: &str = include_str!("../wgsl/l1ssim_moments_h.wgsl");
 /// `wgsl/l1ssim_partials_h.wgsl`
 pub const L1SSIM_PARTIALS_H: &str = include_str!("../wgsl/l1ssim_partials_h.wgsl");
+/// `wgsl/l2clip_branch.wgsl`
+pub const L2CLIP_BRANCH: &str = include_str!("../wgsl/l2clip_branch.wgsl");
 /// `wgsl/l2clip_scale.wgsl`
 pub const L2CLIP_SCALE: &str = include_str!("../wgsl/l2clip_scale.wgsl");
 /// `wgsl/l2clip_scale_ds.wgsl`
@@ -2185,6 +2187,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("l1ssim_map_v", L1SSIM_MAP_V),
     ("l1ssim_moments_h", L1SSIM_MOMENTS_H),
     ("l1ssim_partials_h", L1SSIM_PARTIALS_H),
+    ("l2clip_branch", L2CLIP_BRANCH),
     ("l2clip_scale", L2CLIP_SCALE),
     ("l2clip_scale_ds", L2CLIP_SCALE_DS),
     ("l2clip_scale_dx", L2CLIP_SCALE_DX),

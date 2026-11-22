@@ -45,3 +45,13 @@ fn inkling2_every_adapter_tensor_of_a_lora_build() {
     let s = seed();
     gate(check_inkling2_lora(s), &format!("tiny inkling2 LoRA, seed {s}"));
 }
+
+/// A seed at which a directional step of 1e-3 carried a relative-state vector of layer 0 across its L2 clip threshold
+/// (`wr_du.lora_b`: analytic 2.035, central difference 2.234; the per-entry one-sided differences disagreed by up to
+/// 0.5 beyond a few 1e-4, and converged to the analytic value below): the check now pins the clips' branches.
+#[test]
+fn inkling2_lora_check_holds_where_a_step_crosses_a_clip_threshold() {
+    // seed: regression - the seed whose step crossed the relative-state clip of layer 0 before the branches were pinned
+    let s = 1778422313;
+    gate(check_inkling2_lora(s), &format!("tiny inkling2 LoRA, seed {s}"));
+}

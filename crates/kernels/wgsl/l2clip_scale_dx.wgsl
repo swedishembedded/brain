@@ -15,7 +15,8 @@
 //   r <  1 (clipped):      g = r * dy - (thr / ((n + eps)^2 * n)) * a * (a . dy)
 //   dx = g * s            (g when has_scale == 0)
 //   gs = g * x            (the partial of the scale gradient; reduced over vectors by l2clip_scale_ds)
-// `gs` is written, and `s` read, only when has_scale != 0 (bind any buffer otherwise).
+// `gs` is written, and `s` read, only when has_scale != 0 (bind any buffer otherwise). With pinned != 0 the branch is
+// `branch[v] != 0` instead of r < 1, as in the forward (l2clip_scale.wgsl); `branch` is read only then.
 //
 // x, dy, dx, gs: [n_vec, d]; s: [heads, d]; params as l2clip_scale.wgsl.
 // Dispatch: n_vec * 64 invocations (one workgroup per vector).
@@ -27,6 +28,7 @@ struct Params {
     has_scale: u32,
     thr: f32,
     eps: f32,
+    pinned: u32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -35,6 +37,7 @@ struct Params {
 @group(0) @binding(3) var<storage, read>       dy: array<f32>;
 @group(0) @binding(4) var<storage, read_write> dx: array<f32>;
 @group(0) @binding(5) var<storage, read_write> gs: array<f32>;
+@group(0) @binding(6) var<storage, read>       branch: array<f32>;
 
 var<workgroup> p_ss: array<f32, 64>;
 var<workgroup> p_ad: array<f32, 64>;
@@ -72,8 +75,9 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
     }
     let n = sqrt(tss);
     let r = p.thr / (n + p.eps);
-    let clipped = r < 1.0;
-    // Clipped means n + eps > thr > 0, so n > 0 unless thr <= eps; guard that degenerate case.
+    var clipped = r < 1.0;
+    if (p.pinned != 0u && live) { clipped = branch[v] != 0.0; }
+    // Clipped means n + eps > thr > 0, so n > 0 unless thr <= eps (or a pinned branch at n == 0); guard that case.
     let proj = select(0.0, p.thr / ((n + p.eps) * (n + p.eps) * n) * tad, clipped && n > 0.0);
     if (live) {
         for (var c = t; c < p.d; c = c + 64u) {

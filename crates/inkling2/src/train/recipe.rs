@@ -38,6 +38,14 @@ use crate::config::LayerKind;
 use crate::model::{block_slots, CLIP_EPS, DEPTH_EPS};
 use crate::names::{self, GateSite, LayerNames};
 
+/// The three L2 clips of a visit's attention, the second half of a pinned clip branch's key (the visit is the first).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum ClipSite {
+    Query,
+    Key,
+    Rel,
+}
+
 pub(super) struct Kernels {
     flash: FlashExtIds,
     conv: ShortConvIds,
@@ -56,6 +64,7 @@ pub(super) struct Kernels {
     l2clip: usize,
     l2clip_dx: usize,
     l2clip_ds: usize,
+    l2clip_branch: usize,
     sigmoid: usize,
     sigmoid_bwd: usize,
     mul: usize,
@@ -98,6 +107,7 @@ impl Kernels {
             l2clip: k("l2clip_scale")?,
             l2clip_dx: k("l2clip_scale_dx")?,
             l2clip_ds: k("l2clip_scale_ds")?,
+            l2clip_branch: k("l2clip_branch")?,
             sigmoid: k("sigmoid")?,
             sigmoid_bwd: k("sigmoid_bwd")?,
             mul: k("mul")?,
@@ -323,23 +333,45 @@ impl Inkling2Train {
         dx
     }
 
-    /// Each of `n_vec` vectors of width `d` (vector `i` of head `i % heads`) scaled by `scale` when given, then
-    /// clipped to L2 norm `thr`.
+    /// The recorded branch of the clip at `site` when [`Inkling2Train::pin_clip_branches`] is on (recorded here, from
+    /// `x` and `scale`, the first time that clip runs), else `None`.
     #[allow(clippy::too_many_arguments)]
-    fn l2clip(&self, s: &mut Vec<Step>, x: &DeviceBuffer, scale: Option<&str>, n_vec: u32, heads: u32, d: u32, thr: f32) -> DeviceBuffer {
+    fn clip_branch(&self, s: &mut Vec<Step>, site: (usize, ClipSite), x: &DeviceBuffer, sb: &DeviceBuffer, p: &[u32; 7]) -> Option<DeviceBuffer> {
+        let mut pins = self.clip_pins.borrow_mut();
+        let pins = pins.as_mut()?;
+        Some(
+            pins.entry(site)
+                .or_insert_with(|| {
+                    let branch = self.fresh(p[0]);
+                    s.push(self.g().dispatch(self.k.l2clip_branch, &[x, sb, &branch], p, Dispatch::Workgroups(p[0])));
+                    branch
+                })
+                .clone(),
+        )
+    }
+
+    /// Each of `n_vec` vectors of width `d` (vector `i` of head `i % heads`) scaled by `scale` when given, then
+    /// clipped to L2 norm `thr` (the clip at `site`: its branch pinned when [`Inkling2Train::pin_clip_branches`] is on).
+    #[allow(clippy::too_many_arguments)]
+    fn l2clip(&self, s: &mut Vec<Step>, site: (usize, ClipSite), x: &DeviceBuffer, scale: Option<&str>, n_vec: u32, heads: u32, d: u32, thr: f32) -> DeviceBuffer {
         let y = self.fresh(n_vec * d);
         let sb = scale.map(|n| self.val(n)).unwrap_or(x);
-        s.push(self.g().dispatch(self.k.l2clip, &[x, sb, &y], &[n_vec, heads, d, scale.is_some() as u32, f(thr), f(CLIP_EPS)], Dispatch::Workgroups(n_vec)));
+        let mut p = [n_vec, heads, d, scale.is_some() as u32, f(thr), f(CLIP_EPS), 0];
+        let branch = self.clip_branch(s, site, x, sb, &p);
+        p[6] = branch.is_some() as u32;
+        s.push(self.g().dispatch(self.k.l2clip, &[x, sb, &y, branch.as_ref().unwrap_or(x)], &p, Dispatch::Workgroups(n_vec)));
         y
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn l2clip_bwd(&self, s: &mut Vec<Step>, x: &DeviceBuffer, scale: Option<&str>, dy: &DeviceBuffer, n_vec: u32, heads: u32, d: u32, thr: f32) -> DeviceBuffer {
+    fn l2clip_bwd(&self, s: &mut Vec<Step>, site: (usize, ClipSite), x: &DeviceBuffer, scale: Option<&str>, dy: &DeviceBuffer, n_vec: u32, heads: u32, d: u32, thr: f32) -> DeviceBuffer {
         let g = self.g();
         let (dx, gs) = (self.fresh(n_vec * d), self.fresh(n_vec * d));
         let sb = scale.map(|n| self.val(n)).unwrap_or(x);
-        let p = [n_vec, heads, d, scale.is_some() as u32, f(thr), f(CLIP_EPS)];
-        s.push(g.dispatch(self.k.l2clip_dx, &[x, sb, dy, &dx, &gs], &p, Dispatch::Workgroups(n_vec)));
+        let mut p = [n_vec, heads, d, scale.is_some() as u32, f(thr), f(CLIP_EPS), 0];
+        let branch = self.clip_branch(s, site, x, sb, &p);
+        p[6] = branch.is_some() as u32;
+        s.push(g.dispatch(self.k.l2clip_dx, &[x, sb, dy, &dx, &gs, branch.as_ref().unwrap_or(x)], &p, Dispatch::Workgroups(n_vec)));
         if let Some(name) = scale {
             s.push(g.step(self.k.l2clip_ds, &[&gs, self.grad(name)], &[n_vec, heads, d], heads * d));
         }
@@ -590,7 +622,7 @@ impl Inkling2Train {
             [self.rms(s, &pre[0], &norm(0), n), self.rms(s, &pre[1], &norm(1), n), self.rms(s, &pre[2], &norm(2), n)]
         };
 
-        let att = self.attention_fwd(s, r, layer, &normed);
+        let att = self.attention_fwd(s, r, layer, i, &normed);
         let attn_conv = self.static_conv(s, r, &att.y, &ln.attn_conv(), d);
         let residual = match sched.retain[i] {
             Some((slot, fresh)) => {
@@ -619,7 +651,8 @@ impl Inkling2Train {
         Ok(VisitFwd { msg, attn_da, inputs, gates, pre, shared_norm, normed, att, residual, mlp_da, mlp_pre, hn, moe, out })
     }
 
-    fn attention_fwd(&self, s: &mut Vec<Step>, r: &Rows, layer: u32, normed: &[DeviceBuffer; 3]) -> AttnFwd {
+    /// The attention of visit `visit` (of layer `layer`).
+    fn attention_fwd(&self, s: &mut Vec<Step>, r: &Rows, layer: u32, visit: usize, normed: &[DeviceBuffer; 3]) -> AttnFwd {
         let cfg = &self.tc.cfg;
         let (g, n) = (self.g(), r.n());
         let a = cfg.attn(layer);
@@ -627,7 +660,7 @@ impl Inkling2Train {
         let full = cfg.kind(layer) == LayerKind::Full;
         let (qh, kh, vh) = (&normed[0], &normed[1], &normed[2]);
         let q_pre = self.proj(s, &ln.wq(), qh, n);
-        let q = self.l2clip(s, &q_pre, Some(&ln.q_scale()), n * a.heads, a.heads, a.head_dim, cfg.qk_clip);
+        let q = self.l2clip(s, (visit, ClipSite::Query), &q_pre, Some(&ln.q_scale()), n * a.heads, a.heads, a.head_dim, cfg.qk_clip);
         let mut kv_pre = Vec::new();
         let mut kv_dyn = [None, None];
         let mut kv_conv = Vec::new();
@@ -645,7 +678,7 @@ impl Inkling2Train {
                 self.static_conv(s, r, &pre, &ln.kv_conv(j == 1), a.kv_dim())
             };
             let normed = if j == 0 {
-                self.l2clip(s, &conv, None, n * a.kv_heads, a.kv_heads, a.head_dim, cfg.qk_clip)
+                self.l2clip(s, (visit, ClipSite::Key), &conv, None, n * a.kv_heads, a.kv_heads, a.head_dim, cfg.qk_clip)
             } else {
                 let y = self.fresh(n * a.kv_dim());
                 s.push(g.dispatch(self.k.rms_nogain, &[&conv, &y], &[a.head_dim, n * a.kv_heads, f(cfg.eps)], Dispatch::Workgroups(n * a.kv_heads)));
@@ -656,7 +689,7 @@ impl Inkling2Train {
             kv.push(normed);
         }
         let rel_pre = self.proj(s, &ln.wr(), qh, n);
-        let rel = self.l2clip(s, &rel_pre, Some(&ln.rel_scale()), n * a.heads, a.heads, cfg.d_rel, cfg.rel_clip);
+        let rel = self.l2clip(s, (visit, ClipSite::Rel), &rel_pre, Some(&ln.rel_scale()), n * a.heads, a.heads, cfg.d_rel, cfg.rel_clip);
         let sink = self.proj(s, &ln.sink(), qh, n);
         let (heads, opts) = self.attn_opts(r, layer);
         let out = self.fresh(n * a.q_dim());
@@ -885,7 +918,7 @@ impl Inkling2Train {
             None => self.add_into(s, d_in, d_res, nn),
         }
         let d_attn = self.static_conv_bwd(s, r, &a.att.y, &ln.attn_conv(), d, d_res);
-        let d_normed = self.attention_bwd(s, r, layer, &a.normed, &a.att, &d_attn);
+        let d_normed = self.attention_bwd(s, r, layer, v.index, &a.normed, &a.att, &d_attn);
 
         // The q, k, v inputs: norms, message gates, depth attention.
         let full = cfg.kind(layer) == LayerKind::Full;
@@ -944,7 +977,8 @@ impl Inkling2Train {
 
     /// The attention's backward from the gradient of its output projection's output: the gradients of the q, k and v
     /// paths' normed inputs (fresh), every weight's gradient added.
-    fn attention_bwd(&self, s: &mut Vec<Step>, r: &Rows, layer: u32, normed: &[DeviceBuffer; 3], a: &AttnFwd, dy: &DeviceBuffer) -> [DeviceBuffer; 3] {
+    #[allow(clippy::too_many_arguments)]
+    fn attention_bwd(&self, s: &mut Vec<Step>, r: &Rows, layer: u32, visit: usize, normed: &[DeviceBuffer; 3], a: &AttnFwd, dy: &DeviceBuffer) -> [DeviceBuffer; 3] {
         let cfg = &self.tc.cfg;
         let (g, n) = (self.g(), r.n());
         let at = cfg.attn(layer);
@@ -971,15 +1005,15 @@ impl Inkling2Train {
         s.extend(flash_ext::flash_ext_bwd(g, &self.k.flash, &heads, &opts, &inputs, Contiguous { b: r.b, t: r.t, pos0: 0 }, &a.q, &a.kv[0], &a.kv[1], &a.out, &a.lse, &d_out, &d_q, &d_k, &d_v, &grads));
         self.add_into(s, self.grad(&bank), &d_bank, cfg.d_rel * cfg.bias_extent(layer));
         self.proj_bwd(s, &ln.sink(), qh, &d_sink, &d_qh, n, true);
-        let d_rel_pre = self.l2clip_bwd(s, &a.rel_pre, Some(&ln.rel_scale()), &d_rel, n * at.heads, at.heads, cfg.d_rel, cfg.rel_clip);
+        let d_rel_pre = self.l2clip_bwd(s, (visit, ClipSite::Rel), &a.rel_pre, Some(&ln.rel_scale()), &d_rel, n * at.heads, at.heads, cfg.d_rel, cfg.rel_clip);
         self.proj_bwd(s, &ln.wr(), qh, &d_rel_pre, &d_qh, n, true);
-        let d_q_pre = self.l2clip_bwd(s, &a.q_pre, Some(&ln.q_scale()), &d_q, n * at.heads, at.heads, at.head_dim, cfg.qk_clip);
+        let d_q_pre = self.l2clip_bwd(s, (visit, ClipSite::Query), &a.q_pre, Some(&ln.q_scale()), &d_q, n * at.heads, at.heads, at.head_dim, cfg.qk_clip);
         self.proj_bwd(s, &ln.wq(), qh, &d_q_pre, &d_qh, n, true);
         // Keys and values: their normalisation, convolution and projections.
         for (j, (input, d_input)) in [(kh, &d_kh), (vh, &d_vh)].into_iter().enumerate() {
             let c = at.kv_dim();
             let d_conv = if j == 0 {
-                self.l2clip_bwd(s, &a.kv_conv[0], None, &d_k, n * at.kv_heads, at.kv_heads, at.head_dim, cfg.qk_clip)
+                self.l2clip_bwd(s, (visit, ClipSite::Key), &a.kv_conv[0], None, &d_k, n * at.kv_heads, at.kv_heads, at.head_dim, cfg.qk_clip)
             } else {
                 let dx = self.fresh(n * c);
                 s.push(g.dispatch(self.k.rms_nogain_dx, &[&a.kv_conv[1], &d_v, &dx], &[at.head_dim, n * at.kv_heads, f(cfg.eps)], Dispatch::Workgroups(n * at.kv_heads)));
