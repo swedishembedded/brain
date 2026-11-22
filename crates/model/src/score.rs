@@ -19,7 +19,7 @@
 
 use std::path::Path;
 
-use crate::train::{causal_lm, load_dataset_with_itos, FitOpts};
+use crate::train::{causal_lm, load_dataset_with_itos, FitOpts, GradSync};
 use crate::{Model, Objective};
 
 /// A held-out record set scored in the trainer's own process: the loss of the
@@ -80,14 +80,65 @@ pub fn supervised_positions(set: &Path, opts: &FitOpts) -> std::io::Result<(usiz
 
 /// A [`ScoredSet`] for each of `sets` before any training: the base's loss
 /// unless the run continues an adapter (`continuing`).
-pub fn score_base<M: Model>(m: &M, sets: &[&Path], opts: &FitOpts, continuing: bool) -> std::io::Result<Vec<ScoredSet>> {
-    sets.iter()
-        .map(|set| {
-            let (records, positions) = supervised_positions(set, opts)?;
-            let base_loss = if continuing { None } else { score_dataset(m, set, opts)? };
-            Ok(ScoredSet { base_loss, tuned_loss: None, positions, records })
-        })
-        .collect()
+///
+/// In a data-parallel run (`sync`) every rank holds the same model, so rank 0
+/// scores and hands every rank its numbers ([`agreed_scores`]); a run whose
+/// parameters are sharded across the ranks scores on every rank, since its
+/// forward needs them all.
+pub fn score_base<M: Model>(m: &M, sets: &[&Path], opts: &FitOpts, continuing: bool, sync: Option<&GradSync<'_>>) -> std::io::Result<Vec<ScoredSet>> {
+    agreed_scores(sync, opts, sets.len(), || {
+        sets.iter()
+            .map(|set| {
+                let (records, positions) = supervised_positions(set, opts)?;
+                let base_loss = if continuing { None } else { score_dataset(m, set, opts)? };
+                Ok(ScoredSet { base_loss, tuned_loss: None, positions, records })
+            })
+            .collect()
+    })
+}
+
+/// `score()` on rank 0 only, its sets broadcast to every rank of `sync`'s group, when the replicas hold the same
+/// model; on every rank (rank 0's result agreed) when `opts` shards the parameters, whose forward gathers them over
+/// the group; plainly without a group. A rank 0 that fails to score says so to the others, which fail with it
+/// instead of waiting.
+pub fn agreed_scores(sync: Option<&GradSync<'_>>, opts: &FitOpts, sets: usize, score: impl FnOnce() -> std::io::Result<Vec<ScoredSet>>) -> std::io::Result<Vec<ScoredSet>> {
+    let Some(sync) = sync else { return score() };
+    let every_rank = opts.sharding == crate::zero::Sharding::Parameters;
+    let local = (every_rank || sync.rank == 0).then(score);
+    let offer = match &local {
+        Some(Ok(scored)) if sync.rank == 0 => std::iter::once(1).chain(scored.iter().flat_map(set_words)).collect(),
+        Some(Err(_)) if sync.rank == 0 => vec![0],
+        _ => Vec::new(),
+    };
+    let words = crate::collective::broadcast_words(sync.collective, sync.rank, &offer, 0).map_err(std::io::Error::other)?;
+    if let Some(Err(e)) = local {
+        return Err(e);
+    }
+    match words.split_first() {
+        Some((&1, sets_words)) if sets_words.len() == sets * SET_WORDS => Ok(sets_words.chunks(SET_WORDS).map(set_of_words).collect()),
+        Some((&0, [])) => Err(std::io::Error::other("rank 0 could not score the held-out sets")),
+        _ => Err(std::io::Error::other(format!("rank 0 sent {} words of scores for {sets} sets", words.len()))),
+    }
+}
+
+/// The words one [`ScoredSet`] travels as.
+const SET_WORDS: usize = 4;
+
+/// A loss as a word: its bits, or a value no f32's bits are for `None`.
+fn loss_word(loss: Option<f32>) -> u64 {
+    loss.map_or(1 << 32, |l| u64::from(l.to_bits()))
+}
+
+fn word_loss(word: u64) -> Option<f32> {
+    u32::try_from(word).ok().map(f32::from_bits)
+}
+
+fn set_words(set: &ScoredSet) -> [u64; SET_WORDS] {
+    [loss_word(set.base_loss), loss_word(set.tuned_loss), set.positions as u64, set.records as u64]
+}
+
+fn set_of_words(words: &[u64]) -> ScoredSet {
+    ScoredSet { base_loss: word_loss(words[0]), tuned_loss: word_loss(words[1]), positions: words[2] as usize, records: words[3] as usize }
 }
 
 /// One document scored for bits per byte: `tokens[0]` is a context-only
@@ -195,10 +246,79 @@ pub fn score_bytes_bucketed<M: Model>(docs: &[ByteDoc], b: u32, lengths: &[u32],
     Ok(score)
 }
 
-/// Fill in the tuned loss of each of `scored` on the model the run returned.
-pub fn score_tuned<M: Model>(m: &M, sets: &[&Path], opts: &FitOpts, scored: &mut [ScoredSet]) -> std::io::Result<()> {
-    for (set, slot) in sets.iter().zip(scored.iter_mut()) {
-        slot.tuned_loss = score_dataset(m, set, opts)?;
-    }
+/// Fill in the tuned loss of each of `scored` on the model the run returned, agreed across `sync`'s group as
+/// [`score_base`] does.
+pub fn score_tuned<M: Model>(m: &M, sets: &[&Path], opts: &FitOpts, scored: &mut [ScoredSet], sync: Option<&GradSync<'_>>) -> std::io::Result<()> {
+    let tuned = agreed_scores(sync, opts, scored.len(), || {
+        let mut tuned = scored.to_vec();
+        for (set, slot) in sets.iter().zip(tuned.iter_mut()) {
+            slot.tuned_loss = score_dataset(m, set, opts)?;
+        }
+        Ok(tuned)
+    })?;
+    scored.copy_from_slice(&tuned);
     Ok(())
+}
+
+#[cfg(test)]
+mod agreed_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn set(loss: f32) -> ScoredSet {
+        ScoredSet { base_loss: Some(loss), tuned_loss: None, positions: 70_000_001, records: 3 }
+    }
+
+    /// Two ranks of a host group each calling [`agreed_scores`] with `opts`; how many times each one scored, and what
+    /// each one got.
+    fn two_ranks(opts: &FitOpts, rank0: std::io::Result<Vec<ScoredSet>>) -> (Vec<usize>, Vec<std::io::Result<Vec<ScoredSet>>>) {
+        let group = crate::HostCollective::new(2);
+        let calls: Vec<AtomicUsize> = (0..2).map(|_| AtomicUsize::new(0)).collect();
+        let rank0 = std::sync::Mutex::new(Some(rank0));
+        let results = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..2)
+                .map(|rank| {
+                    let (group, calls, rank0) = (&group, &calls, &rank0);
+                    scope.spawn(move || {
+                        let sync = GradSync { collective: &**group, rank, checkpoint: None, observer: None };
+                        agreed_scores(Some(&sync), opts, 1, || {
+                            calls[rank].fetch_add(1, Ordering::SeqCst);
+                            match rank {
+                                0 => rank0.lock().unwrap().take().unwrap(),
+                                _ => Ok(vec![set(9.0)]),
+                            }
+                        })
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        (calls.iter().map(|c| c.load(Ordering::SeqCst)).collect(), results)
+    }
+
+    #[test]
+    fn replicas_score_once_on_rank_zero_and_every_rank_gets_its_exact_numbers() {
+        let (calls, results) = two_ranks(&FitOpts::default(), Ok(vec![set(0.123_456_79)]));
+        assert_eq!(calls, vec![1, 0], "a replica does not repeat rank 0's scoring");
+        for r in results {
+            assert_eq!(r.unwrap(), vec![set(0.123_456_79)], "every rank holds rank 0's numbers, bit for bit, counts past f32's exact range included");
+        }
+    }
+
+    #[test]
+    fn a_run_with_sharded_parameters_scores_on_every_rank_and_agrees_on_rank_zeros() {
+        let opts = FitOpts { sharding: crate::zero::Sharding::Parameters, ..Default::default() };
+        let (calls, results) = two_ranks(&opts, Ok(vec![set(1.5)]));
+        assert_eq!(calls, vec![1, 1], "a sharded forward needs every rank");
+        for r in results {
+            assert_eq!(r.unwrap(), vec![set(1.5)]);
+        }
+    }
+
+    #[test]
+    fn a_rank_zero_that_cannot_score_fails_the_others_instead_of_leaving_them_waiting() {
+        let (_, results) = two_ranks(&FitOpts::default(), Err(std::io::Error::other("the set is unreadable")));
+        assert!(results[0].as_ref().unwrap_err().to_string().contains("unreadable"));
+        assert!(results[1].as_ref().unwrap_err().to_string().contains("rank 0 could not score"));
+    }
 }

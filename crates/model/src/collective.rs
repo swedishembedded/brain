@@ -261,6 +261,35 @@ impl<T: Collective + ?Sized> Collective for std::sync::Arc<T> {
     }
 }
 
+/// Whole numbers as payload values that every transport carries exactly: each word as four 16-bit pieces, each
+/// exact in f32, most significant first. For counts, digests and the bits of a float a rank hands its peers.
+pub fn words_to_values(words: &[u64]) -> Vec<f32> {
+    words.iter().flat_map(|&w| (0..4).rev().map(move |i| ((w >> (16 * i)) & 0xffff) as f32)).collect()
+}
+
+/// The inverse of [`words_to_values`], refusing values it could not have produced.
+pub fn values_to_words(values: &[f32]) -> CollectiveResult<Vec<u64>> {
+    if !values.len().is_multiple_of(4) {
+        return Err(CollectiveError::Transport(format!("{} values are not whole words of four pieces", values.len())));
+    }
+    values
+        .chunks(4)
+        .map(|piece| {
+            piece.iter().try_fold(0u64, |word, &v| match v.fract() == 0.0 && (0.0..=65535.0).contains(&v) {
+                true => Ok((word << 16) | v as u64),
+                false => Err(CollectiveError::Transport(format!("{v} is not a 16-bit piece of a word"))),
+            })
+        })
+        .collect()
+}
+
+/// Rank `root`'s `words` on every rank of `group`, exactly (what the other ranks pass is ignored); blocks until
+/// every rank called. How one rank shares a result it computed for all of them: a score, a count, a decision.
+pub fn broadcast_words(group: &dyn Collective, rank: usize, words: &[u64], root: usize) -> CollectiveResult<Vec<u64>> {
+    let shared = pollster::block_on(group.broadcast(rank, Payload::f32(words_to_values(words)), root))?;
+    values_to_words(&shared.data)
+}
+
 pub(crate) fn check_rank(rank: usize, world_size: usize) -> CollectiveResult<()> {
     if rank >= world_size {
         Err(CollectiveError::RankOutOfRange { rank, world_size })

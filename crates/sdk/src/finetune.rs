@@ -1261,8 +1261,11 @@ impl ChatFineTune {
         };
         eprintln!("ChatFineTune: base tier {} ({base_tier_reason})", family.tier_name());
         let scoring_tier = family.scoring_tier();
-        let base_score = held_out.as_ref().zip(scoring_tier).map(|(records, tier)| score_records(weights_str, None, &tok, &tmpl, records, block, tier, render));
-        let base_text_score = held_out_text.as_ref().zip(scoring_tier).map(|(records, tier)| score_records(weights_str, None, &tok, &tmpl, records, block, tier, render));
+        let parallel = self.parallel.as_ref();
+        let (tok_ref, tmpl_ref) = (&tok, &tmpl);
+        let score_with = move |records: &[ChatSample], adapter: Option<&str>, tier| score_records(weights_str, adapter, tok_ref, tmpl_ref, records, block, tier, render);
+        let base_score = agreed_score(parallel, held_out.as_ref().zip(scoring_tier).map(|(records, tier)| move || score_with(records, None, tier)))?;
+        let base_text_score = agreed_score(parallel, held_out_text.as_ref().zip(scoring_tier).map(|(records, tier)| move || score_with(records, None, tier)))?;
 
         if self.grad_accum == 0 {
             return Err(Error::InvalidRequest("ChatFineTune: grad_accum must be at least 1".to_string()));
@@ -1461,11 +1464,11 @@ impl ChatFineTune {
         let adapter_str = utf8(&adapter_path)?;
         outcome.tuned_score = match scored_held_out {
             Some(set) => Some(as_score(set.tuned_loss, &set)),
-            None => held_out.as_ref().zip(scoring_tier).map(|(records, tier)| score_records(weights_str, Some(adapter_str), &tok, &tmpl, records, block, tier, render)),
+            None => agreed_score(parallel, held_out.as_ref().zip(scoring_tier).map(|(records, tier)| move || score_with(records, Some(adapter_str), tier)))?,
         };
         outcome.tuned_text_score = match scored_text {
             Some(set) => Some(as_score(set.tuned_loss, &set)),
-            None => held_out_text.as_ref().zip(scoring_tier).map(|(records, tier)| score_records(weights_str, Some(adapter_str), &tok, &tmpl, records, block, tier, render)),
+            None => agreed_score(parallel, held_out_text.as_ref().zip(scoring_tier).map(|(records, tier)| move || score_with(records, Some(adapter_str), tier)))?,
         };
         outcome.adapter = Some(adapter_path);
 
@@ -1885,6 +1888,32 @@ pub struct HeldOutScore {
     pub skipped: usize,
 }
 
+impl HeldOutScore {
+    /// A value no f32's bits are: an absent loss on the wire.
+    const NO_LOSS: u64 = 1 << 32;
+
+    /// The score as exact words, to hand it to the other ranks of a group.
+    fn words(&self) -> Vec<u64> {
+        let loss = self.loss.map_or(Self::NO_LOSS, |l| u64::from(l.to_bits()));
+        vec![loss, u64::from(self.token_accuracy.is_some()), self.token_accuracy.map_or(0, f64::to_bits), self.positions as u64, self.records as u64, self.skipped as u64]
+    }
+
+    /// The inverse of [`Self::words`]; `None` for anything it could not have produced.
+    fn of_words(words: &[u64]) -> Option<HeldOutScore> {
+        let &[loss, has_accuracy, accuracy, positions, records, skipped] = words else { return None };
+        let loss = match loss {
+            Self::NO_LOSS => None,
+            bits => Some(f32::from_bits(u32::try_from(bits).ok()?)),
+        };
+        let token_accuracy = match has_accuracy {
+            0 => None,
+            1 => Some(f64::from_bits(accuracy)),
+            _ => return None,
+        };
+        Some(HeldOutScore { loss, token_accuracy, positions: usize::try_from(positions).ok()?, records: usize::try_from(records).ok()?, skipped: usize::try_from(skipped).ok()? })
+    }
+}
+
 /// Score `base` - optionally with `adapter` folded in, exactly as serving it
 /// would - on the held-out chat records in `held_out`. `base` is resolved
 /// like [`ChatFineTune::from_pretrained`]'s; the tokenizer and template come
@@ -1950,6 +1979,23 @@ pub fn score_tokens(base: &str, adapter: Option<&Path>, tokens: &[u32], targets:
 }
 
 #[allow(clippy::too_many_arguments)]
+/// `score`, when there is a set to score, run on rank 0 of `parallel`'s group only and its result handed to every
+/// rank: the replicas hold the same model, so a second rank scoring the same records would repeat the work for the
+/// same numbers. Every rank runs it when the group shards the parameters (its forward needs them all), and so does a
+/// run that is no rank. Every rank must make the same call (whether there is a set is the request's, the same on
+/// every rank).
+pub(crate) fn agreed_score(parallel: Option<&crate::DataParallel>, score: Option<impl FnOnce() -> HeldOutScore>) -> Result<Option<HeldOutScore>> {
+    let Some(score) = score else { return Ok(None) };
+    let Some(rank) = parallel.filter(|p| p.sharding() != model::zero::Sharding::Parameters) else { return Ok(Some(score())) };
+    let mine = (rank.rank() == 0).then(score);
+    let words = mine.as_ref().map(HeldOutScore::words).unwrap_or_default();
+    let agreed = rank.share_from_root(&words)?;
+    match mine {
+        Some(mine) => Ok(Some(mine)),
+        None => HeldOutScore::of_words(&agreed).map(Some).ok_or_else(|| Error::Backend(format!("rank 0 sent {} words for a held-out score", agreed.len()))),
+    }
+}
+
 fn score_records(weights: &str, adapter: Option<&str>, tok: &QwenBpe, tmpl: &ChatTemplate, records: &[ChatSample], block: u32, tier: qwen3::Dtype, render: data::chat::RenderOpts) -> HeldOutScore {
     let s = qwen3::eval::score_chat_rendered(weights, adapter, tok, tmpl, records, block, tier, render);
     HeldOutScore { loss: (s.positions > 0).then_some(s.loss), token_accuracy: s.token_accuracy, positions: s.positions, records: s.samples, skipped: s.skipped }
@@ -3016,5 +3062,41 @@ mod tier_tests {
     fn a_device_without_native_tensor_cores_keeps_the_fp32_reference() {
         assert_eq!(pick(true, false, BIG, 1024, &[96 * GIB]), BaseTierChoice::F32);
         assert_eq!(pick(false, false, (600_000_000, 28, 1024), 1024, &[]), BaseTierChoice::F32, "a CPU run");
+    }
+}
+
+#[cfg(test)]
+mod agreed_score_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn the_held_out_score_is_computed_on_rank_zero_once_and_every_rank_reports_it() {
+        let score = HeldOutScore { loss: Some(0.75), token_accuracy: Some(1.0 / 3.0), positions: 12, records: 3, skipped: 1 };
+        let calls: Vec<AtomicUsize> = (0..2).map(|_| AtomicUsize::new(0)).collect();
+        let ranks = crate::DataParallel::in_process(2).unwrap();
+        let got: Vec<Result<Option<HeldOutScore>>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = ranks
+                .into_iter()
+                .map(|rank| {
+                    let (calls, score) = (&calls, &score);
+                    scope.spawn(move || {
+                        agreed_score(
+                            Some(&rank),
+                            Some(|| {
+                                calls[rank.rank()].fetch_add(1, Ordering::SeqCst);
+                                *score
+                            }),
+                        )
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(calls.iter().map(|c| c.load(Ordering::SeqCst)).collect::<Vec<_>>(), vec![1, 0], "rank 1 does not score the set again");
+        for g in got {
+            assert_eq!(g.unwrap(), Some(score), "every rank reports rank 0's score exactly");
+        }
+        assert_eq!(agreed_score(None, None::<fn() -> HeldOutScore>).unwrap(), None, "no set, no score");
     }
 }

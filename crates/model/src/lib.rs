@@ -138,7 +138,7 @@ pub mod rope_table;
 pub mod yarn;
 pub mod zero;
 
-pub use collective::{Collective, HostCollective};
+pub use collective::{broadcast_words, Collective, HostCollective};
 pub use collective::{payload_bytes, CollectiveProfile, OpKind, OpSnapshot, ShapedCollective, SimulatedLink, Snapshot, TimedCollective};
 pub use optim::{grad_multiplier, Adam};
 #[cfg(not(target_arch = "wasm32"))]

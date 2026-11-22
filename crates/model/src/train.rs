@@ -3996,13 +3996,13 @@ mod tests {
         let opts = FitOpts { block_size: 6, batch_size: 2, eval_batches: 0, ..Default::default() };
         let model = Recorder::new(RecorderCfg, 2, 6, &HashMap::new());
         let sets = [dir.path()];
-        let mut scored = crate::score_base(&model, &sets, &opts, false).expect("score");
+        let mut scored = crate::score_base(&model, &sets, &opts, false, None).expect("score");
         assert_eq!((scored[0].records, scored[0].positions), (3, 6));
         assert!((scored[0].base_loss.expect("scored") - 12.5).abs() < 1e-5);
         assert_eq!(scored[0].tuned_loss, None);
-        crate::score_tuned(&model, &sets, &opts, &mut scored).expect("score");
+        crate::score_tuned(&model, &sets, &opts, &mut scored, None).expect("score");
         assert_eq!(scored[0].tuned_loss, scored[0].base_loss);
-        let continued = crate::score_base(&model, &sets, &opts, true).expect("score");
+        let continued = crate::score_base(&model, &sets, &opts, true, None).expect("score");
         assert_eq!(continued[0].base_loss, None, "a continued adapter's start is not the base");
     }
 

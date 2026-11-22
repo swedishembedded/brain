@@ -153,7 +153,7 @@ fn served_artifacts_have_the_trained_loss<T: ChatTrainer>(vocab: u32, write_base
     let lora = model::finetune::LoraRequest { rank: 4, alpha: 8.0, continue_from: None, base: &f32_base, modules_to_save: &[] };
     let mut train = model::finetune::CausalLmFit { dir: &prepared, opts: &opts, out: None, control: Some(model::FitControl::default()) };
     let held_out = [prepared.as_path()];
-    let mut scored = model::finetune::ScoredFit::new(&mut train, &held_out, &opts, false);
+    let mut scored = model::finetune::ScoredFit::new(&mut train, &held_out, &opts, false, None);
     let (_, trained) = T::train_lora(&base, &lora, &opts, &mut scored).unwrap_or_else(|e| panic!("{}: {e}", T::LORA_BASES.model));
     let set = scored.into_scored().pop().expect("one held-out set");
     let (base_loss, tuned_loss) = (f64::from(set.base_loss.expect("scored before")), f64::from(set.tuned_loss.expect("scored after")));
@@ -173,7 +173,7 @@ fn served_artifacts_have_the_trained_loss<T: ChatTrainer>(vocab: u32, write_base
     // A full fine-tune's artifact is a checkpoint: opened as the engine's base, it serves what its trainer measured.
     let trained_base = dir.path().join("full.safetensors");
     let mut train = model::finetune::CausalLmFit { dir: &prepared, opts: &opts, out: Some(&trained_base), control: Some(model::FitControl::default()) };
-    let mut scored = model::finetune::ScoredFit::new(&mut train, &held_out, &opts, false);
+    let mut scored = model::finetune::ScoredFit::new(&mut train, &held_out, &opts, false, None);
     T::train_full(&base, &opts, OptimizerState::HostOffload, &mut scored).unwrap_or_else(|e| panic!("{model}: full fine-tune: {e}"));
     let full_loss = f64::from(scored.into_scored().pop().expect("one held-out set").tuned_loss.expect("scored after"));
     let served_full = model::finetune::served_loss::<T>(&trained_base, &f32_base, None, &prepared, &opts).expect("a serving engine").unwrap_or_else(|e| panic!("{model}: {e}"));

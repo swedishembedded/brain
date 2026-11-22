@@ -135,6 +135,12 @@ impl DataParallel {
         self.group.world_size()
     }
 
+    /// Rank 0's `words` on every rank of the group (what the other ranks pass is ignored): how a result one rank
+    /// computed for all of them is shared. Every rank calls it at the same point.
+    pub(crate) fn share_from_root(&self, words: &[u64]) -> Result<Vec<u64>> {
+        model::broadcast_words(&*self.group, self.rank, words, 0).map_err(|e| Error::Backend(format!("sharing rank 0's result: {e}")))
+    }
+
     /// The gradient group a trainer's fit loop reduces over.
     pub(crate) fn grad_sync(&self) -> model::GradSync<'_> {
         let checkpoint = self.job.as_ref().map(|(job, plan)| model::CheckpointIdentity { job, plan });

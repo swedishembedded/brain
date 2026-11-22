@@ -567,11 +567,12 @@ pub fn finetune_lora_scored_tuned(
     let m = build_lora_model(base, opts, rank, alpha, tuning, resume_from, run)?;
     let (train_set, val, bcfg, _vocab, itos) = model::load_dataset_with_images(dir, opts)?;
     crate::vision_sft::attach_for_dataset(&m, base, dir)?;
-    let mut scored = model::score_base(&m, held_out, opts, resume_from.is_some())?;
+    let sync = control.grad_sync;
+    let mut scored = model::score_base(&m, held_out, opts, resume_from.is_some(), sync.as_ref())?;
     let obj = model::causal_lm_examples::<Qwen35>(train_set, val, bcfg, itos);
     let (report, trained) = model::fit_controlled(m, obj, opts, None, control)?;
     if !report.interrupted {
-        model::score_tuned(&trained, held_out, opts, &mut scored)?;
+        model::score_tuned(&trained, held_out, opts, &mut scored, sync.as_ref())?;
     }
     Ok((report, trained, scored))
 }

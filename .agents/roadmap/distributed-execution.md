@@ -833,6 +833,15 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         `a_rank_that_fails_alone_mid_run_fails_the_run_at_once_with_its_reason`
         (host path on the CPU suite, NCCL on cards), `netcollective`
         `a_rank_that_aborts_fails_every_peer_at_once_with_its_reason`.
+        The held-out sets are scored once (2026-11-22): before and after the
+        run, rank 0 scores them and broadcasts the result as exact words
+        (`model::broadcast_words`; the SDK's separate scorer through
+        `agreed_score`, the in-process scorers through
+        `model::agreed_scores`), unless the parameters are sharded, when
+        every rank runs the forward and rank 0's numbers are agreed; a rank 0
+        that cannot score fails the others instead of leaving them waiting.
+        Tests: `model` `score::agreed_tests`, `sdk`
+        `agreed_score_tests`.
         Residency half (2026-11-21): `ResidentModel::cards(key)` (default 1) and
         `activate_cards(key, &[Device])` make a claim of "any N cards with
         room" (`ResidencyManager::claim_cards`, `manager/cards.rs`): planned

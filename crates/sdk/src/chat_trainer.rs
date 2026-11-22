@@ -257,8 +257,10 @@ fn lora<T: ChatTrainer + 'static>(job: LoraJob<'_>, control: FitControl<'_>) -> 
         return Err(unsupported("scoring held-out sets before and after the run"));
     }
     let continuing = job.lora.continue_from.is_some();
-    fn run<T: ChatTrainer + 'static, F: ModelFit>(job: &LoraJob<'_>, inner: &mut F, continuing: bool) -> std::io::Result<(FitReport, Vec<model::ScoredSet>, SaveAdapter)> {
-        let mut scored = ScoredFit::new(inner, job.held_out, job.opts, continuing);
+    // The group the run reduces over, when it is a rank of one: the held-out sets are scored once and shared.
+    let sync = control.grad_sync;
+    fn run<T: ChatTrainer + 'static, F: ModelFit>(job: &LoraJob<'_>, inner: &mut F, continuing: bool, sync: Option<model::GradSync<'_>>) -> std::io::Result<(FitReport, Vec<model::ScoredSet>, SaveAdapter)> {
+        let mut scored = ScoredFit::new(inner, job.held_out, job.opts, continuing, sync);
         let (report, trained) = T::train_lora(job.base, &job.lora, job.opts, &mut scored)?;
         let sets = scored.into_scored();
         let save: SaveAdapter = Box::new(move |path, lineage| T::save_adapter(&trained, path, lineage));
@@ -267,12 +269,12 @@ fn lora<T: ChatTrainer + 'static>(job: LoraJob<'_>, control: FitControl<'_>) -> 
     match job.policy_gradient {
         Some(config) => {
             let mut fit = PolicyGradientFit::new(job.dir, config, job.opts, control);
-            let (report, scored, save) = run::<T, _>(&job, &mut fit, continuing)?;
+            let (report, scored, save) = run::<T, _>(&job, &mut fit, continuing, sync)?;
             Ok(LoraOutcome { report, scored, policy_gradient: Some(fit.into_stats().unwrap_or_default()), save })
         }
         None => {
             let mut fit = CausalLmFit { dir: job.dir, opts: job.opts, out: None, control: Some(control) };
-            let (report, scored, save) = run::<T, _>(&job, &mut fit, continuing)?;
+            let (report, scored, save) = run::<T, _>(&job, &mut fit, continuing, sync)?;
             Ok(LoraOutcome { report, scored, policy_gradient: None, save })
         }
     }

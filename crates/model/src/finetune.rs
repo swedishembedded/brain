@@ -93,13 +93,15 @@ pub struct ScoredFit<'a, F> {
     held_out: &'a [&'a Path],
     opts: &'a FitOpts,
     continuing: bool,
+    sync: Option<crate::GradSync<'a>>,
     scored: Vec<crate::ScoredSet>,
 }
 
 impl<'a, F: ModelFit> ScoredFit<'a, F> {
-    /// Score `held_out` around the run `inner` performs.
-    pub fn new(inner: &'a mut F, held_out: &'a [&'a Path], opts: &'a FitOpts, continuing: bool) -> ScoredFit<'a, F> {
-        ScoredFit { inner, held_out, opts, continuing, scored: Vec::new() }
+    /// Score `held_out` around the run `inner` performs; in a data-parallel run (`sync`, the group the run reduces
+    /// over) rank 0 scores and every rank gets its numbers ([`crate::score_base`]).
+    pub fn new(inner: &'a mut F, held_out: &'a [&'a Path], opts: &'a FitOpts, continuing: bool, sync: Option<crate::GradSync<'a>>) -> ScoredFit<'a, F> {
+        ScoredFit { inner, held_out, opts, continuing, sync, scored: Vec::new() }
     }
 
     /// One score per held-out set, in the order given (the tuned loss is `None` for an interrupted run).
@@ -110,10 +112,10 @@ impl<'a, F: ModelFit> ScoredFit<'a, F> {
 
 impl<F: ModelFit> ModelFit for ScoredFit<'_, F> {
     fn fit<M: Model>(&mut self, model: M) -> std::io::Result<(FitReport, M)> {
-        self.scored = crate::score_base(&model, self.held_out, self.opts, self.continuing)?;
+        self.scored = crate::score_base(&model, self.held_out, self.opts, self.continuing, self.sync.as_ref())?;
         let (report, model) = self.inner.fit(model)?;
         if !report.interrupted {
-            crate::score_tuned(&model, self.held_out, self.opts, &mut self.scored)?;
+            crate::score_tuned(&model, self.held_out, self.opts, &mut self.scored, self.sync.as_ref())?;
         }
         Ok((report, model))
     }
