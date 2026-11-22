@@ -163,6 +163,50 @@ fn the_e4m3_weight_is_within_a_sixteenth_of_the_exact_decoded_weight() {
     assert!(worst <= 1.0 / 16.0, "worst relative error {worst}");
 }
 
+/// The decode-batch `mma.sync` builds (the E4M3 `mmae*` and the bf16 `mma*`) repeat bit for bit: their K-slices meet in shared
+/// memory in a fixed order. With shared-memory atomics the slices landed in a varying order, and the same served decode gave
+/// different logits from launch to launch.
+#[test]
+fn the_mma_builds_repeat_bit_for_bit() {
+    let gpu = gpu_core::testgpu::dev(&[]);
+    if !gpu.caps().arch.compute_capability.is_some_and(|cc| cc >= (8, 9)) || gpu.kind() != "cuda" || !gpu.has_fused(Fused::MatmulNvfp4MmaE32) {
+        return brain_testutil::skip_unavailable("the NVFP4 mma builds need a CUDA device of compute capability 8.9 or more");
+    }
+    let mut r = Lcg::new(20261122);
+    let (k, n) = (5120usize, 300usize);
+    let w = upload_u32(&gpu, &(0..n * k / 8).map(|_| r.next_u32()).collect::<Vec<_>>());
+    let s = upload_u32(&gpu, &words(&(0..n * k / 16).map(|_| 0x30 + (r.next_u32() % 0x20) as u8).collect::<Vec<_>>()));
+    let repeat = |which: Fused, m: usize, bufs: &[&backend_api::DeviceBuffer], params: &[u32], y: &backend_api::DeviceBuffer| {
+        let mut first: Option<Vec<u32>> = None;
+        for launch in 0..24 {
+            gpu.write_f32(y, &vec![f32::NAN; m * n]);
+            let step = gpu.fused_step(which, bufs, params).expect("served shape");
+            gpu.submit(&[], &[step]);
+            gpu.poll_wait();
+            let bits: Vec<u32> = gpu.read(y, m * n).iter().map(|v| v.to_bits()).collect();
+            assert!(bits.iter().all(|b| f32::from_bits(*b).is_finite()), "{which:?} m={m}: an output was not written");
+            match &first {
+                None => first = Some(bits),
+                Some(f) => assert!(f == &bits, "{which:?} m={m}: launch {launch} differs from the first"),
+            }
+        }
+    };
+    for (m, e4m3, bf16) in [(8usize, Fused::MatmulNvfp4MmaE8, Fused::MatmulNvfp4Mma8), (16, Fused::MatmulNvfp4MmaE16, Fused::MatmulNvfp4Mma16), (32, Fused::MatmulNvfp4MmaE32, Fused::MatmulNvfp4Mma32)] {
+        let xq = upload_u32(&gpu, &(0..m * k / 4).map(|_| 0x3838_3838u32 ^ (r.next_u32() & 0x0707_0707)).collect::<Vec<_>>());
+        let sx = gpu.storage_init("sx", &(0..m).map(|i| 0.01 + i as f32 * 1e-3).collect::<Vec<_>>());
+        let xb = upload_u32(&gpu, &(0..m * k / 2).map(|_| 0x3f80_3f80u32 ^ (r.next_u32() & 0x007f_007f)).collect::<Vec<_>>());
+        let y = gpu.storage(m as u64 * n as u64);
+        repeat(e4m3, m, &[&xq, &w, &s, &sx, &y], &[m as u32, k as u32, n as u32, 0.0071f32.to_bits()], &y);
+        repeat(bf16, m, &[&xb, &w, &s, &y], &[m as u32, k as u32, n as u32, 0, 0, 0.0071f32.to_bits(), 0, 0], &y);
+    }
+    if gpu.has_fused(Fused::MatmulNvfp4Mma64) {
+        let m = 64;
+        let xb = upload_u32(&gpu, &(0..m * k / 2).map(|_| 0x3f80_3f80u32 ^ (r.next_u32() & 0x007f_007f)).collect::<Vec<_>>());
+        let y = gpu.storage(m as u64 * n as u64);
+        repeat(Fused::MatmulNvfp4Mma64, m, &[&xb, &w, &s, &y], &[m as u32, k as u32, n as u32, 0, 0, 0.0071f32.to_bits(), 0, 0], &y);
+    }
+}
+
 /// Median-free minimum of device-event times of `Fused::MatmulNvfp4Wgmma` and, where it serves, the 64-row `mma` build, against the best FP8 candidate,
 /// at the 27B's MLP and head shapes. Weights are cycled past the L2 for the streaming row counts. Run with `--ignored --nocapture`.
 #[test]

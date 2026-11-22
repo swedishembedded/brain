@@ -110,19 +110,25 @@ __device__ __forceinline__ void brain_matmul_nvfp4_mmae_body(const unsigned int*
         }
     }
     __syncthreads();
-    // D fragment: c0, c1 (row g, columns 2 t, 2 t + 1), c2, c3 (row g + 8): the K-slices' partial sums add in shared memory.
+    // D fragment: c0, c1 (row g, columns 2 t, 2 t + 1), c2, c3 (row g + 8): the K-slices' partial sums add in shared memory
+    // in slice order, one slice per turn (within a slice every element has one owner), so a product repeats bit for bit;
+    // atomics summed them in whatever order they landed.
+    for (unsigned int turn = 0; turn < static_cast<unsigned int>(KS); ++turn) {
+        if (ks == turn) {
 #pragma unroll
-    for (int ti = 0; ti < RT; ++ti) {
+            for (int ti = 0; ti < RT; ++ti) {
 #pragma unroll
-        for (int j = 0; j < NT; ++j) {
+                for (int j = 0; j < NT; ++j) {
 #pragma unroll
-            for (int c = 0; c < 4; ++c) {
-                const unsigned int r = rw * (RT * 16u) + ti * 16u + g + (c >> 1) * 8u, a = 8u * j + 2u * t + (c & 1);
-                if (a < m) { atomicAdd(&accs[r][a], acc[ti][j][c]); }
+                    for (int c = 0; c < 4; ++c) {
+                        const unsigned int r = rw * (RT * 16u) + ti * 16u + g + (c >> 1) * 8u, a = 8u * j + 2u * t + (c & 1);
+                        if (a < m) { accs[r][a] += acc[ti][j][c]; }
+                    }
+                }
             }
         }
+        __syncthreads();
     }
-    __syncthreads();
     for (unsigned int i = threadIdx.x; i < static_cast<unsigned int>(ROWS) * m; i += THREADS) {
         const unsigned int r = i % ROWS, a = i / ROWS;
         const unsigned int row = blockIdx.x * ROWS + r;

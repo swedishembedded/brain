@@ -828,9 +828,18 @@ Scope: Running one training job as ranks across machines, and serving one model 
   in one process. Test on cards: `gdn_mixer_tc`
   `the_tensor_core_backward_repeats_bit_for_bit` (16 runs of the layer, every
   output and gradient compared bitwise; fails at the first repeat before).
-  Open: the NVFP4 decode products (`matmul_nvfp4_mmae`, `fp8_nvfp4_gemv`)
-  meet their K-slices with shared atomics, so NVFP4 serving is not
-  bit-repeatable.
+  The NVFP4 decode products (`matmul_nvfp4_mmae8/16/32`,
+  `matmul_nvfp4_mma8/16/32/64` in `fp8_nvfp4_gemv.cu`) met their eight
+  K-slices with shared atomics too; they now add one slice per turn in slice
+  order (2026-11-22). Device time, one GH200, min of 12 launches at the 27B's
+  shapes, before -> after (us): gate/up mmae32 111.8 -> 71.2, mma32 141.5 ->
+  102.7, mma64 252.1 -> 178.8; lm_head mmae32 1165 -> 771, mma64 2521 -> 1790;
+  m=8 unchanged within the run-to-run spread (down mmae8 36-39 -> 39-44, lm_head
+  mmae8 358-384 -> 369-382). No CUDA kernel now holds an atomic: `kernels-cuda`
+  `no_kernel_combines_partial_sums_with_atomics` (fails on the old sources)
+  and gpu-core `the_mma_builds_repeat_bit_for_bit` (24 launches a build, every
+  build; it did not catch the old kernels in one isolated process, the
+  source gate does).
 - **Is the 4-card loss collapse a wrong gradient? No (2026-11-22, n442,
   4 GH200, served `full_train`, Qwen3-4B, the same 256 records, seed 7,
   `max_block` 512, lr 1e-6, brain c25ea1f69 + this change).** The run above

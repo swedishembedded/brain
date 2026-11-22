@@ -16,9 +16,9 @@ row and column sums of the mask have slots of their own. 1 KiB more shared memor
 
 **How to apply:** a kernel on a training path that combines partials uses a fixed-order reduction (per-producer
 slots, then an ordered sum; a warp shuffle tree; a block reduction indexed by warp), never `atomicAdd` on floats.
-`grep 'atomicAdd' crates/kernels-cuda/cu/` before claiming a path repeatable; the NVFP4 decode products
-`matmul_nvfp4_mmae.cu` and `fp8_nvfp4_gemv.cu` still meet their K-slices with shared atomics (a served NVFP4 decode is
-therefore not bit-repeatable). Repeatability is tested by running the same inputs many times and comparing bits
+`kernels-cuda` `no_kernel_combines_partial_sums_with_atomics` refuses any catalogued kernel with an atomic (the NVFP4
+decode products `matmul_nvfp4_mmae*` and `matmul_nvfp4_mma*` met their eight K-slices with shared atomics too until
+2026-11-22; they now add one slice per turn, which also removed the contention: 30-40% faster at 32 rows). Repeatability is tested by running the same inputs many times and comparing bits
 (`gdn_mixer_tc` `the_tensor_core_backward_repeats_bit_for_bit` failed at its first repeat before the fix).
 
 ## Evidence (2026-11-22, n442, 4 GH200)

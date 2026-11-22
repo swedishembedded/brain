@@ -5753,6 +5753,17 @@ pub fn check_table(table: &[CudaKernel]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    /// No kernel combines partial sums with atomics: a float atomic adds in the order its contributions land, which varies
+    /// from launch to launch, so a kernel that used one would make a served answer or a training step differ between two
+    /// runs of one binary (knowledge 567). Partials meet in a fixed order instead (per-producer slots summed in order, one
+    /// producer per turn, a shuffle tree, a block reduction indexed by warp).
+    #[test]
+    fn no_kernel_combines_partial_sums_with_atomics() {
+        let atomic = ["atomicAdd", "atomicSub", "atomicMax", "atomicMin", "atomicExch", "atomicCAS", "\"red.", " red.", "atom.global", "atom.shared"];
+        let offenders: Vec<(&str, &str)> = ALL.iter().flat_map(|k| atomic.iter().filter(|a| k.src.contains(**a)).map(|a| (k.name, *a))).collect();
+        assert!(offenders.is_empty(), "kernels with atomics, whose results are not repeatable: {offenders:?}");
+    }
+
     #[test]
     fn the_staged_nvfp4_gemv_source_and_the_rust_constant_agree_on_the_row_it_stages() {
         let k = get("matmul_nvfp4_gemv_m1_xs").expect("registered");
