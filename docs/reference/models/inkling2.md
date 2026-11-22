@@ -71,6 +71,44 @@ the request path from image parts to them does not, so a request carrying an
 image is refused rather than answered without it), adapters, and the optional
 `mtp.safetensors` drafter.
 
+## Training
+
+Inkling 2 trains through the generic fine-tuners (`brain finetune`, the SDK's
+`ChatFineTune`, `PreferenceFineTune`, `ChatFullFineTune` and policy gradient;
+the architecture is read from the checkpoint's `config.json`, or named with
+`.arch("inkling2")`):
+
+```bash
+# LoRA over the release as published (QLoRA: the expert banks stay NVFP4/MXFP8, never dequantized)
+brain finetune thinkingmachines/Inkling-2-Mini --lora 16 --dataset train.jsonl --out runs/sft
+# DPO (also --loss ipo|simpo|orpo), KTO, distillation
+brain finetune thinkingmachines/Inkling-2-Mini --lora 16 --objective preference --dataset pairs.jsonl --out runs/dpo
+# GRPO-family policy gradient on rollout records (reward, group)
+brain finetune thinkingmachines/Inkling-2-Mini --lora 16 --objective policy-gradient --dataset rollouts.jsonl --out runs/pg
+```
+
+- The adapter covers every site: the attention's q, k, v, o, output-gate,
+  relative-state and sink linears, the depth, readout and message queries and the
+  message gates (as `W + s B A` pairs over those small matrices), and one pair
+  per expert over the stacked expert banks, applied on the rows routed to it.
+  The dense linears are held in bf16 as published (`--base-format bf16`) or
+  widened to f32 (`--base-format f32`); the router always routes in f32.
+- Every layer visit is recomputed from its saved input in the backward (the
+  core's three passes accumulate into one set of gradients), so activation
+  memory is the visits' input rows and the block states.
+- MoE routing replay: a rollout's recorded expert choices are forced on the
+  trainer's forward (`GrpoOptions::routing_replay`), so a policy gradient trains
+  the function that sampled.
+- Packed rows (several documents per row, attention and every convolution
+  state restarting at each document) and image-text rows (the vision tower's
+  features spliced at the image placeholders, the tower frozen or adapted) train
+  too.
+- A full fine-tune trains every weight in f32 for a checkpoint whose experts are
+  stored as floats; the released 26B is refused for it by name (it would need a
+  streamed, sharded or expert-parallel full fine-tune).
+- A trained adapter is not served yet (the engine holds no adapter bank, and the
+  expert pairs cannot be folded into the quantized banks).
+
 The example `samples/python/llm/inkling2/inkling2.py` asks one question at a low
 and a high reasoning effort over D-Bus, OpenAI-compatible or Anthropic-compatible
 HTTP.
