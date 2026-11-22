@@ -31,6 +31,12 @@ Two dumps, both driven through the released transformers reference
          router choices and final logits (top-k for every position, full rows
          for a few).
 
+  real-f32  inkling2_dump_reference.py real-f32 <checkpoint dir> [out_dir]
+         The same dump with the reference loaded in f32 (experts dequantized to
+         f32, every activation f32; about 110 GB of host memory). Against
+         `real` it is the reference's own bf16-versus-f32 spread, which sets the
+         thresholds a port running f32 activations is held to.
+
 Every tensor is stored as f32 (integers cast exactly). The topology (logical
 visit -> physical layer, pass, attention kind, reference cache slot) is written
 to `manifest.json`.
@@ -540,13 +546,13 @@ def branch_stats(g, plan, tc):
 # --------------------------------------------------------------------------
 # real
 # --------------------------------------------------------------------------
-def dump_real(ckpt_dir, out):
+def dump_real(ckpt_dir, out, dtype=torch.bfloat16):
     from transformers import AutoTokenizer, Inkling2LoopForConditionalGeneration
 
     os.makedirs(out, exist_ok=True)
     tok = AutoTokenizer.from_pretrained(ckpt_dir)
     model = Inkling2LoopForConditionalGeneration.from_pretrained(
-        ckpt_dir, dtype=torch.bfloat16, attn_implementation="eager"
+        ckpt_dir, dtype=dtype, attn_implementation="eager"
     ).eval()
     tc = model.config.text_config
     plan = visit_plan(tc)
@@ -576,7 +582,7 @@ def dump_real(ckpt_dir, out):
     manifest = {
         "model": "inkling2",
         "kind": "real",
-        "dtype": "bfloat16 (experts dequantized by the reference, activations unquantized)",
+        "dtype": f"{str(dtype).removeprefix('torch.')} (experts dequantized by the reference, activations unquantized)",
         "attn_implementation": "eager",
         "prompts": prompts,
         "topk": REAL_TOPK,
@@ -616,6 +622,8 @@ def main():
         dump_tiny(args[1] if len(args) == 2 else os.path.join(TESTDATA, "tiny"))
     elif args[:1] == ["real"] and len(args) in (2, 3):
         dump_real(args[1], args[2] if len(args) == 3 else os.path.join(TESTDATA, "real"))
+    elif args[:1] == ["real-f32"] and len(args) in (2, 3):
+        dump_real(args[1], args[2] if len(args) == 3 else os.path.join(TESTDATA, "real-f32"), dtype=torch.float32)
     else:
         sys.exit(__doc__)
 

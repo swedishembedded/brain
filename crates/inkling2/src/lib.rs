@@ -15,7 +15,9 @@
 //! attention, the message gate, the gated expert activation, microscaled expert banks).
 
 pub mod config;
+pub mod model;
 pub mod names;
 pub mod vision;
 
 pub use config::{Family, Inkling2Config, LayerKind};
+pub use model::{kernels, Inkling2, Probe};

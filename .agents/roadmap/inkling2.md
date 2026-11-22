@@ -515,12 +515,40 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
   - Tiny golden at every logical visit on cpu, wgpu, Vulkan and CUDA.
   - Real-weight parity on the GH200 for the hidden state per visit, router agreement and
     final logits, with thresholds set from the reference's own bf16-vs-f32 spread.
+  - Done (2026-11-22): `inkling2::model` - `Inkling2::load(ops, dir)` (header held to the name map first),
+    `forward(tokens)` (logits `[T, valid_vocab]`, capped), `forward_probed` with a `Probe`, `kernels()`,
+    `visit_plan(cfg)` over `model::looped`. One retained-state slot per block, the first core block (the prelude's
+    output) shared by every pass; `flash_ext` with window, sink and distance bias, `tau` scaling q and the bias on
+    full layers; `short_conv` reading the published depthwise weights, the dynamic taps' `weight_proj` rows reordered
+    at load from `[kv head][tap]` to the `[tap][kv head]` the kernel reads; `message_gate`; `router_gate_sigmoid`
+    then a dense f32 bank (`expert_fwd_glu`) or the published NVFP4/MXFP8 `MicroBank`s (`gather` per slot,
+    `glu_act` softcap-sigmoid interleaved, `moe_group_combine` in ascending expert order, the reference's
+    accumulation order); `HeadTransform` for the cap and the valid rows. To run the NVFP4 banks on the CPU JIT,
+    `moe_nvfp4_gemv_gather` / `moe_nvfp4_grouped` now decode E2M1 in registers with one barrier (bit-identical
+    arithmetic; the workgroup lookup table is gone; the native CUDA twin is unchanged; GPU WGSL speed not
+    measured). Gates (CPU backend): `tests/it/tiny_parity.rs` - all 10 visits (in/out, block states, attention and
+    MoE inputs, messages, gated q/k/v/mlp, attention, convolutions and the state they leave, relative states,
+    router logits, choices and weights) and the logits within 5e-5 of each tensor's scale (measured at most
+    2.9e-5); `tests/it/real_parity.rs` - the released weights (about 25 GB resident, 5 min load, 45 s per prompt):
+    every visit's in/out and three full logit rows within 1/100 of the reference's own bf16-vs-f32 distance from
+    the f32 reference (measured 1/1000), router agreement with the f32 run at least the bf16 run's, the f32 run's
+    greedy token at every position. The f32 run is a new golden, `real-f32` (dumper mode of that name, about
+    110 GB); the bf16 run is up to 8e-2 of a visit's scale from it and shares down to 95.8% of its choices.
+    Finding: the tiny golden's core is one block, so its messages attend over the partial alone and do not pin
+    the (q, mlp)/(k, v) query packing; the real gate does (two states per stack).
+  - Left: both gates on wgpu, Vulkan and CUDA (they run there unchanged through `testgpu::dev`; no device was
+    free); a cached prefill and decode (the tiny golden's `decode*` and `prefill.*` keys, I3.1); the grouped expert
+    product for prefill (`moe_route_*`); training (I4.3).
 - **I2.4** Decide the parity target for the expert precision.
   - Default: dequantized weights with unquantized activations, which is the HF reference.
   - Opt-in tier: the vendor's activation quantization (NVFP4 per-token "four over six" and
     MXFP8), measured as KL and top-1 against the bf16 reference.
 
   Precision is a metric, so the low-precision fast path is opt-in.
+  - Done (2026-11-22): the default is the reference numerics - expert banks read as published (NVFP4, MXFP8),
+    activations unquantized f32 - and it is gated against the f32 reference (I2.3).
+  - Left: the vendor's activation-quantized tier (NVFP4 per-token "four over six", MXFP8 activations) is not built;
+    it is a later opt-in item, measured as KL and top-1 against the bf16 reference.
 
 ### Phase 3: serving
 

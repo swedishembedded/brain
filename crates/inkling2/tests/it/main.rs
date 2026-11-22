@@ -5,4 +5,6 @@
 //! directory, environment variables): the others run beside it.
 
 mod layout;
+mod real_parity;
+mod tiny_parity;
 mod vision;
