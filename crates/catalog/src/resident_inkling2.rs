@@ -16,7 +16,8 @@
 //!   variable ([`qwen3::chat::template_params`]), tool calls and reasoning read back by the typed-message scanner. A
 //!   generation stops on the sampling eos `generation_config.json` declares (which the template also ends a reply
 //!   with), never on the message boundary that closes the thinking message before an answer.
-//! - **K/V** rows are f32 unless `--kv-cache bf16` asks for half the bytes per token ([`KV_TIERS`]).
+//! - **K/V** rows are f32 unless `--kv-cache bf16` asks for half the bytes per token, and `--linear-activations declared`
+//!   gives the expert products the release's declared activation quantization ([`INKLING2_POLICY`]).
 //! - **Capacity**: one sequence holds at most `ctx` tokens; the pool holds `max_batch` such sequences in every full
 //!   visit's planes, one state row (40 windowed rings and every visit's convolution states) per running sequence and
 //!   as many snapshot rows for cached prompts. [`Inkling2Resident::estimate`] is the weights, that pool and the
@@ -57,9 +58,26 @@ pub const DEFAULT_CTX: u32 = 16384;
 pub const BLOCK: u32 = 16;
 /// Prompt rows of one prefill pass.
 pub const PREFILL_CHUNK: u32 = 512;
-/// The K/V tiers the engine keeps rows in (`--kv-cache`): f32, the reference numerics and the default, or bf16, half
-/// the bytes per token (its distance from f32 is measured in the engine's tests and recorded in the inkling2 ledger).
-pub const KV_TIERS: [KvTier; 2] = [KvTier::F32, KvTier::BF16];
+/// What the Inkling 2 resident honours of a [`model::policy::ServePolicy`]: K/V rows in f32 (the reference numerics,
+/// the default) or bf16 (half the bytes per token; its distance from f32 is measured in the engine's tests and recorded
+/// in the inkling2 ledger), and the expert products' activation operand (`--linear-activations declared`: the
+/// release's declared W4A4/W8A8 numerics; the model refuses `bf16`/`e4m3`, for which it has no product, by name).
+/// The weights are served as published, so no weight format is chosen.
+pub const INKLING2_POLICY: model::policy::PolicySupport = model::policy::PolicySupport {
+    model: "inkling2",
+    weights: &[],
+    weight_rules: false,
+    kv_cache: &["f32", "bf16"],
+    gemm: false,
+    fuse_norm: false,
+    kv_calibration: false,
+    exact_decode: false,
+    act_precision: false,
+    gdn_state: false,
+    linear_activations: true,
+    sparse_attention: false,
+    draft_model: false,
+};
 
 const SUMMARY: &str = "text generation (Inkling 2: a looped mixture-of-experts decoder with depth-attention residuals, sliding and full attention, served as released; typed-message chat with reasoning and tool calls; continuous batching with prompt-prefix reuse)";
 
@@ -89,13 +107,15 @@ pub struct Inkling2Resident {
     dir: PathBuf,
     cfg: Inkling2Config,
     opts: EngineOptions,
+    /// The expert products' activation operand (`--linear-activations`).
+    linear_activations: model::policy::LinearActivations,
 }
 
 impl Inkling2Resident {
     /// The resident for the directory `dir` (`config.json`, `hf_quant_config.json`, the safetensors, `tokenizer.json`,
     /// the chat template) under the model id `id`: `sizing.ctx` caps a sequence when it was asked for
     /// ([`DEFAULT_CTX`] otherwise, never past the model's positions), `sizing.max_batch` sequences run at once, K/V rows
-    /// are kept at `sizing.kv_cache` (one of [`KV_TIERS`]; f32 unless asked).
+    /// are kept at `sizing.kv_cache` and the expert products take `sizing.linear_activations` ([`INKLING2_POLICY`]).
     pub fn from_hf_dir(dir: &str, id: &str, sizing: Qwen35Sizing) -> Result<Inkling2Resident, String> {
         let path = Path::new(dir);
         let cfg = Inkling2Config::from_dir(path)?;
@@ -105,11 +125,9 @@ impl Inkling2Resident {
             }
         }
         let sizing = sizing.sanitized();
+        let policy = model::policy::ServePolicy { kv_cache: sizing.kv_cache, linear_activations: sizing.linear_activations, ..Default::default() };
+        INKLING2_POLICY.check(&policy).map_err(|e| format!("{id}: {e}"))?;
         let kv_tier = sizing.kv_cache.unwrap_or(KvTier::F32);
-        if !KV_TIERS.contains(&kv_tier) {
-            let offered: Vec<&str> = KV_TIERS.iter().map(|t| t.as_str()).collect();
-            return Err(format!("{id}: KV cache {} is not supported; supported: {}", kv_tier.as_str(), offered.join(", ")));
-        }
         let ctx = if sizing.ctx_explicit { sizing.ctx } else { DEFAULT_CTX };
         let ctx = u64::from(ctx).min(cfg.max_positions).max(u64::from(BLOCK)) as u32;
         let live = sizing.max_batch.max(1);
@@ -117,7 +135,7 @@ impl Inkling2Resident {
         let opts = EngineOptions { kv_tier, sizing: VisitPoolSizing { block_size: BLOCK, num_blocks: blocks, live_rows: live, snapshot_rows: live, undo_rows: false }, max_seq_len: ctx as usize, prefill_chunk: PREFILL_CHUNK };
         // The layout is held to the engine's own check now, so a configuration it cannot serve is refused at the scan.
         Engine::layout(&cfg, kv_tier)?;
-        Ok(Inkling2Resident { id: id.to_string(), dir: path.to_path_buf(), cfg, opts })
+        Ok(Inkling2Resident { id: id.to_string(), dir: path.to_path_buf(), cfg, opts, linear_activations: sizing.linear_activations.unwrap_or_default() })
     }
 
     /// The engine sizing this resident serves at.
@@ -220,10 +238,12 @@ impl ResidentModel for Inkling2Resident {
                 qwen3::chat::parse_request_as(tok, &text_format, inv)
             }),
         );
-        let (dir, opts) = (self.dir.clone(), self.opts);
+        let (dir, opts, linear_activations) = (self.dir.clone(), self.opts, self.linear_activations);
         let live = opts.sizing.live_rows as usize;
         on_device(device, move || -> Result<Box<dyn Instance>, String> {
-            let engine = Engine::open(inkling2::serve::device_ops()?, &dir, opts)?;
+            let mut ops = inkling2::serve::device_ops()?;
+            ops.set_linear_activations(linear_activations);
+            let engine = Engine::open(ops, &dir, opts)?;
             let (Some(v), Some((tiling, image_token)), Some(tok)) = (vision, processor, image_tok) else {
                 return Ok(Box::new(ScheduledInstance::new(text, Scheduler::new(engine, live), live)));
             };

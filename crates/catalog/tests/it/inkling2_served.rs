@@ -157,6 +157,12 @@ fn the_kv_cache_choice_sizes_the_pool_and_an_unoffered_tier_is_refused() {
         let e = Inkling2Resident::from_hf_dir(dir.to_str().unwrap(), "local/inkling2", sized(Some(refused))).err().expect("refused");
         assert!(e.contains(refused.as_str()) && e.contains("bf16"), "the refusal names the tier and what is offered: {e}");
     }
+    // The activation operand reaches the model: `declared` on a checkpoint that declares no activation quantization is
+    // refused by name when the model loads, never served as the reference numerics.
+    let declared = Qwen35Sizing { linear_activations: Some(model::policy::LinearActivations::Declared), ..sized(None) };
+    let r = Inkling2Resident::from_hf_dir(dir.to_str().unwrap(), "local/inkling2", declared).expect("the policy is one the resident honours");
+    let e = gpu_core::devices::with_host_tier(|| r.activate(&InstanceKey::new("local/inkling2", "default"), Device::Cpu).err().expect("refused"));
+    assert!(e.contains("declares no activation quantization"), "{e}");
     gpu_core::devices::with_host_tier(|| {
         let mut instance = bf16.activate(&key, Device::Cpu).expect("the bf16 resident activates");
         let out = instance.run("generate", &ask("hi").set("max_new", json!(3)), &mut |_| {}).expect("served at bf16").outputs;

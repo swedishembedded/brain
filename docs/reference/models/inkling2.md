@@ -144,9 +144,10 @@ f32 activations: the reference implementation's numerics, which brain is
 parity-gated against. The release also declares the activation quantization
 its own runtime applies to each expert product (`required_activation_quantization`
 in `hf_quant_config.json`: NVFP4 with a per-token scale and the "four over six"
-block-scale rule on layers 0-19, MXFP8 on 20-23). In the library,
-`Inkling2::set_linear_activations(LinearActivations::Declared)` runs those
-numerics (the served model does not take `--linear-activations` yet); it is
+block-scale rule on layers 0-19, MXFP8 on 20-23). `brain serve
+--linear-activations declared` (in the library,
+`Inkling2::set_linear_activations(LinearActivations::Declared)`) runs those
+numerics in every product, while reading a prompt and while decoding; it is
 lower precision, so it is never the default. How far it moves the next-token
 distribution from the reference numerics (KL and top-1 agreement on the released
 checkpoint) is measured by the `activation_tier` test of `crates/inkling2`;

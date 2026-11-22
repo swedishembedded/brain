@@ -5,6 +5,7 @@
 //! directory, environment variables): the others run beside it.
 
 mod activation_tier;
+mod declared_tier;
 mod image_text;
 mod kv_precision;
 mod layout;

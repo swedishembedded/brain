@@ -118,11 +118,15 @@ pub struct Qwen35Sizing {
     /// The K/V tier asked for (`--kv-cache`); `None` keeps each resident's own default. A model-dir resident that
     /// offers a K/V choice (Inkling 2: f32 or bf16) serves it and refuses any other by name.
     pub kv_cache: Option<model::kv_tier::KvTier>,
+    /// The activation operand of quantized-weight products asked for (`--linear-activations`); `None` is `auto`. A
+    /// model-dir resident that declares it (Inkling 2: `declared`) serves it; the model refuses a value it has no
+    /// product for by name.
+    pub linear_activations: Option<model::policy::LinearActivations>,
 }
 
 impl Default for Qwen35Sizing {
     fn default() -> Self {
-        Qwen35Sizing { ctx: 4096, ctx_explicit: false, max_batch: 4, exact_decode: false, refused: false, kv_cache: None }
+        Qwen35Sizing { ctx: 4096, ctx_explicit: false, max_batch: 4, exact_decode: false, refused: false, kv_cache: None, linear_activations: None }
     }
 }
 
@@ -430,6 +434,7 @@ impl Qwen35ServeConfig {
             self.fp32.max_batch = b;
         }
         self.fp32.kv_cache = p.kv_cache;
+        self.fp32.linear_activations = p.linear_activations;
         let fp32 = QWEN35_FP32_POLICY.check(p);
         if let Err(e) = &fp32 {
             self.fp32_refused = Some(e.clone());
@@ -1006,6 +1011,11 @@ mod tests {
         assert!(cfg.fp32_refused.as_deref().unwrap().contains("brain checkpoint"));
         let sizing = cfg.fp32;
         assert_eq!((sizing.ctx, sizing.ctx_explicit, sizing.max_batch, sizing.kv_cache), (8192, true, 6, Some(model::kv_tier::KvTier::FP8)), "the model-dir residents sized by it get the context, batch and K/V choice all the same");
+        let mut p = model::policy::ServePolicy::default();
+        p.set("--linear-activations", "declared").unwrap();
+        let mut cfg = Qwen35ServeConfig::default();
+        let _ = cfg.apply_policy(&p);
+        assert_eq!(cfg.fp32.linear_activations, Some(model::policy::LinearActivations::Declared), "the activation operand reaches the model-dir sizing");
 
         let mut p = model::policy::ServePolicy::default();
         p.set("--gemm", "fp32").unwrap();
