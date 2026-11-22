@@ -92,12 +92,20 @@ fn full_fine_tune_cards_and_sharding_are_refused_at_the_door_with_the_reason() {
 }
 
 /// A resumable full fine-tune on two cards stopped part way continues on the same two cards, under each sharding of
-/// the optimizer state, to the weights the uninterrupted run writes, byte for byte, and keeps no state of any rank
+/// the optimizer state and of the parameters, to the weights the uninterrupted run writes, byte for byte, and keeps no state of any rank
 /// once complete; the same key on another layout is refused with both layouts' numbers.
 #[test]
 fn a_stopped_full_fine_tune_on_two_cards_resumes_to_the_uninterrupted_weights() {
     let rig = rig_qwen3_on("full-cards-resume", 16 << 30, &[0, 1], false);
-    for sharding in ["replicated", "gradients"] {
+    // Parameter sharding needs a resident build with bf16 gradients and a layer window.
+    for (sharding, precision) in [("replicated", None), ("gradients", None), ("parameters", Some("weights=bf16,grad=bf16,window=2"))] {
+        let params = |rig: &Rig, cards: u32, sharding: Option<&str>| {
+            let mut p = params(rig, cards, sharding);
+            if let Some(precision) = precision {
+                p["train_precision"] = json!(precision);
+            }
+            p
+        };
         let mut straight = params(&rig, 2, Some(sharding));
         straight["steps"] = json!(4);
         let straight = run_action(&rig, FULL_ACTION, &full_spec(), straight.clone(), &[], &Frames::default()).expect("the straight run").outputs;

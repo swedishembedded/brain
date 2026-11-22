@@ -1161,9 +1161,11 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         answers alone), `runs` `a_run_is_refused_on_another_layout_with_both_layouts`.
         Open: a server whose part completed while another server's did not
         record its completion leaves that one failing at the handshake on
-        a resubmission (a new key on every server is the way out);
-        parameter-sharded (ZeRO-3) served runs resume through the same
-        generations but have no served test yet.
+        a resubmission (a new key on every server is the way out).
+        Parameter-sharded (ZeRO-3) served runs resume the same way
+        (2026-11-22: the `full_cards` resume test also runs `parameters`
+        with `weights=bf16,grad=bf16,window=2`, cancelled after a commit and
+        resumed to byte-identical weights on CPU; no defect found).
 - [x] **C3 sharded training.** Optimizer state and gradient sharding over the dp
       group (reduce-scatter + all-gather), then parameter sharding; tensor
       parallelism inside a node over NVLink, sharded data parallelism across
