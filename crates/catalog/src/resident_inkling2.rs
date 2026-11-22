@@ -366,24 +366,13 @@ impl ResidentModel for Inkling2Resident {
         let adapters = self.adapters.clone();
         let live = opts.sizing.live_rows as usize;
         on_device(device, move || -> Result<Box<dyn Instance>, String> {
-            let mut ops = inkling2::serve::device_ops()?;
-            ops.set_linear_activations(linear_activations);
-            let mut engine = Engine::open(ops, &dir, opts)?;
-            if drafting == Drafting::Mtp {
-                engine.set_drafter(&dir)?;
-            }
+            let mut engine = open_engine(&dir, opts, linear_activations, drafting)?;
             if let Some(bank) = adapters.settings() {
                 // The `all` group over this checkpoint: its expert sites only when its banks are published microscaled.
                 let cfg = bank.bank_config(&engine.served_sites()).map_err(|e| format!("{id}: {e}"))?;
                 engine.enable_adapters(cfg).map_err(|e| format!("{id}: {e}"))?;
             }
-            let scheduler = |engine: Engine| {
-                let mut sched = Scheduler::new(engine, live);
-                if drafting == Drafting::Ngram {
-                    sched.set_drafter(Box::new(NgramDrafter::new(NGRAM_ORDER)));
-                }
-                sched
-            };
+            let scheduler = |engine: Engine| scheduler_of(engine, live, drafting);
             let (Some(v), Some((tiling, image_token)), Some(tok)) = (vision, processor, image_tok) else {
                 return Ok(Box::new(AdaptedInstance::new(text, scheduler(engine), live, adapters)));
             };
@@ -396,6 +385,39 @@ impl ResidentModel for Inkling2Resident {
             Ok(Box::new(AdaptedInstance::new(front, sched, live, adapters)))
         })?
     }
+}
+
+impl Inkling2Resident {
+    /// The served engine under the scheduler, on the current thread's device, built and sized exactly as
+    /// [`ResidentModel::activate`] builds it (K/V tier, pool, batch, drafter, expert activations), without the chat
+    /// front end or an adapter bank: what `brain perf` measures.
+    ///
+    /// # Errors
+    /// The checkpoint cannot be opened or its drafter loaded.
+    pub fn scheduler(&self) -> Result<Scheduler<Engine>, String> {
+        let engine = open_engine(&self.dir, self.opts, self.linear_activations, self.drafting)?;
+        Ok(scheduler_of(engine, self.opts.sizing.live_rows as usize, self.drafting))
+    }
+}
+
+/// The decoder of `dir` at `opts`, with the release's drafter when `drafting` names it.
+fn open_engine(dir: &Path, opts: EngineOptions, linear_activations: model::policy::LinearActivations, drafting: Drafting) -> Result<Engine, String> {
+    let mut ops = inkling2::serve::device_ops()?;
+    ops.set_linear_activations(linear_activations);
+    let mut engine = Engine::open(ops, dir, opts)?;
+    if drafting == Drafting::Mtp {
+        engine.set_drafter(dir)?;
+    }
+    Ok(engine)
+}
+
+/// `engine` under a scheduler of `live` running sequences, proposing with prompt lookup when `drafting` names it.
+fn scheduler_of(engine: Engine, live: usize, drafting: Drafting) -> Scheduler<Engine> {
+    let mut sched = Scheduler::new(engine, live);
+    if drafting == Drafting::Ngram {
+        sched.set_drafter(Box::new(NgramDrafter::new(NGRAM_ORDER)));
+    }
+    sched
 }
 
 impl AdapterHost for Inkling2Resident {

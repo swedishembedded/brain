@@ -71,6 +71,9 @@ OPTIONS
                           ouro:<checkpoint>        a looped decoder (HF dir or brain
                                                    checkpoint), KV pool and batch
                                                    planned as `brain serve` plans them
+                          inkling2:<dir>[:kvf32|:kvbf16]
+                                                   a pulled Inkling 2 directory,
+                                                   built as `brain serve` builds it
                           lfm:<weights>:<tok.json> the LFM2.5 encoder behind the
                                                    residency executor (unit: sequence)
                           flux2[:<W>x<H>x<steps>[:<precision>]]
@@ -116,7 +119,7 @@ OPTIONS
                         --weight-format` grammar: f32, bf16, f16, int8, or per-leaf like i8,out_proj=f32);
                         default: what `brain serve` serves - for qwen: the checkpoint's stored tier
                         (int8 only where it does not fit the card), for qwen35moe: int8
-  --max-batch <N>       the served engine's batch for a qwen:, qwen35: or qwen35moe: target (the `brain serve
+  --max-batch <N>       the served engine's batch for a qwen:, qwen35:, qwen35moe:, ouro: or inkling2: target (the `brain serve
                         --max-batch` setting); default: what `brain serve` chooses (32 for qwen:)
   --kernels             longctx: also profile each batch size's decode steps per kernel on
                         the device and roll the table up into phases (linear, experts,
@@ -742,8 +745,11 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
     if let Some(path) = spec.strip_prefix("ouro:") {
         return crate::perf_ouro::build(path, max_batch);
     }
+    if let Some(rest) = spec.strip_prefix("inkling2:") {
+        return crate::perf_inkling2::build(rest, max_batch);
+    }
     if max_batch.is_some() {
-        return Err("--max-batch sizes the served engine of a qwen:, qwen35:, qwen35moe: or ouro: target; this target takes no batch setting".to_string());
+        return Err("--max-batch sizes the served engine of a qwen:, qwen35:, qwen35moe:, ouro: or inkling2: target; this target takes no batch setting".to_string());
     }
     if let Some(shape) = spec.strip_prefix("qwen-synth:") {
         return build_qwen_synth(shape, workload, input_override, output_override, weight_format);
@@ -838,7 +844,7 @@ fn build_target(spec: &str, workload: &str, input_override: Option<usize>, outpu
     Err(format!(
         "unknown --target {spec:?} \
          (expected 'qwen-synth:<L>x<D>x<H>[xV][:kvf32]', 'qwen:<weights>[:kvf32]', \
-         'qwen35:<gguf>[:kvf32|:kvbf16|:kvint8]', 'qwen35moe:<gguf>[:kvf32|:kvbf16|:kvint8]', 'ouro:<checkpoint>', 'http:qwen-synth:<L>x<D>x<H>[xV]:<tokenizer.json>', 'http:qwen:<weights>:<tokenizer.json>', \
+         'qwen35:<gguf>[:kvf32|:kvbf16|:kvint8]', 'qwen35moe:<gguf>[:kvf32|:kvbf16|:kvint8]', 'ouro:<checkpoint>', 'inkling2:<dir>[:kvf32|:kvbf16]', 'http:qwen-synth:<L>x<D>x<H>[xV]:<tokenizer.json>', 'http:qwen:<weights>:<tokenizer.json>', \
          'lfm:<weights>:<tokenizer.json>', 'kronos:<tokenizer-dir>:<decoder-dir>', \
          'chronos2:<weights>', 'fincast:<weights>', 'timesfm3:<weights>', 'flux2[:<W>x<H>x<steps>[:<precision>]]', \
          'wan[:<frames>x<W>x<H>x<steps>]', 'ltxv[:<frames>x<W>x<H>x<steps>]', \
