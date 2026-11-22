@@ -76,9 +76,11 @@ included) through the shared scheduler, sized as `brain serve` sizes it: one seq
 positions, and the KV pool and the decode batch are planned from the first `--device` card's usable bytes (the
 batch at least `--max-batch`). Every running sequence decodes in one batched step.
 
-`inkling2:<dir>[:kvf32|:kvbf16]` measures a pulled Inkling 2 directory (the expert banks as published, NVFP4 and
-MXFP8) through the shared scheduler on the first card `--device` allows, built by the same code `brain serve` runs: f32
-K/V unless the suffix names bf16, a context of 16384 tokens and `--max-batch` sequences at once.
+`inkling2:<dir>[:ctx<N>][:kvf32|:kvbf16]` measures a pulled Inkling 2 directory (the expert banks as published, NVFP4
+and MXFP8) through the shared scheduler on the first card `--device` allows, built by the same code `brain serve` runs:
+f32 K/V unless the suffix names bf16, a context of 16384 tokens unless `:ctx<N>` caps it (`brain serve --ctx`; the
+pool holds `--max-batch` such contexts, so a short cap keeps a batched decode run small and a long one lets a 32k
+prompt in) and `--max-batch` sequences at once.
 
 `--smoke` shrinks a run to a few seconds, useful for a quick sanity check
 rather than a real measurement.
