@@ -1100,6 +1100,14 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         model and verb. Tests: concurrent stagers make one copy, a path
         outside the store is untouched, a digest mismatch fails and leaves
         nothing. Measured in Measured; the 16-rank gate is open.
+      - [x] A staged copy is its store entry (2026-11-22, knowledge #559): the
+        copy's marker names the entry it copies and a server's model scan reads
+        that entry from the copy, so `serve --checkpoint` over a staged base
+        serves it once, under the store id, and `--serve-adapters` offers its
+        adapters (before: two bases of one id, every adapter refused). Test:
+        `brain-cli` `serve_staged` (one served base, the adapter offered,
+        `/v1/models` equal with and without staging); Qwen3-4B on CPU lists the
+        base and the adapter identically plain and staged.
 - [ ] **C8 collective failure handling.** A communicator state machine
       (active, suspect, aborting, rebuilding) driven by op deadlines and async
       error polling; recovery is a job-level restart from the last committed

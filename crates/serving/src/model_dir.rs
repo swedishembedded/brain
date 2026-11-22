@@ -112,6 +112,9 @@ pub struct ScanSettings {
     /// The families whose models run in a supervised worker
     /// (`--worker-hosted`); `None` runs every model in this process.
     pub worker_hosting: Option<residency::supervised::WorkerHosting>,
+    /// Node-local copies of store entries (`--stage-models`) the scan reads instead of the entries they copy: a
+    /// copy is the entry, so its model is served once, under the entry's id, from the copy's files.
+    pub copies: Vec<brain_modelstore::stage::StagedEntry>,
 }
 
 /// What [`discover`] found.
@@ -150,7 +153,7 @@ fn catalog_served_families() -> std::collections::BTreeSet<&'static str> {
 pub fn discover(dir: &Path, settings: &ScanSettings) -> Discovered {
     let mut errors: Vec<DiscoveryError> = Vec::new();
 
-    let mut locals = brain_modelstore::Store::new(dir.to_path_buf()).scan();
+    let mut locals: Vec<brain_modelstore::LocalModel> = brain_modelstore::Store::new(dir.to_path_buf()).scan().into_iter().map(|local| read_from_copy(local, &settings.copies)).collect();
     locals.sort_by(|a, b| a.weights.cmp(&b.weights)); // deterministic catalog order
     let (adapters, bases): (Vec<_>, Vec<_>) = locals.iter().partition(|l| l.adapter.is_some());
     let mut scan = Scan::new(settings, &adapters);
@@ -196,6 +199,18 @@ pub fn discover(dir: &Path, settings: &ScanSettings) -> Discovered {
     let qwen35 = scan.qwen35_bases.values().cloned().collect();
     let qwen = scan.qwen_bases.values().cloned().collect();
     Discovered { residents: scan.out, multi: scan.multi, qwen, qwen35, ricursive: scan.ricursive, errors }
+}
+
+/// `local`, read from the copy among `copies` made of its entry directory, if there is one.
+fn read_from_copy(local: brain_modelstore::LocalModel, copies: &[brain_modelstore::stage::StagedEntry]) -> brain_modelstore::LocalModel {
+    let same = |a: &Path, b: &Path| match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    };
+    match copies.iter().find(|c| same(&c.source, &local.dir)) {
+        Some(c) => local.read_from(&c.copy),
+        None => local,
+    }
 }
 
 /// Whether `local` is a released Qwen3.8 or Qwen3.5/3.6 MoE GGUF: served from the file itself (the multi-card INT8

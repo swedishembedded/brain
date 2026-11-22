@@ -414,7 +414,11 @@ pub fn build_executor(machine: &Machine, reserve: Reserve, store: &catalog::Serv
     let mut qwen_scanned = Vec::new();
     if let Some(dir) = store.models_dir() {
         let existing: std::collections::BTreeSet<String> = models.iter().map(|m| m.manifest().model).collect();
-        let settings = crate::model_dir::ScanSettings { qwen: qwen_cfg, qwen35: qwen35.clone(), ricursive, gpus: gpus.clone(), reserved, encoder_batch: max_batch, worker_hosting: worker_hosting.clone() };
+        // A `--checkpoint` staged onto node-local disk names a copy of a store entry the scan also finds. The copy is
+        // that entry, so the scan reads the entry from it: one model, under the store's id, read from the copy, which
+        // the merge below then recognises as the checkpoint's by path.
+        let copies = qwen.iter().filter_map(|env| brain_modelstore::stage::staged_entry(std::path::Path::new(env.weights_path()))).collect();
+        let settings = crate::model_dir::ScanSettings { qwen: qwen_cfg, qwen35: qwen35.clone(), ricursive, gpus: gpus.clone(), reserved, encoder_batch: max_batch, worker_hosting: worker_hosting.clone(), copies };
         let discovered = crate::model_dir::discover(dir, &settings);
         // The env-selected resident and a model-dir entry may be the same
         // checkpoint. Two residents would be two instances: two copies of the

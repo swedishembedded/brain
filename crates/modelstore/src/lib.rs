@@ -91,6 +91,26 @@ pub struct LocalModel {
     pub roles: Option<BTreeMap<String, PathBuf>>,
 }
 
+impl LocalModel {
+    /// The same model, its files read from `copy`, a verified copy of its entry directory ([`stage::staged_entry`]):
+    /// every path inside [`LocalModel::dir`] is answered inside `copy`, and its reference and card, its identity,
+    /// stay those of the store entry.
+    pub fn read_from(self, copy: &Path) -> LocalModel {
+        let entry = self.dir;
+        let moved = |p: PathBuf| p.strip_prefix(&entry).map(|rel| copy.join(rel)).unwrap_or(p);
+        LocalModel {
+            weights: moved(self.weights),
+            tokenizer: self.tokenizer.map(moved),
+            adapter: self.adapter.map(moved),
+            roles: self.roles.map(|roles| roles.into_iter().map(|(role, p)| (role, moved(p))).collect()),
+            dir: copy.to_path_buf(),
+            reference: self.reference,
+            card: self.card,
+            format: self.format,
+        }
+    }
+}
+
 /// The on-disk description of a compound (multi-file) model: several
 /// distinct-role files that together make one servable model, rather than
 /// shards of a single tensor set. Written by a [`recipe::ArtifactRecipe`]'s

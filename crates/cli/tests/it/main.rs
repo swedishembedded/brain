@@ -30,6 +30,7 @@ mod roofline;
 mod seed_flag;
 mod serve_cli;
 mod serve_connection;
+mod serve_staged;
 mod version;
 #[cfg(target_os = "linux")]
 mod worker_hosted;

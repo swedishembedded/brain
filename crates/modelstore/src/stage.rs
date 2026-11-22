@@ -21,6 +21,11 @@
 //! fails the stage and leaves nothing behind. The copy is built in a private
 //! temporary directory and renamed into place only once complete, so a crash
 //! leaves either the old state or a whole copy, never a partial one.
+//!
+//! A copy is the store entry it was made from, not a model of its own: its
+//! marker records that entry, and [`staged_entry`] answers it for any path
+//! inside the copy, so a reader that also finds the entry in the store (a
+//! server's model scan) reads it from the copy instead of serving it twice.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -28,8 +33,31 @@ use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest as _, Sha256};
 
-/// The marker a complete staged copy carries.
+/// The marker a complete staged copy carries; it holds the path of the store entry the copy was made from.
 const COMPLETE: &str = ".staged";
+
+/// A node-local copy of a store entry, and the entry it copies.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StagedEntry {
+    /// The copy's `<vendor>/<repo>` directory.
+    pub copy: PathBuf,
+    /// The store entry's directory the copy was made from, as it was named when staging.
+    pub source: PathBuf,
+}
+
+/// The staged copy `path` lies in, and the store entry it copies; `None` for a path in no complete staged copy.
+pub fn staged_entry(path: &Path) -> Option<StagedEntry> {
+    path.ancestors().find_map(|dir| {
+        let source = fs::read_to_string(dir.join(COMPLETE)).ok().filter(|s| !s.is_empty())?;
+        Some(StagedEntry { copy: dir.to_path_buf(), source: PathBuf::from(source) })
+    })
+}
+
+/// Whether `dest` holds a complete copy of `source`: its marker names `source`. A copy made from another store's
+/// entry, or by a stager that recorded no source, is not one.
+fn copies(dest: &Path, source: &Path) -> bool {
+    fs::read_to_string(dest.join(COMPLETE)).is_ok_and(|recorded| recorded == source.to_string_lossy())
+}
 
 /// How many files are copied at once: enough to keep a parallel filesystem and a local NVMe busy.
 const PARALLEL_FILES: usize = 8;
@@ -49,7 +77,7 @@ pub fn stage(store_root: &Path, path: &Path, local: &Path) -> io::Result<PathBuf
 
 /// Copy the directory `source` to `dest` once (see the module documentation); answers `dest`.
 fn stage_entry(source: &Path, dest: &Path) -> io::Result<PathBuf> {
-    if dest.join(COMPLETE).is_file() {
+    if copies(dest, source) {
         return Ok(dest.to_path_buf());
     }
     let parent = dest.parent().ok_or_else(|| io::Error::other(format!("{} has no parent", dest.display())))?;
@@ -58,13 +86,15 @@ fn stage_entry(source: &Path, dest: &Path) -> io::Result<PathBuf> {
     let lock = File::create(parent.join(format!(".{name}.lock")))?;
     // Every other process staging this entry on this node waits here, then finds the copy complete.
     lock.lock()?;
-    if dest.join(COMPLETE).is_file() {
+    if copies(dest, source) {
         return Ok(dest.to_path_buf());
     }
     let temp = parent.join(format!(".{name}.staging-{}", std::process::id()));
     let _ = fs::remove_dir_all(&temp);
     let copied = copy_tree(source, &temp).and_then(|()| {
-        File::create(temp.join(COMPLETE))?.sync_all()?;
+        let mut marker = File::create(temp.join(COMPLETE))?;
+        marker.write_all(source.to_string_lossy().as_bytes())?;
+        marker.sync_all()?;
         // A copy a crashed stager left complete but unrenamed is replaced, never merged.
         let _ = fs::remove_dir_all(dest);
         fs::rename(&temp, dest)
@@ -169,7 +199,10 @@ mod tests {
             assert_eq!(path, &local.join("acme/model/sub/tokenizer.json"));
         }
         assert_eq!(fs::read(local.join("acme/model/weights.safetensors")).unwrap(), vec![7u8; 3 << 20]);
-        assert!(local.join("acme/model").join(COMPLETE).is_file());
+        // The copy answers which store entry it is, from any path inside it.
+        let entry = StagedEntry { copy: local.join("acme/model"), source: store.join("acme/model") };
+        assert_eq!(staged_entry(&got[0]), Some(entry));
+        assert_eq!(staged_entry(&wanted), None, "the store entry is no copy");
         // Nothing of a staging attempt is left beside the copy.
         let leftovers: Vec<_> = fs::read_dir(local.join("acme")).unwrap().filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.contains("staging")).collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");

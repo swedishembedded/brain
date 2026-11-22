@@ -302,7 +302,8 @@ precedence ladder.
 models directory (or of `--stage-from <ROOT>`) from a node-local copy of that entry under `DIR`. The first process on a
 node copies the entry, checking every file's SHA-256 against the store's, and renames the copy into place once it is
 complete; the node's other processes wait for it and then read the copy. Point it at fast local disk when many ranks
-of a cluster job would otherwise read the same base from a shared filesystem.
+of a cluster job would otherwise read the same base from a shared filesystem. A copy is the entry it was made from:
+`brain serve` reads that entry from the copy and serves it once, under the store's id.
 
 ### Naming weights on a model command
 
