@@ -7,7 +7,7 @@
 // checkpoint recovery then you can procure our services by sending an email to
 // info@swedishembedded.com.
 
-//! What a distributed training job does when a rank fails: stop before any partial step is applied, say why, and
+//! What a distributed training job does when a rank fails: stop before any partial step is committed, say why, and
 //! leave a state the job restarts from exactly.
 //!
 //! **The communicator's state** ([`CommState`], tracked by [`CommHealth`]): `active` while operations complete in
@@ -24,6 +24,13 @@
 //! what was committed: each rank writes its exact-resume state as a numbered generation, the ranks vote that every
 //! state is durable, and only then does rank 0 write the generation's commit ([`Generations`]). A crash at any point
 //! before that leaves the previous generation the newest, every rank's file of it still on disk.
+//!
+//! **A parameter-sharded step** (ZeRO-3, [`crate::zero::Sharding::Parameters`]) is not voted: each unit is updated on
+//! its owners as soon as its reduce-scatter completes, inside the backward, and holding every reduced slice until a
+//! vote would cost the whole gradient's slice per rank. Its guarantee is the commit's instead: a rank whose step
+//! failed part way never votes that its state is durable, so no rank commits that step or any later one, and the
+//! restart reloads the last committed generation; the failed step's partial updates are discarded with the process.
+//! The model reports the failure ([`crate::Model::collective_failure`]) and the fit loop ends on it as here.
 //!
 //! **The exit.** A failure of the job's collective is a [`JobFailure`]; a process that ends on one exits with
 //! [`RESTART_STATUS`], which tells a launcher to restart every rank with the same plan, secret and arguments. The run
@@ -75,7 +82,9 @@ impl CommState {
     }
 }
 
-/// The job's collective failed: this rank stopped before applying any part of `step`.
+/// The job's collective failed: this rank stopped inside `step`, and nothing of the step is committed. A replicated or
+/// optimizer-sharded rank applied none of it; a parameter-sharded rank may hold some of the step's units updated,
+/// which the restart from the last commit discards.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JobFailure {
     /// The step (1-based) whose collective failed.
@@ -91,7 +100,7 @@ pub struct JobFailure {
 impl fmt::Display for JobFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let path: Vec<&str> = self.states.iter().map(|s| s.name()).collect();
-        write!(f, "the job's collective failed in step {} ({}): {} [communicator {}]; no part of the step was applied, restart the job from its last commit", self.step, self.phase, self.cause, path.join(" -> "))
+        write!(f, "the job's collective failed in step {} ({}): {} [communicator {}]; nothing of the step is committed, restart the job from its last commit", self.step, self.phase, self.cause, path.join(" -> "))
     }
 }
 
@@ -170,11 +179,15 @@ impl CommHealth {
                 self.usual = Some(self.usual.map_or(secs, |u| 0.9 * u + 0.1 * secs));
                 Ok(value)
             }
-            Err(e) => {
-                self.enter(CommState::Aborting);
-                Err(io::Error::other(JobFailure { step, phase, states: self.states.clone(), cause: e.to_string() }))
-            }
+            Err(e) => Err(self.failed(step, phase, e.to_string())),
         }
+    }
+
+    /// The job's collective failed in `step`'s `phase` for `cause` (reported by work that ran the collective itself,
+    /// such as a parameter-sharded model's step): the state moves to aborting, and the failure is a [`JobFailure`].
+    pub fn failed(&mut self, step: u32, phase: &'static str, cause: String) -> io::Error {
+        self.enter(CommState::Aborting);
+        io::Error::other(JobFailure { step, phase, states: self.states.clone(), cause })
     }
 }
 
@@ -323,7 +336,7 @@ mod tests {
         let failure = job_failure(&err).expect("a job failure");
         assert_eq!((failure.step, failure.phase), (2, "reduce"));
         assert_eq!(failure.states, [CommState::Active, CommState::Suspect, CommState::Aborting]);
-        assert!(err.to_string().contains("no part of the step was applied"), "{err}");
+        assert!(err.to_string().contains("nothing of the step is committed"), "{err}");
         let mut rebuilt = CommHealth::rebuilding(4);
         rebuilt.guarded(5, "reduce", || Ok(())).unwrap();
         assert_eq!(rebuilt.history(), [CommState::Rebuilding, CommState::Active]);

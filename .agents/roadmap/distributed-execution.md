@@ -1062,15 +1062,34 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
       (error after 5.8 s for a 5 s bound), the gpt2 device fault test (all 8
       cases, gpu2-3 and gpu0-1 of n442). Cost: about 2 us more per small
       operation (Measured).
-      Open: the parameter-sharded (ZeRO-3) step is not a transaction: the
-      resident trainer updates each unit as soon as its reduce-scatter
-      completes, inside the backward, so a vote would need every unit's
-      reduced slice kept until the end of the backward (a per-unit gradient
-      slice instead of the one transient slice: about 13.5 GB more a card for
-      27B on 8 ranks) and the updates deferred behind it. A lost peer there
-      now ends at the op timeout as an error, but as a panic in the model's
-      layer loader (exit 101), not the restart status. Also open: weight
-      publication faults (C6), and shrink/regrow.
+      The parameter-sharded (ZeRO-3) step since 2026-11-22: it is not voted
+      (the resident trainer updates each unit as soon as its reduce-scatter
+      completes, inside the backward; a vote would need every unit's reduced
+      slice kept to the end of the backward, about 13.5 GB more a card for 27B
+      on 8 ranks). Its guarantee is the commit's: a job restarts from the last
+      generation every rank committed, and a rank whose step failed part way
+      never votes its state of that step durable, so no rank commits that step
+      or a later one; the failed step's partial updates (some units updated on
+      some ranks) are discarded with the process. Every collective failure
+      inside the sharded forward, backward, update, evaluation and final save
+      is a typed `JobFailure` (exit 75), no panic: the sharded build keeps its
+      first failure (`ResidentFullFt::collective_failure`), every later gather,
+      reduction and update returns at once without touching the group, the
+      model reports it (`Model::collective_failure`) and the fit loop ends on it.
+      The fault harness is shared (`model::conformance_faults`: a faulty
+      collective that fires in the n-th call of an operation of the armed step,
+      the rank-process runner, the committed-generation check); gpt2's test runs
+      on it. Tests: qwen35 `sharded_faults` (two OS processes over loopback, CPU)
+      kills a rank in the forward's first all-gather, kills and stalls one in
+      the backward's second reduce-scatter (after its peer updated the step's
+      first layer), kills the coordinator there, and kills one after its state
+      is durable: the survivor exits 75 without a panic, the newest commit is
+      the step before, and the restarted job writes the uninterrupted run's
+      model byte for byte. Before the change the survivor panicked in the
+      layer loader (exit 101). The device variant (NCCL, gpu0-1 of n442)
+      passes all five cases (286 s), and gpt2's device fault test passes on
+      the shared harness (444 s).
+      Also open: weight publication faults (C6), and shrink/regrow.
 - [ ] **C9 qualification suite and traces.** Communication part delivered
       2026-11-21: `brain bench collectives` (`crates/bench/src/collectives.rs`,
       `make bench/collectives`) joins a job plan as one rank, forms the device

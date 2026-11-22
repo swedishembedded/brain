@@ -2016,13 +2016,15 @@ pub struct CheckpointIdentity<'a> {
 /// when the objective reports no evaluation: a rank 0 that skipped it while
 /// its peers waited for the result would deadlock the group. The root's
 /// "no evaluation" is therefore itself the broadcast value.
-fn agreed_eval<M: Model, O: Objective<M>>(obj: &mut O, model: &M, rng: &Rng, batches: u32, grad_sync: Option<&GradSync<'_>>, every_rank: bool) -> std::io::Result<Option<f32>> {
+#[allow(clippy::too_many_arguments)] // the evaluation, its group, and the step and health a failure is reported with
+fn agreed_eval<M: Model, O: Objective<M>>(obj: &mut O, model: &M, rng: &Rng, batches: u32, grad_sync: Option<&GradSync<'_>>, every_rank: bool, health: &mut crate::jobfault::CommHealth, step: u32) -> std::io::Result<Option<f32>> {
     let Some(sync) = grad_sync else {
         return Ok(obj.eval(model, &mut rng.clone(), batches));
     };
     // A parameter-sharded model's forward gathers its layers over the group: every rank runs it, rank 0's result
     // is the agreed one.
     let local = if every_rank { obj.eval(model, &mut rng.clone(), batches) } else { None };
+    own_collective(model, health, step, "evaluation of a parameter-sharded model")?;
     // Only the root computes; everyone else sends a placeholder the root's
     // value replaces. `broadcast` ignores it, so its contents do not matter.
     let local = if sync.rank == 0 {
@@ -2033,11 +2035,22 @@ fn agreed_eval<M: Model, O: Objective<M>>(obj: &mut O, model: &M, rng: &Rng, bat
     } else {
         crate::collective::Payload::f32(Vec::new())
     };
-    let agreed = pollster::block_on(sync.collective.broadcast(sync.rank, local, 0)).map_err(std::io::Error::other)?;
+    let agreed = health.guarded(step, "evaluation broadcast", || pollster::block_on(sync.collective.broadcast(sync.rank, local, 0)))?;
     if agreed.data.len() != 2 {
         return Err(std::io::Error::other(format!("the evaluation broadcast from rank 0 carried {} values, expected 2", agreed.data.len())));
     }
     Ok((agreed.data[0] != 0.0).then_some(agreed.data[1]))
+}
+
+/// End the run as the job's failure ([`crate::jobfault::JobFailure`], the restart status) when the job's collective
+/// failed inside work the model ran itself in `step`'s `phase` ([`Model::collective_failure`]: a parameter-sharded
+/// model gathers, reduces and updates its own units). Such a model's state is no step's result: some of its units may
+/// hold the failed step's update and others not, so nothing of it may be committed or written.
+fn own_collective<M: Model>(model: &M, health: &mut crate::jobfault::CommHealth, step: u32, phase: &'static str) -> std::io::Result<()> {
+    match model.collective_failure() {
+        Some(cause) => Err(health.failed(step, phase, cause)),
+        None => Ok(()),
+    }
 }
 
 /// [`fit_controlled`] with every optimizer step's gradients averaged across
@@ -2302,6 +2315,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         gpu_core::profile::stage_time("fit: initial loss probe", probe_clock);
         total / opts.initial_probe_batches as f32
     });
+    own_collective(&model, &mut health, first_step + 1, "initial loss probe")?;
     let mut gate = crate::stepgate::UpdateGate::new(opts.strict_updates);
     let mut last_train: Option<f32> = None;
     let mut completed = first_step;
@@ -2330,6 +2344,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
             None => obj.micro_steps(&model, &mut rng, opts.grad_accum.max(1)),
         };
         gpu_core::profile::stage_time("fit: step micro-steps (forward+backward)", step_clock);
+        own_collective(&model, &mut health, step + 1, "forward and backward")?;
         // What the micro-steps measured, taken once: its supervised count also
         // weights this rank in a data-parallel reduction below.
         let mut work = obj.step_work().unwrap_or_default();
@@ -2376,7 +2391,8 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
                     }
                 } else if let (true, Some(sync)) = (parameter_sharded, &grad_sync) {
                     // A parameter-sharded model reduces inside its own step; the ranks agree on taking it first.
-                    let totals = pollster::block_on(sync.collective.all_reduce(sync.rank, crate::collective::Payload::f32(vec![weight, if step_loss.is_finite() { 0.0 } else { 1.0 }]))).map_err(std::io::Error::other)?.data;
+                    let local = crate::collective::Payload::f32(vec![weight, if step_loss.is_finite() { 0.0 } else { 1.0 }]);
+                    let totals = health.guarded(step + 1, "agreement on taking the parameter-sharded step", || pollster::block_on(sync.collective.all_reduce(sync.rank, local)))?.data;
                     let why = (totals.get(1).copied().unwrap_or(1.0) > 0.0).then(|| "non-finite loss on a rank".to_string());
                     match gate.verdict(why)? {
                         Some(why) => eprintln!("step {:>6}: no optimiser step taken: {why}", step + 1),
@@ -2384,7 +2400,13 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
                             model.set_shard_weight(weight / totals[0].max(1e-12)).map_err(std::io::Error::other)?;
                             applied += 1;
                             model.adamw_step(applied, lr, opts.weight_decay, opts.adam, clip, scale);
+                            // The model's step reduced and updated each unit as its gradient completed: a failure part way
+                            // leaves some units updated, so it ends the run before anything of the step is committed.
+                            own_collective(&model, &mut health, step + 1, "parameter-sharded backward and update")?;
                             gate.verify_committed(model.last_grad_norm(), step + 1)?;
+                            if let Some(observe) = sync.observer {
+                                observe(crate::jobfault::StepPhase::Applied, step + 1);
+                            }
                         }
                     }
                 } else {
@@ -2443,7 +2465,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         let due = opts.eval_interval > 0 && ((step + 1) % opts.eval_interval == 0 || ((last || cooled) && selection.selecting()));
         let mut step_eval = None;
         if due {
-            if let Some(eval_loss) = agreed_eval(&mut obj, &model, &rng, opts.eval_batches, grad_sync.as_ref(), parameter_sharded)? {
+            if let Some(eval_loss) = agreed_eval(&mut obj, &model, &rng, opts.eval_batches, grad_sync.as_ref(), parameter_sharded, &mut health, step + 1)? {
                 step_eval = Some(eval_loss);
                 let train_loss = selection.take_interval();
                 selection.evaluations.push(Evaluation { step: step + 1, train_loss, eval_loss });
@@ -2618,7 +2640,9 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
     if let Some(p) = sharded_out.filter(|_| !interrupted) {
         let ts = std::time::Instant::now();
         let path = p.to_str().expect("utf-8 path");
-        model.save_sharded(writer.then_some(path)).map_err(|e| std::io::Error::other(format!("{}: {e}", p.display())))?;
+        let saved = model.save_sharded(writer.then_some(path));
+        own_collective(&model, &mut health, completed, "writing the parameter-sharded model")?;
+        saved.map_err(|e| std::io::Error::other(format!("{}: {e}", p.display())))?;
         if writer {
             eprintln!("saved checkpoint -> {} ({:.1} s)", p.display(), ts.elapsed().as_secs_f64());
             commit(p, completed)?;

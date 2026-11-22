@@ -40,6 +40,8 @@ pub mod depth_attn;
 pub mod acceptance;
 pub mod conformance;
 pub mod conformance_adapter;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod conformance_faults;
 pub mod conformance_grad;
 pub mod conformance_head;
 pub mod conformance_trainable;
@@ -580,6 +582,14 @@ pub trait Model {
     /// parameter.
     #[cfg(not(target_arch = "wasm32"))]
     fn parameter_shards(&self) -> Option<zero::ShardGroup> {
+        None
+    }
+
+    /// The cause of a failure of the job's collective inside work this model drives itself (a parameter-sharded build
+    /// gathers, reduces and updates its own units in its forward, backward and optimizer step), `None` while there is
+    /// none. Once set, the model's state is no step's result: the fit loop ends the run as the job's failure, and the
+    /// job restarts from its last commit. `None` (the default) for a model that runs no collective of its own.
+    fn collective_failure(&self) -> Option<String> {
         None
     }
 

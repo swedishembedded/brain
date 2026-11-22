@@ -1014,6 +1014,17 @@ impl ResidentFullFt {
         false
     }
 
+    /// The cause of the first failure of a parameter-sharded build's collective (a lost or stalled peer), `None`
+    /// while the group is healthy. Once set, every later gather, reduction and update returns an error at once and
+    /// this rank's state is no step's result (some units of the failed step may be updated, others not): the trainer
+    /// ends the run as the job's failure and the job restarts from its last commit.
+    pub fn collective_failure(&self) -> Option<String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        return self.sharded.as_ref().and_then(|sh| sh.failure().map(str::to_string));
+        #[cfg(target_arch = "wasm32")]
+        None
+    }
+
     /// The group a parameter-sharded build reduces over and this rank's place in it.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn shard_group(&self) -> Option<&crate::zero::ShardGroup> {
@@ -1380,17 +1391,17 @@ impl ResidentFullFt {
 
     /// Sum of squares of the tables' gradients, reduced on the device. A layer-streamed pass covers only the layers:
     /// its trainer counts the tables with the parameters it holds itself.
-    pub fn table_grad_sum_sq(&mut self, ops: &dyn DeviceIo) -> f64 {
+    pub fn table_grad_sum_sq(&mut self, ops: &dyn DeviceIo) -> io::Result<f64> {
         let tables = self.tables();
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(sh) = &mut self.sharded {
-            return sh.tables_sum_sq(ops, &tables).unwrap_or_else(|e| panic!("parameter-sharded tables: {e}"));
+            return sh.tables_sum_sq(ops, &tables);
         }
         let items: Vec<NormItem<'_>> = tables.iter().map(|&ti| NormItem { buf: &self.grads[ti], numel: self.specs[ti].numel(), dtype: self.cfg.grad }).collect();
         let t0 = std::time::Instant::now();
         let sum = self.norm.sum_sq_each(ops.gpu(), &items).iter().sum();
         self.times.grad_read += t0.elapsed();
-        sum
+        Ok(sum)
     }
 
     /// Update every table of a layer-streamed build from its complete gradient, multiplied by `grad_multiplier` (the
@@ -1649,6 +1660,18 @@ pub trait ResidentBackward {
     }
 }
 
+/// The value of `result`, work of the resident build `ft` that a model's infallible entry point drives (a layer load
+/// inside its forward, its optimizer step), or `None` when the build's group collective failed: the step is void and
+/// the trainer ends the run on [`ResidentFullFt::collective_failure`] as the job's failure. Any other error is a defect
+/// of the build and panics with what `what` names.
+pub fn unless_group_failed<T>(ft: &RefCell<ResidentFullFt>, what: impl FnOnce() -> String, result: io::Result<T>) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(_) if ft.borrow().collective_failure().is_some() => None,
+        Err(e) => panic!("{}: {e}", what()),
+    }
+}
+
 /// The run's per-step values of [`adamw_step`].
 #[derive(Clone, Copy, Debug)]
 pub struct StepArgs {
@@ -1700,11 +1723,11 @@ pub fn adamw_step(host: &dyn ResidentBackward, ft: &RefCell<ResidentFullFt>, ops
     let remainder = || {
         host.flush_backward();
         let mut ft = ft.borrow_mut();
-        host.remainder_grad_sum_sq(ft.device_norm()) + ft.table_grad_sum_sq(ops)
+        io::Result::Ok(host.remainder_grad_sum_sq(ft.device_norm()) + ft.table_grad_sum_sq(ops)?)
     };
     // One backward over the layers under `pass`: layers are loaded as the backward reaches them, measured or updated
     // as their gradients complete.
-    let run = |pass: StreamPass, after_head: &dyn Fn()| -> io::Result<PassReport> {
+    let run = |pass: StreamPass, after_head: &dyn Fn() -> io::Result<()>| -> io::Result<PassReport> {
         host.zero_remainder_grads();
         host.flush_backward();
         ft.borrow().zero_grads(ops);
@@ -1712,10 +1735,7 @@ pub fn adamw_step(host: &dyn ResidentBackward, ft: &RefCell<ResidentFullFt>, ops
         host.backward_pass(&mut |event| {
             host.flush_backward();
             match event {
-                LayerEvent::AfterHead => {
-                    after_head();
-                    Ok(())
-                }
+                LayerEvent::AfterHead => after_head(),
                 LayerEvent::BeforeBackward(layer) => ft.borrow_mut().begin_layer_backward(ops, layer),
                 LayerEvent::AfterBackward(layer) => ft.borrow_mut().finish_layer(ops, layer),
                 LayerEvent::AfterVisit(layer) => ft.borrow_mut().carry_layer(ops, layer),
@@ -1734,14 +1754,14 @@ pub fn adamw_step(host: &dyn ResidentBackward, ft: &RefCell<ResidentFullFt>, ops
     let clip_pass = ft.borrow().clip_pass();
     let (multiplier, sum_sq) = match (clip, clip_pass) {
         (None, _) => {
-            run(StreamPass::Update { lr, grad_multiplier: extra_scale }, &|| {})?;
+            run(StreamPass::Update { lr, grad_multiplier: extra_scale }, &|| Ok(()))?;
             (extra_scale, 0.0)
         }
         (Some(_), ClipPass::TwoPass) => {
-            let measured = run(StreamPass::Measure, &|| {})?;
-            let sum_sq = measured.sum_sq + remainder();
+            let measured = run(StreamPass::Measure, &|| Ok(()))?;
+            let sum_sq = measured.sum_sq + remainder()?;
             let multiplier = optim::grad_multiplier(sum_sq, clip, extra_scale);
-            run(StreamPass::Update { lr, grad_multiplier: multiplier }, &|| {})?;
+            run(StreamPass::Update { lr, grad_multiplier: multiplier }, &|| Ok(()))?;
             (multiplier, sum_sq)
         }
         (Some(_), ClipPass::Running) => {
@@ -1754,11 +1774,12 @@ pub fn adamw_step(host: &dyn ResidentBackward, ft: &RefCell<ResidentFullFt>, ops
             let sharded = ft.borrow().parameter_sharded();
             let report = run(StreamPass::Running { lr, clip, extra_scale }, &|| {
                 if !sharded {
-                    head.set(remainder());
+                    head.set(remainder()?);
                     ft.borrow_mut().add_external_sum_sq(head.get());
                 }
+                Ok(())
             })?;
-            let sum_sq = report.sum_sq - head.get() + remainder();
+            let sum_sq = report.sum_sq - head.get() + remainder()?;
             (optim::grad_multiplier(sum_sq, clip, extra_scale), sum_sq)
         }
     };

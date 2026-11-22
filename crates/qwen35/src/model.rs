@@ -7469,8 +7469,9 @@ impl Qwen35 {
             let streamed = self.layer_streamed();
             assert!(!streamed || self.backward_pending.replace(false), "qwen35 layer-streamed full fine-tune: adamw_step without a backward before it");
             let args = model::resident_ft::StepArgs { step: t, lr, wd, adam, clip, extra_scale };
-            let norm = model::resident_ft::adamw_step(self, ft, &self.ops, &args).unwrap_or_else(|e| panic!("qwen35 resident full fine-tune: update: {e}"));
-            self.resident_norm.set(norm);
+            let norm = model::resident_ft::adamw_step(self, ft, &self.ops, &args);
+            // A failed group collective voids the step: the fit loop ends the run on `collective_failure`.
+            self.resident_norm.set(model::resident_ft::unless_group_failed(ft, || "qwen35 resident full fine-tune: update".to_string(), norm).flatten());
             if streamed {
                 // The step consumed the forward's activations (it ran the backward itself).
                 *self.train_acts.borrow_mut() = None;
@@ -7490,7 +7491,9 @@ impl Qwen35 {
     fn stream_load(&self, layer: usize) {
         if let Some(ft) = self.resident.as_ref().filter(|ft| ft.borrow().is_layer_streamed()) {
             self.gpu.flush();
-            ft.borrow_mut().load_layer(&self.ops, layer).unwrap_or_else(|e| panic!("qwen35 layer-streamed full fine-tune: loading layer {layer}: {e}"));
+            let loaded = ft.borrow_mut().load_layer(&self.ops, layer);
+            // A failed group collective voids the step: the forward runs on, and the fit loop ends the run on it.
+            model::resident_ft::unless_group_failed(ft, || format!("qwen35 layer-streamed full fine-tune: loading layer {layer}"), loaded);
         }
     }
 
@@ -7943,6 +7946,9 @@ impl model::Model for Qwen35 {
     }
     fn parameter_shards(&self) -> Option<model::zero::ShardGroup> {
         self.resident.as_ref().and_then(|ft| ft.borrow().shard_group().cloned())
+    }
+    fn collective_failure(&self) -> Option<String> {
+        self.resident.as_ref().and_then(|ft| ft.borrow().collective_failure())
     }
     fn set_shard_weight(&self, share: f32) -> Result<(), String> {
         self.resident.as_ref().ok_or("this model does not shard its parameters")?.borrow_mut().set_shard_weight(share)

@@ -19,6 +19,13 @@
 //!
 //! Every rank must load and finish the same layers in the same order (the forward and backward of every rank visit
 //! the same layers, whatever its batch), since each load and finish is a collective.
+//!
+//! **A failed collective.** Each unit is updated as soon as it is reduced, inside the backward, so a step whose
+//! collective fails part way (a lost or stalled peer) leaves some units of this rank updated and others not. The
+//! first failure is kept ([`ShardedLayers::failure`]): every later gather, reduction or update of the step returns
+//! at once without touching the group or the state, and the trainer ends the run on it as the job's failure. The
+//! half-applied step is never committed (the commit needs every rank's vote that its step completed) and the
+//! restarted job reloads the last committed generation, so the partial updates are discarded with the process.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -29,7 +36,7 @@ use gpu_core::{CollectiveDtype, DeviceBuffer, Gpu};
 use optim::rule::Rule;
 use paramstore::precision::{GradDtype, MasterPolicy, StateFormat};
 
-use crate::collective::Payload;
+use crate::collective::{CollectiveResult, Payload};
 use crate::ops::{DeviceIo, Weight};
 use crate::resident_ft::{ResidentFtConfig, ResidentSpec, ResidentValue};
 use crate::zero::{DeviceParam, DeviceParams, ShardGroup, UnitUpdate, ZeroOptimizer};
@@ -84,6 +91,8 @@ pub(crate) struct ShardedLayers {
     last_layer: Option<u32>,
     /// One word on the card the per-layer norm is summed in.
     scalar: std::sync::OnceLock<DeviceBuffer>,
+    /// The first collective failure: once set, no further collective or update runs (module documentation).
+    failed: std::sync::OnceLock<String>,
 }
 
 impl ShardedLayers {
@@ -104,7 +113,29 @@ impl ShardedLayers {
         let zero = ZeroOptimizer::new_parameter_shards(DeviceParams { gpu: gpu.share(), tensors }, &groups, &*group.collective, group.rank, &mut read)?;
         gpu_core::profile::stage_time("parameter sharding: read this rank's slices and build the state on the card", clock);
         let units = zero.unit_count();
-        Ok(ShardedLayers { group, zero, step: 0, scale: 1.0, reduced: vec![false; units], last_layer: None, scalar: std::sync::OnceLock::new() })
+        Ok(ShardedLayers { group, zero, step: 0, scale: 1.0, reduced: vec![false; units], last_layer: None, scalar: std::sync::OnceLock::new(), failed: std::sync::OnceLock::new() })
+    }
+
+    /// The group's collective failed (the first failure's cause): this rank's state is no step's result any more.
+    pub(crate) fn failure(&self) -> Option<&str> {
+        self.failed.get().map(String::as_str)
+    }
+
+    /// Refuse to touch the group or the state after a failure.
+    fn healthy(&self) -> io::Result<()> {
+        match self.failure() {
+            Some(cause) => Err(io::Error::other(format!("the group's collective failed earlier in this step: {cause}"))),
+            None => Ok(()),
+        }
+    }
+
+    /// `result` of a collective of the group, keeping a failure as the build's first.
+    fn checked<T>(&self, result: CollectiveResult<T>) -> io::Result<T> {
+        result.map_err(|e| {
+            let cause = e.to_string();
+            let _ = self.failed.set(cause.clone());
+            io::Error::other(cause)
+        })
     }
 
     pub(crate) fn report(&self) -> String {
@@ -156,12 +187,13 @@ impl ShardedLayers {
         if units.is_empty() {
             return Ok(());
         }
+        self.healthy()?;
         // The work the model recorded against the slots (the layer that used them last) reaches the device first;
         // the gather's copies are ordered after it.
         ops.gpu().flush();
         let coll = &*self.group.collective;
         for u in units {
-            self.zero.gather_unit(coll, u).map_err(io::Error::other)?;
+            self.checked(self.zero.gather_unit(coll, u))?;
             for ti in (0..slot_of.len()).filter(|&ti| self.zero.unit_of(ti) == u) {
                 slot_holds[slot_of[ti]] = Some((ti, versions[ti]));
             }
@@ -180,24 +212,28 @@ impl ShardedLayers {
     /// Update the (reduced) unit of `tensors` with every gradient multiplied by `multiplier`.
     pub(crate) fn update_layer(&mut self, tensors: &[usize], lr: f32, multiplier: f32, rule: Rule) -> io::Result<()> {
         let Some(&first) = tensors.first() else { return Ok(()) };
+        self.healthy()?;
         self.update(self.zero.unit_of(first), lr, multiplier, rule)
     }
 
     /// The group's sum of `local` over its ranks on the device collective (a scalar all-reduce of microseconds there;
     /// through the transport's payload op where the group has no device path): what a running clip needs per layer.
     pub(crate) fn device_sum(&self, gpu: &Gpu, local: f64) -> io::Result<f64> {
+        self.healthy()?;
         let coll = &*self.group.collective;
         let buf = self.scalar.get_or_init(|| gpu.storage(1));
         gpu.write_f32(buf, &[local as f32]);
-        if pollster::block_on(coll.all_reduce_device(self.group.rank, gpu, &[(buf, 1)], CollectiveDtype::F32, 1.0)).map_err(io::Error::other)? {
+        if self.checked(pollster::block_on(coll.all_reduce_device(self.group.rank, gpu, &[(buf, 1)], CollectiveDtype::F32, 1.0)))? {
             return Ok(f64::from(gpu.read(buf, 1)[0]));
         }
         self.global_sum(local)
     }
 
     fn reduce(&mut self, ops: &dyn DeviceIo, u: usize) -> io::Result<()> {
+        self.healthy()?;
         ops.gpu().flush();
-        self.zero.reduce_unit(&*self.group.collective, u, self.scale).map_err(io::Error::other)?;
+        let reduced = self.zero.reduce_unit(&*self.group.collective, u, self.scale);
+        self.checked(reduced)?;
         self.reduced[u] = true;
         Ok(())
     }
@@ -234,8 +270,9 @@ impl ShardedLayers {
         let gpu = self.zero.gpu();
         let mut vals = vec![0f32; tile];
         let mut enc = TileBuf::default();
+        self.healthy()?;
         for u in 0..self.zero.unit_count() {
-            let staging = self.zero.gather_master(coll, u).map_err(io::Error::other)?;
+            let staging = self.checked(self.zero.gather_master(coll, u))?;
             let Some(sink) = sink.as_deref_mut() else { continue };
             for &(ti, offset, count) in self.zero.unit_members(u) {
                 let d = &descs[ti];
@@ -257,13 +294,15 @@ impl ShardedLayers {
 
     /// The group's sum of squares given this rank's `local` share.
     pub(crate) fn global_sum(&self, local: f64) -> io::Result<f64> {
+        self.healthy()?;
         let coll = &*self.group.collective;
-        let sum = pollster::block_on(coll.all_reduce(self.group.rank, Payload::f32(vec![local as f32]))).map_err(io::Error::other)?.data;
+        let sum = self.checked(pollster::block_on(coll.all_reduce(self.group.rank, Payload::f32(vec![local as f32]))))?.data;
         Ok(f64::from(sum.first().copied().unwrap_or(f32::NAN)))
     }
 
     /// Sum `grads` (the remainder every rank holds whole) over the group in place, each rank's weighted by its share.
     pub(crate) fn reduce_remainder(&self, grads: &crate::DeviceGrads) -> io::Result<()> {
+        self.healthy()?;
         let coll = &*self.group.collective;
         let rank = self.group.rank;
         for dtype in [CollectiveDtype::F32, CollectiveDtype::Bf16] {
@@ -271,12 +310,12 @@ impl ShardedLayers {
             if bufs.is_empty() {
                 continue;
             }
-            if pollster::block_on(coll.all_reduce_device(rank, &grads.gpu, &bufs, dtype, self.scale)).map_err(io::Error::other)? {
+            if self.checked(pollster::block_on(coll.all_reduce_device(rank, &grads.gpu, &bufs, dtype, self.scale)))? {
                 continue;
             }
             for (buf, n) in bufs {
                 let local: Vec<f32> = crate::zero::read_elems(&grads.gpu, buf, 0, n, dtype).into_iter().map(|g| g * self.scale).collect();
-                let sum = pollster::block_on(coll.all_reduce(rank, Payload::f32(local))).map_err(io::Error::other)?.data;
+                let sum = self.checked(pollster::block_on(coll.all_reduce(rank, Payload::f32(local))))?.data;
                 crate::zero::write_elems(&grads.gpu, buf, 0, &sum, dtype);
             }
         }
@@ -285,6 +324,7 @@ impl ShardedLayers {
 
     /// Reduce the tables' gradients (complete once the backward is) and return the group's sum of their squares.
     pub(crate) fn tables_sum_sq(&mut self, ops: &dyn DeviceIo, tables: &[usize]) -> io::Result<f64> {
+        self.healthy()?;
         let mut local = 0.0;
         for &ti in tables {
             let u = self.zero.unit_of(ti);
@@ -298,6 +338,7 @@ impl ShardedLayers {
 
     /// Update the tables' slices (reducing their gradients first where this pass has not yet).
     pub(crate) fn update_tables(&mut self, ops: &dyn DeviceIo, tables: &[usize], lr: f32, multiplier: f32, rule: Rule) -> io::Result<()> {
+        self.healthy()?;
         for &ti in tables {
             let u = self.zero.unit_of(ti);
             if !self.reduced[u] {
@@ -305,6 +346,6 @@ impl ShardedLayers {
             }
             self.update(u, lr, multiplier, rule)?;
         }
-        self.zero.settle(&*self.group.collective).map_err(io::Error::other)
+        self.checked(self.zero.settle(&*self.group.collective))
     }
 }

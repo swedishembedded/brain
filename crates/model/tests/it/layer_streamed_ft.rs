@@ -382,7 +382,7 @@ fn streamed_head_step(ops: &Ops, ft: &mut ResidentFullFt, task: &Task, clip: Opt
         }
         Some(_) => {
             let measured = backward(ft, StreamPass::Measure);
-            let multiplier = optim::grad_multiplier(measured.sum_sq + ft.table_grad_sum_sq(ops), clip, 1.0);
+            let multiplier = optim::grad_multiplier(measured.sum_sq + ft.table_grad_sum_sq(ops).unwrap(), clip, 1.0);
             backward(ft, StreamPass::Update { lr: LR, grad_multiplier: multiplier });
             multiplier
         }

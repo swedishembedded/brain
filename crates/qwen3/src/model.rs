@@ -2685,9 +2685,11 @@ impl Qwen {
 
     /// Load `layer` into its device slots.
     fn stream_load(&self, layer: usize) {
-        let mut ft = self.resident.as_ref().expect("layer-streamed builds are resident").borrow_mut();
+        let ft = self.resident.as_ref().expect("layer-streamed builds are resident");
         self.gpu.flush();
-        ft.load_layer(&self.ops, layer).unwrap_or_else(|e| panic!("qwen3 layer-streamed full fine-tune: loading layer {layer}: {e}"));
+        let loaded = ft.borrow_mut().load_layer(&self.ops, layer);
+        // A failed group collective voids the step: the forward runs on, and the fit loop ends the run on it.
+        model::resident_ft::unless_group_failed(ft, || format!("qwen3 layer-streamed full fine-tune: loading layer {layer}"), loaded);
     }
 
     /// The CE gradient's `1/count` for the current batch, which the recorded
@@ -2901,8 +2903,9 @@ impl Qwen {
         if let Some(ft) = &self.resident {
             assert!(!self.layer_streamed() || self.backward_pending.replace(false), "qwen3 layer-streamed full fine-tune: adamw_step without a backward before it");
             let args = model::resident_ft::StepArgs { step: t, lr, wd, adam, clip, extra_scale };
-            let norm = model::resident_ft::adamw_step(self, ft, &self.ops, &args).unwrap_or_else(|e| panic!("qwen3 resident full fine-tune: update: {e}"));
-            self.resident_norm.set(norm);
+            let norm = model::resident_ft::adamw_step(self, ft, &self.ops, &args);
+            // A failed group collective voids the step: the fit loop ends the run on `collective_failure`.
+            self.resident_norm.set(model::resident_ft::unless_group_failed(ft, || "qwen3 resident full fine-tune: update".to_string(), norm).flatten());
             return;
         }
         self.update_device_params(&model::resident_ft::StepArgs { step: t, lr, wd, adam, clip: None, extra_scale: 1.0 }, clip, extra_scale);
@@ -4597,6 +4600,9 @@ impl model::Model for Qwen {
     }
     fn parameter_shards(&self) -> Option<model::zero::ShardGroup> {
         self.resident.as_ref().and_then(|ft| ft.borrow().shard_group().cloned())
+    }
+    fn collective_failure(&self) -> Option<String> {
+        self.resident.as_ref().and_then(|ft| ft.borrow().collective_failure())
     }
     fn set_shard_weight(&self, share: f32) -> Result<(), String> {
         self.resident.as_ref().ok_or("this model does not shard its parameters")?.borrow_mut().set_shard_weight(share)
