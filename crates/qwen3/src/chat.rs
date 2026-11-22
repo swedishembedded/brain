@@ -591,7 +591,7 @@ impl ChatFormat {
 
     /// The tokens this format ends a generation with, when they are not the checkpoint's own eos, for
     /// `data::generation::stop_ids`: ChatML's `<|im_end|>`; for a template that writes typed messages, its
-    /// sampling eos and the message boundary ([`data::chat_template::ChatTemplate::end_of_turn_markers`]);
+    /// sampling eos, which ends the whole reply ([`data::chat_template::ChatTemplate::end_of_turn_markers`]);
     /// none for any other template or no template, where the checkpoint's own eos ends a turn.
     pub fn end_of_turn(&self) -> Vec<&'static str> {
         match self {
@@ -1619,15 +1619,28 @@ mod tests {
     const TYPED_LIKE: &str = "<|message_system|><|content_text|>effort {{ reasoning_effort }}<|end_message|>{% for m in messages %}{% if m.role == 'user' %}<|message_user|><|content_text|>{{ m.content }}<|end_message|>{% else %}{% if m.reasoning_content %}<|message_model|><|content_thinking|>{{ m.reasoning_content }}<|end_message|>{% endif %}<|message_model|><|content_text|>{{ m.content }}<|end_message|><|content_model_end_sampling|>{% endif %}{% endfor %}";
 
     /// A template that writes typed messages selects the typed-message reader, stops a generation on the
-    /// sampling eos and the message boundary, and takes `reasoning_effort` as a typed template variable (named or
+    /// sampling eos alone (a thinking message's boundary does not cut the answer after it), and takes `reasoning_effort` as a typed template variable (named or
     /// numeric, refused out of range); a template that does not read it refuses it by name.
     #[test]
     fn a_typed_message_template_selects_its_reader_stops_and_effort() {
         let tok = byte_tok(&["<|content_model_end_sampling|>", "<|end_message|>"]);
         let format = ChatFormat::for_checkpoint(Some(&template_dir("typed", TYPED_LIKE)), &tok);
         assert!(matches!(format, ChatFormat::Template(_)));
-        assert_eq!(format.end_of_turn(), ["<|content_model_end_sampling|>", "<|end_message|>"]);
-        assert_eq!(data::generation::stop_ids(None, &tok, None, format.end_of_turn()).unwrap(), [256, 257]);
+        assert_eq!(format.end_of_turn(), ["<|content_model_end_sampling|>"]);
+        let stop = data::generation::stop_ids(None, &tok, None, format.end_of_turn()).unwrap();
+        assert_eq!(stop, [256], "the message boundary closes every message, so only the reply's end stops");
+        // A reply that thinks, then answers: the generation runs through the thinking message's boundary to the
+        // sampling eos, and the reader returns both messages.
+        let reply = "<|message_model|><|content_thinking|>weigh it<|end_message|><|message_model|><|content_text|>42<|end_message|><|content_model_end_sampling|>";
+        let ids = data::tokenizer::Tokenizer::encode(&tok, reply);
+        let cut = ids.iter().position(|id| stop.contains(id)).expect("the reply ends with the sampling eos");
+        assert_eq!(cut, ids.len() - 1, "nothing before the reply's end stops it");
+        let mut scanner = qwen_chat::ChatScanner::with_flavor(false, qwen_chat::TemplateFlavor::TypedMessages);
+        let mut events = Vec::new();
+        scanner.push(&data::tokenizer::Tokenizer::decode(&tok, &ids[..cut]), &mut events);
+        scanner.finish(&mut events);
+        let (reasoning, content) = (scanner.reasoning(), scanner.content());
+        assert_eq!((reasoning.trim(), content.trim()), ("weigh it", "42"), "the thinking and the answer both read back");
 
         let inv = Invocation::new().set("messages", json!(r#"[{"role":"user","content":"hi"}]"#));
         let rendered = render_prompt_as(&format, &inv).unwrap();

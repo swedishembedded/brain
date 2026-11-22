@@ -234,7 +234,7 @@ mod tests {
         assert_eq!(stop_ids(None, &tok(), None, Some("<|missing|>")).unwrap(), Vec::<u32>::new());
     }
 
-    /// A format that ends a turn with several markers (a sampling eos and a message boundary) contributes
+    /// A format that ends a turn with several markers contributes
     /// each one the vocabulary has, after the checkpoint's own eos, without repeating one.
     #[test]
     fn a_format_may_end_a_turn_with_several_markers() {
@@ -256,10 +256,11 @@ mod tests {
         }
     }
 
-    /// Inkling 2 Mini, when present: generation_config names the sampling eos 200006, and its template's
-    /// message boundary 200010 follows it.
+    /// Inkling 2 Mini, when present: generation_config names the sampling eos 200006, and its template ends a reply
+    /// with that same token; the message boundary 200010 closes the thinking message before an answer, so it never
+    /// stops a generation.
     #[test]
-    fn inkling2_stops_on_the_sampling_eos_and_the_message_boundary() {
+    fn inkling2_stops_on_the_sampling_eos_alone() {
         let Some(dir) = brain_testutil::model_dir("thinkingmachines/Inkling-2-Mini") else {
             brain_testutil::skip("Inkling-2-Mini: no models directory");
             return;
@@ -270,7 +271,7 @@ mod tests {
             return;
         };
         let template = crate::chat_template::ChatTemplate::from_model_dir(dir).unwrap();
-        assert_eq!(stop_ids(Some(dir), &t, None, template.end_of_turn_markers()).unwrap(), vec![200006, 200010]);
+        assert_eq!(stop_ids(Some(dir), &t, None, template.end_of_turn_markers()).unwrap(), vec![200006]);
         assert_eq!(stop_ids(Some(dir), &t, None, None::<&str>).unwrap(), vec![200006], "the checkpoint's own eos alone");
     }
 }

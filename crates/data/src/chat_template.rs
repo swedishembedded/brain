@@ -564,12 +564,14 @@ impl ChatTemplate {
     }
 
     /// The tokens that end a generation under this template beyond the checkpoint's own eos. A template that
-    /// writes typed messages ends the reply with its sampling eos and each message with a boundary token; both
-    /// stop a generation ([`crate::message_scan`]). Empty for a template whose turn the checkpoint's eos ends.
+    /// writes typed messages ends the whole reply with its sampling eos ([`crate::message_scan::END_SAMPLING`]), and
+    /// only that stops a generation: its message boundary ([`crate::message_scan::END_MESSAGE`]) closes every message
+    /// of a reply, the thinking message before the answer and each tool call included, so stopping there would cut a
+    /// reply after its first message. Empty for a template whose turn the checkpoint's eos ends.
     #[must_use]
     pub fn end_of_turn_markers(&self) -> Vec<&'static str> {
         match self.reply_flavor() {
-            Some(crate::qwen_chat::TemplateFlavor::TypedMessages) => vec![crate::message_scan::END_SAMPLING, crate::message_scan::END_MESSAGE],
+            Some(crate::qwen_chat::TemplateFlavor::TypedMessages) => vec![crate::message_scan::END_SAMPLING],
             _ => Vec::new(),
         }
     }
