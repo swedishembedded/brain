@@ -25,6 +25,7 @@ pub mod adapters;
 pub mod fd;
 pub mod golden;
 pub mod hfquant;
+pub mod load_peak;
 pub mod parity;
 mod process;
 pub mod rounding;

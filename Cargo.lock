@@ -1040,6 +1040,7 @@ version = "6.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
+ "brain-data",
  "brain-forecast",
  "brain-gpu-core",
  "brain-kernels",
@@ -3298,6 +3299,7 @@ version = "6.0.0"
 dependencies = [
  "brain-capability",
  "brain-checkpoint",
+ "brain-data",
  "brain-forecast",
  "brain-gpu-core",
  "brain-kernels",

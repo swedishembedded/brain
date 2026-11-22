@@ -13,3 +13,4 @@ mod mv_parity;
 mod t0_param_layout;
 mod t5_parity;
 mod timing;
+mod streamed_load;

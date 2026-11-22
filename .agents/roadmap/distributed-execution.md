@@ -747,6 +747,18 @@ Scope: Running one training job as ranks across machines, and serving one model 
   tile on n442's CPUs: decode then encode 9.2 ms, the fused pass 2.2 ms at
   8192 blocks a task (3.7 ms at 2048, 4.2-4.5 ms at 512: dispatch over 288
   threads dominates small tasks).
+- **Streaming the other eager generate/serve loads (2026-11-22, CPU device,
+  `brain_testutil::load_peak`, host peak growth of one load against the
+  file).** `qwen35moe generate` (62 MB export): 18-56 MB, 168 MB before;
+  `Chronos2::load` (77 MB): 0 MB, 175 MB before; `Timesfm3::load` (68 MB):
+  0 MB, 137 MB before; `Horizon::load` (67 MB, a trainable build whose AdamW
+  moments are host memory on a CPU device): 130 MB, 243 MB before. The
+  `qwen3 lora_gate` arm folds its candidate adapter into the streamed base
+  as each tensor is read (functional gate test; no peak test). Decoding in
+  qwen35moe projects the head on the card, as qwen35 does. Open: `qwen3
+  generate` still keeps an f32 host copy of the head for its host-side
+  sampling; the remaining allowlisted whole-model loads are trainers,
+  importers and tests.
 - **Cost of bounding every device collective (2026-11-22, n442 cards 2-3,
   `brain bench collectives`, f32, 50 iterations, two runs each).** p50
   before -> after: all-reduce 5.9-6.8 -> 7.7-8.1 us at 8 B, 28.7 -> 31.2-31.8

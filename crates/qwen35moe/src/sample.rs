@@ -3,8 +3,7 @@
 
 //! Autoregressive sampling from a [`Qwen35`] over its single-sequence
 //! incremental decode path ([`Qwen35::step`], P11b). Mirrors
-//! `qwen3::sample::generate_kv_stream_with_head`'s structure exactly (same
-//! temperature/top-k/top-p contract, same host-side head application), since
+//! `qwen3::sample`'s structure (same temperature/top-k/top-p contract), since
 //! `Qwen35::step`'s return contract was built to match `qwen3::Qwen::step`'s
 //! byte-for-byte. The sampling helpers below are a small, deliberate
 //! duplication of `qwen3::sample`'s private `argmax`/`sample_logits` rather
@@ -90,85 +89,20 @@ fn sample_logits(logits: &[f32], temperature: f32, top_k: usize, top_p: f32, rng
 /// `temperature <= 0` is greedy; `top_k = 0` disables top-k; `top_p` in
 /// `(0,1)` enables nucleus filtering. Stops early at any id in `eos`.
 ///
-/// Reads the LM head weight fresh from `model` — a `[vocab, d_model]`
-/// device→host transfer once per call, not once per token. A caller serving
-/// many requests against one resident model should read it once and reuse
-/// the buffer (mirroring `qwen3::sample::generate_kv_stream_with_head`'s own
-/// reasoning) — not done here since qwen35moe has no resident-serving caller
-/// yet (that's `crates/qwen35moe/src/serve.rs`'s own, separate concern).
+/// Each step's logits come from the resident head on the device
+/// ([`Qwen35::head_logits`]), whatever tier it is held in: only the `[vocab]`
+/// row is read back, and no host copy of the head is made.
 #[allow(clippy::too_many_arguments)]
 pub fn generate_kv(model: &Qwen35, prompt: &[u32], max_new: usize, temperature: f32, top_k: usize, top_p: f32, eos: &[u32], rng: &mut Rng) -> Vec<u32> {
-    if model.head_is_quantized() {
-        // A head held as int8, FP8 or NVFP4 has no f32 copy to read back: the logits come from the resident head.
-        return generate_kv_with_logits(model, prompt, max_new, temperature, top_k, top_p, eos, rng, &|hidden| model.head_logits(hidden));
-    }
-    let head = model.read_weight(model.cfg.head_weight());
-    generate_kv_with_head(model, prompt, max_new, temperature, top_k, top_p, eos, rng, &head)
-}
-
-/// [`generate_kv`] with the LM head weight supplied by the caller instead of
-/// read fresh from `model` — see [`generate_kv`]'s own doc for why a
-/// multi-request caller wants this instead.
-#[allow(clippy::too_many_arguments)]
-pub fn generate_kv_with_head(
-    model: &Qwen35,
-    prompt: &[u32],
-    max_new: usize,
-    temperature: f32,
-    top_k: usize,
-    top_p: f32,
-    eos: &[u32],
-    rng: &mut Rng,
-    head: &[f32],
-) -> Vec<u32> {
-    let vocab = model.cfg.vocab as usize;
-    let d = model.cfg.d_model as usize;
-    generate_kv_with_logits(model, prompt, max_new, temperature, top_k, top_p, eos, rng, &|hidden| model::hostmath::matvec_par(head, hidden, vocab, d))
-}
-
-/// [`generate_kv`] with the head applied by `logits_of` (a final-norm hidden row to its `[vocab]` logits).
-#[allow(clippy::too_many_arguments)]
-pub fn generate_kv_with_logits(
-    model: &Qwen35,
-    prompt: &[u32],
-    max_new: usize,
-    temperature: f32,
-    top_k: usize,
-    top_p: f32,
-    eos: &[u32],
-    rng: &mut Rng,
-    logits_of: &dyn Fn(&[f32]) -> Vec<f32>,
-) -> Vec<u32> {
-    model.reset_decode_cache();
-    let seed_prompt: &[u32] = if prompt.is_empty() { &[0] } else { prompt };
-    let mut hidden = Vec::new();
-    for &tok in seed_prompt {
-        hidden = model.step(tok);
-    }
-
-    let mut out = Vec::with_capacity(max_new);
-    for _ in 0..max_new {
-        let next = sample_logits(&logits_of(&hidden), temperature, top_k, top_p, rng);
-        if eos.contains(&next) {
-            break;
-        }
-        out.push(next);
-        hidden = model.step(next);
-    }
-    out
+    generate_kv_stream(model, prompt, max_new, temperature, top_k, top_p, eos, rng, &mut |_, _| true)
 }
 
 /// [`generate_kv`] with a per-token callback: `on_token(index, token)` fires as
 /// each token is accepted (before the next decode step), giving callers a true
 /// streaming timeline (TTFT/ITL) without re-implementing the decode loop.
 /// Returning `false` from `on_token` stops generation early (the token is kept),
-/// letting callers honour cancellation or stop-strings. Added for `crate::caps`
-/// (P13's `capability` wiring), mirroring `qwen3::sample::generate_kv_stream`'s
-/// own signature exactly — see that function's doc for the full contract
-/// (`eos` is a stop-id SET, an empty slice disables the check). Reads the head
-/// fresh from `model` on every call; a caller serving many requests against one
-/// resident model should read it once and call
-/// [`generate_kv_stream_with_head`] directly instead.
+/// letting callers honour cancellation or stop-strings (`eos` is a stop-id SET,
+/// an empty slice disables the check).
 #[allow(clippy::too_many_arguments)]
 pub fn generate_kv_stream(
     model: &Qwen35,
@@ -181,32 +115,6 @@ pub fn generate_kv_stream(
     rng: &mut Rng,
     on_token: &mut dyn FnMut(usize, u32) -> bool,
 ) -> Vec<u32> {
-    let head = model.read_weight(model.cfg.head_weight());
-    generate_kv_stream_with_head(model, prompt, max_new, temperature, top_k, top_p, eos, rng, &head, on_token)
-}
-
-/// [`generate_kv_stream`] with the LM head weight supplied by the caller
-/// instead of read fresh from `model` on every call — same reasoning as
-/// [`generate_kv_with_head`] vs [`generate_kv`], now with the per-token
-/// callback. This IS the streaming implementation; [`generate_kv_stream`]
-/// delegates here with a freshly-read head.
-#[allow(clippy::too_many_arguments)]
-pub fn generate_kv_stream_with_head(
-    model: &Qwen35,
-    prompt: &[u32],
-    max_new: usize,
-    temperature: f32,
-    top_k: usize,
-    top_p: f32,
-    eos: &[u32],
-    rng: &mut Rng,
-    head: &[f32],
-    on_token: &mut dyn FnMut(usize, u32) -> bool,
-) -> Vec<u32> {
-    let vocab = model.cfg.vocab as usize;
-    let d = model.cfg.d_model as usize;
-    let logits_of = |hidden: &[f32]| -> Vec<f32> { model::hostmath::matvec_par(head, hidden, vocab, d) };
-
     model.reset_decode_cache();
     let seed_prompt: &[u32] = if prompt.is_empty() { &[0] } else { prompt };
     let mut hidden = Vec::new();
@@ -216,7 +124,7 @@ pub fn generate_kv_stream_with_head(
 
     let mut out = Vec::with_capacity(max_new);
     for _ in 0..max_new {
-        let next = sample_logits(&logits_of(&hidden), temperature, top_k, top_p, rng);
+        let next = sample_logits(&model.head_logits(&hidden), temperature, top_k, top_p, rng);
         if eos.contains(&next) {
             break;
         }

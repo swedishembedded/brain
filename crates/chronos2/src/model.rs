@@ -85,24 +85,15 @@ impl Chronos2 {
     }
 
     /// Build on an existing device handle — see `Gpt::new_on`.
-    pub fn from_weights_on(
-        gpu: Gpu,
-        cfg: Chronos2Config,
-        weights: &HashMap<String, Vec<f32>>,
-    ) -> Result<Chronos2, String> {
+    pub fn from_weights_on(gpu: Gpu, cfg: Chronos2Config, weights: &dyn checkpoint::TensorSource) -> Result<Chronos2, String> {
         let mut w = HashMap::new();
         for (name, shape) in cfg.param_list() {
             let numel: usize = shape.iter().product();
-            let data = weights
-                .get(&name)
-                .ok_or_else(|| format!("chronos2: missing weight {name}"))?;
-            if data.len() != numel {
-                return Err(format!(
-                    "chronos2: {name} has {} elems, expected {numel}",
-                    data.len()
-                ));
-            }
-            w.insert(name.clone(), gpu.storage_init(&name, data));
+            let mut uploaded = Err(format!("chronos2: missing weight {name}"));
+            weights.with_tensor(&name, &mut |data| {
+                uploaded = if data.len() == numel { Ok(gpu.storage_init(&name, data)) } else { Err(format!("chronos2: {name} has {} elems, expected {numel}", data.len())) };
+            });
+            w.insert(name.clone(), uploaded?);
         }
         Ok(Chronos2 { gpu, cfg, w })
     }
@@ -120,9 +111,9 @@ impl Chronos2 {
             let weights = crate::import::load_hf(&cfg, path)?;
             return Chronos2::from_weights_on(gpu, cfg, &weights);
         }
-        let c = checkpoint::load(path);
-        let cfg = Chronos2Config::from_hf(&c.header["config"])?;
-        let weights = c.by_role("");
+        // Streamed from the file's mapping one tensor at a time, never a whole-model host copy.
+        let weights = checkpoint::weightio::WeightReader::open(path).map_err(|e| format!("chronos2: open {path}: {e}"))?;
+        let cfg = Chronos2Config::from_hf(&weights.config())?;
         Chronos2::from_weights_on(gpu, cfg, &weights)
     }
 

@@ -1147,14 +1147,13 @@ fn fold_and_score(
 ) -> Result<Arm, String> {
     let adapter_path = scratch.join("candidate.safetensors");
     std::fs::write(&adapter_path, adapter_bytes).map_err(|e| format!("qwen lora_gate: staging the candidate adapter: {e}"))?;
-    let ck = checkpoint::load(weights);
-    let cfg = crate::config::QwenConfig::from_json_checked(&ck.header["config"]).map_err(|e| format!("qwen lora_gate: {weights}: {e}"))?;
-    let mut tensors = ck.by_role("");
+    // Streamed: the base is read one tensor at a time, each targeted linear folded with the candidate as it is read.
+    let (cfg, base) = crate::open_checkpoint(weights).map_err(|e| format!("qwen lora_gate: {e}"))?;
     // The adapter is caller-supplied bytes: an adapter for a different base
     // (a tensor name the checkpoint does not carry, a rank that does not
     // divide the factors) must fail THIS request with a message, not unwind
     // the thread serving it.
-    guarded("adapter", || crate::lora::fold_adapter_into(&mut tensors, &adapter_path.to_string_lossy()))?
+    let tensors = guarded("adapter", || model::lora::device_adapter::FoldedSource::open(base, &adapter_path.to_string_lossy()))?
         .map_err(|e| format!("qwen lora_gate: folding the candidate adapter: {e}"))?;
     let n_layers = cfg.n_layers as usize;
     let shard = crate::model::Shard::whole(n_layers);

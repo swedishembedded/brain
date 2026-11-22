@@ -11,11 +11,11 @@
 //!
 //! What differs from `qwen3::caps`, because `qwen35moe::model::Qwen35` is a
 //! different model at a different stage of the port:
-//! - Loading goes through `checkpoint::load(path).by_role("")` +
-//!   `Qwen35Config::from_json` + [`Qwen35::new`]/[`Qwen35::new_i8`] (there is
-//!   no `Qwen::load_inference`-style convenience constructor here). The
+//! - Loading streams the checkpoint onto the device one tensor at a time
+//!   ([`Qwen35::new_on_src`]/[`Qwen35::new_on_i8_src`] over the file's
+//!   `checkpoint::packed::stored_source`), never a whole-model host copy. The
 //!   checkpoint is the store's `weights` role, built into the provider.
-//! - Decoding is `crate::sample::generate_kv_stream_with_head`, itself a thin
+//! - Decoding is `crate::sample::generate_kv_stream`, itself a thin
 //!   wrapper around [`Qwen35::step`] fed one token at a time (P11b's
 //!   single-sequence incremental decode primitive) — there is no fast batched
 //!   prefill path yet (`crate::sample`'s own module doc), so a long prompt
@@ -116,10 +116,6 @@ pub fn manifest() -> Manifest {
 /// otherwise — the exact same caching key `qwen3::caps::Hot` uses.
 struct QwenResident {
     model: Qwen35,
-    /// The LM head, read once when this resident is (re)built - see
-    /// `crate::sample::generate_kv_stream_with_head`'s doc comment for the
-    /// per-request cost re-reading it every call otherwise pays.
-    head: Vec<f32>,
 }
 
 /// What a built [`QwenResident`] is reused for: its checkpoint, the context it
@@ -258,12 +254,13 @@ impl Action for GenerateAction {
             key,
             || {
                 let cap = need.max(64);
-                let container = checkpoint::load(&weights);
-                let cfg = Qwen35Config::from_json(&container.header["config"]);
-                let init = container.by_role("");
-                let model = if precision == "int8" { Qwen35::new_i8(cfg, 1, cap, &init) } else { Qwen35::new(cfg, 1, cap, &init) };
-                let head = model.read_weight(model.cfg.head_weight());
-                Ok(QwenResident { model, head })
+                // Streamed onto the device one tensor at a time from the file's mapping, never a whole-model host copy.
+                let reader = checkpoint::weightio::WeightReader::open(&weights).map_err(|e| format!("qwen35moe generate: open {weights}: {e}"))?;
+                let cfg = Qwen35Config::from_json(&reader.config());
+                let src = checkpoint::packed::stored_source(reader);
+                let gpu = gpu_core::Gpu::new(crate::model::pipelines());
+                let model = if precision == "int8" { Qwen35::new_on_i8_src(gpu, cfg, 1, cap, &*src) } else { Qwen35::new_on_src(gpu, cfg, 1, cap, &*src) };
+                Ok(QwenResident { model })
             },
             |hot| {
                 let model = &hot.model;
@@ -275,7 +272,7 @@ impl Action for GenerateAction {
                 let mut rng = Rng::new(seed);
                 let mut seq = SeqState::new(&req, inv.cancel.clone());
                 let mut ids_out: Vec<u32> = Vec::with_capacity(req.max_new.unwrap_or(DEFAULT_MAX_NEW as usize));
-                let gen = crate::sample::generate_kv_stream_with_head(
+                let gen = crate::sample::generate_kv_stream(
                     model,
                     &req.ids,
                     req.max_new.unwrap_or(DEFAULT_MAX_NEW as usize),
@@ -284,7 +281,6 @@ impl Action for GenerateAction {
                     req.top_p,
                     &eos,
                     &mut rng,
-                    &hot.head,
                     &mut |_i, t| {
                         ids_out.push(t);
                         !seq.advance(&tok, &ids_out, progress)
@@ -295,7 +291,7 @@ impl Action for GenerateAction {
             Plan::Raw { ids, max_new, temp, top_k, top_p, seed, eos } => {
                 let mut rng = Rng::new(seed);
                 let total = max_new as u32;
-                let gen = crate::sample::generate_kv_stream_with_head(model, &ids, max_new, temp, top_k, top_p, &eos, &mut rng, &hot.head, &mut |i, _t| {
+                let gen = crate::sample::generate_kv_stream(model, &ids, max_new, temp, top_k, top_p, &eos, &mut rng, &mut |i, _t| {
                     progress(Progress::step(i as u32 + 1, total, "token"));
                     true
                 });

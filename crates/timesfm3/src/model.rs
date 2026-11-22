@@ -109,28 +109,35 @@ impl Timesfm3 {
         Timesfm3::from_weights_on(Gpu::new(PIPELINES), cfg, weights)
     }
 
-    pub fn from_weights_on(gpu: Gpu, cfg: Timesfm3Config, weights: &HashMap<String, Vec<f32>>) -> Result<Timesfm3, String> {
+    pub fn from_weights_on(gpu: Gpu, cfg: Timesfm3Config, weights: &dyn checkpoint::TensorSource) -> Result<Timesfm3, String> {
         let mut w = HashMap::new();
         for (name, shape) in cfg.param_list() {
             let numel: usize = shape.iter().product();
-            let data = weights.get(&name).ok_or_else(|| format!("timesfm3: missing weight {name}"))?;
-            if data.len() != numel {
-                return Err(format!("timesfm3: {name} has {} elems, expected {numel}", data.len()));
+            if name.ends_with(".per_dim_scale.per_dim_scale") {
+                continue; // folded into the paired query_ln below - not a separate device buffer.
             }
-            if name.ends_with(".query_ln.weight") {
-                // Fold PerDimScale into the effective query gain (see module
-                // docs). `{seq,var}_attn.query_ln.weight` and
-                // `{seq,var}_attn.per_dim_scale.per_dim_scale` are always a
-                // matched pair at this point in `param_list()`'s naming.
+            // Fold PerDimScale into the effective query gain (see module docs). `{seq,var}_attn.query_ln.weight` and
+            // `{seq,var}_attn.per_dim_scale.per_dim_scale` are always a matched pair in `param_list()`'s naming.
+            let scale = if name.ends_with(".query_ln.weight") {
                 let scale_name = name.replace(".query_ln.weight", ".per_dim_scale.per_dim_scale");
-                let scale = weights.get(&scale_name).ok_or_else(|| format!("timesfm3: missing {scale_name}"))?;
-                let folded: Vec<f32> = data.iter().zip(scale).map(|(&g, &s)| g * 1.442_695_1 * softplus(s)).collect();
-                w.insert(name.clone(), gpu.storage_init(&name, &folded));
-            } else if name.ends_with(".per_dim_scale.per_dim_scale") {
-                continue; // consumed above, folded into the paired query_ln - not a separate device buffer.
+                let mut scale = None;
+                weights.with_tensor(&scale_name, &mut |d| scale = Some(d.to_vec()));
+                Some(scale.ok_or_else(|| format!("timesfm3: missing {scale_name}"))?)
             } else {
-                w.insert(name.clone(), gpu.storage_init(&name, data));
-            }
+                None
+            };
+            let mut uploaded = Err(format!("timesfm3: missing weight {name}"));
+            weights.with_tensor(&name, &mut |data| {
+                uploaded = if data.len() != numel {
+                    Err(format!("timesfm3: {name} has {} elems, expected {numel}", data.len()))
+                } else if let Some(scale) = &scale {
+                    let folded: Vec<f32> = data.iter().zip(scale).map(|(&g, &s)| g * 1.442_695_1 * softplus(s)).collect();
+                    Ok(gpu.storage_init(&name, &folded))
+                } else {
+                    Ok(gpu.storage_init(&name, data))
+                };
+            });
+            w.insert(name.clone(), uploaded?);
         }
         Ok(Timesfm3 { gpu, cfg, w })
     }
@@ -154,9 +161,9 @@ impl Timesfm3 {
             let weights = crate::import::load_hf(&cfg, path)?;
             return Timesfm3::from_weights_on(gpu, cfg, &weights);
         }
-        let c = checkpoint::load(path);
-        let cfg = Timesfm3Config::from_json(&c.header["config"])?;
-        let weights = c.by_role("");
+        // Streamed from the file's mapping one tensor at a time, never a whole-model host copy.
+        let weights = checkpoint::weightio::WeightReader::open(path).map_err(|e| format!("timesfm3: open {path}: {e}"))?;
+        let cfg = Timesfm3Config::from_json(&weights.config())?;
         Timesfm3::from_weights_on(gpu, cfg, &weights)
     }
 

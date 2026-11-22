@@ -7,7 +7,7 @@
 # that migrates the call to a bounded packed reader. A new call is a design
 # defect; see check-whole-tensor-loads.sh. Classes are those of the
 # loader inventory in the knowledge base (entry 337).
-crates/chronos2/src/model.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
+crates/chronos2/src/model.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/cli/src/flops_cli.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/clip/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
 crates/diamond/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
@@ -21,7 +21,6 @@ crates/gemma4/src/gguf_src.rs	1	the embedded tokenizer_json blob, read whole bec
 crates/gemma4/src/model.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/gguf/src/gdn_order.rs	5	delegating TensorSource wrapper: forwards the call to the wrapped source (knowledge 337 section 1)
 crates/glmdsa/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
-crates/horizon/src/model.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/kronos/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
 crates/lfm2/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
 crates/lfm2/src/model.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
@@ -44,14 +43,12 @@ crates/model/src/train.rs	2	class T: one whole tensor as fp32 on the host, then 
 crates/moondream3/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
 crates/nemotronasr/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
 crates/npu/src/bin/qwen_kv_bench.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
-crates/qwen3/src/caps.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/qwen3/src/export.rs	3	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/qwen3/src/finetune.rs	1	delegating TensorSource wrapper: forwards the call to the wrapped source (knowledge 337 section 1)
 crates/qwen3/src/gguf_import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
 crates/qwen35/src/base_source.rs	1	AdapterOverlay forwards with_tensor to its owner and materializes nothing itself; delete when Phase 1 gives TensorSource a descriptor-aware packed read (keep forwarding with_tensor_chunks and raw_blocks)
 crates/qwen35/src/bin/import_profile.rs	2	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
 crates/qwen35/src/import.rs	3	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader
-crates/qwen35moe/src/caps.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/qwen35moe/src/model.rs	2	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/qwen35moe/src/q8.rs	1	class T: one whole tensor as fp32 on the host, then Weight::upload or a device copy (knowledge 337)
 crates/qwen3asr/src/import.rs	1	offline importer: one whole tensor per call into a writer sink (knowledge 337 class T); the bounded form is the packed reader

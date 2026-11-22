@@ -386,7 +386,7 @@ pub struct Horizon {
 
 impl Horizon {
     /// Build on the device `BRAIN_DEVICE` selects.
-    pub fn new(cfg: HorizonConfig, b: u32, init: &HashMap<String, Vec<f32>>) -> Horizon {
+    pub fn new(cfg: HorizonConfig, b: u32, init: &dyn checkpoint::TensorSource) -> Horizon {
         Horizon::new_on(Gpu::new(&optim::with_moment_kernels(PIPELINES)), cfg, b, init)
     }
 
@@ -395,7 +395,7 @@ impl Horizon {
         gpu: Gpu,
         cfg: HorizonConfig,
         b: u32,
-        init: &HashMap<String, Vec<f32>>,
+        init: &dyn checkpoint::TensorSource,
     ) -> Horizon {
         Horizon::build(gpu, cfg, b, init, None).unwrap_or_else(|e| panic!("horizon: {e}"))
     }
@@ -408,7 +408,7 @@ impl Horizon {
         gpu: Gpu,
         cfg: HorizonConfig,
         b: u32,
-        init: &HashMap<String, Vec<f32>>,
+        init: &dyn checkpoint::TensorSource,
         resident: &model::resident_ft::ResidentFtConfig,
     ) -> Result<Horizon, String> {
         Horizon::build(gpu, cfg, b, init, Some(resident))
@@ -418,7 +418,7 @@ impl Horizon {
         gpu: Gpu,
         cfg: HorizonConfig,
         b: u32,
-        init: &HashMap<String, Vec<f32>>,
+        init: &dyn checkpoint::TensorSource,
         resident: Option<&model::resident_ft::ResidentFtConfig>,
     ) -> Result<Horizon, String> {
         cfg.validate().expect("horizon config");
@@ -1599,10 +1599,11 @@ impl Horizon {
     }
 
     /// Load a checkpoint sized for batches of `b`.
+    /// Streamed from the file's mapping one tensor at a time, never a whole-model host copy.
     pub fn load(path: &str, b: u32) -> Result<Horizon, String> {
-        let c = checkpoint::load(path);
-        let cfg = HorizonConfig::from_json(&c.header["config"])?;
-        Ok(Horizon::new(cfg, b, &c.by_role("")))
+        let reader = checkpoint::weightio::WeightReader::open(path).map_err(|e| format!("horizon: open {path}: {e}"))?;
+        let cfg = HorizonConfig::from_json(&reader.config())?;
+        Ok(Horizon::new(cfg, b, &reader))
     }
 }
 

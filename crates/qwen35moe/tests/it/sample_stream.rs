@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! `qwen35moe::sample::{generate_kv_stream, generate_kv_stream_with_head}` —
+//! `qwen35moe::sample::generate_kv_stream` -
 //! the per-token-callback streaming variants added for `qwen35moe::caps`
 //! (P13's `capability` wiring). Mirrors `qwen3::sample`'s own
 //! `eos_stops_on_any_id_in_the_slice` / `with_head_matches_the_self_reading_wrapper`
@@ -9,13 +9,12 @@
 //! streaming must produce the SAME tokens as the non-streaming `generate_kv`
 //! (the callback is purely an observability hook, not a behavior change), an
 //! `eos` slice must stop generation at the FIRST id it contains, and the
-//! caller-supplied-head variant must be bit-for-bit identical to the
-//! self-reading wrapper.
+//! logits the device head gives are those of the f32 head.
 
 use data::rng::{random_seed, Rng};
 use qwen35moe::config::Qwen35Config;
 use qwen35moe::model::Qwen35;
-use qwen35moe::sample::{generate_kv, generate_kv_stream, generate_kv_stream_with_head};
+use qwen35moe::sample::{generate_kv, generate_kv_stream};
 
 fn tiny_model() -> (Qwen35, Vec<u32>) {
     let cfg = Qwen35Config::tiny();
@@ -86,14 +85,15 @@ fn on_token_returning_false_stops_generation_early_but_keeps_the_token() {
 }
 
 #[test]
-fn with_head_matches_the_self_reading_wrapper() {
+fn the_device_head_gives_the_logits_of_the_f32_head() {
     let (model, prompt) = tiny_model();
-    let seed = random_seed();
     let head = model.read_weight(model.cfg.head_weight());
-
-    let mut r1 = Rng::new(seed);
-    let a = generate_kv_stream(&model, &prompt, 6, 0.0, 0, 1.0, &[], &mut r1, &mut |_, _| true);
-    let mut r2 = Rng::new(seed);
-    let b = generate_kv_stream_with_head(&model, &prompt, 6, 0.0, 0, 1.0, &[], &mut r2, &head, &mut |_, _| true);
-    assert_eq!(a, b, "generate_kv_stream_with_head must match generate_kv_stream given the same head");
+    model.reset_decode_cache();
+    let hidden = prompt.iter().fold(Vec::new(), |_, &t| model.step(t));
+    let (vocab, d) = (model.cfg.vocab as usize, model.cfg.d_model as usize);
+    let want = model::hostmath::matvec_par(&head, &hidden, vocab, d);
+    let got = model.head_logits(&hidden);
+    for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+        assert!((g - w).abs() <= 1e-4 * w.abs().max(1.0), "logit {i}: device {g}, host {w}");
+    }
 }

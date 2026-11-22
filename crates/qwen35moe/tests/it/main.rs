@@ -29,6 +29,7 @@ mod reference_parity;
 mod sample_generate;
 mod sample_stream;
 mod serve;
+mod streamed_generate;
 mod serve_conformance;
 mod shard_parity;
 mod streamed_construction;
