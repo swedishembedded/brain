@@ -1474,6 +1474,13 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
 
 ## Open
 
+- [ ] A rank must not deadlock on a CXI fabric without `FI_CXI_DISABLE_HOST_REGISTER=1` (knowledge 552). Reproduced
+      on one node (2 ranks forced through the NIC, `--network=single_node_vni`, qwen35 parameter-sharded harness,
+      2026-11-22: proxy in `cudaHostRegister`, rank in `cuModuleLoadData`). Candidate fix in `backend_cuda::exec`
+      (bounded run-ahead, wait outside the driver before downloads, large pageable uploads, frees and module loads)
+      passes five held-stream backend-cuda tests that were red; not landed: the harness run without the variable and
+      its cost are still to be measured. Until then the variable is required.
+
 - [ ] The one-machine profile cannot see a real network. The loopback
       transport's latency is the kernel's TCP stack on one host, there is no
       NIC and no scheduler, and the host transport stages payloads through host

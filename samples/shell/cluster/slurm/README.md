@@ -104,7 +104,8 @@ then an error, not a fall back), `FI_PROVIDER=cxi` and
 registers new request buffers with CUDA from NCCL's proxy thread, which
 deadlocks against a rank blocked in the CUDA driver behind a collective (the
 proxy waits for a driver lock that rank holds while the collective waits for
-the proxy). A Slingshot step gets a
+the proxy). It is still required (2026-11-22: the deadlock reproduces on one node
+too and brain does not yet avoid it; knowledge 552). A Slingshot step gets a
 network VNI only when it spans nodes, or with `--network=single_node_vni` on
 one node, which `train.sh` adds for a one-node step.
 
