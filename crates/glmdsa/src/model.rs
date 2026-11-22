@@ -277,8 +277,8 @@ enum Mlp {
         gate: DeviceBuffer,   // combine weights [n, E] (0 for non-selected)
         probs: DeviceBuffer,  // sigmoid scores [n, E]
         /// Every routed expert's `gate_pre`/`up`/`h`/`expert_out` for the rows routed to it in the latest forward
-        /// (`model::moe::MoeActs::compact`), which the backward reads.
-        acts: RefCell<Option<MoeActs>>,
+        /// (`model::moe::MoeActs::compact`), which the backward reads. Boxed: it is far larger than the other variant.
+        acts: RefCell<Option<Box<MoeActs>>>,
         sh_gate: DeviceBuffer,
         sh_up: DeviceBuffer,
         sh_h: DeviceBuffer,
@@ -1245,7 +1245,7 @@ impl Glm {
         let ids = MoeIds { router_gate: ROUTER_SIG, linear_gated: self.kernel("moe_linear_gated"), silu_mul: SILU_MUL, scale_add: SCALE_ADD };
         let steps = model::moe::experts_fwd_train(&self.gpu, &ids, &shape, &self.layers[l].xn2, gate, &self.expert_weights(l), &compact, &self.moe_acc);
         self.gpu.submit(&[&self.moe_acc], &steps);
-        *acts.borrow_mut() = keep.then_some(compact);
+        *acts.borrow_mut() = keep.then(|| Box::new(compact));
     }
 
     /// The routed half of MoE layer `l`'s backward over `rows` rows: the router (its weight's input gradient adds into
@@ -1254,7 +1254,7 @@ impl Glm {
         let lb = &self.layers[l];
         let Mlp::Moe { router_logits, gate, acts, .. } = &lb.mlp else { unreachable!("a MoE segment of a dense layer") };
         let acts = acts.borrow();
-        let acts = acts.as_ref().expect("glmdsa: a MoE backward without the forward that routed it");
+        let acts = acts.as_deref().expect("glmdsa: a MoE backward without the forward that routed it");
         let shape = self.moe_shape(rows);
         let (d, e) = (shape.d_model, shape.n_experts);
         let mut router_weight_bwd: Vec<Step> = Vec::new();
