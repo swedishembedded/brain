@@ -120,10 +120,30 @@ pub fn grad_multiplier(raw_sum_sq: f64, clip: Option<f32>, extra_scale: f32) -> 
     }
 }
 
+/// Adam's bias correction `1 - beta^t` at 1-based step `t`, in f64 by square-and-multiply.
+///
+/// Not `powi`: LLVM folds `powi` of a step known at compile time to the correctly rounded power but multiplies in
+/// the operand's precision at run time, so the same step gave two f32 results in one optimised binary (0.99^3 in f32:
+/// 0.97029907 folded, 0.97029901 multiplied), and an update depended on whether its step number was a constant where
+/// it was inlined. Explicit multiplications are folded exactly as they run, and f64 carries enough bits that the f32
+/// result is the correctly rounded one.
+pub fn bias_correction(beta: f64, t: u32) -> f64 {
+    let (mut power, mut base, mut e) = (1.0f64, beta, t);
+    while e > 0 {
+        if e & 1 == 1 {
+            power *= base;
+        }
+        base *= base;
+        e >>= 1;
+    }
+    1.0 - power
+}
+
 impl Adam {
-    /// The two bias corrections at 1-based step `t`.
+    /// The two bias corrections at 1-based step `t`: `1 - beta^t` ([`bias_correction`]), rounded once to f32. Every
+    /// AdamW of the workspace takes them from here, the device kernels too (they receive them with the step's rate).
     pub fn bias_corrections(&self, t: u32) -> (f32, f32) {
-        (1.0 - self.beta1.powi(t as i32), 1.0 - self.beta2.powi(t as i32))
+        (bias_correction(f64::from(self.beta1), t) as f32, bias_correction(f64::from(self.beta2), t) as f32)
     }
 
     /// One element of a decoupled-weight-decay AdamW step, as `adamw.wgsl`
@@ -686,6 +706,21 @@ mod tests {
     use super::*;
     use paramstore::ParamStore;
     use std::collections::HashMap;
+
+    /// A step's bias corrections are the same bits whether the step number is known when the code is compiled or
+    /// only when it runs: an optimised build folded `powi` of a constant step to the correctly rounded power while a
+    /// run-time step multiplied, so the same step differed by a rounding in two places of one binary.
+    #[test]
+    fn bias_corrections_do_not_depend_on_whether_the_step_is_known_at_compile_time() {
+        let adam = Adam { beta1: 0.9, beta2: 0.99, eps: 1e-6 };
+        assert_eq!(adam.bias_corrections(3), adam.bias_corrections(std::hint::black_box(3)));
+        assert_eq!(adam.bias_corrections(7), adam.bias_corrections(std::hint::black_box(7)));
+        // The documented value: 1 - beta^t, rounded once to f32.
+        for t in [1u32, 2, 3, 10, 1000, 100_000] {
+            let want = |b: f32| (1.0 - f64::from(b).powf(f64::from(t))) as f32;
+            assert_eq!(adam.bias_corrections(std::hint::black_box(t)), (want(0.9), want(0.99)), "t = {t}");
+        }
+    }
 
     #[test]
     fn adamw_with_clip_matches_hand_computation() {

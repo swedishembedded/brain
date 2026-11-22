@@ -209,18 +209,12 @@ impl LayerDistiller {
         if stats.queries == 0 {
             return stats;
         }
-        let (b1, b2, eps) = (0.9f32, 0.999f32, 1e-8f32);
+        // The workspace's AdamW element update and bias corrections, without weight decay.
+        let adam = crate::Adam { beta1: 0.9, beta2: 0.999, eps: 1e-8 };
         self.adam.t += 1;
-        let t = self.adam.t as i32;
-        let (c1, c2) = (1.0 - b1.powi(t), 1.0 - b2.powi(t));
+        let bc = adam.bias_corrections(self.adam.t);
         let n = self.wq.len();
-        let mut update = |i: usize, value: &mut f32, g: f32| {
-            let m = &mut self.adam.m[i];
-            let v = &mut self.adam.v[i];
-            *m = b1 * *m + (1.0 - b1) * g;
-            *v = b2 * *v + (1.0 - b2) * g * g;
-            *value -= lr * (*m / c1) / ((*v / c2).sqrt() + eps);
-        };
+        let mut update = |i: usize, value: &mut f32, g: f32| adam.update(bc, lr, 0.0, g, value, &mut self.adam.m[i], &mut self.adam.v[i]);
         for (i, (w, g)) in self.wq.iter_mut().zip(&gq).enumerate() {
             update(i, w, *g);
         }
