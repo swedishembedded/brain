@@ -475,9 +475,11 @@ SERVING POLICY  (one model-agnostic policy for every model that serves it.
                          gaps. Engines that do not mix prompts into decoding
                          report the setting as ignored (default: the engine's
                          own, 45 for the Qwen3.8 GGUF models).
-  --speculative MODE     speculative decoding for the Qwen3.8 GGUF models and
+  --speculative MODE     speculative decoding for the Qwen3.8 GGUF models,
                          Ripple (Ripple: off, ngram, or dflash with the
-                         DFlash2 draft model; mtp is refused):
+                         DFlash2 draft model; mtp is refused) and Inkling 2
+                         (opt-in: mtp drafts with its released mtp.safetensors,
+                         ngram by prompt lookup; auto decodes plainly):
                          auto|off|mtp|dflash|ngram (default auto = the best
                          drafter the checkpoint offers, off when it has none;
                          off where the cards cannot run the CUDA verify
@@ -1079,6 +1081,7 @@ pub fn run_serve(args: &[String]) {
                     std::process::exit(2);
                 });
                 qwen35_cfg.gguf.speculative = Some(parsed);
+                qwen35_cfg.fp32.speculative = Some(parsed);
                 ricursive_cfg.speculative = Some(parsed);
             }
             "--anthropic" => anthropic = Some(take_addrs(args, &mut i, 8787)),

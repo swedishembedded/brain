@@ -1083,6 +1083,29 @@ Driven by the per-device gap list, as new candidates only:
     path; a round after the context grew in pieces; two sequences in one forward; the serving drafter end to end), the
     released `mtp.safetensors` over the real golden's visit inputs for the three prompts at 3e-6 scaled, path exact.
     The per-row window instead of the block-anchored one fails the tiny gate (3.9e-1).
+  - Done (2026-11-22): wired. `inkling2::serve::Engine` retains taps by logical depth (`TapProbe` over the trunk's
+    `visit{v}.in` / `final_norm` keys, written for every prefill, decode and verify row, carried by a prefix hit's
+    copied tail: `Resumed::copied_tail`), verifies each sequence's rows as one chunk past its checkpoint
+    (`forward_batched_verify{,_logit_rows}`), and in `commit_verified` rolls a partly kept verify back and recomputes the
+    kept rows; `spec_max_draft` is the drafter's 7 (the scheduler's default for an external drafter) and 0 without undo
+    rows. `Engine::set_drafter(dir)` loads `inkling2::mtp` (`shape` validates `mtp_config` against the target: width,
+    depths ascending to the full depth 48, the head type, no biases; `load` reads `mtp.safetensors` under the release's
+    declaration), keyed by state row (forgotten on release). Serving: `--speculative mtp|ngram` (opt-in; `auto`/`off`
+    decode plainly, `dflash` refused by name) through `Qwen35Sizing::speculative` into `Inkling2Resident` (`Drafting`),
+    charging the drafter (`mtp::device_bytes`), the undo rows and the host taps. Gates (CPU): `inkling2/tests/it/serve.rs`
+    (conformance with undo rows and with the tiny drafter attached, taps equal to the uncached forward's rows through
+    prefill/decode/verify/prefix hit, speculative greedy == plain greedy with the tiny drafter, sampled requests through
+    rejection sampling, and the released weights below), `catalog/tests/it/inkling2_served.rs` (mtp serves as plain
+    decoding, modes refused by name, footprint). Removing the rollback fails three of them.
+  - Measured (2026-11-22, CPU, debug build, released weights + released drafter, the three real-golden prompts, 32
+    greedy tokens each, every round a full block of 7): speculative output == plain greedy for all three; accepted
+    67 of 155 proposals (0.43; per prompt 0.38, 0.35, 0.62), 3.6 tokens per verify round over 26 rounds. Through the
+    scheduler on the CPU its cost gate stops speculating after one round (the draft round and the 8-row verify are not
+    cheaper than decoding there), so acceptance is measured with forced windows.
+  - Left: the verify runs one chunk pass per sequence (a batched multi-sequence verify would share the weight reads);
+    a partly kept verify costs a recompute of its kept rows (keeping per-row convolution inputs and the overwritten ring
+    rows would make the rollback a copy); the Markov walk runs one vocabulary-wide head product per step; speculation
+    is opt-in until the GPU crossover is measured (knowledge #318); CUDA not exercised.
 
 ## Decisions (2026-11-21)
 

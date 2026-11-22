@@ -35,6 +35,11 @@ Two modes write `golden.safetensors` (f32):
     # a tiny random draft (draft/config.json, draft/mtp.safetensors) and its golden
     inkling2_mtp_reference.py tiny --out testdata/golden/inkling2/mtp-tiny
 
+    # a tiny random draft for the tiny reference target (its config.json plus mtp_config, and mtp.safetensors): what the
+    # served engine's drafter tests load beside testdata/golden/inkling2/tiny/checkpoint
+    inkling2_mtp_reference.py tiny-target --checkpoint testdata/golden/inkling2/tiny/checkpoint \
+        --out testdata/golden/inkling2/mtp-tiny-target
+
     # the released draft over real target features (the real golden's visit inputs at the tapped depths)
     inkling2_mtp_reference.py real --checkpoint MODELS/thinkingmachines/Inkling-2-Mini \\
         --features testdata/golden/inkling2/real-f32/golden.safetensors --out testdata/golden/inkling2/mtp-real
@@ -252,6 +257,27 @@ def run_tiny(args):
         json.dump({"kind": "tiny", "seed": seed, "cases": {"a": 14, "b": 17}, "softcap": TINY_CAP}, f, indent=1)
 
 
+def run_tiny_target(args):
+    seed = args.seed if args.seed is not None else int.from_bytes(os.urandom(4), "little")
+    print(f"seed {seed}")
+    gen = torch.Generator().manual_seed(seed)
+    with open(os.path.join(args.checkpoint, "config.json")) as f:
+        target = json.load(f)
+    text = target["text_config"]
+    loop = text.get("loop_config")
+    n = text["num_hidden_layers"]
+    visits = loop["core_start"] + (loop["core_end"] - loop["core_start"]) * loop["num_passes"] + n - loop["core_end"] if loop else n
+    d = text["hidden_size"]
+    cfg = dict(TINY, hidden_size=d, head_dim=d // 4, intermediate_size=2 * d, target_layer_ids=[1, visits // 2, visits - 1, visits])
+    w = tiny_weights(cfg, text["vocab_size"], gen)
+    os.makedirs(args.out, exist_ok=True)
+    save_file({k: v.contiguous() for k, v in w.items()}, os.path.join(args.out, "mtp.safetensors"))
+    with open(os.path.join(args.out, "config.json"), "w") as f:
+        json.dump(dict(target, mtp_config=cfg), f, indent=1)
+    with open(os.path.join(args.out, "manifest.json"), "w") as f:
+        json.dump({"kind": "tiny-target", "seed": seed, "target": os.path.basename(os.path.normpath(args.checkpoint)), "visits": visits}, f, indent=1)
+
+
 def run_real(args):
     ckpt = args.checkpoint
     with open(os.path.join(ckpt, "config.json")) as f:
@@ -296,6 +322,12 @@ def main():
         ap.add_argument("--out", required=True)
         ap.add_argument("--seed", type=int, default=None)
         run_tiny(ap.parse_args(sys.argv[2:]))
+    elif len(sys.argv) > 1 and sys.argv[1] == "tiny-target":
+        ap = argparse.ArgumentParser(prog="inkling2_mtp_reference.py tiny-target")
+        ap.add_argument("--checkpoint", required=True)
+        ap.add_argument("--out", required=True)
+        ap.add_argument("--seed", type=int, default=None)
+        run_tiny_target(ap.parse_args(sys.argv[2:]))
     elif len(sys.argv) > 1 and sys.argv[1] == "real":
         ap = argparse.ArgumentParser(prog="inkling2_mtp_reference.py real")
         ap.add_argument("--checkpoint", required=True)

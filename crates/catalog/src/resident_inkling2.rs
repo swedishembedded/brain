@@ -23,6 +23,13 @@
 //!   as many snapshot rows for cached prompts. [`Inkling2Resident::estimate`] is the weights, that pool and the
 //!   engine's step buffers.
 //!
+//! - **Speculation** is opt-in (`--speculative`): `mtp` drafts with the release's own drafter (`mtp.safetensors`, a
+//!   DSpark block drafter over the target's hidden states at four logical depths, `inkling2::mtp`), `ngram` by prompt
+//!   lookup. Either adds an undo state row per running sequence (a verify is rolled back over the rings and convolution
+//!   states), the drafter's weights and caches, and host memory for the retained hidden states. `auto` and `off`
+//!   decode plainly: what speculation buys on a device is not measured yet (inkling2 ledger, Phase 7); `dflash` is
+//!   refused by name.
+//!
 //! - **Images**: a checkpoint with a vision tower reads the request's image blobs (one per image part of its
 //!   messages) through [`images::Inkling2Images`], the tower on the decoder's card; the rows stand at the template's
 //!   placeholder tokens, expanded to one per 40x40-pixel region, and the engine splices them after its embedding norm.
@@ -44,7 +51,7 @@ use llmserve::image_frontend::ImageFrontend;
 use llmserve::{generate_spec, ScheduledInstance, TextFrontend};
 use model::kv_tier::KvTier;
 use model::serve::visit_state::VisitPoolSizing;
-use model::serve::Scheduler;
+use model::serve::{NgramDrafter, Scheduler, SpeculativeMode, TapPool};
 use residency::{on_device, Device, Instance, InstanceKey, MemCost, ResidentModel};
 
 use crate::resident_qwen35::Qwen35Sizing;
@@ -79,6 +86,42 @@ pub const INKLING2_POLICY: model::policy::PolicySupport = model::policy::PolicyS
     draft_model: false,
 };
 
+/// Tokens the prompt-lookup drafter matches on (`--speculative ngram`).
+const NGRAM_ORDER: usize = 3;
+
+/// Where a resident's proposals come from (`--speculative`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Drafting {
+    /// Plain decoding.
+    Off,
+    /// The release's drafter (`mtp.safetensors`).
+    Mtp,
+    /// Prompt lookup: no model.
+    Ngram,
+}
+
+impl Drafting {
+    /// The drafting `--speculative` asks for, for the checkpoint in `dir`.
+    fn resolve(mode: Option<SpeculativeMode>, dir: &Path, cfg: &Inkling2Config, id: &str) -> Result<Drafting, String> {
+        match mode {
+            None | Some(SpeculativeMode::Off) => Ok(Drafting::Off),
+            Some(SpeculativeMode::Auto) => {
+                eprintln!("brain: {id}: --speculative auto decodes plainly: speculation is opt-in for this model (--speculative mtp or ngram) until it is measured on a device");
+                Ok(Drafting::Off)
+            }
+            Some(SpeculativeMode::Ngram) => Ok(Drafting::Ngram),
+            Some(SpeculativeMode::Dflash) => Err(format!("{id}: --speculative dflash: Inkling 2 has no DFlash2 draft model; its drafter is the release's own (--speculative mtp)")),
+            Some(SpeculativeMode::Mtp) => {
+                if !dir.join(inkling2::mtp::MTP_FILE).is_file() {
+                    return Err(format!("{id}: --speculative mtp: {} has no {}", dir.display(), inkling2::mtp::MTP_FILE));
+                }
+                inkling2::mtp::draft_config(dir, cfg)?.ok_or_else(|| format!("{id}: --speculative mtp: config.json declares no mtp_config"))?;
+                Ok(Drafting::Mtp)
+            }
+        }
+    }
+}
+
 const SUMMARY: &str = "text generation (Inkling 2: a looped mixture-of-experts decoder with depth-attention residuals, sliding and full attention, served as released; typed-message chat with reasoning and tool calls; continuous batching with prompt-prefix reuse)";
 
 /// The static manifest: safe to build with no weights on the machine. The released checkpoint has a vision tower, so
@@ -109,6 +152,7 @@ pub struct Inkling2Resident {
     opts: EngineOptions,
     /// The expert products' activation operand (`--linear-activations`).
     linear_activations: model::policy::LinearActivations,
+    drafting: Drafting,
 }
 
 impl Inkling2Resident {
@@ -132,10 +176,35 @@ impl Inkling2Resident {
         let ctx = u64::from(ctx).min(cfg.max_positions).max(u64::from(BLOCK)) as u32;
         let live = sizing.max_batch.max(1);
         let blocks = ctx.div_ceil(BLOCK).checked_mul(live).ok_or_else(|| format!("{id}: {live} sequences of {ctx} tokens overflow the block count"))?;
-        let opts = EngineOptions { kv_tier, sizing: VisitPoolSizing { block_size: BLOCK, num_blocks: blocks, live_rows: live, snapshot_rows: live, undo_rows: false }, max_seq_len: ctx as usize, prefill_chunk: PREFILL_CHUNK };
+        let drafting = Drafting::resolve(sizing.speculative, path, &cfg, id)?;
+        let undo_rows = drafting != Drafting::Off;
+        let opts = EngineOptions { kv_tier, sizing: VisitPoolSizing { block_size: BLOCK, num_blocks: blocks, live_rows: live, snapshot_rows: live, undo_rows }, max_seq_len: ctx as usize, prefill_chunk: PREFILL_CHUNK };
         // The layout is held to the engine's own check now, so a configuration it cannot serve is refused at the scan.
         Engine::layout(&cfg, kv_tier)?;
-        Ok(Inkling2Resident { id: id.to_string(), dir: path.to_path_buf(), cfg, opts, linear_activations: sizing.linear_activations.unwrap_or_default() })
+        Ok(Inkling2Resident { id: id.to_string(), dir: path.to_path_buf(), cfg, opts, linear_activations: sizing.linear_activations.unwrap_or_default(), drafting })
+    }
+
+    /// Where this resident's proposals come from.
+    pub fn drafting(&self) -> Drafting {
+        self.drafting
+    }
+
+    /// Device bytes of the drafter (`--speculative mtp`): its weights and its caches, one slot per running sequence.
+    fn draft_bytes(&self) -> u64 {
+        if self.drafting != Drafting::Mtp {
+            return 0;
+        }
+        inkling2::mtp::device_bytes(&self.dir, &self.cfg, self.opts.sizing.live_rows, self.opts.max_seq_len as u32).expect("the drafter's declaration was checked at construction")
+    }
+
+    /// Host bytes of the hidden states the drafter reads, retained per cached position.
+    fn tap_bytes(&self) -> u64 {
+        if self.drafting != Drafting::Mtp {
+            return 0;
+        }
+        let depths = inkling2::mtp::draft_config(&self.dir, &self.cfg).ok().flatten().map_or(0, |c| c.target_layers.len());
+        let s = self.opts.sizing;
+        TapPool::bytes(depths, self.cfg.hidden as usize, s.num_blocks, s.block_size)
     }
 
     /// The engine sizing this resident serves at.
@@ -162,7 +231,7 @@ impl Inkling2Resident {
     fn pool_bytes(&self) -> u64 {
         let layout = Engine::layout(&self.cfg, self.opts.kv_tier).expect("checked at construction");
         let s = self.opts.sizing;
-        u64::from(s.num_blocks) * layout.block_bytes(s.block_size) + u64::from(s.live_rows + s.snapshot_rows) * layout.row_bytes() + layout.zero_row_bytes()
+        u64::from(s.num_blocks) * layout.block_bytes(s.block_size) + s.state_rows() * layout.row_bytes() + layout.zero_row_bytes()
     }
 
     /// The engine's step buffers at their widest: one prefill pass of [`PREFILL_CHUNK`] rows or one decode step of the
@@ -198,7 +267,7 @@ impl ResidentModel for Inkling2Resident {
         Some(self.opts.sizing.live_rows as usize)
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
-        MemCost::new(self.weight_bytes() + self.pool_bytes() + self.step_bytes() + self.tower_bytes(), 0)
+        MemCost::new(self.weight_bytes() + self.pool_bytes() + self.step_bytes() + self.tower_bytes() + self.draft_bytes(), self.tap_bytes())
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         let tok = QwenBpe::from_file(&self.dir.join("tokenizer.json").to_string_lossy())?;
@@ -238,19 +307,29 @@ impl ResidentModel for Inkling2Resident {
                 qwen3::chat::parse_request_as(tok, &text_format, inv)
             }),
         );
-        let (dir, opts, linear_activations) = (self.dir.clone(), self.opts, self.linear_activations);
+        let (dir, opts, linear_activations, drafting) = (self.dir.clone(), self.opts, self.linear_activations, self.drafting);
         let live = opts.sizing.live_rows as usize;
         on_device(device, move || -> Result<Box<dyn Instance>, String> {
             let mut ops = inkling2::serve::device_ops()?;
             ops.set_linear_activations(linear_activations);
-            let engine = Engine::open(ops, &dir, opts)?;
+            let mut engine = Engine::open(ops, &dir, opts)?;
+            if drafting == Drafting::Mtp {
+                engine.set_drafter(&dir)?;
+            }
+            let scheduler = |engine: Engine| {
+                let mut sched = Scheduler::new(engine, live);
+                if drafting == Drafting::Ngram {
+                    sched.set_drafter(Box::new(NgramDrafter::new(NGRAM_ORDER)));
+                }
+                sched
+            };
             let (Some(v), Some((tiling, image_token)), Some(tok)) = (vision, processor, image_tok) else {
-                return Ok(Box::new(ScheduledInstance::new(text, Scheduler::new(engine, live), live)));
+                return Ok(Box::new(ScheduledInstance::new(text, scheduler(engine), live)));
             };
             // The tower shares the decoder's card: its own kernel set on the same device.
             let gpu = engine.model().ops().gpu().new_like(inkling2::vision::pipelines());
             let tower = VisionTower::new(&gpu, &v, &VisionWeights::open(&dir, &v)?)?;
-            let sched = Scheduler::new(engine, live);
+            let sched = scheduler(engine);
             let build = images::Inkling2Images::new(tok, format, gpu, tower, tiling, image_token, sched.sequence_capacity());
             let front = ImageFrontend::new(text, build, "inkling2-vision")?;
             Ok(Box::new(ScheduledInstance::new(front, sched, live)))

@@ -28,6 +28,14 @@
 //!   rows; its entry carries the final normalised row of its last position.
 //! - **Routing.** A sequence whose table carries a routing log gets every computed position's experts recorded for
 //!   each of the plan's MoE calls, in visit order ([`PagedDecoder::routing_calls`]).
+//! - **Taps** ([`PagedDecoder::enable_taps`]) are keyed by logical depth: depth `v` below the plan's visit count is the
+//!   carried partial entering visit `v` (after a pass restarts from the prelude), the full depth the final normalised
+//!   row. Every pass records them for the positions it computes, in a [`TapPool`] addressed by the block tables, so
+//!   rollback and prefix reuse carry them.
+//! - **Speculation** (a pool sized with [`VisitPoolSizing::undo_rows`]): a verify runs each sequence's rows as one
+//!   chunk past its checkpointed state row; [`PagedDecoder::commit_verified`] restores the rings and convolution states
+//!   of a sequence that keeps fewer rows and recomputes the kept ones, so every kept row is what plain decoding computes.
+//!   Proposals come from the release's drafter ([`Engine::set_drafter`], [`crate::mtp`]) or the scheduler's.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -42,12 +50,13 @@ use model::ops::Ops;
 use model::paged::{BlockAllocator, BlockTable, KvNamespace, BASE_KV_NAMESPACE};
 use model::readout::{argmax_rows, topk_rows, ReadoutKernels};
 use model::routing::RouterCallShape;
+use dflash2::{DraftHost, DraftRequest, Dflash2Drafter, TapRows};
 use model::serve::visit_state::{ConvState, VisitLayout, VisitPool, VisitPoolSizing, VisitStateShape};
-use model::serve::{AdapterId, ContentKey, PagedDecoder, PrefillProgress, PromptEmbeds};
+use model::serve::{AdapterId, ContentKey, DraftQuery, PagedDecoder, PrefillProgress, PromptEmbeds, TapPool};
 use model::snapshot_prefix::Prompt;
 
 use crate::config::{Inkling2Config, LayerKind};
-use crate::model::{Banked, Inkling2, Pool, Rows};
+use crate::model::{Banked, Inkling2, Pool, Probe, Rows};
 use crate::train::sites::{expert_sites, lora_sites};
 
 /// Tokens before a prompt's end where its prefix entry is filed (knowledge #347).
@@ -86,6 +95,36 @@ pub struct Engine {
     prefill_chunk: u32,
     /// The adapters this engine serves beside the base ([`Engine::enable_adapters`]); `None` serves the base alone.
     bank: Option<AdapterBank>,
+    /// The hidden states at the tapped depths, per cached position ([`PagedDecoder::enable_taps`]).
+    taps: Option<TapPool>,
+    /// The release's drafter, when one is set ([`Engine::set_drafter`]).
+    drafter: Option<Dflash2Drafter>,
+    /// The verify awaiting [`PagedDecoder::commit_verified`]: each sequence's rows and first position.
+    pending: Vec<(Vec<u32>, u32)>,
+}
+
+/// Collects the tapped depths' rows as a pass runs (the trunk's probe keys).
+struct TapProbe {
+    keys: Vec<String>,
+    rows: Vec<Option<Vec<f32>>>,
+}
+
+impl TapProbe {
+    fn new(depths: &[usize], visits: usize) -> TapProbe {
+        let keys = depths.iter().map(|&v| if v == visits { "final_norm".to_string() } else { format!("visit{v}.in") }).collect();
+        TapProbe { keys, rows: vec![None; depths.len()] }
+    }
+}
+
+impl Probe for TapProbe {
+    fn wants(&self, key: &str) -> bool {
+        self.keys.iter().any(|k| k == key)
+    }
+    fn record(&mut self, key: &str, values: Vec<f32>) {
+        if let Some(i) = self.keys.iter().position(|k| k == key) {
+            self.rows[i] = Some(values);
+        }
+    }
 }
 
 /// The adapter sites the served engine corrects, every site the trainer adapts ([`crate::train::sites`]):
@@ -163,7 +202,7 @@ impl Engine {
         let layout = Self::layout(cfg, opts.kv_tier)?;
         let pool = VisitPool::new(m.ops().gpu(), layout, opts.sizing)?;
         let readout = ReadoutKernels::resolve(m.ops().gpu())?;
-        Ok(Engine { m, pool, readout, max_seq_len: opts.max_seq_len, prefill_chunk: opts.prefill_chunk, bank: None })
+        Ok(Engine { m, pool, readout, max_seq_len: opts.max_seq_len, prefill_chunk: opts.prefill_chunk, bank: None, taps: None, drafter: None, pending: Vec::new() })
     }
 
     /// Load the checkpoint in `dir` onto `ops` and serve it at `opts`.
@@ -266,7 +305,11 @@ impl Engine {
         let key = Prompt::new(prompt, content.as_deref().unwrap_or(&none));
         if table.state_row().is_none() {
             let g = self.m.ops().gpu();
-            if let Some(hidden) = self.pool.begin(g, table, key).exact {
+            let resumed = self.pool.begin(g, table, key);
+            if let (Some(taps), Some((from, to, rows))) = (self.taps.as_mut(), resumed.copied_tail) {
+                taps.copy_rows(from, to, rows);
+            }
+            if let Some(hidden) = resumed.exact {
                 return PrefillProgress::Done(hidden);
             }
         }
@@ -277,22 +320,8 @@ impl Engine {
             n = file_at - done;
         }
         let start = self.pool.reserve(table, n as u32);
-        let tokens = &prompt[done..done + n];
+        let normed = self.chunk(table, start, &prompt[done..done + n], embeds);
         let (g, d) = (self.g(), self.m.config().hidden as usize);
-        let mut s = Vec::new();
-        let x = self.m.embed(&mut s, tokens);
-        if let Some(e) = embeds {
-            self.m.splice(&mut s, &x, e, start, n as u32);
-        }
-        let recording = table.routing_log_mut().is_some();
-        let mut routes = recording.then(Vec::new);
-        let served = self.bank_for(&[&*table], n);
-        let bank = served.as_ref().map(|(bank, slots)| Banked { bank, slots });
-        let normed = self.m.trunk(&mut s, &Rows::Chunk { pool: &self.pool, table, start, bank }, x, n as u32, &mut None, routes.as_mut()).expect("an admitted prompt runs");
-        self.m.flush(&mut s);
-        if let Some(routes) = routes {
-            self.record(&mut [table], &routes, |_| start, n);
-        }
         let hidden = g.read(&normed, n * d).split_off((n - 1) * d);
         if done + n == file_at {
             let g = self.m.ops().gpu();
@@ -303,6 +332,98 @@ impl Engine {
         } else {
             PrefillProgress::Done(hidden)
         }
+    }
+
+    /// One pass of `tokens` of the sequence of `table` at the backed positions `start ..` (embedding rows of `embeds`
+    /// spliced over their positions): the final normalised rows on the device. Routing and taps are recorded.
+    fn chunk(&mut self, table: &mut BlockTable, start: u32, tokens: &[u32], embeds: Option<&PromptEmbeds>) -> DeviceBuffer {
+        let n = tokens.len();
+        let mut s = Vec::new();
+        let x = self.m.embed(&mut s, tokens);
+        if let Some(e) = embeds {
+            self.m.splice(&mut s, &x, e, start, n as u32);
+        }
+        let recording = table.routing_log_mut().is_some();
+        let mut routes = recording.then(Vec::new);
+        let served = self.bank_for(&[&*table], n);
+        let bank = served.as_ref().map(|(bank, slots)| Banked { bank, slots });
+        let mut taps = self.tap_probe();
+        let normed = {
+            let mut probe: Option<&mut dyn Probe> = taps.as_mut().map(|p| p as &mut dyn Probe);
+            self.m.trunk(&mut s, &Rows::Chunk { pool: &self.pool, table, start, bank }, x, n as u32, &mut probe, routes.as_mut()).expect("an admitted chunk runs")
+        };
+        self.m.flush(&mut s);
+        if let Some(routes) = routes {
+            self.record(&mut [table], &routes, |_| start, n);
+        }
+        if let Some(probe) = taps {
+            let positions: Vec<(&BlockTable, u32)> = (0..n as u32).map(|i| (&*table, start + i)).collect();
+            self.retain_taps(probe, &positions);
+        }
+        normed
+    }
+
+    /// A probe for the tapped depths, when taps are retained.
+    fn tap_probe(&self) -> Option<TapProbe> {
+        self.taps.as_ref().map(|t| TapProbe::new(t.depths(), self.m.plan().visits().len()))
+    }
+
+    /// Store the rows a pass's probe collected: row `r` is position `positions[r].1` of the sequence of
+    /// `positions[r].0`.
+    fn retain_taps(&mut self, probe: TapProbe, positions: &[(&BlockTable, u32)]) {
+        let Some(pool) = self.taps.as_mut() else { return };
+        let d = self.m.config().hidden as usize;
+        let depths: Vec<Vec<f32>> = probe.rows.into_iter().map(|r| r.expect("every tapped depth is recorded by the pass")).collect();
+        let mut row = Vec::with_capacity(depths.len() * d);
+        for (r, (table, pos)) in positions.iter().enumerate() {
+            row.clear();
+            for values in &depths {
+                row.extend_from_slice(&values[r * d..(r + 1) * d]);
+            }
+            pool.write(table.blocks(), *pos, &row);
+        }
+    }
+
+    /// The verify of `rows` (each sequence's next input and its proposals): every sequence's state row checkpointed,
+    /// then its rows run as one chunk at its next positions. The logits `[rows, vocab]` per sequence, on the device.
+    fn verify(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>]) -> Vec<DeviceBuffer> {
+        assert_eq!(tables.len(), rows.len(), "inkling2 serve: one row list per verified sequence");
+        {
+            let refs: Vec<&BlockTable> = tables.iter().map(|t| &**t).collect();
+            self.pool.checkpoint(self.m.ops().gpu(), &refs);
+        }
+        self.pending.clear();
+        let mut out = Vec::with_capacity(rows.len());
+        for (t, r) in tables.iter_mut().zip(rows) {
+            assert!(!r.is_empty(), "inkling2 serve: a verify row list holds at least the next input");
+            let start = self.pool.reserve(t, r.len() as u32);
+            let normed = self.chunk(t, start, r, None);
+            let mut s = Vec::new();
+            out.push(self.m.head(&mut s, &normed, r.len() as u32));
+            self.m.flush(&mut s);
+            self.pending.push((r.clone(), start));
+        }
+        out
+    }
+
+    /// Draft with the release's drafter in `dir` (`config.json`'s `mtp_config` and [`crate::mtp::MTP_FILE`]): it is
+    /// loaded with a cache slot for each live sequence, the engine starts retaining the depths it reads, and
+    /// [`PagedDecoder::draft`] proposes from it. Call it before the first request: running sequences have no taps for
+    /// what they consumed before. The pool must keep undo rows ([`VisitPoolSizing::undo_rows`]) to verify.
+    pub fn set_drafter(&mut self, dir: &Path) -> Result<(), String> {
+        if !self.pool.sizing().undo_rows {
+            return Err("inkling2 serve: a drafter needs a pool with undo rows (VisitPoolSizing::undo_rows) to verify its proposals".into());
+        }
+        let slots = self.pool.max_batch() as u32;
+        let draft = crate::mtp::load(dir, self.m.config(), slots, self.max_seq_len as u32)?;
+        self.enable_taps(&draft.cfg.target_layers.clone())?;
+        self.drafter = Some(Dflash2Drafter::new(draft));
+        Ok(())
+    }
+
+    /// What the drafter has cost so far; `None` without one.
+    pub fn draft_stats(&self) -> Option<dflash2::drafter::DraftStats> {
+        self.drafter.as_ref().map(Dflash2Drafter::stats)
     }
 
     /// Write each visit's experts of `rows` rows per sequence (`ids[visit]` `[sequences * rows, top_k]`) into the routing
@@ -335,14 +456,20 @@ impl Engine {
         let x = self.m.embed(&mut s, inputs);
         let recording = tables.iter_mut().any(|t| t.routing_log_mut().is_some());
         let mut routes = recording.then(Vec::new);
+        let mut taps = self.tap_probe();
         let logits = {
             let refs: Vec<&BlockTable> = tables.iter().map(|t| &**t).collect();
             let served = self.bank_for(&refs, 1);
             let bank = served.as_ref().map(|(bank, slots)| Banked { bank, slots });
-            let normed = self.m.trunk(&mut s, &Rows::Decode { pool: &self.pool, tables: &refs, bank }, x, b, &mut None, routes.as_mut()).expect("an admitted batch runs");
+            let mut probe: Option<&mut dyn Probe> = taps.as_mut().map(|p| p as &mut dyn Probe);
+            let normed = self.m.trunk(&mut s, &Rows::Decode { pool: &self.pool, tables: &refs, bank }, x, b, &mut probe, routes.as_mut()).expect("an admitted batch runs");
             self.m.head(&mut s, &normed, b)
         };
         self.m.flush(&mut s);
+        if let Some(probe) = taps {
+            let positions: Vec<(&BlockTable, u32)> = tables.iter().map(|t| (&**t, t.len() - 1)).collect();
+            self.retain_taps(probe, &positions);
+        }
         if let Some(routes) = routes {
             let positions: Vec<u32> = tables.iter().map(|t| t.len() - 1).collect();
             self.record(tables, &routes, |i| positions[i], 1);
@@ -428,6 +555,11 @@ impl PagedDecoder for Engine {
         self.pool.reclaim_keeping(want, namespace(adapter), Prompt::new(prompt, &embeds.content_key()))
     }
     fn release_table(&mut self, t: &mut BlockTable) {
+        // The drafter's cache slot is keyed by the state row: a finished sequence gives its blocks back now, and the
+        // row's next sequence starts with an empty slot.
+        if let (Some(d), Some(row)) = (self.drafter.as_mut(), t.state_row()) {
+            d.forget(u64::from(row));
+        }
         self.pool.release(t);
     }
     fn prefill(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32> {
@@ -502,5 +634,99 @@ impl PagedDecoder for Engine {
     }
     fn topk_capacity(&self) -> usize {
         TOPK_CAP
+    }
+    /// Proposals per sequence a verify scores: the drafter's block, or the scheduler's default for an external drafter;
+    /// none without undo rows to roll a verify back.
+    fn spec_max_draft(&self) -> usize {
+        if !self.pool.sizing().undo_rows {
+            return 0;
+        }
+        self.drafter.as_ref().map_or(model::serve::rows::DEFAULT_MAX_DRAFT, Dflash2Drafter::max_draft)
+    }
+    /// Depth `v` below the plan's visit count is the carried partial entering visit `v`; the full depth is the final
+    /// normalised row.
+    fn enable_taps(&mut self, depths: &[usize]) -> Result<(), String> {
+        let visits = self.m.plan().visits().len();
+        if depths.is_empty() || depths.iter().any(|&v| v > visits) || depths.iter().enumerate().any(|(i, v)| depths[..i].contains(v)) {
+            return Err(format!("inkling2 serve: taps need distinct depths of the plan's {visits} visits (or {visits}, the final row), got {depths:?}"));
+        }
+        match &self.taps {
+            Some(pool) if pool.depths() == depths => Ok(()),
+            Some(pool) => Err(format!("inkling2 serve: taps are already retained at depths {:?}, not {depths:?}", pool.depths())),
+            None => {
+                let sizing = self.pool.sizing();
+                self.taps = Some(TapPool::new(depths.to_vec(), self.m.config().hidden as usize, sizing.num_blocks, sizing.block_size));
+                Ok(())
+            }
+        }
+    }
+    fn tap_depths(&self) -> &[usize] {
+        self.taps.as_ref().map_or(&[], TapPool::depths)
+    }
+    fn read_taps(&self, table: &BlockTable, from: u32, count: u32) -> Result<Vec<f32>, String> {
+        self.taps.as_ref().ok_or("inkling2 serve: hidden-state taps are not enabled")?.read(table, from, count)
+    }
+    fn draft(&mut self, queries: &[DraftQuery], ks: &[usize]) -> Vec<Vec<u32>> {
+        let Some(mut drafter) = self.drafter.take() else { return vec![Vec::new(); queries.len()] };
+        // Keyed by the sequence's state row, which it holds from its first prefill to its release.
+        let requests: Vec<DraftRequest<'_>> = queries
+            .iter()
+            .zip(ks)
+            .map(|(q, &want)| DraftRequest { id: u64::from(q.table.state_row().expect("inkling2 serve: a running sequence holds its state row")), context: q.context, table: q.table, want })
+            .collect();
+        let proposals = drafter.propose(&*self, &*self, &requests);
+        self.drafter = Some(drafter);
+        proposals
+    }
+    fn forward_batched_verify(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>], cands: usize) -> Vec<Vec<Vec<(u32, f32)>>> {
+        let k = cands.clamp(1, TOPK_CAP) as u32;
+        let vocab = self.m.config().vocab;
+        self.verify(tables, rows).iter().zip(rows).map(|(logits, r)| topk_rows(self.g(), self.readout, logits, r.len() as u32, vocab, k)).collect()
+    }
+    fn forward_batched_verify_logit_rows(&mut self, tables: &mut [&mut BlockTable], rows: &[Vec<u32>]) -> Vec<Vec<Vec<f32>>> {
+        self.verify(tables, rows).iter().zip(rows).map(|(logits, r)| self.rows_of(logits, r.len())).collect()
+    }
+    /// A sequence that keeps every verified row is settled; one that keeps fewer gets its rings and convolution states
+    /// back from the checkpoint and its kept rows recomputed over them (the full visits' rows past them are truncated by
+    /// the scheduler and rewritten when those positions are computed).
+    fn commit_verified(&mut self, tables: &mut [&mut BlockTable], keep: &[usize]) {
+        let pending = std::mem::take(&mut self.pending);
+        assert_eq!(pending.len(), tables.len(), "inkling2 serve: a commit of the sequences the verify ran");
+        for ((t, &kept), (rows, start)) in tables.iter_mut().zip(keep).zip(&pending) {
+            assert!((1..=rows.len()).contains(&kept), "inkling2 serve: a commit keeps 1..={} rows, not {kept}", rows.len());
+            if kept < rows.len() {
+                self.pool.rollback(self.m.ops().gpu(), t);
+                self.chunk(t, *start, &rows[..kept], None);
+            }
+        }
+    }
+}
+
+/// The drafter shares the target's normalised embedding and its head (with the soft cap, padding rows floored).
+impl DraftHost for Engine {
+    fn embed(&self, tokens: &[u32]) -> Result<Vec<f32>, String> {
+        self.m.check_tokens(tokens)?;
+        let mut s = Vec::new();
+        let x = self.m.embed(&mut s, tokens);
+        self.m.flush(&mut s);
+        Ok(self.g().read(&x, tokens.len() * self.m.config().hidden as usize))
+    }
+    fn project(&self, normed: &[f32]) -> Result<Vec<f32>, String> {
+        let d = self.m.config().hidden as usize;
+        if normed.is_empty() || !normed.len().is_multiple_of(d) {
+            return Err(format!("inkling2 serve: {} values are not rows of {d}", normed.len()));
+        }
+        let rows = normed.len() / d;
+        let x = self.g().storage_init("inkling2.draft.rows", normed);
+        let mut s = Vec::new();
+        let logits = self.m.head(&mut s, &x, rows as u32);
+        self.m.flush(&mut s);
+        Ok(self.rows_of(&logits, rows).concat())
+    }
+}
+
+impl TapRows for Engine {
+    fn tap_rows(&self, table: &BlockTable, from: u32, count: u32) -> Result<Vec<f32>, String> {
+        self.read_taps(table, from, count)
     }
 }

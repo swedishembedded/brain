@@ -10,11 +10,14 @@
 //! context through the checkpoint's template (with `reasoning_effort` as a template variable, an out-of-range value
 //! refused by name, an image part refused by a checkpoint without a vision tower), the request observes cancellation before admission and between decode tokens, and the footprint it
 //! reports holds the weights and the whole visit-state pool.
+//! `--speculative mtp` serves with the release's drafter (here a random one of the declared shape) and answers greedy
+//! requests as plain decoding does, charging the drafter, the undo rows and the retained hidden states; the modes it
+//! has no drafter for are refused by name.
 
 use std::path::PathBuf;
 
 use capability::Invocation;
-use catalog::resident_inkling2::Inkling2Resident;
+use catalog::resident_inkling2::{Drafting, Inkling2Resident};
 use catalog::resident_qwen35::Qwen35Sizing;
 use capability_mock::cancellation::{certify, Bound};
 use data::rng::Lcg;
@@ -318,6 +321,97 @@ fn an_image_chat_is_served_with_the_uncached_forwards_logits_over_the_spliced_ro
         // A blob that is not an RGB image of its declared size.
         let bad = Invocation::new().set("prompt", json!("x")).blob("image", capability::Blob::new(capability::Media::Image, vec![0u8; 12]).with_meta(json!({"w": 2, "h": 2})));
         refused(&bad, "image");
+    });
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A greedy request (`temp` 0).
+fn ask_greedy(text: &str) -> Invocation {
+    Invocation::new().set("messages", json!(json!([{"role": "user", "content": text}]).to_string())).set("temp", json!(0.0))
+}
+
+/// Declare a drafter in `dir`'s config (`mtp_config`) and write random weights of its shape (`mtp.safetensors`): any rows
+/// serve, the test compares served tokens with and without it.
+fn add_drafter(dir: &std::path::Path) {
+    let mut config: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
+    let d = config["text_config"]["hidden_size"].as_u64().unwrap() as usize;
+    let (layers, heads, kv, hd, ff, rank, taps) = (2usize, 4usize, 2usize, d / 4, 2 * d, 8usize, 4usize);
+    // Visits of the tiny loop: 2 prelude, 2 core layers x 3 passes, 2 coda.
+    config["mtp_config"] = json!({"hidden_size": d, "num_hidden_layers": layers, "num_attention_heads": heads, "num_key_value_heads": kv,
+        "head_dim": hd, "intermediate_size": ff, "max_position_embeddings": 4096, "torch_dtype": "float32", "q_bias": false, "o_bias": false,
+        "rms_norm_eps": 1e-6, "rope_theta": 10000.0, "local_layer_ids": [0], "sliding_window_size": 8, "block_size": 4, "markov_rank": rank,
+        "markov_head_type": "rnn_hidden", "target_layer_ids": [1, 5, 9, 10]});
+    std::fs::write(dir.join("config.json"), config.to_string()).unwrap();
+    // seed: any weights serve; the test compares served tokens with and without the drafter.
+    let mut rng = Lcg::new(12);
+    let mut t = |name: String, shape: &[usize]| (name, shape.iter().map(|&s| s as u64).collect::<Vec<u64>>(), rng.vec_scaled(shape.iter().product(), 0.3));
+    let mut tensors = vec![t("fuse_weight".into(), &[layers + 1, taps]), t("mask_embed".into(), &[d]), t("norm.weight".into(), &[d])];
+    for l in 0..layers {
+        let p = format!("layers.{l}.");
+        for (name, shape) in [
+            ("dflare_norm.weight", vec![d]),
+            ("input_layernorm.weight", vec![d]),
+            ("post_attention_layernorm.weight", vec![d]),
+            ("self_attn.q_proj.weight", vec![heads * hd, d]),
+            ("self_attn.k_proj.weight", vec![kv * hd, d]),
+            ("self_attn.v_proj.weight", vec![kv * hd, d]),
+            ("self_attn.o_proj.weight", vec![d, heads * hd]),
+            ("self_attn.k_proj_ctx.weight", vec![kv * hd, d]),
+            ("self_attn.v_proj_ctx.weight", vec![kv * hd, d]),
+            ("self_attn.q_norm.weight", vec![hd]),
+            ("self_attn.k_norm.weight", vec![hd]),
+            ("self_attn.k_norm_ctx.weight", vec![hd]),
+            ("mlp.gate_proj.weight", vec![ff, d]),
+            ("mlp.up_proj.weight", vec![ff, d]),
+            ("mlp.down_proj.weight", vec![d, ff]),
+        ] {
+            tensors.push(t(format!("{p}{name}"), &shape));
+        }
+    }
+    for (name, shape) in [
+        ("markov_head.dflare_norm.weight", vec![d]),
+        ("markov_head.rnn_proj.weight", vec![3 * rank, 2 * rank + 2 * d]),
+        ("markov_head.rnn_proj.bias", vec![3 * rank]),
+        ("markov_head.hidden_out.weight", vec![d, rank]),
+        ("markov_head.hidden_out.bias", vec![d]),
+        ("markov_head.markov_w1.weight", vec![VOCAB, rank]),
+    ] {
+        tensors.push(t(name.into(), &shape));
+    }
+    checkpoint::st::save_safetensors_with_metadata(&dir.join(inkling2::mtp::MTP_FILE).to_string_lossy(), &tensors, Default::default()).unwrap();
+}
+
+fn resident_with(dir: &std::path::Path, mode: Option<model::serve::SpeculativeMode>) -> Result<Inkling2Resident, String> {
+    let sizing = Qwen35Sizing { ctx: 256, ctx_explicit: true, max_batch: 2, speculative: mode, ..Qwen35Sizing::default() };
+    Inkling2Resident::from_hf_dir(dir.to_str().unwrap(), "local/inkling2", sizing)
+}
+
+#[test]
+fn speculative_mtp_serves_with_the_releases_drafter_and_answers_as_plain_decoding() {
+    use model::serve::SpeculativeMode;
+    let Some(dir) = pulled_dir("mtp") else { return };
+    let e = resident_with(&dir, Some(SpeculativeMode::Mtp)).err().expect("no drafter on disk yet");
+    assert!(e.contains("--speculative mtp") && e.contains("mtp.safetensors"), "{e}");
+    add_drafter(&dir);
+    let e = resident_with(&dir, Some(SpeculativeMode::Dflash)).err().expect("dflash is refused");
+    assert!(e.contains("--speculative dflash"), "{e}");
+    for (mode, want) in [(None, Drafting::Off), (Some(SpeculativeMode::Auto), Drafting::Off), (Some(SpeculativeMode::Ngram), Drafting::Ngram), (Some(SpeculativeMode::Mtp), Drafting::Mtp)] {
+        assert_eq!(resident_with(&dir, mode).unwrap().drafting(), want, "{mode:?}");
+    }
+    let (plain, mtp) = (resident_with(&dir, None).unwrap(), resident_with(&dir, Some(SpeculativeMode::Mtp)).unwrap());
+    let key = InstanceKey::new("local/inkling2", "default");
+    let (base, drafted) = (plain.estimate(&key), mtp.estimate(&key));
+    let draft_file = std::fs::metadata(dir.join(inkling2::mtp::MTP_FILE)).unwrap().len();
+    assert!(drafted.vram > base.vram + draft_file, "the drafter's weights, caches and the undo rows are charged: {} against {}", drafted.vram, base.vram);
+    assert!(drafted.ram > base.ram, "the retained hidden states are charged to the host");
+    gpu_core::devices::with_host_tier(|| {
+        let answer = |r: &Inkling2Resident| {
+            let mut instance = r.activate(&key, Device::Cpu).expect("the resident activates");
+            let inv = ask_greedy("count to ten").set("max_new", json!(16)).set("ignore_eos", json!(true));
+            instance.run("generate", &inv, &mut |_| {}).expect("served").outputs
+        };
+        let (a, b) = (answer(&plain), answer(&mtp));
+        assert_eq!(a["text"], b["text"], "greedy output with the drafter equals plain decoding: {a} / {b}");
     });
     std::fs::remove_dir_all(&dir).ok();
 }

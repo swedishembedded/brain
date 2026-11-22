@@ -23,6 +23,14 @@ What makes it more than a small decoder:
   into one coherent path (greedy, at temperature 0).
 * It stores neither the token embedding nor the output head: the target's are shared.
 
+The same crate runs the **DSpark** member of the family, the drafter released
+beside Inkling 2 (`mtp.safetensors`, see [Inkling 2](inkling2.md)): each draft
+layer mixes the target's tapped hidden states itself (a softmax over the taps,
+then a norm) into context keys and values of its own, the mask rows are a learned
+embedding, local layers read the window before the block, there are no
+convolutions, and a recurrent Markov head replaces the selector, correcting the
+head's logits position by position with the token chosen before.
+
 ## Support
 
 | Capability | Supported |

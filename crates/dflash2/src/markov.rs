@@ -134,7 +134,7 @@ impl MarkovHead {
         // Per job and step, the bias plus the `[hidden; context]` columns.
         let mut fixed: Vec<Vec<Vec<f32>>> = Vec::with_capacity(jobs.len());
         for j in jobs {
-            if j.hidden.len() % d != 0 || j.want > j.hidden.len() / d || j.last_taps.len() != self.alpha.len() * d {
+            if !j.hidden.len().is_multiple_of(d) || j.want > j.hidden.len() / d || j.last_taps.len() != self.alpha.len() * d {
                 return Err(format!("{MODEL}: a Markov walk of {} steps over {} hidden values and {} tap values", j.want, j.hidden.len(), j.last_taps.len()));
             }
             let context = mix_taps(j.last_taps, &self.alpha, &self.norm, self.eps);

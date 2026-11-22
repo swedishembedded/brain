@@ -1959,6 +1959,7 @@ dependencies = [
  "brain-capability",
  "brain-checkpoint",
  "brain-data",
+ "brain-dflash2",
  "brain-gpu-core",
  "brain-imaging",
  "brain-kernels",

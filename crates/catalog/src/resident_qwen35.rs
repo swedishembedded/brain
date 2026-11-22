@@ -122,11 +122,14 @@ pub struct Qwen35Sizing {
     /// model-dir resident that declares it (Inkling 2: `declared`) serves it; the model refuses a value it has no
     /// product for by name.
     pub linear_activations: Option<model::policy::LinearActivations>,
+    /// `--speculative` for the residents that size from this (each honours the modes its engine has and refuses the
+    /// others by name); `None` is the engine's default.
+    pub speculative: Option<model::serve::SpeculativeMode>,
 }
 
 impl Default for Qwen35Sizing {
     fn default() -> Self {
-        Qwen35Sizing { ctx: 4096, ctx_explicit: false, max_batch: 4, exact_decode: false, refused: false, kv_cache: None, linear_activations: None }
+        Qwen35Sizing { ctx: 4096, ctx_explicit: false, max_batch: 4, exact_decode: false, refused: false, kv_cache: None, linear_activations: None, speculative: None }
     }
 }
 

@@ -18,6 +18,7 @@
 pub mod config;
 pub mod finetune;
 pub mod model;
+pub mod mtp;
 pub mod names;
 pub mod serve;
 pub mod train;

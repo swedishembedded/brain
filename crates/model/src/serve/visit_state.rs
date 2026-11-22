@@ -266,6 +266,9 @@ pub struct Resumed<P> {
     pub rows: usize,
     /// The payload filed with the prompt, when the cached prompt is the whole prompt (nothing to compute).
     pub exact: Option<P>,
+    /// The partly filled tail block the sequence copied before writing into it, `(from, to, rows)`: an engine that keeps
+    /// per-block data of its own beside the pool (hidden-state taps) copies the same rows.
+    pub copied_tail: Option<(u32, u32, u32)>,
 }
 
 /// Where the rows of one decode step go for one visit: the K/V layer, its block geometry (a ring's block is one
@@ -449,7 +452,7 @@ impl<P: Clone> VisitPool<P> {
             steps.push(copy_words_within(g, self.ids.copy_within, bufs, zero * c.words(), u64::from(row) * c.words(), c.words()));
         }
         g.submit(&[], &steps);
-        let fresh = Resumed { rows: 0, exact: None };
+        let fresh = Resumed { rows: 0, exact: None, copied_tail: None };
         if prompt.tokens.len() < self.min_cached || !self.cache.enabled() {
             return fresh;
         }
@@ -460,13 +463,15 @@ impl<P: Clone> VisitPool<P> {
         let (snap, shared) = (entry.snap_row, entry.table.blocks()[..rows.div_ceil(bs) as usize].to_vec());
         let exact = (rows as usize == prompt.tokens.len()).then(|| entry.payload.clone());
         table.adopt_rows(&shared, rows, &mut self.alloc);
+        let mut copied_tail = None;
         if !rows.is_multiple_of(bs) {
             // The entry keeps serving later prompts from this block, so the one this sequence writes next is a copy.
             let (from, to) = table.unshare_tail(&mut self.alloc).expect("visit state: a block shared with the prefix cache has a single owner");
             self.copy_block_rows(g, from, to, rows % bs);
+            copied_tail = Some((from, to, rows % bs));
         }
         self.copy_state(g, self.snapshot_row(snap), row);
-        Resumed { rows: rows as usize, exact }
+        Resumed { rows: rows as usize, exact, copied_tail }
     }
 
     /// Back `n` more positions of the sequence (every full visit's rows); returns the first one's position. A pool

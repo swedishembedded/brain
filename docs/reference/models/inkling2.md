@@ -96,7 +96,33 @@ curl -s localhost:8788/v1/chat/completions -H "Authorization: Bearer $KEY" -d '{
 Adapters: the engine serves LoRA adapters of the trainer's linear and expert
 sites per sequence (`inkling2::serve::Engine::enable_adapters`, `load_adapter`),
 but `brain serve` does not yet offer an Inkling 2 adapter as a model of its
-own. Not served yet: that, and the optional `mtp.safetensors` drafter.
+own. Not served yet: that.
+
+## Speculative decoding
+
+The release ships a drafter beside the decoder, `mtp.safetensors` (636 MB): a
+three-layer block drafter that proposes the next 7 tokens of a sequence in one
+forward. It reads the decoder's own hidden states at four logical depths (the
+state entering visits 5, 23 and 41, and the final normalised row), denoises a
+block of the last token plus 7 learned mask rows with attention that is not
+causal, and a small recurrent head walks the block left to right into one
+coherent proposal. The scheduler verifies every sequence's proposals in one step
+and keeps the longest prefix the model agrees with, so greedy output is the same
+as without it; a sampled request goes through rejection sampling.
+
+```bash
+brain serve --openai 8788 --speculative mtp     # the release's drafter
+brain serve --openai 8788 --speculative ngram   # prompt lookup, no second model
+```
+
+Speculation is opt-in for this model (`auto` and `off` decode plainly): what it
+buys depends on how much cheaper verifying several rows is than decoding them one
+at a time on the device, and that is not measured yet. With it, every running
+sequence keeps a second state row (a verify writes ahead into the sliding
+windows and convolution states and is rolled back when proposals are rejected),
+the drafter's weights and caches are resident, and the four hidden states of every
+cached position are kept in host memory (18 KB per position). `dflash` is refused:
+this model has no DFlash2 draft model. Adapter requests decode without speculation.
 
 ## Training
 

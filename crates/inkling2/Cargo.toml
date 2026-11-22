@@ -14,6 +14,8 @@ path = "src/lib.rs"
 
 [dependencies]
 brain-checkpoint.workspace = true
+# The release's drafter (`mtp.safetensors`) is a DSpark block drafter.
+brain-dflash2.workspace = true
 # The shared operators the tower runs on: ViT blocks, the position-table taps, the MLP projector, the prompt embeds.
 brain-model.workspace = true
 brain-gpu-core.workspace = true
