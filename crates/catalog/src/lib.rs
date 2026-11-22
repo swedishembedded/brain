@@ -68,6 +68,7 @@ pub mod resident_ouro;
 pub mod resident_provider;
 pub use brain_modelstore::family_spec;
 pub mod resident_huginn;
+pub mod resident_inkling2;
 pub mod resident_llm;
 pub mod resident_ltxv;
 pub mod resident_minimaxh3;
@@ -574,6 +575,14 @@ pub fn models() -> Vec<ModelEntry> {
             manifest: resident_ouro::direct_manifest,
             provider: resident_ouro::provider,
             spec: Some(("ouro", &family_spec::FamilySpec { arch: "ouro", card_family: "ouro", tokenizer: family_spec::TokenizerRole::Required })),
+            resident: None,
+        },
+        // Inkling 2: the pulled Hugging Face directory (the store recognises the architecture its config declares);
+        // served by `crate::resident_inkling2::Inkling2Resident`, which the model-dir scan registers under the pulled id.
+        ModelEntry {
+            manifest: resident_inkling2::manifest,
+            provider: resident_inkling2::provider,
+            spec: Some(("inkling2", &family_spec::FamilySpec { arch: "inkling2", card_family: "inkling2", tokenizer: family_spec::TokenizerRole::Required })),
             resident: None,
         },
         ModelEntry {

@@ -25,3 +25,52 @@ The checkpoint is read as published: `config.json` is parsed strictly (an
 unknown key or a layer list the reference would read differently is refused
 by name), and every tensor of the file must be one the configuration accounts
 for, with its shape and an encoding its role admits.
+
+## Serving
+
+```bash
+brain pull thinkingmachines/Inkling-2-Mini
+brain serve --dbus --openai 8788      # served under its pulled id
+brain do inkling2 generate --prompt "Hello" --max_new 64   # in process, no server
+```
+
+The pulled directory is read in place: the expert banks stay in their NVFP4 and
+MXFP8 encodings, the other weights at their stored tier, and activations are
+f32, the reference's numerics. Requests go through the same continuous-batching
+scheduler as every other model: prompts are read in chunks of 512 tokens under
+the scheduler's prefill budget, every running sequence decodes in one batched
+step, and the expert products are grouped by expert while reading a prompt and
+gathered per slot while decoding.
+
+Each of the 48 layer visits keeps its own state per sequence: the 8 full-attention
+visits keep keys and values in a paged pool (one block table covers all of them),
+the 40 sliding visits a ring of exactly their 1024-token window, and every visit
+the inputs its four short convolutions read next. A sequence therefore costs
+64 KiB per token (f32 keys and values of the 8 full visits) plus a fixed state
+row of about 340 MB (the rings and the convolution states), whatever its length. `brain serve --ctx N` caps one
+sequence (default 16384 tokens; the model's positions reach 1M) and
+`--max-batch N` is how many run at once; the pool holds that many contexts and
+as many state rows again for cached prompts.
+
+A prompt of 32 tokens or more is cached 16 tokens short of its end, keyed by its
+tokens (and by the content of any embedding rows), so the next turn of a
+conversation, which re-renders the last tokens of this one, resumes from it and
+reads in only what is new.
+
+Chat is the checkpoint's own template. Replies are typed messages: a thinking
+message, the answer, tool calls; the reply carries the reasoning in
+`reasoning_content`, the answer as the text and calls in `tool_calls`. A
+generation stops only on the sampling end the checkpoint declares
+(`<|content_model_end_sampling|>`): the message boundary closes the thinking
+message before the answer too, so it never stops one. `reasoning_effort` is the
+template's own variable (`low`, `medium`, `high` or a number from 0 to 1); any
+other value is refused by name.
+
+Not served yet: images (the vision tower and the engine's prompt splice exist;
+the request path from image parts to them does not, so a request carrying an
+image is refused rather than answered without it), adapters, and the optional
+`mtp.safetensors` drafter.
+
+The example `samples/python/llm/inkling2/inkling2.py` asks one question at a low
+and a high reasoning effort over D-Bus, OpenAI-compatible or Anthropic-compatible
+HTTP.

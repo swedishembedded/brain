@@ -958,6 +958,7 @@ dependencies = [
  "brain-huginn",
  "brain-imaging",
  "brain-imgpipe",
+ "brain-inkling2",
  "brain-januspro",
  "brain-kronos",
  "brain-lfm2",

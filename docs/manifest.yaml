@@ -285,6 +285,8 @@ navigation:
         path: examples/python/llm/edgerock.md
       - source: samples/python/llm/glmdsa/README.md
         path: examples/python/llm/glmdsa.md
+      - source: samples/python/llm/inkling2/README.md
+        path: examples/python/llm/inkling2.md
       - source: samples/python/llm/qwen35moe/README.md
         path: examples/python/llm/qwen35moe.md
       - source: samples/python/musicgen/generate-song/README.md

@@ -16,6 +16,7 @@ named on the model's own page (see
 | [`qwen3`](qwen3.md) ⤓ | instruct/chat LLM, tool calls, paged-KV serving | [x] | [x] | [x] |
 | [`ouro`](ouro.md) | looped decoder: one shared stack run four times per token | [x] | [ ] | [ ] |
 | [`huginn`](huginn.md) | recurrent-depth decoder: prelude, shared core re-applied, coda | [x] | [ ] | [ ] |
+| [`inkling2`](inkling2.md) | looped MoE decoder with depth-attention residuals, sliding and full attention, typed-message reasoning and tool calls | [x] | [ ] | [ ] |
 | [`qwen35moe`](qwen35moe.md) | hybrid GDN/GQA sparse-MoE decoder | [x] | [ ] | [x] |
 | [`qwen35`](qwen35.md) | dense hybrid GDN/GQA decoder + MTP + vision splice | [x] | [x] | [x] |
 | [`edgerock`](edgerock.md) | windowed hybrid GDN/GQA decoder with a bounded anchor memory | [x] | [x] | [x] |

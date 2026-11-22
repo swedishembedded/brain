@@ -95,6 +95,7 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("toypid", "brain/toypid"),
     ("toymoe", "brain/toymoe"),
     ("huginn", "brain/huginn"),
+    ("inkling2", "brain/inkling2"),
     ("ouro", "brain/ouro"),
     ("qwen35", "brain/qwen35"),
     ("qwen35moe", "brain/qwen35moe"),

@@ -613,6 +613,37 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
   - `serve::conformance::run_all` on the tiny config, plus `inkling2_served.rs`;
   - `docs/reference/models/inkling2.md`;
   - a sample.
+  - Done (2026-11-22): engine `inkling2::serve::Engine: PagedDecoder` (`EngineOptions { kv_tier, sizing:
+    VisitPoolSizing, max_seq_len, prefill_chunk }`, `Engine::{layout, new, open, model, pool}`, `device_ops()`), one
+    recipe with the uncached forward: `model.rs`'s `trunk` runs over `Rows::{Whole, Chunk, Decode}` - attention through
+    `VisitPool::attend_chunk` / `attend_decode`, all four convolution states per visit through `conv_rows` /
+    `store_conv_rows` (history + `conv_state_tail_step` in a chunk, `short_conv_step` in decode), the published banks
+    grouped by expert for whole/chunk passes (`MicroBank::grouped` over the new `model::ops::MicroRoute`: barrier-free
+    `moe_route_count_serial` / `moe_route_emit_serial` + `moe_route_scan`, so it runs on the CPU JIT) and gathered per
+    slot in decode; head transform declared (cap 30, valid 200,058), greedy/top-k reduced on the device; prompt
+    embeddings spliced after the embedding norm (`embed_width`, `prefill_chunk_embeds`); prefix entries filed
+    `CHECKPOINT_TAIL` (16) tokens short of a prompt of 32+ (knowledge #347), content-keyed (`VisitPool::begin` /
+    `cached_prefix_blocks` / `reclaim_keeping` take a `snapshot_prefix::Prompt`, `file_prefix_content`); routing recorded
+    per logical visit (`routing_calls`, I4.5's log). Gates (CPU): `inkling2/tests/it/serve.rs` - the tiny golden's
+    `prefill.visit*.conv*` states and `decode0..3.logits` (whole and sliced prefill), served logits == uncached forward
+    at every position (prefill whole / in 4s / token by token, batched beside another sequence), `conformance::run_all`,
+    routing log == the uncached router at every computed position (`SchedulerRollout::record_routing(true)`), and the
+    released weights: cached greedy decode of the three real-golden prompts (6 tokens) == the uncached forward's argmax
+    (about 25 GB resident, 12 min); `real_parity` still passes with the grouped prefill (worst 1/1000 of the bf16
+    spread). Serving: `catalog::resident_inkling2` (`Inkling2Resident::from_hf_dir`, estimate = shard bytes + the
+    pool + step buffers, f32 K/V, ctx 16384 unless `--ctx`, `--max-batch` live rows and as many snapshot rows),
+    `generate_spec(..).params(template_params(TypedMessages))`, `parse_request_as` with the checkpoint's own template
+    (TypedMessages scanner), stop = `stop_ids` over `end_of_turn()`; registrations: catalog row (`FamilySpec`
+    inkling2), serving `model_dir` (`card.family == "inkling2"`), cli alias `inkling2`; docs page, sample
+    `samples/python/llm/inkling2`; `catalog/tests/it/inkling2_served.rs` (served chat within ctx, effort refused out of
+    range, image refused, `certify` cancellation, estimate >= weights + pool). Stop set decision: TypedMessages
+    `end_of_turn_markers()` is the sampling eos alone (`<|end_message|>` closes the thinking message too); test that a
+    think-then-answer stream is cut only at its end.
+  - Left: images through the request path (apiserve media -> `VisionTower::embed_prompt` -> `PromptEmbeds`; the engine
+    splice and content-keyed prefixes are in, the front end is not: an image request is refused by name); adapters
+    (`llmserve::adapter_release` -> `parse_adapter_with_experts`, an `AdapterBank` over the linear and expert sites);
+    a recorded/graph decode step (every pass allocates its buffers, attention and conv state submit per visit; no
+    profile yet); bf16 K/V as a measured opt-in; MTP drafting.
 - **I3.5** Acceptance through the public API with the vendor's published verification
   suite (coding, vision, long context to 1M), after operator parity.
 

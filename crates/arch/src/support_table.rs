@@ -23,6 +23,7 @@ pub(crate) const SERVING: &[(&str, Support)] = &[
     ("glmdsa", Support::Preview),
     ("lfm2", Support::Preview),
     ("ricursive", Support::Production),
+    ("inkling2", Support::Production),
     ("qwen3omnimoe", Support::Preview),
     ("qwen3vl", Support::Preview),
     ("fastvlm", Support::Preview),

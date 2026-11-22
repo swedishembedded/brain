@@ -962,6 +962,11 @@ fn resident_for_compound(card: &ModelCard, roles: &std::collections::BTreeMap<St
         let dir = roles.get("weights").and_then(|p| p.to_str()).ok_or("compound manifest missing role \"weights\"")?;
         return catalog::resident_edgerock::EdgeRockResident::from_hf_dir(dir, &card.id, qwen35_sizing).map(|r| Built::Other(Arc::new(r)));
     }
+    // Inkling 2: the published directory, served by the visit-state engine with every tensor as stored.
+    if card.family == "inkling2" {
+        let dir = roles.get("weights").and_then(|p| p.to_str()).ok_or("compound manifest missing role \"weights\"")?;
+        return catalog::resident_inkling2::Inkling2Resident::from_hf_dir(dir, &card.id, qwen35_sizing).map(|r| Built::Other(Arc::new(r)));
+    }
     // A saved timeline model (the training service installs one with a manifest of this family): its directory, as
     // `TimelineModel::save` or an ensemble's save wrote it, is served under the id the manifest names.
     if card.family == "horizon" {

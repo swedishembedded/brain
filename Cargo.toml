@@ -250,6 +250,7 @@ brain-lfm2 = { path = "crates/lfm2" }
 brain-ouro = { path = "crates/ouro" }
 brain-spectrallm = { path = "crates/spectrallm" }
 brain-huginn = { path = "crates/huginn" }
+brain-inkling2 = { path = "crates/inkling2" }
 brain-modernbert = { path = "crates/modernbert" }
 brain-nemotronasr = { path = "crates/nemotronasr" }
 brain-qwen3asr = { path = "crates/qwen3asr" }

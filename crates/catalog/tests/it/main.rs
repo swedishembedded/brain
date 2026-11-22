@@ -17,6 +17,7 @@ mod decision_lifecycle;
 mod decision_served;
 mod edgerock_real_served;
 mod edgerock_served;
+mod inkling2_served;
 mod mirage_http;
 mod mirage_served;
 mod multi_adapter;
