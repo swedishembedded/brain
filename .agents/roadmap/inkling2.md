@@ -1225,12 +1225,61 @@ roof: bytes a launch reads over the measured ~4 TB/s):
   `moe_nvfp4_gemv_gather` in the profile.
 - Result: warm uncached forward (default arithmetic) 492-525 ms -> 67-90 ms; binary32 with every visit read back
   559-641 ms -> 143-164 ms. Device time per forward ~62 ms (9-forward mean, binary32 and default mixed).
-- `real_parity`'s default-arithmetic greedy check now counts routed flips by distinct context (knowledge #568): every
+- `real_parity`'s default-arithmetic greedy check now counts routed flips by distinct context (knowledge #569): every
   arm flips or keeps position 5 of the shared chat-template prefix depending on equally accurate f32 reductions.
-- Left (gap list after these, per forward of 27 rows at the default arithmetic): `moe_nvfp4_grouped` 175 us x 88
-  (15 ms), `moe_mxfp8_grouped` 707 us x 8 (5.7 ms), bf16 products on the library; the binary32 arm's
-  `matmul_gemv_w_bf16` at 27 rows 170 us a launch (~2% of its roof; the GEMV is selected up to 32 rows); host launch
-  count (~3,200 launches, ~3,250 zero-fills a forward); a recorded/graph decode step.
+- Grouped expert products on the bf16 tensor cores (`Fused::MoeNvfp4GroupedMma`, `Fused::MoeMxfp8GroupedMma`, chosen by
+  `Ops::micro_grouped` where the GEMM precision lets products round operands; `Fp32Reference` keeps the binary32 kernels):
+  the weights decoded exactly into `mma.m16n8k16` fragments, the activations rounded to bf16, K-slices summed in a fixed
+  order (deterministic). Gate: `model` `micro_bank_stacked` (the f64 product over bf16-rounded activations, NVFP4 and
+  MXFP8, several tiles of one expert, a bank narrower than a block; a wrong slot mapping fails it). Precision on the
+  released weights (`real_parity`, default arithmetic): worst KL 2.1e-2 nats (bf16 reference run 4.4e-2), the same one
+  routed flip. Warm uncached forward 54-66 ms (from 67-90).
+- Decode groups the slots by expert too (the per-slot gather is gone from inkling2): A/B at the same build, decode
+  time per step (`brain perf`, below) 38.3 -> 37.4 ms at batch 1, 62.6 -> 42.7 at 8, 157.6 -> 67.6 at 32, 396 -> 103.5
+  at 64.
+- A decode step draws its temporaries from a replay arena (`Gpu::scratch_scope_in`) and runs as one pass
+  (`Gpu::pass_scope`): 37.4 -> 26.2 ms a step at batch 1, 67.6 -> 59.2 at 32, 103.5 -> 91.7 at 64.
+
+Serving throughput, one GH200 (gpu2 of a shared node; another tenant's process held a context on the card during
+the "after" runs), real checkpoint, `brain perf run serve --target inkling2:<dir> --max-batch B --concurrency B` (the lane's target took a
+`:ctx<N>` cap, 256 for decode, 1100 and 8256 for prefill; main's equivalent target, a79a14eb7, sizes the context itself),
+closed loop, 64-token prompts and 64 output tokens for decode, 2 to 64 requests, one warm-up, seed 7. Decode tok/s =
+batch / per-token time (`tpoa` p50); output tok/s is the run's measured rate (prefill included). Prefill: one request
+of 1024 or 8192 tokens, 2-token output, `ttfa` p50.
+
+| | before (main at e6b4effc0 plus the perf target) | after (this lane's commits) |
+|---|---|---|
+| decode, batch 1 | 2.2 tok/s (447 ms/token), 2.15 out tok/s | 38.2 tok/s (26.2 ms), 35.9 |
+| decode, batch 8 | 15.0 tok/s (534 ms), 7.0 | 182 tok/s (43.9 ms), 69.7 |
+| decode, batch 32 | 37.4 tok/s (856 ms), 18.5 | 541 tok/s (59.2 ms), 249 |
+| decode, batch 64 | 45.0 tok/s (1422 ms), 24.1 | 698 tok/s (91.7 ms), 321 |
+| prefill 1k | 149 tok/s (6.87 s) | 1235 tok/s (0.83 s) |
+| prefill 8k | 150 tok/s (54.5 s) | 720 tok/s (11.4 s) |
+
+- Left (measured, in order): the 8k prefill is attention-bound - `flash_attn_gqa_ext_rows` is 17.2 s of the ~22 s
+  of kernels of a warm-up plus one 8k prompt (up to 71 ms a launch on a full layer): it walks every key once per
+  (query row, head), so a query-tiled candidate that loads each K/V tile once for a block of rows and the GQA group is
+  next. It must keep the served rows as close to the whole-sequence forward as the per-row forms keep them (`inkling2`
+  `serve::retained_taps_...` and `model` `serve_visit_state::served_logits_equal_the_stateless_whole_sequence_forward`
+  hold a chunked prefill and every decode step to the forward), so the tiled form and the per-row form that serves
+  decode need the same key tiles at absolute positions and the same per-tile arithmetic. A first tiled kernel (16 rows
+  x 32-key tiles, 47 KB of workgroup memory) passed the oracle gates on CUDA and Vulkan and broke exactly that, so it
+  did not land.
+- Left: the decode step was host-bound before the arena (kernels 40-48% of its wall at batch 1 and 64 under nsys,
+  ~3,500 launches a step); with it the step replays as captured CUDA graphs (nsys: 96 `cuGraphLaunch` over a warm-up
+  and two 24-token generations at batch 1), the remaining host time not re-measured. `depth_attn_fwd_rows` is
+  latency-bound at decode (one workgroup per row, 37 us a launch, ~11% of a batch-1 step); `moe_route_emit_serial`
+  takes 115 us a launch at 4096 slots; the binary32 arm's `matmul_gemv_w_bf16` at 27 rows runs at ~2% of its roof (the
+  GEMV is selected up to 32 rows). The decode window stays 1: the engine's window is a host loop of single steps, and a
+  window that chains steps on the device needs the embedding to read the argmax there.
+- The served taps (`serve::retained_taps_...`) are not the forward's bits on CUDA with the reference kernels either:
+  their excess over bf16 rounding reaches 2.7e-6 of the row's scale there and 6.4e-7 with the cooperative forms, and
+  such an excess on an element near zero failed the old per-element bound; the bound now adds 1e-5 of the row's scale.
+- Not this lane's, seen on CUDA at main (b465b479a) with and without these commits: `inkling2`
+  `kv_precision::..._on_the_tiny_checkpoint`, `serve_adapters::a_trained_adapter_is_served_...`,
+  `training::the_serving_engine_serves_what_the_trainer_trains` and `model` `adapter_merged::a_merged_pair_...` fail
+  (the suites were measured on the CPU backend). `image_text::...` (a finite-difference check of the tower's adapters
+  through the decoder, a new seed each run) failed one of five CUDA runs with these commits and none of seven at main.
 
 ## Decisions (2026-11-21)
 
