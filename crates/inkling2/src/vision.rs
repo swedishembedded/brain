@@ -368,7 +368,7 @@ fn layer_param(l: u32, tail: &str) -> String {
 
 /// The store name of the fused `[3C, C]` query/key/value weight (`.weight`) or `[3C]` bias (`.bias`) of layer `l`. The
 /// published file keeps the three projections apart; the shared block reads one fused tensor, so the store does too.
-/// An adapter still addresses the three by their published names (see [`crate::vision::train`]).
+/// An adapter still addresses the three by their published names (see [`crate::vision::LoraTraining`]).
 pub fn fused_qkv_name(l: u32, kind: &str) -> String {
     layer_param(l, &format!("self_attn.qkv_proj.{kind}"))
 }

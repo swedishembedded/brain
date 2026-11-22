@@ -9,7 +9,7 @@
 //! Inkling 2 as a trainable [`model::Model`]: the forward recipe of [`crate::model`] and its backward, over the shared
 //! operators' backward passes, in two modes.
 //!
-//! - **Full fine-tuning** ([`Inkling2Train::new`], [`Inkling2Train::from_dir`] without an adapter): every parameter is
+//! - **Full fine-tuning** ([`model::Model::new`], [`Inkling2Train::from_dir`] without an adapter): every parameter is
 //!   an f32 tensor of the [`ParamStore`], under its published name, and trains (the router's selection bias excepted:
 //!   it is a load-balancing heuristic with no gradient). The expert banks must be stored as floats; a microscaled
 //!   release is refused by name (the real 26B needs a streamed or sharded full fine-tune, which this crate does not
@@ -21,7 +21,7 @@
 //!   message-gate factors) through a merged pair ([`MergedLora`]).
 //!
 //! **Saved activations.** The forward keeps the partial sum entering every visit, the retained block states (one
-//! [`RetainedStates`] slot per block; the prelude's output slot is shared by every core pass, the previous pass's own
+//! [`model::saved::RetainedStates`] slot per block; the prelude's output slot is shared by every core pass, the previous pass's own
 //! core block states are what each later pass's messages read), and nothing inside a visit: the backward walks the
 //! visits in reverse and recomputes each one from its saved input before differentiating it. The routing a visit
 //! recomputes is the routing its forward took (the same inputs, or the same replayed record). Gradients of the shared

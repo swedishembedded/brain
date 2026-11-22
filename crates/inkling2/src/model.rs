@@ -381,7 +381,7 @@ fn declared_activations(declared: Option<&HfQuant>, cfg: &Inkling2Config) -> (st
 
 impl Inkling2 {
     /// Load the checkpoint directory `dir` (`config.json`, the safetensors and, when present, `hf_quant_config.json`)
-    /// onto `ops`, whose `Gpu` registers [`kernels`]. The header is held to the name map first, so a file the config
+    /// onto `ops`, whose `Gpu` registers [`kernels()`]. The header is held to the name map first, so a file the config
     /// does not describe is refused by name before any weight is read. The vision tower's tensors are checked, not
     /// loaded. The activation operand `ops` is set to ([`Ops::set_linear_activations`]) is held to what this model can
     /// run ([`Self::set_linear_activations`]).
