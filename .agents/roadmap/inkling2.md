@@ -783,7 +783,7 @@ The first trainable target needs no streaming: the base is about 19.5 GB.
     capped logits (knowledge #561). Gates (CPU backend): training forward == tiny reference logits and its loss ==
     their CE (`tests/it/training.rs`); `gradcheck` `inkling2_fd` - every parameter of a full fine-tune (directional),
     every shared core tensor and the message queries entry by entry, every adapter tensor of a LoRA build (routing
-    pinned by replay: a finite difference must not flip a top-k); rl conformance `inkling2_conforms` (C1-C4, C6, C10
+    pinned by replay: a finite difference must not flip a top-k, knowledge #562); rl conformance `inkling2_conforms` (C1-C4, C6, C10
     and every objective's step; the subject routes both of two experts, since the suite cannot pin a routing);
     bf16 base == f32 over rounded values; packed row == documents alone; LoRA run lowers the loss and its saved adapter
     reloads; `rl/tests/grpo_inkling2.rs` (on-policy ratio, routing replay applied and exact on the trainer's own
