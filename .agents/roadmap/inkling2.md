@@ -780,6 +780,49 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
     is the existing model-id path. Docs page: an Adapters section with the commands.
 - **I3.5** Acceptance through the public API with the vendor's published verification
   suite (coding, vision, long context to 1M), after operator parity.
+  - Done (2026-11-22, accept): acceptance on one GH200 (n442 gpu2, shared with the perf lane, so every rate below
+    is contended), CUDA backend, release `brain` at main `a7400595c` plus this lane's fixes, `brain serve --openai 8898
+    --max-batch 4` (f32 K/V, ctx 16384) unless noted; client `scripts/accept.py` (OpenAI SDK 3.57). `brain pull
+    thinkingmachines/Inkling-2-Mini` reports the store entry complete. Through the OpenAI API, all passing: plain chat;
+    multi-turn with thinking (`reasoning_content`, the second turn's history re-rendered, prefix hit 24 tokens);
+    tool calling (declared tool -> `tool_calls` with parsed arguments, `finish_reason: tool_calls`, tool-result turn
+    answered); `reasoning_effort` named (none, low, high, max: 49-76 completion tokens) and numeric (`0.2` and `"0.2"`
+    render as `low`; `1.5`, `"bogus"`, `true` refused 400); an image chat and a transparent PNG (its reply equals
+    the reply to the same picture composited onto the checkerboard by hand, and differs from the black composite);
+    streaming (109 chunks, TTFT 2.0 s); cancellation (a dropped stream frees its slot, a follow-up served in 21-25 s);
+    4 concurrent requests; `--kv-cache bf16 --speculative mtp` together (same cases pass); the D-Bus sample
+    (`samples/python/llm/inkling2`) over `--dbus` and the OpenAI sample (low effort 55 words of reasoning, high 57).
+    LoRA: `brain finetune thinkingmachines/Inkling-2-Mini --lora 8 --steps 30` on 8 examples (5 min, loss 2.21 ->
+    0.0000), served with `--serve-adapters`: the adapter id is listed and answers the trained fact, the base does
+    not.
+  - Defects found and fixed (landed): a tool-result turn failed rendering ("tool call function name must be a
+    string": the serving contract's flat `{id, name, arguments}` reached a template that reads the OpenAI shape and
+    refuses argument text; `data::chat_template` lifts the calls and detects such a template by a probe render); a
+    numeric `reasoning_effort` was dropped for the default (apiserve); `brain finetune --lora` refused Inkling 2 (and
+    every registered chat trainer but Ripple: `ChatFamily::Chat` now carries the registry's entry,
+    `ChatTrainer::base_shape`); `brain_py` HTTP clients dropped `reasoning_effort` and the reasoning; every D-Bus
+    `Run` result failed to read on RHEL 9 (knowledge #570); the sample sent `messages` as a list over D-Bus; the docs
+    said a trained adapter is not served. New: `brain perf` target `inkling2:<dir>[:kvf32|:kvbf16]`.
+  - Throughput (brain perf `serve`, contended card, artifacts were in the lane's scratch): decode batch 1 (in 128,
+    out 64): inter-token p50 1.79 s (0.56 tok/s; the served chat measured 1.8-2.9 tok/s, and a 8k NIAH case decoded
+    256 tokens in about 15 s, so the card share varied); prefill 8k: TTFT p50 53 s (about 150 tok/s, cold); batch 32
+    (`:kvbf16`, in 128, out 64): 13.3 output tok/s total, inter-token p50 0.84 s. The served engine is far from the
+    roofline: the Phase 7 gap list applies (per-step allocations, reference attention and depth kernels).
+  - Vendor suite: `thinking-machines-lab/inkling-verify` at `94fd95b6812bf679ceef2678fb63895b7d6784dd` (Apache-2.0,
+    datasets under their own terms), in `~/resources/reference/inkling-verify/`. Needle-in-a-haystack, reduced grid
+    (prepared from the checkpoint's tokenizer: contexts 8000/32000, depths 0/25/50/75/100, 2 per cell; the published
+    grid is 4k-1M x 11 depths x 10), temperature 0, `reasoning_effort` none (the suite's default), concurrency 1,
+    server `--max-batch 1 --ctx 131072`: with a 256-token output budget 10/20 (all 10 failures `length`: the model
+    reasons before answering; all 10 completed answers correct, at 8k and 32k alike; 32k cases 100-150 s each); with
+    1024 tokens 3/4 before the run was stopped (one reply ended with an empty answer). The card does not publish NIAH
+    numbers; its long-context rows are GraphWalks BFS 256K 69.7%, MRCR v2 8-needle 256K-512K 46.4%.
+  - Left: the remaining suite runs, not started (lane stopped by the coordinator): NIAH at 1024+ output tokens over
+    the whole 8k/32k grid and at 128k/256k/512k (a long grid was prepared; 128k and up need `--ctx` beyond 131072
+    and, at f32 K/V, 8 GB of K/V per 128k tokens); MMMU-Pro vision (prepared, 1730 questions; the card's reference is
+    74.9% on standard-10, with tools); DeepSWE (coding) needs an x86-64 Podman host and four hours per sample, out of
+    reach on an aarch64 GH200 node; HLE's dataset is gated. Uncontended throughput numbers (the card was shared).
+    `/v1/metrics` answers 404 on the OpenAI surface; a template refusal (an out-of-range effort) reaches the client
+    as the generic "the model failed to process the request" rather than its reason.
 
 ### Phase 4: training on the frozen quantized base
 
