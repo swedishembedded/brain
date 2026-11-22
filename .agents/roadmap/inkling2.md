@@ -583,10 +583,10 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
       weight's `amax/denominator`).
     - MXFP8 (layers 20-23): per 32-block `raw = bmax * (1/448)`, E8M0 exponent = `raw` rounded UP to a power of two
       (`(bits + 0x7FFFFF) & 0x7F800000`), values `e4m3_rne(clamp(x/scale, +-448))`.
-    - Deviations, stated: brain quantizes its f32 rows (the vendor's are bf16); the vendor multiplies the routing weight
-      into the activation before quantizing `w2`'s input, brain after the product (NVFP4 is invariant to a per-row
-      scale up to f32 rounding; MXFP8's power-of-two grid is not, so layers 20-23 round on a shifted grid); a row with
-      amax below 2^-100 or an MXFP8 block whose `raw` is subnormal reads as zero. The round trip feeding f32 products is
+    - Deviations, stated: brain quantizes its f32 rows (the vendor's are bf16); a row with amax below 2^-100 or an
+      MXFP8 block whose `raw` is subnormal reads as zero. (The routing weight now multiplies each slot's activation
+      before `w2`'s input is quantized, as the vendor does, on the declared tier only; see the 2026-11-22 engine2 note
+      below.) The round trip feeding f32 products is
       the quantized product up to accumulation order; a packed W4A4/W8A8 product is a speed item with this as oracle.
     - Measured (CPU backend, the released checkpoint, the three golden prompts, 76 positions; `inkling2` test
       `activation_tier`), with the prompt's expert products grouped by expert: against brain's reference numerics mean
@@ -597,6 +597,18 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
       difference flips a code, so the tier is not smooth in its inputs and a 76-position estimate resolves its KL to
       about +-0.03 nats. The reference numerics moved by 1e-11 between the two orders. The per-product round trip's
       relative L2 error is 8.0% (NVFP4) and 2.7% (MXFP8) on heavy-tailed rows.
+  - Done (2026-11-22, engine2): faithfulness - under `--linear-activations declared` each slot's activation is scaled by
+    its routing weight BEFORE the `w2` round trip (the vendor's order; `Inkling2::weighted_slots`: `lora_expert_slots`
+    with one row slot per token gives the flat `[token, expert]` gate index, `embed` gathers the weight,
+    `moe_slot_combine` with one slot per row scales; the combine then sums unweighted), the reference numerics keep the
+    weight after the product. Re-measured with `activation_tier` (CPU, released checkpoint, 76 positions): mean KL 0.0847
+    nats and top-1 0.934 against the reference numerics, 0.0285 nats against the f32 reference's full rows (before:
+    0.085 / 0.934 / 0.029; only layers 20-23 move, below the estimate's resolution). The served engine takes the tier
+    (`inkling2::serve` test `declared_tier`: a tiny release with published NVFP4 banks declaring the vendor's
+    activation quantization serves the grouped prefill and the gathered decode at the uncached forward's logits, 5e-5
+    of scale; conformance passes) and `brain serve --linear-activations declared` reaches it (`INKLING2_POLICY`).
+    Left: the MXFP8 decode path is covered only on the released weights (an MXFP8 bank needs rows of a multiple of 128
+    inputs, wider than the tiny model).
   - Left: the tier on CUDA/Vulkan (the CUDA bit-exactness test exists and skips without a selected card; not run);
     the serving engine taking `--linear-activations` (its `PolicySupport` row); a split of the KL between the NVFP4 and
     MXFP8 layers; the routing-weight-before-quantization order if the MXFP8 layers' share matters.
@@ -697,6 +709,42 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
     `parse_adapter_with_experts`, done 2026-11-22, so only the engine side is missing);
     a recorded/graph decode step (every pass allocates its buffers, attention and conv state submit per visit; no
     profile yet); bf16 K/V as a measured opt-in; MTP drafting.
+  - Done (2026-11-22, engine2): images through the request path - `catalog::resident_inkling2::images::Inkling2Images`
+    builds an image request on the shared `llmserve::image_frontend::ImageFrontend` (the qwen35 front end moved onto
+    it): the request's image blobs (`image`, `image1`, ...; the HTTP surfaces decode inline `data:` URLs into them),
+    each bounded from its size before any pixel is processed (side <= 4096, all regions < the context), the checkpoint's
+    template renders one `<|unused_200054|>` per image part (client text escaped: a typed placeholder stays text),
+    `expand_placeholders` (part/image mismatch refused), the tower on the decoder's card (`new_like`, features of a
+    picture seen lately reused), `PromptEmbeds` spliced by the engine; a raw prompt with images and a text-path image
+    part without its blob are refused as invalid requests. `Inkling2::forward_embedded` is the uncached oracle. Gates:
+    catalog `inkling2_served::an_image_chat_is_served_with_the_uncached_forwards_logits_over_the_spliced_rows` (tiny
+    checkpoint + random tower on the decoder's width: served prompt ids = template + expansion, greedy tokens = the
+    uncached forward's argmax, sampled log-probabilities within 1e-4 of its log-softmax, every bound refused as
+    invalid-request), `serve_images` (rows spliced whole/chunked = `forward_embedded` at 5e-5; other rows are another
+    prefix) and the released weights + tower on the real vision golden's reference-processor pixels: six cached greedy
+    tokens = the uncached forward's argmax (CPU). API audit: no new route or field; the HTTP image path's count, pixel
+    and off-runtime bounds apply unchanged; transparency is dropped by the HTTP decode (RGB), unlike the reference
+    processor's checkerboard composite.
+  - Done (2026-11-22, engine2): `--kv-cache bf16` (`INKLING2_POLICY`: f32|bf16, int8/fp8 refused by name; the
+    model-dir sizing now carries the K/V and activation choices and `--ctx`/`--max-batch` even when the brain-checkpoint
+    Qwen3.8 resident refuses the policy). Precision vs f32 K/V (`kv_precision`, served rows at every position,
+    teacher-forced): tiny mean KL 1.2e-4, max 6.5e-4, top-1 37/39 (logits capped at 1.5: near ties); released weights
+    (97 positions, three prompts + 8 greedy tokens) mean KL 1.4e-3 nats, max 2.0e-2, top-1 100%. Conformance passes at
+    bf16 after a defect fix (knowledge #563: the ring read its own chunk at f32).
+  - Done (2026-11-22, engine2): adapters in the engine - `Engine::{enable_adapters, load_adapter, unload_adapter,
+    adapters}` over an `AdapterBank::new_with_experts` of `serve::ServedSites` (the trainer's linear sites and its
+    w13/w2 expert sites; `correct` after each linear product, `correct_experts` after each routed bank product, grouped
+    or gathered), one bank slot per sequence in mixed batches, K/V and prefixes per adapter namespace, `BankedEngine`.
+    Gates (`serve_adapters`, CPU): a trainer-saved rank-2 adapter over every served site of a release with NVFP4 banks
+    is served at the trainer's adapted logits (1e-4 of scale) at every position, whole/chunked prefill and decode,
+    beside a base row at the base forward's logits; the conformance suite with adapters; merged-site pairs and expert
+    targets over dense experts refused by name.
+  - Left: `brain serve` does not yet offer an Inkling 2 adapter as a model (no `AdapterHost` for `Inkling2Resident`, no
+    model-dir adapter scan for the family; the engine side is in); merged sites (depth/message queries, gate factors)
+    are trained but not served; an adapter the trainer saves with a merged site does not read back through
+    `read_adapter_with_experts` (its card names `attn_queries` while the reader takes the tensors' last segment, `0`,
+    as the leaf); the trainer's `serving_engine` hook still refuses an adapter (scoring runs base-namespace sequences);
+    nothing of this lane ran on CUDA/Vulkan.
 - **I3.5** Acceptance through the public API with the vendor's published verification
   suite (coding, vision, long context to 1M), after operator parity.
 
@@ -953,6 +1001,10 @@ The first trainable target needs no streaming: the base is about 19.5 GB.
   images in image order fill the placeholder positions in order (`get_placeholder_mask`). `embed_prompt` from PNG bytes
   equals the tower on the reference processor's own pixels. Left for the model lane: the serving splice of
   `PromptEmbeds` into the scheduler, and image-text logit parity once the decoder is up.
+
+  Done, serving half (2026-11-22, engine2): the scheduler splice and image-text logit parity, see I3.4's engine2 notes
+  (catalog image chat = uncached forward over the spliced rows; released weights + tower decode to the uncached greedy
+  tokens on the reference processor's pixels).
 
 ### Phase 6: full fine-tuning
 

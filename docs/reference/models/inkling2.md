@@ -93,7 +93,10 @@ curl -s localhost:8788/v1/chat/completions -H "Authorization: Bearer $KEY" -d '{
     {"type": "text", "text": "What is in this picture?"}]}]}'
 ```
 
-Not served yet: adapters and the optional `mtp.safetensors` drafter.
+Adapters: the engine serves LoRA adapters of the trainer's linear and expert
+sites per sequence (`inkling2::serve::Engine::enable_adapters`, `load_adapter`),
+but `brain serve` does not yet offer an Inkling 2 adapter as a model of its
+own. Not served yet: that, and the optional `mtp.safetensors` drafter.
 
 ## Training
 
