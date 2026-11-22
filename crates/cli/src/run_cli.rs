@@ -274,6 +274,18 @@ SERVING OPTIONS
   --min-free-bytes SIZE  (with --training) new training work is refused while the work
                          directory or the artifact store has less than this free on its
                          filesystem (default 10GiB; 0 turns the floor off).
+  --train-job-secret FILE
+                         (with --training) take part in training jobs spread over
+                         several servers (a train request's `job`): FILE is the job
+                         secret (64 hex digits, owner-only, as `brain finetune
+                         --job-secret` reads), read once at startup. A request names
+                         it only by its SHA-256 and is refused when that is not this
+                         secret's. OFF unless given.
+  --train-job-coordinator HOST:PORT
+                         (with --train-job-secret) the one address this server binds
+                         when it holds a job's rank 0; a job plan naming another
+                         coordinator for this server's rank 0 is refused. Without it
+                         this server runs only a job's other ranks.
   --api-keys-out FILE    write {\"openai\":\"sk-brain-…\", …} as JSON, mode 0600
   --reserve-gb N         GB of VRAM kept free per GPU (default 2). Each model is
                          placed with room for its own activations at --max-batch;
@@ -841,6 +853,10 @@ pub fn run_serve(args: &[String]) {
     // `--sched-*`: the residency scheduler's batching/fairness weights.
     let mut scheduler = residency::Policy::serving_default();
     let mut artifact_store: Option<String> = None;
+    // `--train-job-secret FILE` / `--train-job-coordinator HOST:PORT`: what lets the training workload run ranks of a
+    // job spread over several servers.
+    let mut train_job_secret: Option<String> = None;
+    let mut train_job_coordinator: Option<String> = None;
     let mut quotas = trainjob::Quotas::default();
     let mut quota_flag_given = false;
     // Opt-in continuous-learning hot swap (`--watch-adapters DIR`): watch DIR
@@ -976,6 +992,8 @@ pub fn run_serve(args: &[String]) {
             "--autofetch" => autofetch = true,
             "--mock-delay-ms" => mock_delay_ms = Some(parsed(args, &mut i, "--mock-delay-ms")),
             "--artifact-store" => artifact_store = Some(val(args, &mut i, "--artifact-store")),
+            "--train-job-secret" => train_job_secret = Some(val(args, &mut i, "--train-job-secret")),
+            "--train-job-coordinator" => train_job_coordinator = Some(val(args, &mut i, "--train-job-coordinator")),
             "--artifact-max-bytes" => (quotas.max_artifact_bytes, quota_flag_given) = (size(args, &mut i, "--artifact-max-bytes"), true),
             "--artifact-store-max-bytes" => (quotas.max_store_bytes, quota_flag_given) = (size(args, &mut i, "--artifact-store-max-bytes"), true),
             "--job-staging-max-bytes" => (quotas.max_job_staging_bytes, quota_flag_given) = (size(args, &mut i, "--job-staging-max-bytes"), true),
@@ -1238,8 +1256,8 @@ pub fn run_serve(args: &[String]) {
     // The training workload, with its artifact store opened now: a mistyped directory ends the start, it is not
     // discovered by the first job.
     let train = match (training, artifact_store) {
-        (false, artifact_store) if artifact_store.is_some() || quota_flag_given => {
-            eprintln!("brain serve: --artifact-store and the training quota flags belong to the training workload; add --training");
+        (false, artifact_store) if artifact_store.is_some() || quota_flag_given || train_job_secret.is_some() || train_job_coordinator.is_some() => {
+            eprintln!("brain serve: --artifact-store, --train-job-secret, --train-job-coordinator and the training quota flags belong to the training workload; add --training");
             std::process::exit(2);
         }
         (false, _) => None,
@@ -1254,7 +1272,27 @@ pub fn run_serve(args: &[String]) {
                     std::process::exit(2);
                 })
             });
-            Some(serving::TrainKnobs { artifact_store, quotas })
+            let job_access = match (train_job_secret, train_job_coordinator) {
+                (None, Some(_)) => {
+                    eprintln!("brain serve: --train-job-coordinator binds for jobs this server joins with its job secret; add --train-job-secret");
+                    std::process::exit(2);
+                }
+                (None, None) => None,
+                (Some(file), coordinator) => {
+                    let secret = model::JobSecret::read(Path::new(&file)).unwrap_or_else(|e| {
+                        eprintln!("brain serve: --train-job-secret: {e}");
+                        std::process::exit(2);
+                    });
+                    if let Some(addr) = &coordinator {
+                        if addr.len() > 255 || !addr.contains(':') {
+                            eprintln!("brain serve: --train-job-coordinator {addr:?} is not host:port");
+                            std::process::exit(2);
+                        }
+                    }
+                    Some(trainjob::job::JobAccess { secret, coordinator })
+                }
+            };
+            Some(serving::TrainKnobs { artifact_store, quotas, job_access })
         }
     };
 

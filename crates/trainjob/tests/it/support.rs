@@ -50,23 +50,29 @@ pub fn rig_qwen3(tag: &str, memory: u64) -> Rig {
 /// [`rig_qwen3`] on a server given the cards `gpus` (24 GiB each) and, when `cpu_compute`, the CPU for model compute:
 /// what `brain serve --device` names. The host's `memory` is budgeted either way.
 pub fn rig_qwen3_on(tag: &str, memory: u64, gpus: &[u32], cpu_compute: bool) -> Rig {
+    rig_qwen3_serving_jobs(tag, memory, gpus, cpu_compute, None)
+}
+
+/// [`rig_qwen3_on`] started with `job_access`: the job secret and coordinator address of a server that takes part in
+/// jobs spread over several servers.
+pub fn rig_qwen3_serving_jobs(tag: &str, memory: u64, gpus: &[u32], cpu_compute: bool, job_access: Option<trainjob::job::JobAccess>) -> Rig {
     let mut budgets = Budgets::new();
     for &i in gpus {
         budgets.set(Device::Gpu(i), 24 << 30, 0);
     }
     budgets.set(Device::Cpu, memory, 0).exclude_cpu_compute(!cpu_compute);
-    rig_budgeted(tag, budgets, true, None, Vec::new(), qwen3_model_dir_of(&format!("{tag}-base"), qwen3::QwenConfig::tiny()))
+    rig_budgeted(tag, budgets, true, None, Vec::new(), qwen3_model_dir_of(&format!("{tag}-base"), qwen3::QwenConfig::tiny()), job_access)
 }
 
 /// A server whose store holds `made` (a model directory) as `local/toy`.
 fn rig_over(tag: &str, memory: u64, store: bool, card: Option<u64>, extra: Vec<Arc<dyn residency::ResidentModel>>, made: TempDir) -> Rig {
     let mut budgets = Budgets::new();
     budgets.set(Device::Cpu, memory, 0);
-    rig_budgeted(tag, budgets, store, card, extra, made)
+    rig_budgeted(tag, budgets, store, card, extra, made, None)
 }
 
 /// [`rig_over`] with the server's device budgets given.
-fn rig_budgeted(tag: &str, budgets: Budgets, store: bool, card: Option<u64>, extra: Vec<Arc<dyn residency::ResidentModel>>, made: TempDir) -> Rig {
+fn rig_budgeted(tag: &str, budgets: Budgets, store: bool, card: Option<u64>, extra: Vec<Arc<dyn residency::ResidentModel>>, made: TempDir, job_access: Option<trainjob::job::JobAccess>) -> Rig {
     let dir = TempDir::new(tag);
     let models = dir.join("models");
     let base = models.join("local").join("toy");
@@ -81,7 +87,7 @@ fn rig_budgeted(tag: &str, budgets: Budgets, store: bool, card: Option<u64>, ext
     let work_root = dir.join("work");
     // As a server counts them: one run in flight per card, and at least one.
     let devices = budgets.gpus().len().max(1);
-    let config = TrainConfig { models_dir: Some(models.clone()), store: store.then(|| store_handle.clone()), work_root: work_root.clone(), largest_card_bytes: card, devices, quotas: trainjob::Quotas::default(), free_space: Arc::new(trainjob::DiskFree) };
+    let config = TrainConfig { models_dir: Some(models.clone()), store: store.then(|| store_handle.clone()), work_root: work_root.clone(), largest_card_bytes: card, devices, quotas: trainjob::Quotas::default(), free_space: Arc::new(trainjob::DiskFree), job_access };
     let mut served = vec![trainjob::resident(config)];
     served.extend(extra);
     let exec = Executor::start(served, budgets, Policy::default());

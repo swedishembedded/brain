@@ -181,6 +181,8 @@ pub use example_length::ExampleMeter;
 pub use model::IGNORE as IGNORE_TARGET;
 #[cfg(feature = "study")]
 pub use model::TrainPrecision;
+/// The plan every rank of a distributed job shares, and the secret that proves a rank belongs to it ([`JobRanks`]).
+pub use model::{JobPlan, JobSecret};
 #[cfg(feature = "study")]
 /// Native sparse attention training for a fine-tune: [`NativeSparse`] and the [`LsaConfig`] it carries.
 pub use model::lsa::LsaConfig;
@@ -216,7 +218,7 @@ pub use data::tokenizer_identity::{TokenizerDifferences, TokenizerIdentity, Toke
 #[cfg(feature = "study")]
 pub use rl::objective::dpo::{PairLoss, DEFAULT_SIMPO_GAMMA};
 #[cfg(feature = "study")]
-pub use data_parallel::DataParallel;
+pub use data_parallel::{DataParallel, JobRanks};
 #[cfg(feature = "study")]
 pub use finetune::{DEFAULT_LORA_LR, DEFAULT_LORA_RANK, LORA_WEIGHT_DECAY, emit_held_out_records, score_chat, score_tokens, score_tokens_qwen35, HeldOutRecords, ChatFineTune, ChatFineTuneOutcome, FineTuneProgress, TrainFootprint, FineTuneStatus, HeldOutScore, MonitorPoint, PolicyGradientOutcome, RecordReadout, Selection, TokenReadout, TokenScore};
 #[cfg(feature = "study")]

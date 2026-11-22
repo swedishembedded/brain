@@ -39,6 +39,15 @@ pub const MAX_EVALUATIONS: u32 = 1024;
 pub const MAX_ADAPTER_ID_LEN: usize = 200;
 /// The most cards one run trains on at once.
 pub const MAX_CARDS: u32 = 64;
+/// The longest `job` document accepted, in bytes.
+pub const MAX_JOB_DOCUMENT_BYTES: usize = 4096;
+/// The most ranks a job spread over several servers has.
+pub const MAX_JOB_WORLD: usize = 4096;
+/// The longest a job may wait for its ranks to join, or one of its collectives for a peer: a day.
+pub const MAX_JOB_TIMEOUT_MS: u64 = 24 * 3600 * 1000;
+/// The longest job name and coordinator address accepted.
+const MAX_JOB_NAME_LEN: usize = 128;
+const MAX_COORDINATOR_LEN: usize = 255;
 
 /// What the trainer applies to each LoRA and objective setting a request omits, by param name, read from the trainer's
 /// own defaults: [`brain::PolicyGradientConfig::default`] for the policy gradient, the preference trainer's and the
@@ -113,6 +122,7 @@ fn spec_without_defaults() -> ActionSpec {
         .param(ParamSpec::new("strict_updates", ParamType::Bool, "abort at the first optimiser step whose loss or gradient is not finite (off: such a step is skipped, and the run aborts on the third in a row); the adapter is never updated with a non-finite value").default(json!(false)))
         .param(ParamSpec::new("seed", ParamType::Int, "seed of a fresh adapter's initialisation and the batch order (random when omitted; the report carries the one used)").min(0.0))
         .param(ParamSpec::new("cards", ParamType::Int, "how many of the server's cards the run trains on at once: one data-parallel rank per card, each holding the run's whole footprint, training its own share of the records with the same seed, with every step's gradients reduced over the cards (sft and policy_gradient only; at most the cards the server has)").default(json!(1)).min(1.0).max(MAX_CARDS as f64).step(1.0))
+        .param(ParamSpec::new("job", ParamType::Str, "JSON document that makes this run part of one data-parallel job spread over several servers: {\"plan\": PLAN, \"first_rank\": N, \"secret_sha256\": \"<hex>\"} where PLAN is the job plan every server is given (job, world_size, tp 1, pp 1, dp = world_size, coordinator = the address the server holding rank 0 was started to bind as a job coordinator, handshake_timeout_ms, op_timeout_ms, optional collectives and bucket_mib), this server runs ranks first_rank .. first_rank + cards - 1, and secret_sha256 is the SHA-256 of the job secret this server was started with, never the secret; needs seed, sft or policy_gradient, no resume_key"))
         .param(ParamSpec::new("max_block", ParamType::Int, "the longest training row in tokens: the memory reserved for the run is sized to it, and a record longer than it is refused by name").default(json!(8192)).min(64.0).max(1_048_576.0).step(1.0))
         .param(ParamSpec::new("thinking", ParamType::Bool, "train the model to reason before it answers (off: trained for no-think mode); sft and policy_gradient only").default(json!(true)))
         .param(ParamSpec::new("pack_answers", ParamType::Bool, "train a record that supervises several turns as one sequence; sft and policy_gradient only").default(json!(false)))
@@ -345,6 +355,7 @@ pub struct Params {
     pub strict_updates: bool,
     pub seed: Option<u64>,
     pub cards: u32,
+    pub job: Option<String>,
     pub max_block: u32,
     pub thinking: bool,
     pub pack_answers: bool,
@@ -394,6 +405,73 @@ pub struct Params {
 pub struct Request {
     pub params: Params,
     pub data: DataRefs,
+    /// The job spread over several servers this run is part of (`job`), when it is one.
+    pub job: Option<JobRef>,
+}
+
+/// This server's part of a job spread over several servers, as the `job` document names it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct JobRef {
+    /// The plan every server of the job is given.
+    pub plan: brain::JobPlan,
+    /// This server's first rank; it runs `cards` ranks from it.
+    pub first_rank: usize,
+    /// The SHA-256 of the job secret, which this server must hold.
+    pub secret_sha256: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct JobDoc {
+    plan: brain::JobPlan,
+    first_rank: usize,
+    secret_sha256: String,
+}
+
+impl JobRef {
+    /// Parses and checks the `job` document against the run's `cards`: a bounded document with no unknown field, a
+    /// plan that holds and is plain data parallelism over replicas with bounded timeouts, a rank range inside it,
+    /// and a well-formed secret digest.
+    pub fn parse(text: &str, cards: u32) -> Result<JobRef, String> {
+        let refused = |why: String| Err(format!("train: job: {why}"));
+        if text.len() > MAX_JOB_DOCUMENT_BYTES {
+            return refused(format!("the document is {} bytes; at most {MAX_JOB_DOCUMENT_BYTES} are accepted", text.len()));
+        }
+        let doc: JobDoc = serde_json::from_str(text).map_err(|e| format!("train: job: {e}"))?;
+        let plan = doc.plan;
+        plan.validate().map_err(|why| format!("train: job: {why}"))?;
+        if plan.job.len() > MAX_JOB_NAME_LEN || !plan.job.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)) {
+            return refused(format!("plan.job must be 1 to {MAX_JOB_NAME_LEN} characters of letters, digits and . _ -"));
+        }
+        if plan.coordinator.len() > MAX_COORDINATOR_LEN {
+            return refused(format!("plan.coordinator is longer than {MAX_COORDINATOR_LEN} characters"));
+        }
+        if plan.world_size > MAX_JOB_WORLD {
+            return refused(format!("plan.world_size {} is more than {MAX_JOB_WORLD} ranks", plan.world_size));
+        }
+        if plan.tp != 1 || plan.pp != 1 {
+            return refused("a served job trains data-parallel only: tp and pp must be 1".to_string());
+        }
+        if !plan.sharding.is_replicated() {
+            return refused("a served job trains replicas: plan.sharding must be replicated".to_string());
+        }
+        if plan.handshake_timeout_ms > MAX_JOB_TIMEOUT_MS || plan.op_timeout_ms > MAX_JOB_TIMEOUT_MS {
+            return refused(format!("a timeout above {MAX_JOB_TIMEOUT_MS} ms"));
+        }
+        let end = doc.first_rank.checked_add(cards as usize).filter(|&end| end <= plan.world_size);
+        if end.is_none() {
+            return refused(format!("ranks {} .. {} (first_rank and cards {cards}) are outside the plan's {} ranks", doc.first_rank, doc.first_rank.saturating_add(cards as usize), plan.world_size));
+        }
+        if doc.secret_sha256.len() != 64 || !doc.secret_sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return refused("secret_sha256 is the SHA-256 of the job secret, 64 hexadecimal digits".to_string());
+        }
+        Ok(JobRef { plan, first_rank: doc.first_rank, secret_sha256: doc.secret_sha256 })
+    }
+
+    /// The ranks this server runs.
+    pub fn ranks(&self, cards: u32) -> std::ops::Range<usize> {
+        self.first_rank..self.first_rank + cards as usize
+    }
 }
 
 impl Request {
@@ -494,8 +572,20 @@ impl Request {
                 return refused(&format!("adapter_id {id:?} does not name an adapter: an adapter card is named <vendor>/<repo>:<owner>:<name>:<tag>, as a server offers it"));
             }
         }
+        let job = params.job.as_deref().map(|text| JobRef::parse(text, params.cards)).transpose()?;
+        if job.is_some() {
+            if !matches!(params.objective, Objective::Sft | Objective::PolicyGradient) {
+                return refused(&format!("job trains data-parallel across servers, and the {} objective trains on one card; sft and policy_gradient train as ranks", params.objective.name()));
+            }
+            if params.seed.is_none() {
+                return refused("job needs seed: every server's ranks must draw the same initialisation and batch order");
+            }
+            if params.resume_key.is_some() {
+                return refused("job does not resume (resume_key): a job spread over several servers restarts whole");
+            }
+        }
         check_attached(&data, inv)?;
-        Ok(Request { params, data })
+        Ok(Request { params, data, job })
     }
 }
 

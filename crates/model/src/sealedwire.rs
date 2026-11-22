@@ -95,6 +95,21 @@ impl JobSecret {
         self.0.iter().map(|b| format!("{b:02x}")).collect()
     }
 
+    /// The SHA-256 of the secret's 32 bytes, as 64 lowercase hexadecimal digits: what a party that must not hold the
+    /// secret (an orchestrator talking to servers over HTTP) names it by, so a server can check it holds the same
+    /// one (`xxd -r -p secret | sha256sum` computes it from the file).
+    pub fn digest_hex(&self) -> String {
+        use sha2::Digest as _;
+        sha2::Sha256::digest(self.0).iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// Whether `digest` is [`Self::digest_hex`] of this secret (hexadecimal case aside), compared in constant time.
+    pub fn has_digest(&self, digest: &str) -> bool {
+        let mine = self.digest_hex();
+        let theirs = digest.to_ascii_lowercase();
+        mine.len() == theirs.len() && mine.bytes().zip(theirs.bytes()).fold(0u8, |diff, (a, b)| diff | (a ^ b)) == 0
+    }
+
     /// Read the secret file a launcher wrote (`openssl rand -hex 32`).
     ///
     /// # Errors
@@ -313,6 +328,21 @@ impl SealedStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_secret_is_named_by_its_digest_without_being_revealed() {
+        let secret = JobSecret::from_hex(&"ab".repeat(SECRET_BYTES)).unwrap();
+        // SHA-256 of 32 bytes of 0xab.
+        let expected = {
+            use sha2::Digest as _;
+            sha2::Sha256::digest([0xabu8; SECRET_BYTES]).iter().map(|b| format!("{b:02x}")).collect::<String>()
+        };
+        assert_eq!(secret.digest_hex(), expected);
+        assert!(!secret.digest_hex().contains(&secret.to_hex()));
+        assert!(secret.has_digest(&expected.to_ascii_uppercase()));
+        assert!(!secret.has_digest(&JobSecret::random().digest_hex()));
+        assert!(!secret.has_digest(&expected[..63]));
+    }
     use std::net::TcpListener;
     use std::thread;
 

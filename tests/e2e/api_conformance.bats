@@ -767,6 +767,30 @@ train_body() { # train_body <extra params json fragment, with a leading comma or
   [ "$STATUS" -eq 400 ]
 }
 
+@test "security: a training job spread over several servers is refused by a server holding no job secret, and names none" {
+  post_json openai /v1/jobs "$(train_body ',"seed":1,"job":"{\"plan\":{\"job\":\"j\",\"world_size\":2,\"tp\":1,\"pp\":1,\"dp\":2,\"coordinator\":\"127.0.0.1:1\",\"handshake_timeout_ms\":1000,\"op_timeout_ms\":1000},\"first_rank\":1,\"secret_sha256\":\"'"$TRAIN_DIGEST"'\"}"')"
+  [ "$STATUS" -eq 400 ]; grep -q -- "--train-job-secret" "$RESP"
+  ! grep -q "$TRAIN_DIGEST" "$RESP"
+  # An oversized job document is refused by its bound, not parsed.
+  post_json openai /v1/jobs "$(train_body ',"seed":1,"job":"'"$(head -c 5000 /dev/zero | tr '\0' 'a')"'"')"
+  [ "$STATUS" -eq 400 ]; grep -q "at most 4096" "$RESP"
+}
+
+@test "training: the job secret flag needs --training, and a secret other users can read ends the start" {
+  local secret="$CONF_DIR/job.secret"
+  head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$secret"
+  chmod 644 "$secret"
+  run "$BRAIN" serve --models-dir "$MODELS_DIR" --train-job-secret "$secret" --openai 0
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"add --training"* ]]
+  run "$BRAIN" serve --models-dir "$MODELS_DIR" --training --train-job-secret "$secret" --openai 0
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"chmod 600"* ]]
+  run "$BRAIN" serve --models-dir "$MODELS_DIR" --training --train-job-coordinator 127.0.0.1:1 --openai 0
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"add --train-job-secret"* ]]
+}
+
 @test "training: the artifact store flag needs --training, and an absent directory ends the start" {
   run "$BRAIN" serve --models-dir "$MODELS_DIR" --artifact-store "$ARTIFACTS" --openai 0
   [ "$status" -eq 2 ]

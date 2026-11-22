@@ -901,9 +901,30 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         all or nothing; a busy one is never a victim. Test: `residency`
         `workload_cards` (an idle spanning model gives way, a busy one makes
         the claim wait, a claim that cannot complete evicts nothing).
-        Cross-node served training would take a job plan in the request (the
-        plan, this server's rank range and the secret's digest) and the
-        server's own sealed coordinator address.
+      - [x] One served job over several servers (2026-11-22): a `train`
+        request's `job` document (the plan, `first_rank`, the secret's
+        SHA-256; at most 4 KiB, data-parallel replicated plans of at most
+        4096 ranks, timeouts at most a day; `seed` required, `resume_key`
+        refused) runs ranks `first_rank..first_rank+cards` of the plan on
+        the server's claimed cards (`brain::DataParallel::job_ranks`,
+        `JobRanks::join` per rank thread, the co-located ranks sharing a
+        failure and a cancellation). The secret never crosses the API: the
+        server reads it at startup (`--train-job-secret`, owner-only) and
+        refuses a digest that is not its own (constant-time compare), and
+        only the address it was started with (`--train-job-coordinator`)
+        is bound as rank 0. Rank 0's server publishes the run; the others
+        answer `{status, objective, job, ranks, adapter_sha256}`. Failure
+        as C8: the failing server's ranks stop at once, the coordinator
+        relays its reason over the TCP star, a lost peer otherwise ends
+        within the plan's op timeout; every server gives its cards back.
+        Tests: `trainjob` `fleet` (two servers on loopback, 2 + 2 ranks,
+        train the adapter one server's four cards train, byte for byte; a
+        server whose peers never join fails within the handshake and
+        returns its cards; door refusals), `api_conformance.bats` (no
+        secret, oversized document, startup flags). Open: a resumable job
+        across servers (each server's state is local, the C8 commit needs
+        every rank's file; a shared store or per-server commit is
+        needed); the orchestrator's side lives outside brain.
 - [x] **C3 sharded training.** Optimizer state and gradient sharding over the dp
       group (reduce-scatter + all-gather), then parameter sharding; tensor
       parallelism inside a node over NVLink, sharded data parallelism across

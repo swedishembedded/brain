@@ -167,10 +167,11 @@ fn a_rank_that_fails_alone_mid_run_fails_the_run_at_once_with_its_reason() {
     let model = crate::fixture::qwen3_model_dir_of("cards-rank-fails", qwen3::QwenConfig::tiny());
     let train = crate::fixture::write_chat_dataset(&model, &[("cab", "bad"), ("fed", "deaf"), ("ace", "face"), ("bag", "gab"), ("dab", "bead"), ("cafe", "face")]);
     let ranks = brain::DataParallel::in_process(2).expect("a two-rank group");
+    let abort = |i: usize, why: &str| ranks[i].abort(why);
     let peer_error: Mutex<Option<String>> = Mutex::new(None);
     let failed_at: Mutex<Option<std::time::Instant>> = Mutex::new(None);
-    let body = |rank: brain::DataParallel, _frames: Option<std::sync::mpsc::Sender<capability::Progress>>| -> Result<(), String> {
-        let r = rank.rank();
+    let body = |r: usize, _frames: Option<std::sync::mpsc::Sender<capability::Progress>>| -> Result<(), String> {
+        let rank = ranks[r].clone();
         let tune = brain::ChatFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap()).placed(true).dataset(&train).out_dir(model.join(format!("rank{r}"))).rank(2).steps(1000).lr(1e-2).seed(11).data_parallel(rank);
         let outcome = tune.run_with(&CancelToken::armed(), |step| {
             // Rank 1 fails after step 1, once the group (the device group, on cards) is formed and rank 0 is
@@ -187,7 +188,7 @@ fn a_rank_that_fails_alone_mid_run_fails_the_run_at_once_with_its_reason() {
         error
     };
     let devices = [Device::Gpu(0), Device::Gpu(1)];
-    let why = trainjob::job::run_ranks(ranks, &devices, body, &mut |_| {}).expect_err("the run fails with its rank");
+    let why = trainjob::job::run_ranks(&devices, &abort, body, &mut |_| {}).expect_err("the run fails with its rank");
     let waited = failed_at.lock().unwrap().expect("rank 1 failed after step 1").elapsed();
     assert_eq!(why, "train: the device failed during the run (see the server log)", "the run names the first rank's failure");
     let peer = peer_error.lock().unwrap().clone().expect("rank 0 failed too");

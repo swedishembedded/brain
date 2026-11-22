@@ -71,6 +71,8 @@ pub struct TrainConfig {
     pub quotas: Quotas,
     /// How the free disk space is read for the admission floor.
     pub free_space: Arc<dyn FreeSpace>,
+    /// What lets this server take part in jobs spread over several servers.
+    pub job_access: Option<crate::job::JobAccess>,
 }
 
 /// The training workload. See the module doc.
@@ -88,7 +90,7 @@ const HOST_PREFIX: &str = "host:";
 
 impl TrainResident {
     pub fn new(config: TrainConfig) -> TrainResident {
-        TrainResident { env: JobEnv { store: config.store, models_dir: config.models_dir, work_root: config.work_root, quotas: config.quotas }, largest_card_bytes: config.largest_card_bytes, devices: config.devices.max(1), footprints: FootprintCache::default(), free_space: config.free_space }
+        TrainResident { env: JobEnv { store: config.store, models_dir: config.models_dir, work_root: config.work_root, quotas: config.quotas, job_access: config.job_access }, largest_card_bytes: config.largest_card_bytes, devices: config.devices.max(1), footprints: FootprintCache::default(), free_space: config.free_space }
     }
 
     /// Everything about `inv` that can be known without a device: the request, the base, the artifact store it
@@ -108,6 +110,9 @@ impl TrainResident {
 
     fn admit_train(&self, inv: &Invocation) -> Result<Reservation, String> {
         let request = Request::from_invocation(inv)?;
+        if let Some(job) = &request.job {
+            crate::job::JobAccess::admit(self.env.job_access.as_ref(), job)?;
+        }
         if self.env.store.is_none() {
             if !request.data.digests().is_empty() {
                 return Err("train: this server has no artifact store (--artifact-store), so a dataset cannot be named by digest".to_string());
@@ -445,7 +450,7 @@ mod tests {
 
     fn service(free: u64) -> TrainResident {
         let quotas = Quotas { min_free_bytes: 1000, ..Quotas::default() };
-        TrainResident::new(TrainConfig { models_dir: None, store: None, work_root: PathBuf::from("/nonexistent/work"), largest_card_bytes: None, devices: 1, quotas, free_space: Arc::new(Free(free)) })
+        TrainResident::new(TrainConfig { models_dir: None, store: None, work_root: PathBuf::from("/nonexistent/work"), largest_card_bytes: None, devices: 1, quotas, free_space: Arc::new(Free(free)), job_access: None })
     }
 
     #[test]

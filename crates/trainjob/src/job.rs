@@ -43,6 +43,34 @@ pub struct JobEnv {
     pub work_root: PathBuf,
     /// What a job may keep in that directory.
     pub quotas: Quotas,
+    /// What lets this server take part in a job spread over several servers; `None` takes none.
+    pub job_access: Option<JobAccess>,
+}
+
+/// What a server was started with to take part in jobs spread over several servers (a request's `job`): the job
+/// secret, read from an owner-only file at startup and never taken over the API, and the one address it binds when it
+/// holds a job's rank 0 (none: it never coordinates).
+#[derive(Clone, Debug)]
+pub struct JobAccess {
+    pub secret: brain::JobSecret,
+    pub coordinator: Option<String>,
+}
+
+impl JobAccess {
+    /// Whether this server may run `job`'s ranks: it holds the secret the job names, and, for the server of rank 0,
+    /// binds the plan's coordinator address.
+    pub fn admit(access: Option<&JobAccess>, job: &crate::request::JobRef) -> Result<(), String> {
+        let Some(access) = access else {
+            return Err("train: job: this server takes no part in jobs spread over several servers (it was started without --train-job-secret)".to_string());
+        };
+        if !access.secret.has_digest(&job.secret_sha256) {
+            return Err("train: job: secret_sha256 is not the digest of this server's job secret".to_string());
+        }
+        if job.first_rank == 0 && access.coordinator.as_deref() != Some(job.plan.coordinator.as_str()) {
+            return Err("train: job: this server holds the job's rank 0, and the plan's coordinator is not the address it binds as a job coordinator (--train-job-coordinator)".to_string());
+        }
+        Ok(())
+    }
 }
 
 /// The directory the jobs of this user make their private directories in: `brain-train-<uid>` under the
@@ -737,17 +765,16 @@ fn train_chat(request: &Request, base_dir: &Path, teacher_dir: Option<&Path>, st
 /// trains the same request with the same seed on its own card and shard of the records, and every step's gradients
 /// are reduced over the group, so every rank ends with the same adapter (checked). Rank 0 streams the steps and its
 /// outcome is the run's; the ranks share the run's cancellation and stop after the same step ([`run_ranks`] for
-/// what a failing rank does).
+/// what a failing rank does). A request naming a `job` runs this server's ranks of that job instead
+/// ([`brain::DataParallel::job_ranks`]), with the job's other ranks on other servers; the first of them streams.
 #[allow(clippy::too_many_arguments)]
-fn train_chat_ranks(request: &Request, base_dir: &Path, teacher_dir: Option<&Path>, staged: &Staged, files: &RunFiles, work: &Workdir, devices: &[residency::Device], cancel: &capability::CancelToken, began: Instant, progress: &mut dyn FnMut(Progress)) -> Result<Trained, String> {
+fn train_chat_ranks(request: &Request, env: &JobEnv, base_dir: &Path, teacher_dir: Option<&Path>, staged: &Staged, files: &RunFiles, work: &Workdir, devices: &[residency::Device], cancel: &capability::CancelToken, began: Instant, progress: &mut dyn FnMut(Progress)) -> Result<Trained, String> {
     let p = &request.params;
     // Every rank must draw the same batch order and initialisation: the resumable run's seed, the request's, or one
     // drawn here for all of them.
     let seed = files.resumable.as_ref().map(|(_, seed, _)| *seed).or(p.seed).unwrap_or_else(brain::random_seed);
-    let ranks = brain::DataParallel::in_process(devices.len()).map_err(trainer_failure)?;
     let rank_files: Vec<RunFiles> = (0..devices.len()).map(|r| files.for_rank(r, work.path())).collect();
-    let body = |rank: brain::DataParallel, frames: Option<std::sync::mpsc::Sender<Progress>>| -> Result<Trained, String> {
-        let files = &rank_files[rank.rank()];
+    let train_rank = |rank: brain::DataParallel, files: &RunFiles, frames: Option<std::sync::mpsc::Sender<Progress>>| -> Result<Trained, String> {
         let fine_tune = build_fine_tune(request, base_dir, teacher_dir, staged, files)?.seed(seed).data_parallel(rank);
         let outcome = fine_tune
             .run_with(cancel, |step| {
@@ -758,7 +785,24 @@ fn train_chat_ranks(request: &Request, base_dir: &Path, teacher_dir: Option<&Pat
             .map_err(trainer_failure)?;
         trained_chat(request, files, outcome)
     };
-    let mut ranks_trained = run_ranks(ranks, devices, body, progress)?;
+    let ranks_trained = match &request.job {
+        // This server's ranks of a job spread over several servers: each joins the job on its own thread.
+        Some(job) => {
+            let access = env.job_access.as_ref();
+            JobAccess::admit(access, job)?;
+            let secret = access.map(|a| a.secret.clone()).ok_or("train: job: this server holds no job secret")?;
+            let ranks = brain::DataParallel::job_ranks(job.plan.clone(), secret, job.ranks(p.cards)).map_err(trainer_failure)?;
+            let first = job.first_rank;
+            let body = |i: usize, frames| train_rank(ranks.join(first + i).map_err(trainer_failure)?, &rank_files[i], frames);
+            run_ranks(devices, &|i, why| ranks.abort(&format!("rank {} failed: {why}", first + i)), body, progress)?
+        }
+        None => {
+            let ranks = brain::DataParallel::in_process(devices.len()).map_err(trainer_failure)?;
+            let body = |i: usize, frames| train_rank(ranks[i].clone(), &rank_files[i], frames);
+            run_ranks(devices, &|i, why| ranks[i].abort(why), body, progress)?
+        }
+    };
+    let mut ranks_trained = ranks_trained;
     let first = ranks_trained.swap_remove(0);
     if let Some(other) = ranks_trained.iter().find(|t| t.adapter_sha256 != first.adapter_sha256) {
         return Err(format!("train: the ranks ended with different adapters ({} and {}); the run is not published", first.adapter_sha256, other.adapter_sha256));
@@ -766,32 +810,32 @@ fn train_chat_ranks(request: &Request, base_dir: &Path, teacher_dir: Option<&Pat
     Ok(first)
 }
 
-/// Runs `body` once per rank of `ranks`, each on its own thread scoped to its card of `devices` (rank `r` on
-/// `devices[r]`), and returns every rank's result in rank order once all are done. Rank 0's `body` is handed the
-/// sender of the steps it reports, which reach `progress` on this thread as they arrive.
+/// Runs `body(i, ..)` for this process's rank `i` of a group, one per card of `devices`, each on its own thread
+/// scoped to `devices[i]`, and returns every rank's result in order once all are done. Rank `0`'s `body` is handed
+/// the sender of the steps it reports, which reach `progress` on this thread as they arrive.
 ///
-/// A rank that fails (an error or a panic) breaks the group at once ([`brain::DataParallel::abort`]: the host
-/// transport and the device group on every card), so the others fail in their next or current reduction instead of
-/// waiting for it until the group's op timeout; the run then fails with the reason of the rank that failed first,
-/// not the "aborted" its failure caused in the others.
+/// A rank that fails (an error, a panic or a cancellation) breaks the group at once with `abort(i, why)`
+/// ([`brain::DataParallel::abort`]: the host transport and the device group on every card), so the others fail in
+/// their next or current reduction instead of waiting for it until the group's op timeout; the run then fails with
+/// the reason of the rank that failed first, not the "aborted" its failure caused in the others.
 pub fn run_ranks<T: Send>(
-    ranks: Vec<brain::DataParallel>,
     devices: &[residency::Device],
-    body: impl Fn(brain::DataParallel, Option<std::sync::mpsc::Sender<Progress>>) -> Result<T, String> + Sync,
+    abort: &(dyn Fn(usize, &str) + Sync),
+    body: impl Fn(usize, Option<std::sync::mpsc::Sender<Progress>>) -> Result<T, String> + Sync,
     progress: &mut dyn FnMut(Progress),
 ) -> Result<Vec<T>, String> {
     let first_failure: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
     let (frames, steps) = std::sync::mpsc::channel::<Progress>();
     let results: Vec<Result<T, String>> = std::thread::scope(|scope| {
-        let handles: Vec<_> = ranks
-            .into_iter()
-            .zip(devices.iter().copied())
-            .map(|(rank, device)| {
-                let frames = (rank.rank() == 0).then(|| frames.clone());
+        let handles: Vec<_> = devices
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(i, device)| {
+                let frames = (i == 0).then(|| frames.clone());
                 let (body, first_failure) = (&body, &first_failure);
                 scope.spawn(move || {
-                    let breaker = rank.clone();
-                    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| residency::on_device(device, || body(rank, frames))));
+                    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| residency::on_device(device, || body(i, frames))));
                     let result = match run {
                         Ok(placed) => placed.and_then(|done| done),
                         Err(panic) => {
@@ -803,7 +847,7 @@ pub fn run_ranks<T: Send>(
                     if let Err(why) = &result {
                         // Recorded before the group is broken, so no failure the break causes can come first.
                         first_failure.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(|| why.clone());
-                        breaker.abort(why);
+                        abort(i, why);
                     }
                     result
                 })
@@ -905,10 +949,17 @@ pub fn run(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], progre
             };
             train_distill(&request, &base_dir, &staged, teacher.as_deref(), &files, &inv.cancel, began, progress)?
         }
-        Objective::Sft | Objective::PolicyGradient if devices.len() > 1 => train_chat_ranks(&request, &base_dir, teacher_dir.as_deref(), &staged, &files, &work, devices, &inv.cancel, began, progress)?,
+        Objective::Sft | Objective::PolicyGradient if devices.len() > 1 || request.job.is_some() => train_chat_ranks(&request, env, &base_dir, teacher_dir.as_deref(), &staged, &files, &work, devices, &inv.cancel, began, progress)?,
         Objective::Sft | Objective::PolicyGradient => train_chat(&request, &base_dir, teacher_dir.as_deref(), &staged, &files, &inv.cancel, began, progress)?,
     };
     work.ensure_within_quota()?;
+    // A server that runs none of a job's rank 0 answers for its ranks only: the server of rank 0 publishes the run.
+    if let Some(job) = request.job.as_ref().filter(|job| job.first_rank != 0) {
+        let last = job.first_rank + p.cards as usize - 1;
+        let mut result = Outcome::new();
+        result.outputs = json!({"status": "completed", "objective": p.objective.name(), "job": job.plan.job, "ranks": [job.first_rank, last], "adapter_sha256": trained.adapter_sha256});
+        return Ok(result);
+    }
     let mut result = Outcome::new();
     let mut digest = None;
     if let Some(store) = &env.store {
@@ -982,7 +1033,7 @@ mod tests {
     use capability::Media;
 
     fn env_with(root: &Path, max_job_staging_bytes: u64, store: Option<ArtifactStore>) -> JobEnv {
-        JobEnv { store, models_dir: None, work_root: root.to_path_buf(), quotas: Quotas { max_job_staging_bytes, ..Quotas::default() } }
+        JobEnv { store, models_dir: None, work_root: root.to_path_buf(), quotas: Quotas { max_job_staging_bytes, ..Quotas::default() }, job_access: None }
     }
 
     fn blobs(sizes: &[(&str, usize)]) -> BTreeMap<String, Blob> {

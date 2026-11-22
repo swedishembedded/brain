@@ -18,6 +18,7 @@ mod cards;
 mod consolidate;
 mod create;
 mod dryrun;
+mod fleet;
 mod door;
 mod http;
 mod pretrain;

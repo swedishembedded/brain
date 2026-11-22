@@ -42,8 +42,85 @@ pub struct DataParallel {
 /// What the ranks that are threads of this process share: each one's collective (so a rank that fails can break the
 /// group on the host and on every card at once) and the step they agreed to stop after.
 struct LocalGroup {
-    members: Vec<Arc<dyn Collective>>,
+    /// The members that joined, and the reason the group was broken, once it was: a member that joins after that is
+    /// broken as it joins.
+    members: Mutex<Members>,
     stop_after: Mutex<Option<u32>>,
+}
+
+/// The members of a [`LocalGroup`] that joined, and why the group was broken, once it was.
+#[derive(Default)]
+struct Members {
+    joined: Vec<Arc<dyn Collective>>,
+    broken: Option<String>,
+}
+
+impl LocalGroup {
+    fn new(members: Vec<Arc<dyn Collective>>) -> Arc<LocalGroup> {
+        Arc::new(LocalGroup { members: Mutex::new(Members { joined: members, broken: None }), stop_after: Mutex::new(None) })
+    }
+
+    fn abort(&self, why: &str) {
+        let mut members = self.members.lock().unwrap_or_else(|e| e.into_inner());
+        members.broken.get_or_insert_with(|| why.to_string());
+        for member in &members.joined {
+            member.abort(why);
+        }
+    }
+
+    /// Count `member` in; `Err` with the reason when the group was broken before it joined (it is then broken too).
+    fn admit(&self, member: Arc<dyn Collective>) -> Result<()> {
+        let mut members = self.members.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(why) = &members.broken {
+            member.abort(why);
+            return Err(Error::Backend(format!("joining the job: the group was aborted: {why}")));
+        }
+        members.joined.push(member);
+        Ok(())
+    }
+}
+
+/// The ranks of a distributed job that run as threads of this process: a contiguous range of the plan's ranks, each
+/// on its own card ([`DataParallel::job_ranks`]). Each one joins the job on its own thread ([`JobRanks::join`]); they
+/// share a cancellation and a failure as the ranks of [`DataParallel::in_process`] do, and reach the job's other
+/// ranks, in other processes or on other machines, over the job's sealed transport.
+pub struct JobRanks {
+    plan: crate::JobPlan,
+    secret: crate::JobSecret,
+    ranks: std::ops::Range<usize>,
+    local: Arc<LocalGroup>,
+}
+
+impl std::fmt::Debug for JobRanks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JobRanks").field("job", &self.plan.job).field("world", &self.plan.world_size).field("ranks", &self.ranks).finish()
+    }
+}
+
+impl JobRanks {
+    /// The ranks this process runs, in order.
+    pub fn ranks(&self) -> std::ops::Range<usize> {
+        self.ranks.clone()
+    }
+
+    /// Join the job as `rank` (one of [`Self::ranks`]): blocks until every rank of the job joined, within the plan's
+    /// handshake timeout. The rank that is the plan's rank 0 binds the coordinator address. Call it on the thread
+    /// that trains the rank, every rank of the range at once.
+    pub fn join(&self, rank: usize) -> Result<DataParallel> {
+        if !self.ranks.contains(&rank) {
+            return Err(Error::MissingArgument(format!("rank {rank} is not one of this process's ranks {:?} of job {:?}", self.ranks, self.plan.job)));
+        }
+        let context = JobContext::new(self.plan.clone(), self.secret.clone(), rank).map_err(Error::MissingArgument)?;
+        let group: Arc<dyn Collective> = Arc::new(context.job_collective().map_err(|e| Error::Backend(format!("joining the job: {e}")))?);
+        self.local.admit(Arc::clone(&group))?;
+        Ok(DataParallel { group, rank, job: Some((self.plan.job.clone(), self.plan.identity())), sharding: self.plan.sharding, local: Some(Arc::clone(&self.local)) })
+    }
+
+    /// Break the ranks of this process, joined or still joining, because one of them failed before it could join:
+    /// the ones that joined fail at once, and so does a later join.
+    pub fn abort(&self, why: &str) {
+        self.local.abort(why);
+    }
 }
 
 impl std::fmt::Debug for DataParallel {
@@ -63,6 +140,18 @@ impl DataParallel {
         Ok(DataParallel { group: Arc::new(group), rank, job, sharding: context.plan().sharding, local: None })
     }
 
+    /// The ranks `ranks` of the job `plan`, run as threads of this process, one per card, beside the job's other ranks
+    /// in other processes or on other machines (each started with the same plan and secret and its own range): what a
+    /// server runs of a job an orchestrator spread over several servers. The ranks join one by one
+    /// ([`JobRanks::join`]). Refused when the range is empty or outside the plan, or the plan does not hold.
+    pub fn job_ranks(plan: crate::JobPlan, secret: crate::JobSecret, ranks: std::ops::Range<usize>) -> Result<JobRanks> {
+        plan.validate().map_err(Error::InvalidRequest)?;
+        if ranks.is_empty() || ranks.end > plan.world_size {
+            return Err(Error::InvalidRequest(format!("ranks {ranks:?} are not a range of job {:?}'s {} ranks", plan.job, plan.world_size)));
+        }
+        Ok(JobRanks { plan, secret, ranks, local: LocalGroup::new(Vec::new()) })
+    }
+
     /// `world` ranks that are threads of this process, one per card: hand rank `r` to the trainer that runs on card
     /// `r`. Gradients are reduced on the cards when every one of them can, through host memory otherwise.
     pub fn in_process(world: usize) -> Result<Vec<DataParallel>> {
@@ -73,7 +162,7 @@ impl DataParallel {
         let members: Vec<Arc<dyn Collective>> = (0..world)
             .map(|_| Arc::new(JobCollective::new(Arc::clone(&host), CollectivePath::Auto, IN_PROCESS_JOIN, IN_PROCESS_OP).with_bucket_bytes(u64::from(model::job::DEFAULT_BUCKET_MIB) << 20)) as Arc<dyn Collective>)
             .collect();
-        let local = Arc::new(LocalGroup { members: members.clone(), stop_after: Mutex::new(None) });
+        let local = LocalGroup::new(members.clone());
         Ok(members.into_iter().enumerate().map(|(rank, group)| DataParallel { group, rank, job: None, sharding: model::zero::Sharding::Replicated, local: Some(Arc::clone(&local)) }).collect())
     }
 
@@ -83,10 +172,7 @@ impl DataParallel {
     /// launched job, whose launcher sees the process end.
     pub fn abort(&self, why: &str) {
         if let Some(local) = &self.local {
-            let why = format!("rank {} failed: {why}", self.rank);
-            for member in &local.members {
-                member.abort(&why);
-            }
+            local.abort(&format!("rank {} failed: {why}", self.rank));
         }
     }
 

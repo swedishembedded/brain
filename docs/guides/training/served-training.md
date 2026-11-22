@@ -179,7 +179,9 @@ A surface on an address other than loopback needs TLS (see
 [Transport security](../serving/serving.md#transport-security)).
 
 `--training` turns the workload on; it is off otherwise. `--artifact-store DIR`
-names the directory bulk data moves through (below); it must exist. The base is
+names the directory bulk data moves through (below); it must exist.
+`--train-job-secret FILE` and `--train-job-coordinator HOST:PORT` let the
+server run ranks of a job spread over several servers ([below](#one-job-over-several-servers)). The base is
 named by model id in `--models-dir`, as everywhere (`brain pull
 Qwen/Qwen3.8-27B-FP8`).
 
@@ -238,6 +240,7 @@ No dataset or adapter travels through the API as a message body.
 | `strict_updates` | abort at the first optimiser step whose loss or gradient is not finite (default off: such a step is skipped, the weights untouched, and the run aborts on the third in a row) |
 | `max_block` | the longest training row in tokens (default 8192). The memory reserved for the run is sized to it and a longer record is refused by name |
 | `cards` | how many of the server's cards the run trains on at once (default 1, at most the cards the server has). Each card runs one data-parallel rank holding the run's whole footprint and its own share of the records, all with the same `seed` (one is drawn for all of them when the request names none), and every step's gradients are reduced over the cards, so each step sees `cards` times the records of a one-card step. The result is the same document as on one card, from rank 0; the same request trains the same adapter, byte for byte, though not the adapter of a one-card run. `sft` and `policy_gradient` only: another objective naming more than one card is refused by name |
+| `job` | makes the run this server's part of one data-parallel job spread over several servers (below); `sft` and `policy_gradient` only, with `seed`, without `resume_key` |
 | `thinking`, `pack_answers` | how records are rendered |
 | `base_format` | how the frozen base is held: `bf16`, `fp8`, `nf4`, ...; default the tier that fits the card |
 | `eval_every`, `patience`, `replay_share`, `keep_evaluations` | monitoring and early stopping |
@@ -347,7 +350,50 @@ and gives them back:
   waits.
 - When a run ends, by completion, failure or cancel, it gives its cards back at
   once, and its files are removed. On several cards a cancel stops every rank
-  after the same step, and a rank that fails fails the run.
+  after the same step, and a rank that fails fails the run at once: the others
+  stop in their current reduction (on the cards too) with its reason.
+
+### One job over several servers
+
+An orchestrator runs one training job over the cards of several servers (on
+different machines) by sending each server the same `train` request with a
+`job` document naming that server's part:
+
+```json
+{"plan": {"job": "run-17", "world_size": 8, "tp": 1, "pp": 1, "dp": 8,
+          "coordinator": "10.0.0.1:29500", "handshake_timeout_ms": 600000, "op_timeout_ms": 600000},
+ "first_rank": 4, "secret_sha256": "<64 hex digits>"}
+```
+
+- `plan` is the job plan every server gets unchanged (the `--job-plan` file of
+  `brain finetune`): data-parallel only (`tp` and `pp` 1, `dp` the world size,
+  `sharding` replicated), optionally `collectives` and `bucket_mib`. At most
+  4096 ranks, timeouts at most a day, the document at most 4 KiB.
+- The server runs ranks `first_rank` to `first_rank + cards - 1`, one per card
+  it claims; the ranges of all servers cover the plan's ranks once.
+- `secret_sha256` is the SHA-256 of the job secret's 32 bytes
+  (`xxd -r -p secret | sha256sum`). The secret itself never travels over the
+  API: each server is started with it, `--train-job-secret FILE` (the
+  owner-only file `brain finetune --job-secret` reads; the orchestrator puts it
+  on each machine out of band), and refuses a job whose digest is not its
+  secret's. A server started without it refuses every `job`.
+- The server holding rank 0 binds the plan's `coordinator`, which must be the
+  address it was started with, `--train-job-coordinator HOST:PORT`; every other
+  rank connects to it. Every connection proves the secret and is sealed, as for
+  a launched job. A server without `--train-job-coordinator` runs only a job's
+  other ranks.
+- Every server's ranks join within the plan's `handshake_timeout_ms` (each
+  server's run waits for its cards first, so leave room), or the job fails on
+  every server and each gives its cards back. A rank that fails, or a server
+  whose run is cancelled, fails the job: the ranks on that server stop at once,
+  and the other servers' ranks within `op_timeout_ms`.
+- The server holding rank 0 answers with the run's result and publishes the
+  adapter as a one-server run does. Every other server answers
+  `{"status": "completed", "objective", "job", "ranks": [first, last],
+  "adapter_sha256"}` and publishes nothing; every rank holds the same adapter.
+- `seed` is required (every rank must start from the same initialisation),
+  and so is the same `data` on every server, each naming datasets its own store
+  or the call holds. A job does not resume (`resume_key` is refused).
 - A `train`, `full_train` or `pretrain` run never lands on the CPU backend
   silently. On a server started on the CPU (`--device cpu`, `--backend cpu`) it
   trains there and says so in the server log. Where the CPU would only be the
