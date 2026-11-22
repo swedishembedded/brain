@@ -47,6 +47,35 @@ pub fn save_adapter_file(trained: &Inkling2Train, path: &Path) -> std::io::Resul
 /// The weights file of a full fine-tune's export, beside `config.json`.
 pub const WEIGHTS_FILE: &str = "model.safetensors";
 
+/// The second weights file of an export whose trained file holds the decoder only: the vision tower as the base stores
+/// it.
+pub const FROZEN_FILE: &str = "model-frozen.safetensors";
+
+/// A full fine-tune trains the decoder; the vision tower is frozen as published. When the trained file at `trained`
+/// holds no tower but the configuration has one, copy the base's (`base`, a checkpoint directory) as stored into
+/// [`FROZEN_FILE`] beside [`WEIGHTS_FILE`] in `out` and index both files, so the export is a whole checkpoint again.
+fn copy_frozen_tower(trained: &Path, base: &Path, out: &Path, tc: &TrainConfig, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
+    use checkpoint::packed::{BoundedWorkspace, CodecRegistry, LoadConfig, LoadPolicy, Loader, MemoryBudget, PackedReader};
+    let tower: Vec<String> = crate::names::vision_manifest(&tc.cfg).into_iter().map(|e| e.name).collect();
+    let name = trained.to_str().ok_or_else(|| format!("{}: not a UTF-8 path", trained.display()))?;
+    let held: Vec<String> = checkpoint::weightio::WeightReader::open(name).map_err(|e| format!("{name}: {e}"))?.names().map(str::to_string).collect();
+    if tower.is_empty() || tower.iter().all(|n| held.contains(n)) {
+        return Ok(());
+    }
+    let reader = PackedReader::open(base).map_err(|e| format!("the vision tower a full fine-tune leaves frozen is read from the base: {e}"))?;
+    let codecs = CodecRegistry::reference();
+    let loader = Loader { reader: &reader, codecs: &codecs, workspace: BoundedWorkspace::new(MemoryBudget::new(64 << 20, 0)), config: LoadConfig::default() };
+    let requests: Vec<(String, LoadPolicy)> = tower.iter().map(|n| (n.clone(), LoadPolicy::Preserve)).collect();
+    if checkpoint::packed::convert_to_file_while(&loader, &requests, &out.join(FROZEN_FILE), &serde_json::json!({}), keep_going)?.is_none() {
+        return Err(capability::failure::CANCELLED.to_string());
+    }
+    let weight_map: serde_json::Map<String, serde_json::Value> =
+        held.iter().map(|n| (n.clone(), serde_json::Value::from(WEIGHTS_FILE))).chain(tower.iter().map(|n| (n.clone(), serde_json::Value::from(FROZEN_FILE)))).collect();
+    let index = serde_json::json!({ "metadata": {}, "weight_map": weight_map });
+    let path = out.join("model.safetensors.index.json");
+    std::fs::write(&path, serde_json::to_string_pretty(&index).map_err(|e| e.to_string())?).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 impl ChatTrainer for Inkling2Trainer {
     type Trained = Inkling2Train;
     /// The tier the frozen dense linears are held at: `bf16` keeps the release's bf16 tensors as published, `f32`
@@ -166,6 +195,8 @@ impl ChatTrainer for Inkling2Trainer {
             return Err(capability::failure::CANCELLED.to_string());
         }
         std::fs::copy(trained, out.join(WEIGHTS_FILE)).map_err(|e| format!("{}: {e}", trained.display()))?;
+        let tc = TrainConfig::from_value(config.clone()).map_err(|e| format!("{name}: {e}"))?;
+        copy_frozen_tower(trained, tokenizer_dir, out, &tc, keep_going)?;
         for f in ["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "generation_config.json", "chat_template.jinja"] {
             let from = tokenizer_dir.join(f);
             if from.is_file() {
