@@ -75,6 +75,18 @@ impl Rgba8 {
         }
         Ok(Rgba8 { w, h, px })
     }
+
+    /// Interleaved HWC f32 in `[0, 1]`, alpha the fourth channel.
+    pub fn to_hwc_unit(&self) -> Vec<f32> {
+        u8_to_unit(&self.px)
+    }
+
+    /// The 8-bit image of interleaved RGBA f32 in `[0, 1]` (the inverse of [`Self::to_hwc_unit`]). Errors when the
+    /// buffer is not `w * h * 4` floats.
+    pub fn from_hwc_unit(hwc: &[f32], w: u32, h: u32) -> Result<Rgba8, String> {
+        let px = hwc.iter().map(|&v| quantize_unit(v)).collect();
+        Rgba8::new(w, h, px)
+    }
 }
 
 /// An axis-aligned pixel rectangle, `x`/`y` = top-left, in pixels.

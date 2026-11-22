@@ -1100,6 +1100,66 @@ async fn an_image_for_a_model_that_cannot_read_images_is_a_400_naming_the_model(
     assert_eq!(st, StatusCode::OK);
 }
 
+/// A chat model that answers with the image it was handed: its channel count and pixels. `alpha`: its image input
+/// declares that it composites transparency itself.
+struct ImageEcho {
+    name: &'static str,
+    alpha: bool,
+}
+
+struct ImageEchoInst;
+
+impl ResidentModel for ImageEcho {
+    fn manifest(&self) -> Manifest {
+        let mut m = chat_manifest();
+        m.model = self.name.to_string();
+        let input = BlobSpec::new("image", Media::Image, "an image the model reads");
+        m.actions[0] = m.actions[0].clone().input(if self.alpha { input.with_alpha() } else { input });
+        m
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new(self.name, "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::default()
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(ImageEchoInst))
+    }
+}
+
+impl Instance for ImageEchoInst {
+    fn run(&mut self, _a: &str, inv: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+        let (hwc, w, h, c) = capability::blob::decode_hwc(inv, "image")?;
+        let text = json!({"w": w, "h": h, "c": c, "px": hwc}).to_string();
+        Ok(Outcome::new().set("prompt_tokens", json!(1)).set("completion_tokens", json!(1)).set("finish_reason", json!("stop")).blob("text", Blob::new(Media::Text, text.into_bytes())))
+    }
+}
+
+/// An HTTP image with transparency keeps its alpha channel for an image input that declares it composites alpha
+/// itself, and reaches every other image input as RGB: the colour channels exactly as an RGB decode of the file gives
+/// them, never a 4-channel image a model that reads RGB would refuse or misread.
+#[tokio::test]
+async fn an_image_with_transparency_keeps_its_alpha_only_for_an_input_that_reads_it() {
+    let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(ImageEcho { name: "brain-image-rgb", alpha: false }), Arc::new(ImageEcho { name: "brain-image-rgba", alpha: true })];
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 8 << 30, 0);
+    let key = "sk-brain-test-key".to_string();
+    let app = router(AppState::new(Executor::start(models, budgets, Policy::default()), key.clone(), Provider::OpenAI));
+    let png = events::base64::decode(&TINY_PNG_URL["data:image/png;base64,".len()..]).unwrap();
+    let (rgb, rgba) = match imaging::decode_alpha_bounded(&png, 1).unwrap() {
+        imaging::Decoded::Rgba(rgba) => (imaging::codec::decode(&png).unwrap(), rgba),
+        other => panic!("the fixture carries transparency: {other:?}"),
+    };
+    let served = |v: &Value| -> Value { serde_json::from_str(v["choices"][0]["message"]["content"].as_str().unwrap()).unwrap() };
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &image_chat_body("brain-image-rgba")).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(served(&v), json!({"w": 1, "h": 1, "c": 4, "px": rgba.to_hwc_unit()}), "the alpha reaches the input that reads it");
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &image_chat_body("brain-image-rgb")).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(served(&v), json!({"w": 1, "h": 1, "c": 3, "px": rgb.to_hwc_unit()}), "every other input gets the RGB decode");
+}
+
 #[tokio::test]
 async fn an_image_for_a_model_that_reads_images_is_served() {
     let (app, key) = vision_chat_app(Provider::OpenAI);

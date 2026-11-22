@@ -37,7 +37,7 @@ const SPECIALS: [&str; 9] = [
     "<|content_model_end_sampling|>",
 ];
 /// The image placeholder's id in the byte-level vocabulary.
-const IMAGE_TOKEN: u32 = 256 + 7;
+pub(crate) const IMAGE_TOKEN: u32 = 256 + 7;
 /// Stored unembedding rows and the valid ones (bytes and the specials, then padding).
 const VOCAB: usize = 272;
 pub(crate) const VALID: usize = 256 + SPECIALS.len();
@@ -86,13 +86,13 @@ pub(crate) fn pulled_dir(tag: &str) -> Option<PathBuf> {
     Some(dir)
 }
 
-fn resident(dir: &std::path::Path) -> Inkling2Resident {
+pub(crate) fn resident(dir: &std::path::Path) -> Inkling2Resident {
     let sizing = Qwen35Sizing { ctx: 256, ctx_explicit: true, max_batch: 2, ..Qwen35Sizing::default() };
     Inkling2Resident::from_hf_dir(dir.to_str().unwrap(), "local/inkling2", sizing).expect("the pulled directory is served")
 }
 
 fn ask(text: &str) -> Invocation {
-    Invocation::new().set("messages", json!(json!([{"role": "user", "content": text}]).to_string())).set("temperature", json!(0.0))
+    Invocation::new().set("messages", json!(json!([{"role": "user", "content": text}]).to_string())).set("temp", json!(0.0))
 }
 
 #[test]
@@ -120,9 +120,11 @@ fn the_resident_serves_a_typed_message_chat_within_its_context() {
         assert!(e.contains("no vision tower"), "a checkpoint without a tower refuses an image part, never reads it as its placeholder token: {e}");
         let long = || ask("count").set("max_new", json!(24)).set("ignore_eos", json!(true));
         let instance = std::cell::RefCell::new(instance);
-        // The token fires on the first event (the request's admission); the prefill already queued with it still
-        // answers its first token, then the next scheduler step sees the token: two events at most.
-        certify("inkling2 generate", &long, &|inv, p| instance.borrow_mut().run("generate", inv, p), Bound { fire_after: 1, within: 2 });
+        // The token fires on the first event (the request's admission); the scheduler step already queued with it
+        // finishes the prefill and decodes the next token, and the step after it sees the token. That step's two
+        // tokens stream as one text event or, for bytes that decode to no character of the byte-level vocabulary
+        // (greedy here: two such bytes), one event each; then the terminal event: three at most.
+        certify("inkling2 generate", &long, &|inv, p| instance.borrow_mut().run("generate", inv, p), Bound { fire_after: 1, within: 3 });
     });
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -176,7 +178,7 @@ fn the_kv_cache_choice_sizes_the_pool_and_an_unoffered_tier_is_refused() {
 
 /// A tower on the decoder's width in the published naming, random but well scaled: one layer, regions of 40 pixels
 /// (20-pixel patches merged 2x2, as the processor requires).
-fn tiny_vision() -> Value {
+pub(crate) fn tiny_vision() -> Value {
     json!({
         "model_type": "inkling2_vision", "text_hidden_size": 64, "temporal_patch_size": 2, "native_patch_size": 20,
         "adapter_merge_size": 2, "projection_hidden_dim": 32, "projector_bias": false, "hidden_size": 64,
@@ -186,7 +188,7 @@ fn tiny_vision() -> Value {
 
 /// [`pulled_dir`] with a vision tower: `vision_config`, the tower's tensors beside the decoder's and the processor's
 /// configuration, as the released directory carries them.
-fn pulled_dir_with_tower(tag: &str) -> Option<PathBuf> {
+pub(crate) fn pulled_dir_with_tower(tag: &str) -> Option<PathBuf> {
     let dir = pulled_dir(tag)?;
     let mut config: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("config.json")).unwrap()).unwrap();
     config["vision_config"] = tiny_vision();

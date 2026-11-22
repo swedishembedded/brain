@@ -82,6 +82,31 @@ pub fn decode_image(inv: &Invocation, name: &str) -> Result<(Vec<f32>, u32, u32)
     Ok((hwc, w, h))
 }
 
+/// Decode an image blob that may keep its transparency: RGB (`c` = 3) or straight-alpha RGBA (`c` = 4), for an input
+/// that declares it reads alpha ([`crate::BlobSpec::alpha`]). Returns `(hwc, w, h, c)`.
+pub fn decode_image_alpha(inv: &Invocation, name: &str) -> Result<(Vec<f32>, u32, u32, usize), String> {
+    let (hwc, w, h, c) = decode_hwc(inv, name)?;
+    if c != 3 && c != 4 {
+        return Err(format!("'{name}' must be an RGB or RGBA image (got {c} channels)"));
+    }
+    Ok((hwc, w, h, c))
+}
+
+/// An RGBA image blob (`c` = 4) as RGB (`c` = 3), its alpha channel dropped, the colour channels kept as they are (what
+/// an RGB decode of the source gives); any other blob unchanged. What a host hands an image input that does not read
+/// alpha ([`crate::BlobSpec::alpha`]).
+pub fn drop_alpha(b: Blob) -> Blob {
+    let dim = |k: &str| b.meta.get(k).and_then(serde_json::Value::as_u64);
+    let (Some(w), Some(h), Some(4)) = (dim("w"), dim("h"), dim("c")) else { return b };
+    if b.media != Media::Image || (b.bytes.len() as u64) != w * h * 16 {
+        return b;
+    }
+    let bytes: Vec<u8> = b.bytes.as_chunks::<16>().0.iter().flat_map(|px| px[..12].iter().copied()).collect();
+    let mut meta = b.meta.clone();
+    meta["c"] = json!(3);
+    Blob { bytes, meta, ..b }
+}
+
 /// Decode a mask-style blob to its channel-0 plane `[h·w]` in `[0,1]`.
 /// Returns `(plane, w, h)`.
 pub fn decode_plane(inv: &Invocation, name: &str) -> Result<(Vec<f32>, u32, u32), String> {
@@ -296,5 +321,25 @@ mod tests {
     #[test]
     fn video_blob_rejects_empty_frame_list() {
         assert!(video_blob(&[]).unwrap_err().contains("at least one frame"));
+    }
+
+    /// An RGBA blob read by an input that keeps alpha is RGBA; dropping the alpha leaves the colour channels exactly
+    /// (an RGB decode of the same source), and leaves an RGB blob, and a blob that does not hold what its meta says,
+    /// alone.
+    #[test]
+    fn alpha_is_kept_for_an_input_that_reads_it_and_dropped_exactly_otherwise() {
+        let rgba = [0.1f32, 0.2, 0.3, 0.0, 0.4, 0.5, 0.6, 1.0];
+        let inv = Invocation::new().blob("image", image_blob(&rgba, 2, 1, 4));
+        assert_eq!(decode_image_alpha(&inv, "image").unwrap(), (rgba.to_vec(), 2, 1, 4));
+        assert!(decode_image(&inv, "image").unwrap_err().contains("4 channels"), "an RGB input refuses RGBA it was not given flattened");
+        let flat = drop_alpha(image_blob(&rgba, 2, 1, 4));
+        let inv = Invocation::new().blob("image", flat);
+        assert_eq!(decode_image(&inv, "image").unwrap(), (vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6], 2, 1));
+        let rgb = image_blob(&[0.5; 6], 2, 1, 3);
+        assert_eq!(drop_alpha(rgb.clone()).bytes, rgb.bytes);
+        let lying = image_blob(&rgba[..4], 1, 1, 4).with_meta(json!({"w": 2, "h": 1, "c": 4}));
+        assert_eq!(drop_alpha(lying.clone()).bytes, lying.bytes, "a payload that is not its meta's size is left to the decoder to refuse");
+        let two = Invocation::new().blob("image", image_blob(&[0.5; 4], 2, 1, 2));
+        assert!(decode_image_alpha(&two, "image").unwrap_err().contains("2 channels"));
     }
 }

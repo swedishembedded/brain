@@ -18,7 +18,8 @@ use std::sync::{mpsc, Arc, Mutex};
 
 use capability::{failure::tag, FailureClass, Invocation};
 use data::qwen_tokenizer::QwenBpe;
-use imaging::pixels::Rgb8;
+use imaging::pixels::{Rgb8, Rgba8};
+use imaging::Decoded;
 use model::serve::PromptEmbeds;
 
 use crate::{Encoding, Frontend, ParsedRequest, TextFrontend};
@@ -39,6 +40,23 @@ pub fn request_images(inv: &Invocation) -> Result<Vec<Rgb8>, String> {
     Ok(out)
 }
 
+/// [`request_images`] for a model whose processor composites transparency itself (its image inputs declare that they
+/// read alpha, [`capability::BlobSpec::alpha`]): an image that kept its alpha channel (`c` = 4) is
+/// [`Decoded::Rgba`], every other [`Decoded::Rgb`].
+pub fn request_images_with_alpha(inv: &Invocation) -> Result<Vec<Decoded>, String> {
+    let mut out = Vec::new();
+    for i in 0..capability::blob::MAX_IMAGES {
+        let key = capability::blob::image_key(i);
+        if inv.get_blob(&key).is_none() {
+            break;
+        }
+        let invalid = |e: String| tag(FailureClass::InvalidRequest, e);
+        let (hwc, w, h, c) = capability::blob::decode_image_alpha(inv, &key).map_err(invalid)?;
+        out.push(if c == 4 { Decoded::Rgba(Rgba8::from_hwc_unit(&hwc, w, h).map_err(invalid)?) } else { Decoded::Rgb(Rgb8::from_hwc_unit(&hwc, w, h).map_err(invalid)?) });
+    }
+    Ok(out)
+}
+
 /// Whether `inv` carries an image.
 pub fn has_images(inv: &Invocation) -> bool {
     inv.get_blob("image").is_some()
@@ -51,27 +69,27 @@ pub fn has_images(inv: &Invocation) -> bool {
 /// read, and gives the decoder rows equal to the ones its prefix cache was filed under, so the picture's span of the
 /// prompt is reused with the text around it. The image is compared byte for byte (a hash of client bytes could be
 /// chosen to collide), so one client's picture can never be served another's rows.
-pub struct EncodedImages<R> {
+pub struct EncodedImages<R, I = Rgb8> {
     capacity: usize,
     /// Least recently used first.
-    recent: Mutex<Vec<(Rgb8, Arc<R>)>>,
+    recent: Mutex<Vec<(I, Arc<R>)>>,
     encodes: std::sync::atomic::AtomicU64,
 }
 
-impl<R> EncodedImages<R> {
+impl<R, I: PartialEq + Clone> EncodedImages<R, I> {
     /// A cache of the rows of the `capacity` most recently used images (0 keeps none).
-    pub fn new(capacity: usize) -> EncodedImages<R> {
+    pub fn new(capacity: usize) -> EncodedImages<R, I> {
         EncodedImages { capacity, recent: Mutex::new(Vec::new()), encodes: std::sync::atomic::AtomicU64::new(0) }
     }
 
     /// The rows of `image`: remembered ones, else `encode`'s, which are remembered. The lock is not held while
     /// encoding, so a picture two requests bring at once may be encoded twice, never wrongly.
-    pub fn rows_of(&self, image: &Rgb8, encode: impl FnOnce(&Rgb8) -> R) -> Arc<R> {
+    pub fn rows_of(&self, image: &I, encode: impl FnOnce(&I) -> R) -> Arc<R> {
         self.try_rows_of(image, |i| Ok::<R, std::convert::Infallible>(encode(i))).unwrap_or_else(|never| match never {})
     }
 
     /// [`Self::rows_of`] for an encoder that can fail: a failure is returned and nothing is remembered.
-    pub fn try_rows_of<E>(&self, image: &Rgb8, encode: impl FnOnce(&Rgb8) -> Result<R, E>) -> Result<Arc<R>, E> {
+    pub fn try_rows_of<E>(&self, image: &I, encode: impl FnOnce(&I) -> Result<R, E>) -> Result<Arc<R>, E> {
         let mut recent = self.recent.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(i) = recent.iter().position(|(seen, _)| seen == image) {
             let hit = recent.remove(i);

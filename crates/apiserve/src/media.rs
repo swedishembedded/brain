@@ -64,7 +64,7 @@ impl ExtractedMedia {
     }
 
     /// Decode the next image's bytes (PNG/JPEG/PPM) into brain's HWC-f32 image
-    /// blob. The image is refused from its header, before it is decoded, when
+    /// blob, RGBA when the source carries transparency. The image is refused from its header, before it is decoded, when
     /// it is over [`MAX_IMAGE_PIXELS`] or over what is left of the request's
     /// [`MAX_REQUEST_PIXELS`]: checking the total only after decoding let one
     /// request decode a whole further image past it.
@@ -73,15 +73,21 @@ impl ExtractedMedia {
             return Err(format!("a request may carry at most {MAX_IMAGES} images"));
         }
         let left = MAX_REQUEST_PIXELS - self.pixels;
-        let rgb = imaging::codec::decode_bounded(bytes, MAX_IMAGE_PIXELS.min(left)).map_err(|e| {
+        let decoded = imaging::codec::decode_alpha_bounded(bytes, MAX_IMAGE_PIXELS.min(left)).map_err(|e| {
             if left < MAX_IMAGE_PIXELS {
                 format!("{e} (the images of a request may hold at most {MAX_REQUEST_PIXELS} pixels together)")
             } else {
                 e
             }
         })?;
-        self.pixels += u64::from(rgb.w) * u64::from(rgb.h);
-        self.images.push(capability::blob::image_blob(&rgb.to_hwc_unit(), rgb.w, rgb.h, 3));
+        let (w, h) = decoded.size();
+        self.pixels += u64::from(w) * u64::from(h);
+        // The transparency is kept (`c` = 4) until the action that reads the image is known: an image input that
+        // composites alpha itself takes it, every other is given RGB (`crate::bridge::admit`).
+        self.images.push(match decoded {
+            imaging::Decoded::Rgb(rgb) => capability::blob::image_blob(&rgb.to_hwc_unit(), w, h, 3),
+            imaging::Decoded::Rgba(rgba) => capability::blob::image_blob(&rgba.to_hwc_unit(), w, h, 4),
+        });
         Ok(())
     }
 }

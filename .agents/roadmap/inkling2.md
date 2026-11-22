@@ -778,11 +778,6 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
     `__adapter` set by a caller refused by name on `/v1/run` (the chat body cannot reach it); serving
     `discover_serves_the_stores_inkling2_adapters_as_views_of_one_base`. API audit: no route or field added; selection
     is the existing model-id path. Docs page: an Adapters section with the commands.
-  - Left: catalog `inkling2_served::the_resident_serves_a_typed_message_chat_within_its_context` is flaky before and
-    after this change (2 of 8 runs on the old code): its request sets `temperature` (an OpenAI field the action does not
-    read), so it samples, and one scheduler step can stream two text events before the cancellation is seen; with
-    `temp: 0` it fails every time (two byte tokens of the greedy reply arrive in one step). The certify bound counts
-    events, not steps.
 - **I3.5** Acceptance through the public API with the vendor's published verification
   suite (coding, vision, long context to 1M), after operator parity.
 
@@ -1069,6 +1064,23 @@ The first trainable target needs no streaming: the base is about 19.5 GB.
   Done, serving half (2026-11-22, engine2): the scheduler splice and image-text logit parity, see I3.4's engine2 notes
   (catalog image chat = uncached forward over the spliced rows; released weights + tower decode to the uncached greedy
   tokens on the reference processor's pixels).
+
+  Done (2026-11-22, adapt): transparency reaches the processor. Generic: `BlobSpec::{alpha, with_alpha}` (an image
+  input that composites alpha itself), `capability::blob::{decode_image_alpha, drop_alpha}`, the HTTP decode keeps alpha
+  (`apiserve::media` decodes with `imaging::decode_alpha_bounded`, `c` 4 for an RGBA source) and the admit seam gives
+  every input that does not declare alpha the RGB decode (`apiserve::bridge::alpha_where_read`), so no other model sees
+  a change; `llmserve::image_frontend::request_images_with_alpha`, `EncodedImages<R, I = Rgb8>` keyed by the decoded
+  image; `imaging::Rgba8::{to_hwc_unit, from_hwc_unit}`. Inkling 2's image inputs declare alpha and its builder
+  preprocesses the `Decoded` image (checkerboard composite). Gates: catalog
+  `inkling2_image_alpha::a_transparent_png_over_the_api_reaches_the_tower_as_the_reference_processors_pixels` (the
+  golden `rgba_mixed.png` over OpenAI chat: greedy tokens = the uncached forward's argmax over the tower rows of the
+  reference processor's `pixel_values`, sampled log-probabilities within 1e-4; failed before the change, the dropped-alpha
+  rows move the logits), apiserve `an_image_with_transparency_keeps_its_alpha_only_for_an_input_that_reads_it`,
+  capability `alpha_is_kept_for_an_input_that_reads_it_and_dropped_exactly_otherwise`. CPU only.
+  Also fixed: catalog `the_resident_serves_a_typed_message_chat_within_its_context` asked with `temperature` (an
+  OpenAI field the action does not read) and so sampled; it now decodes greedily and its cancellation bound says what
+  the scheduler does (the step that ends the prefill decodes one more token; a byte-level vocabulary streams each
+  undecodable byte as its own event): three events, deterministic.
 
 ### Phase 6: full fine-tuning
 

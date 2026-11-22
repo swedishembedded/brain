@@ -20,6 +20,7 @@ mod edgerock_served;
 
 
 mod inkling2_adapters;
+mod inkling2_image_alpha;
 mod inkling2_served;
 mod mirage_http;
 mod mirage_served;

@@ -29,6 +29,9 @@ Implement `capability::Action` for each action and advertise them in a
 - Blob conventions are shared and typed (`capability::Media`): images = raw
   interleaved HWC f32 in `[0,1]`, little-endian, meta `{"w","h","c"}`; audio = raw
   mono f32 LE 16 kHz + `{sample_rate}`. Reuse them; don't invent a per-model encoding.
+  An image is RGB (`c` 3) unless the input declares `BlobSpec::with_alpha` (its processor
+  composites transparency itself): then it may be straight-alpha RGBA (`c` 4), which the
+  HTTP surfaces keep for it and drop for every other input (`apiserve::bridge::alpha_where_read`).
 - The image codec has ONE implementation: **`capability::blob`**
   (`image_blob` to encode; `decode_hwc` / `decode_image` / `decode_plane` to decode,
   with media + `{w,h}` + payload-size validation). Providers and resident adapters

@@ -107,6 +107,7 @@ fn admit_on(exec: &residency::Executor, provider: Provider, model: &str, action:
     let manifest = manifests.iter().find(|m| m.model == model).ok_or_else(|| ApiError::model_not_found(provider, model))?;
     let spec = manifest.actions.iter().find(|a| a.name == action).ok_or_else(|| ApiError::not_found(provider, format!("model '{model}' has no action '{action}'")))?;
     refuse_unread_media(exec, provider, model, action, &inv)?;
+    let inv = alpha_where_read(spec, inv);
     let inv = crate::sampling::settle(spec, inv);
     let inv = spec.check_served(inv, host).map_err(|v| refusal(provider, model, &v, naming))?;
     // What the spec cannot say - that a base exists, that a dataset is in the store - the model is asked at the door,
@@ -211,6 +212,20 @@ pub fn refuse_unread_media(exec: &residency::Executor, provider: Provider, model
         return refuse(format!("model '{model}' does not read audio: its '{action}' action takes no audio input; resend without input_audio parts"));
     }
     Ok(())
+}
+
+/// `inv` with every RGBA image blob (an HTTP image with transparency, or a caller's 4-channel blob) given as RGB, its
+/// alpha dropped, unless the action's input of that name reads alpha ([`capability::BlobSpec::alpha`]): an action
+/// composites transparency onto the background its processor was trained with only when it says it does, and every
+/// other image input receives what an RGB decode of the source gives.
+pub fn alpha_where_read(spec: &capability::ActionSpec, mut inv: Invocation) -> Invocation {
+    let flatten: Vec<String> = inv.blobs.iter().filter(|(name, b)| b.media == capability::Media::Image && b.meta.get("c").and_then(serde_json::Value::as_u64) == Some(4) && !spec.inputs.iter().any(|i| i.name == **name && i.alpha)).map(|(name, _)| name.clone()).collect();
+    for name in flatten {
+        if let Some(b) = inv.blobs.remove(&name) {
+            inv.blobs.insert(name, capability::blob::drop_alpha(b));
+        }
+    }
+    inv
 }
 
 /// Auto-fetch entry point: `model` didn't resolve against `resolve` (the caller's

@@ -145,11 +145,12 @@ fn action_spec(reads_images: bool) -> ActionSpec {
     let spec = generate_spec("generate text (Inkling 2; the checkpoint's typed-message chat template)", true).params(qwen3::chat::template_params(TemplateFlavor::TypedMessages));
     (0..if reads_images { capability::blob::MAX_IMAGES } else { 0 }).fold(spec, |spec, i| {
         let help = if i == 0 {
-            "an image of the conversation, in the order its image parts appear: raw HWC f32 pixels in [0,1], meta {w,h}; at most 4096 pixels a side, one decoder token per 40x40-pixel region"
+            "an image of the conversation, in the order its image parts appear: raw HWC f32 pixels in [0,1], RGB or straight-alpha RGBA (composited onto the processor's checkerboard), meta {w,h,c}; at most 4096 pixels a side, one decoder token per 40x40-pixel region"
         } else {
             "a further image, read only when every earlier one is present"
         };
-        spec.input(BlobSpec::new(&capability::blob::image_key(i), Media::Image, help))
+        // The processor composites transparency onto its checkerboard: the images keep their alpha channel.
+        spec.input(BlobSpec::new(&capability::blob::image_key(i), Media::Image, help).with_alpha())
     })
 }
 

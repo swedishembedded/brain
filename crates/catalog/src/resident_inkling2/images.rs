@@ -29,7 +29,7 @@ use data::qwen_tokenizer::QwenBpe;
 use gpu_core::Gpu;
 use imaging::{Decoded, RegionTiling};
 use inkling2::vision::{expand_placeholders, splice_embeds, ImageFeatures, VisionTower};
-use llmserve::image_frontend::{request_images, EncodedImages, ImageRequests};
+use llmserve::image_frontend::{request_images_with_alpha, EncodedImages, ImageRequests};
 use llmserve::ParsedRequest;
 use model::serve::PromptEmbeds;
 use qwen3::chat::ChatFormat;
@@ -80,7 +80,7 @@ pub struct Inkling2Images {
     image_token: u32,
     /// The most prompt tokens the scheduler holds for one sequence.
     context: usize,
-    seen: EncodedImages<ImageFeatures>,
+    seen: EncodedImages<ImageFeatures, Decoded>,
 }
 
 impl Inkling2Images {
@@ -111,8 +111,13 @@ impl ImageRequests for Inkling2Images {
     fn build(&self, inv: &Invocation) -> Result<(ParsedRequest, Option<PromptEmbeds>), String> {
         inv.cancel.check()?;
         let started = std::time::Instant::now();
-        let images = request_images(inv)?;
-        let regions = images.iter().enumerate().map(|(i, img)| self.regions(i, img.w, img.h)).collect::<Result<Vec<usize>, String>>()?;
+        // The processor composites transparency onto its checkerboard, so the images keep their alpha (the image inputs
+        // declare it, `capability::BlobSpec::alpha`).
+        let images = request_images_with_alpha(inv)?;
+        let regions = images.iter().enumerate().map(|(i, img)| {
+            let (w, h) = img.size();
+            self.regions(i, w, h)
+        }).collect::<Result<Vec<usize>, String>>()?;
         let total: usize = regions.iter().sum();
         if total >= self.context {
             return Err(invalid(format!(
@@ -141,7 +146,7 @@ impl ImageRequests for Inkling2Images {
         for (i, image) in images.iter().enumerate() {
             inv.cancel.check()?;
             let features = self.seen.try_rows_of(image, |img| {
-                let tiled = self.tiling.preprocess(&Decoded::Rgb(img.clone())).map_err(|e| invalid(format!("inkling2: image {i}: {e}")))?;
+                let tiled = self.tiling.preprocess(img).map_err(|e| invalid(format!("inkling2: image {i}: {e}")))?;
                 self.tower.encode(&self.gpu, &[tiled])
             })?;
             rows.extend_from_slice(features.rows());

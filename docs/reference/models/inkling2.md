@@ -82,8 +82,11 @@ tower's rows stand at those tokens. An image may be at most 4096 pixels a side,
 a request carries at most 8, and all of them together must need fewer tokens
 than the context holds; an image part without its image (or the reverse), an
 image in a raw prompt (`chat: false`) or in a system or assistant message is
-refused as the client's error. Transparency does not reach the model: the HTTP
-surfaces decode images to RGB.
+refused as the client's error. An image with transparency (a PNG with an alpha
+channel) keeps it: the processor composites it onto its 8-pixel grey
+checkerboard, as the reference processor does, so a transparent area reaches the
+model as the checkerboard rather than as black. Over D-Bus an image blob may be
+RGB (`c` 3) or straight-alpha RGBA (`c` 4).
 
 ```bash
 curl -s localhost:8788/v1/chat/completions -H "Authorization: Bearer $KEY" -d '{

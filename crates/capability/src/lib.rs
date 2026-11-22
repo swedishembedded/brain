@@ -249,11 +249,21 @@ pub struct BlobSpec {
     /// rather than sampling a few frames the way it does for a clip that is
     /// only context for a prompt.
     pub clip: bool,
+    /// A [`Media::Image`] input the action reads with its transparency: an image blob may carry straight-alpha RGBA
+    /// (`c` = 4), which the action composites itself (onto the background its processor was trained with). A host keeps
+    /// an image's alpha channel for such an input; every other image input receives RGB (`c` = 3), the alpha dropped
+    /// ([`blob::drop_alpha`]).
+    pub alpha: bool,
 }
 
 impl BlobSpec {
     pub fn new(name: &str, media: Media, help: &str) -> BlobSpec {
-        BlobSpec { name: name.into(), media, required: false, help: help.into(), clip: false }
+        BlobSpec { name: name.into(), media, required: false, help: help.into(), clip: false, alpha: false }
+    }
+    /// See [`Self::alpha`].
+    pub fn with_alpha(mut self) -> BlobSpec {
+        self.alpha = true;
+        self
     }
     pub fn required(mut self) -> BlobSpec {
         self.required = true;
@@ -268,6 +278,9 @@ impl BlobSpec {
         let mut v = json!({ "name": self.name, "media": self.media.name(), "required": self.required, "help": self.help });
         if self.clip {
             v["clip"] = json!(true);
+        }
+        if self.alpha {
+            v["alpha"] = json!(true);
         }
         v
     }
