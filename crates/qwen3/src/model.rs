@@ -4635,7 +4635,10 @@ impl model::Model for Qwen {
         self.opt.set_rounding_seed(seed);
     }
     fn last_grad_norm(&self) -> Option<f32> {
-        self.resident.as_ref().and_then(|_| self.resident_norm.get())
+        match &self.resident {
+            Some(_) => self.resident_norm.get(),
+            None => self.opt.last_grad_norm(&self.gpu, &self.ps),
+        }
     }
     fn param_names(&self) -> Vec<String> {
         // The optimised set: full-training `trainable` plus any `offload` params

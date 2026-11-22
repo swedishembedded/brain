@@ -365,6 +365,10 @@ impl Optim {
     /// `extra_scale`, the norm `clip` bounds); `None` before one, or when the step did not clip - an
     /// unclipped step measures nothing. Reads the device's partial sums, so it waits for the step.
     pub fn last_grad_norm(&self, gpu: &Gpu, ps: &ParamStore) -> Option<f32> {
+        // A store whose every moment is offloaded is clipped by the host optimizer, which measured the norm.
+        if !ps.offload.is_empty() && ps.opt_params().is_empty() {
+            return self.host.borrow().as_ref().and_then(OffloadAdam::last_grad_norm);
+        }
         let cache = self.cache.borrow();
         let graph = cache.as_ref().filter(|g| g.clipped)?;
         let sum_sq: f64 = gpu.read(&ps.norms, graph.n_norm_inputs as usize).iter().map(|&v| f64::from(v)).sum();

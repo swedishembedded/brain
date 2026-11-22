@@ -113,6 +113,8 @@ pub struct OffloadAdam<S: OptimizerStateStorage = BlockStateStorage<MemBacking>>
     /// The device reduction of the global gradient norm, resolved on the first clipped step; `Some(None)` when the
     /// device lacks its kernels (the norm is then measured on the host, which moves every gradient there).
     norm: Option<Option<DeviceGradNorm>>,
+    /// The global gradient norm the latest clipped step measured, after its `extra_scale`: the norm `clip` bounds.
+    last_norm: Option<f32>,
 }
 
 fn specs_of(ps: &ParamStore) -> Vec<TensorSpec> {
@@ -151,7 +153,7 @@ impl OffloadAdam {
         let layout = state_layout(&default_rule(), &specs);
         let st = BlockStateStorage::new(layout.clone(), MemBacking::zeroed(layout.total_bytes()), OFFLOAD_TILE)
             .expect("state layout and backing agree");
-        OffloadAdam { opt: StreamedOptimizer::new(default_rule(), specs, st, random_seed(), OFFLOAD_TILE).expect("valid specs"), norm: None }
+        OffloadAdam { opt: StreamedOptimizer::new(default_rule(), specs, st, random_seed(), OFFLOAD_TILE).expect("valid specs"), norm: None, last_norm: None }
     }
 }
 
@@ -162,7 +164,7 @@ impl OffloadAdam<BlockStateStorage<FileBacking>> {
         let specs = specs_of(ps);
         let layout = state_layout(&default_rule(), &specs);
         let st = BlockStateStorage::new(layout.clone(), FileBacking::create(path, layout.total_bytes())?, OFFLOAD_TILE)?;
-        Ok(OffloadAdam { opt: StreamedOptimizer::new(default_rule(), specs, st, random_seed(), OFFLOAD_TILE)?, norm: None })
+        Ok(OffloadAdam { opt: StreamedOptimizer::new(default_rule(), specs, st, random_seed(), OFFLOAD_TILE)?, norm: None, last_norm: None })
     }
 }
 
@@ -179,15 +181,18 @@ impl<S: OptimizerStateStorage> OffloadAdam<S> {
         let names = self.opt.specs().iter().map(|s| (s.name.clone(), s.numel)).collect();
         let mut tiles = DeviceTiles::new(gpu, ps, names);
         let norm = self.norm.get_or_insert_with(|| DeviceGradNorm::new(gpu).ok());
-        let report = match (clip, norm) {
+        let sum_sq = match (clip, norm) {
             // The gradients are on the device: reduce their norm there rather than reading all of them to the host first.
             (Some(_), Some(norm)) => {
                 let items: Vec<NormItem<'_>> = self.opt.specs().iter().map(|s| NormItem { buf: ps.g(&s.name), numel: s.numel, dtype: GradDtype::F32 }).collect();
-                let multiplier = crate::grad_multiplier(norm.sum_sq(gpu, &items), clip, extra_scale);
-                self.opt.step_scaled(&mut tiles, lr, multiplier)
+                Some(norm.sum_sq(gpu, &items))
             }
-            _ => self.opt.step(&mut tiles, lr, clip, extra_scale),
+            // No device reduction: the norm is summed on the host, in f64 as the device's partials are.
+            (Some(_), None) => Some(self.opt.specs().iter().flat_map(|s| ps.read_grad(gpu, &s.name)).map(|g| f64::from(g) * f64::from(g)).sum()),
+            (None, _) => None,
         };
+        self.last_norm = sum_sq.map(|sq| sq.sqrt() as f32 * extra_scale);
+        let report = self.opt.step_scaled(&mut tiles, lr, sum_sq.map_or(extra_scale, |sq| crate::grad_multiplier(sq, clip, extra_scale)));
         report.unwrap_or_else(|e| panic!("OffloadAdam step: {e}"));
         if gpu_core::profile::enabled() {
             eprintln!("stage host optimizer update phases: {:?}", self.opt.take_phase_times());
@@ -214,6 +219,12 @@ impl<S: OptimizerStateStorage> OffloadAdam<S> {
     /// The streamed optimiser, for checkpointing its state and position.
     pub fn streamed(&mut self) -> &mut StreamedOptimizer<S> {
         &mut self.opt
+    }
+
+    /// The global gradient norm the latest clipped [`Self::step`] measured (after its `extra_scale`); `None` before
+    /// one, or when the step did not clip.
+    pub fn last_grad_norm(&self) -> Option<f32> {
+        self.last_norm
     }
 
     /// Host bytes held by the optimiser state and staging.

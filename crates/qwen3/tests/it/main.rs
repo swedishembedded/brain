@@ -96,6 +96,7 @@ mod sft_learning;
 mod sft_loss_weights;
 mod slice;
 mod split_encode;
+mod step_grad_norm;
 mod step_parity;
 mod step_parity_fixture;
 mod step_timing;

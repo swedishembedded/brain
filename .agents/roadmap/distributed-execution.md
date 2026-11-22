@@ -949,8 +949,12 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         parameter-sharded vote carries it), so no collective is added. Tests:
         gpt2 `sharded_training` (2 and 4 ranks), `distributed_model`
         `reduce_grads_weighted_gives_the_per_token_mean_of_unequal_ranks`.
-        Measured on Qwen3-4B (Measured, knowledge 565). Open: a replicated or
-        one-card full fine-tune (host-offloaded AdamW) reports no grad_norm.
+        Measured on Qwen3-4B (Measured, knowledge 565). A replicated or
+        one-card qwen3 full fine-tune reports the norm it clipped by too
+        (2026-11-22; it reported none): the device optimizer's, or the host
+        optimizer's when every moment is offloaded (`OffloadAdam` keeps it),
+        after the step's accumulation scale as the sharded step reports it.
+        Test: qwen3 `step_grad_norm`.
       - [ ] Load balance: a rank on a node shared with other work (n424) holds
         every step of a 12-card run back by about 10 ms; the first collective
         of a step is where it shows.
