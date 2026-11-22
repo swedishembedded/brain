@@ -33,7 +33,8 @@ use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::kv_tier::{FlashDecodeShape, KvAppend, KvKernels, KvLayer, KvTier};
 use model::ops::{Act, Ops, PagedDecodeShape, Weight};
 
-use crate::config::{Dflash2Config, LayerKind};
+use crate::config::{Dflash2Config, DraftKind, LayerKind};
+use crate::markov::{mix_taps, softmax, MarkovHead, MarkovJob, Project};
 use crate::selector::Selector;
 use crate::source::{DraftSource, Leaf, Tensor};
 
@@ -92,12 +93,36 @@ struct Layer {
     gate: Weight,
     up: Weight,
     down: Weight,
+    /// DFlash2's dynamic convolutions around the sublayers.
+    conv: Option<LayerConv>,
+    /// DSpark's own context projection.
+    ctx: Option<LayerCtx>,
+}
+
+struct LayerConv {
     /// `[2, taps, d_model]`: `[0]` is the base kernel of the convolution ENTERING the sublayer, `[1]` of the one
     /// leaving it.
-    attn_conv_base: DeviceBuffer,
-    attn_conv_proj: Weight,
-    mlp_conv_base: DeviceBuffer,
-    mlp_conv_proj: Weight,
+    attn_base: DeviceBuffer,
+    attn_proj: Weight,
+    mlp_base: DeviceBuffer,
+    mlp_proj: Weight,
+}
+
+/// How a DSpark layer turns the target's taps into its context keys and values.
+struct LayerCtx {
+    /// The layer's softmax over the taps and the RMSNorm gain of their mix (host: the mix is a few thousand
+    /// products per context row).
+    alpha: Vec<f32>,
+    gain: Vec<f32>,
+    wk: Weight,
+    wv: Weight,
+    k_norm: DeviceBuffer,
+}
+
+/// What turns the denoised block into proposals.
+enum Head {
+    Selector(Selector),
+    Markov(MarkovHead),
 }
 
 #[derive(Clone, Copy)]
@@ -174,12 +199,16 @@ pub struct Dflash2 {
     ops: Ops,
     k: Kids,
     kv: KvKernels,
-    fused: bool,
+    flash: bool,
     pub cfg: Dflash2Config,
     src: Box<dyn DraftSource>,
-    selector: Selector,
-    fc: Weight,
-    hidden_norm: DeviceBuffer,
+    head: Head,
+    /// The final RMSNorm gain, applied to the block before the target's head.
+    out_norm: Vec<f32>,
+    /// DFlash2's shared context projection: `fc` and the norm after it.
+    fused: Option<(Weight, DeviceBuffer)>,
+    /// DSpark's learned mask row.
+    mask_embed: Option<Vec<f32>>,
     layers: Vec<Layer>,
     caches: Vec<KvLayer>,
     cache: DraftCache,
@@ -211,7 +240,7 @@ impl Dflash2 {
         let k = Kids { rmsnorm: kid("rmsnorm")?, add2: kid("add2")?, silu_mul: kid("silu_mul")?, rope2d: kid("rope2d")?, dyn_conv: kid("dyn_group_conv1d")?, softmax: kid("decode_softmax_batched")? };
         let shape = head_shape(&cfg);
         let kv = KvKernels::resolve_for(&gpu, cache.tier, &[shape])?;
-        let fused = kv.flash_decode_available(&gpu, shape.0, shape.1);
+        let flash = kv.flash_decode_available(&gpu, shape.0, shape.1);
 
         let (d, ff) = (cfg.d_model as usize, cfg.d_ff as usize);
         let (q_dim, kv_dim) = (cfg.q_dim() as usize, cfg.kv_dim() as usize);
@@ -226,7 +255,6 @@ impl Dflash2 {
             weight_bytes += w.resident_bytes();
             Ok(w)
         };
-        let fc = linear(Tensor::Fc, d, wide)?;
         let buf = |t: Tensor, len: usize| -> Result<DeviceBuffer, String> {
             let v = src.vector(t)?;
             if v.len() != len {
@@ -234,15 +262,47 @@ impl Dflash2 {
             }
             Ok(gpu.storage_init(&t.name_hf(), &v))
         };
-        let hidden_norm = buf(Tensor::HiddenNorm, d)?;
+        let host = |t: Tensor, len: usize| -> Result<Vec<f32>, String> {
+            let v = src.vector(t)?;
+            if v.len() != len {
+                return Err(format!("{MODEL}: {} holds {} values, the config implies {len}", t.name_hf(), v.len()));
+            }
+            Ok(v)
+        };
+        let dspark = matches!(cfg.kind, DraftKind::Dspark { .. });
+        let taps = cfg.target_layers.len();
+        let fuse = if dspark { host(Tensor::FuseWeight, (cfg.n_layers + 1) * taps)? } else { Vec::new() };
+        let fused = if dspark { None } else { Some((linear(Tensor::Fc, d, wide)?, buf(Tensor::HiddenNorm, d)?)) };
+        let hd = cfg.head_dim as usize;
         let mut layers = Vec::with_capacity(cfg.n_layers);
         for l in 0..cfg.n_layers {
             let t = |leaf| Tensor::Layer(l, leaf);
+            let conv = if dspark {
+                None
+            } else {
+                Some(LayerConv {
+                    attn_base: buf(t(Leaf::AttnConvBase), 2 * cfg.conv_kernel as usize * d)?,
+                    attn_proj: linear(t(Leaf::AttnConvProj), dyn_width, d)?,
+                    mlp_base: buf(t(Leaf::MlpConvBase), 2 * cfg.conv_kernel as usize * d)?,
+                    mlp_proj: linear(t(Leaf::MlpConvProj), dyn_width, d)?,
+                })
+            };
+            let ctx = if dspark {
+                Some(LayerCtx {
+                    alpha: softmax(&fuse[l * taps..(l + 1) * taps]),
+                    gain: host(t(Leaf::ContextNorm), d)?,
+                    wk: linear(t(Leaf::KCtx), kv_dim, d)?,
+                    wv: linear(t(Leaf::VCtx), kv_dim, d)?,
+                    k_norm: buf(t(Leaf::KNormCtx), hd)?,
+                })
+            } else {
+                None
+            };
             layers.push(Layer {
                 input_norm: buf(t(Leaf::InputNorm), d)?,
                 post_attn_norm: buf(t(Leaf::PostAttnNorm), d)?,
-                q_norm: buf(t(Leaf::QNorm), cfg.head_dim as usize)?,
-                k_norm: buf(t(Leaf::KNorm), cfg.head_dim as usize)?,
+                q_norm: buf(t(Leaf::QNorm), hd)?,
+                k_norm: buf(t(Leaf::KNorm), hd)?,
                 wq: linear(t(Leaf::Q), q_dim, d)?,
                 wk: linear(t(Leaf::K), kv_dim, d)?,
                 wv: linear(t(Leaf::V), kv_dim, d)?,
@@ -250,13 +310,12 @@ impl Dflash2 {
                 gate: linear(t(Leaf::Gate), ff, d)?,
                 up: linear(t(Leaf::Up), ff, d)?,
                 down: linear(t(Leaf::Down), d, ff)?,
-                attn_conv_base: buf(t(Leaf::AttnConvBase), 2 * cfg.conv_kernel as usize * d)?,
-                attn_conv_proj: linear(t(Leaf::AttnConvProj), dyn_width, d)?,
-                mlp_conv_base: buf(t(Leaf::MlpConvBase), 2 * cfg.conv_kernel as usize * d)?,
-                mlp_conv_proj: linear(t(Leaf::MlpConvProj), dyn_width, d)?,
+                conv,
+                ctx,
             });
         }
-        let selector = Selector::load(src.as_ref())?;
+        let out_norm = host(Tensor::OutNorm, d)?;
+        let (head, mask_embed) = if dspark { (Head::Markov(MarkovHead::load(&cfg, src.as_ref(), &fuse)?), Some(host(Tensor::MaskEmbed, d)?)) } else { (Head::Selector(Selector::load(src.as_ref())?), None) };
         let limit = gpu.max_storage_binding_bytes();
         let caches = (0..cfg.n_layers)
             .map(|l| {
@@ -276,7 +335,7 @@ impl Dflash2 {
             })
             .collect::<Result<Vec<_>, String>>()?;
         let pool = Mutex::new(Pool { free: (0..cache.pool_blocks()).rev().collect(), tables: vec![Vec::new(); slots as usize] });
-        Ok(Dflash2 { gpu, ops, k, kv, fused, cfg, src, selector, fc, hidden_norm, layers, caches, cache, pool, slots, cap, weight_bytes })
+        Ok(Dflash2 { gpu, ops, k, kv, flash, cfg, src, head, out_norm, fused, mask_embed, layers, caches, cache, pool, slots, cap, weight_bytes })
     }
 
     /// Give a finished or evicted sequence's blocks of the shared pool back at once. Its ring rows are overwritten by the
@@ -333,18 +392,48 @@ impl Dflash2 {
 
     /// The draft's final RMSNorm gain, for a head that applies it in place of the target's own.
     pub fn output_norm(&self) -> &[f32] {
-        self.selector.output_norm()
+        &self.out_norm
     }
 
     /// The draft's hidden rows RMS-normed with its final norm, ready for the target's head.
     pub fn normed(&self, hidden: &[f32]) -> Vec<f32> {
-        self.selector.normed(&self.cfg, hidden)
+        let d = self.cfg.d_model as usize;
+        hidden
+            .chunks_exact(d)
+            .flat_map(|row| {
+                let inv = 1.0 / (row.iter().map(|v| v * v).sum::<f32>() / d as f32 + self.cfg.eps).sqrt();
+                row.iter().zip(&self.out_norm).map(move |(x, w)| x * inv * w)
+            })
+            .collect()
     }
 
     /// The selector's chosen token per row of `hidden` (the pre-final-norm block rows, anchor excluded), given the
-    /// target head's `logits` for them.
+    /// target head's `logits` for them (DFlash2).
     pub fn select(&self, hidden: &[f32], logits: &[f32], anchor: u32) -> Result<Vec<u32>, String> {
-        self.selector.select(&self.cfg, self.src.as_ref(), hidden, logits, anchor)
+        match &self.head {
+            Head::Selector(sel) => sel.select(&self.cfg, self.src.as_ref(), &self.normed(hidden), logits, anchor),
+            Head::Markov(_) => Err(format!("{MODEL}: a DSpark draft walks its Markov head (Dflash2::markov_walk), it has no selector")),
+        }
+    }
+
+    /// The Markov head's walks (DSpark): see [`MarkovHead::walk`].
+    pub fn markov_walk(&self, jobs: &[MarkovJob<'_>], project: &mut Project<'_>) -> Result<Vec<Vec<u32>>, String> {
+        match &self.head {
+            Head::Markov(m) => m.walk(self.src.as_ref(), jobs, project),
+            Head::Selector(_) => Err(format!("{MODEL}: a DFlash2 draft selects its path (Dflash2::select), it has no Markov head")),
+        }
+    }
+
+    /// The input rows of a block whose anchor the target embeds as `anchor_row` (`[d_model]`), when the draft learned
+    /// its mask rows (DSpark): `[anchor_row, mask_embed x (block_size - 1)]`. `None` for a draft whose mask rows are
+    /// the target's embedding of its mask token.
+    pub fn learned_noise(&self, anchor_row: &[f32]) -> Option<Vec<f32>> {
+        let mask = self.mask_embed.as_ref()?;
+        let mut rows = anchor_row.to_vec();
+        for _ in 1..self.cfg.block_size {
+            rows.extend_from_slice(mask);
+        }
+        Some(rows)
     }
 
     fn act(&self, s: &mut Vec<Step>, x: &DeviceBuffer, xr0: u32, rows: u32, k: u32, weights: &[&Weight]) -> Act {
@@ -447,7 +536,7 @@ impl Dflash2 {
         let c = &self.cfg;
         let out = self.gpu.storage(u64::from(rows) * u64::from(c.q_dim()));
         let cache = &self.caches[layer];
-        if self.fused {
+        if self.flash {
             let shape = FlashDecodeShape { batch: rows, n_heads: c.n_heads, n_kv_heads: c.n_kv_heads, head_dim: c.head_dim, block_size, max_bt, cap, pin_splits: false };
             s.extend(self.kv.flash_decode(&self.gpu, q, &cache.k, &cache.v, table, lens, &out, shape));
             return out;
@@ -496,10 +585,13 @@ impl Dflash2 {
             let chunk_end = base + m;
             let rows = &hidden[(off * wide) as usize..((off + m) * wide) as usize];
             let _scope = self.gpu.scratch_scope();
-            let x = self.gpu.storage_init("dflash2.ctx.in", rows);
             let mut s = Vec::new();
-            let proj = self.matmul(&mut s, &x, 0, m, &self.fc);
-            let normed = self.rms(&mut s, &proj, &self.hidden_norm, d, m);
+            // DFlash2's one context row for every layer (DSpark mixes per layer below).
+            let shared = self.fused.as_ref().map(|(fc, norm)| {
+                let x = self.gpu.storage_init("dflash2.ctx.in", rows);
+                let proj = self.matmul(&mut s, &x, 0, m, fc);
+                self.rms(&mut s, &proj, norm, d, m)
+            });
             for (l, layer) in self.layers.iter().enumerate() {
                 // The positions this layer's cache can still be asked for once the whole context is in.
                 let keep_from = match self.cfg.layers[l].kind {
@@ -511,9 +603,18 @@ impl Dflash2 {
                     continue;
                 }
                 let cnt = chunk_end - from;
-                let kb = self.matmul(&mut s, &normed, from - base, cnt, &layer.wk);
-                let vb = self.matmul(&mut s, &normed, from - base, cnt, &layer.wv);
-                let kn = self.rms(&mut s, &kb, &layer.k_norm, hd, cnt * nkv);
+                let (kb, vb, k_norm) = match (&shared, &layer.ctx) {
+                    (Some(normed), _) => (self.matmul(&mut s, normed, from - base, cnt, &layer.wk), self.matmul(&mut s, normed, from - base, cnt, &layer.wv), &layer.k_norm),
+                    (None, Some(ctx)) => {
+                        let wide = wide as usize;
+                        let first = (from - base) as usize;
+                        let mixed: Vec<f32> = rows[first * wide..(first + cnt as usize) * wide].chunks_exact(wide).flat_map(|row| mix_taps(row, &ctx.alpha, &ctx.gain, self.cfg.eps)).collect();
+                        let x = self.gpu.storage_init("dflash2.ctx.mixed", &mixed);
+                        (self.matmul(&mut s, &x, 0, cnt, &ctx.wk), self.matmul(&mut s, &x, 0, cnt, &ctx.wv), &ctx.k_norm)
+                    }
+                    (None, None) => unreachable!("a draft without a shared context projection projects per layer (checked at load)"),
+                };
+                let kn = self.rms(&mut s, &kb, k_norm, hd, cnt * nkv);
                 if self.cfg.layers[l].rope {
                     let positions: Vec<u32> = (from..chunk_end).collect();
                     let (cos, sin) = self.rope_tables(&positions);
@@ -578,13 +679,21 @@ impl Dflash2 {
 
         // Which keys each query row reads: positions `lo ..= hi` of its slot. Non-causal: every row of the block
         // reads to its end; a sliding layer reads back `window - 1` positions, a full layer to position 0.
+        let dspark = matches!(c.kind, DraftKind::Dspark { .. });
         let ranges = |sliding: bool| -> Vec<(u32, u32)> {
             jobs.iter()
                 .flat_map(|j| {
                     (0..n).map(move |i| {
                         let q = j.pos + i;
                         let hi = if c.causal { q } else { j.pos + n - 1 };
-                        (if sliding { (q + 1).saturating_sub(c.window) } else { 0 }, hi)
+                        // DSpark's local layers read the window before the block; DFlash2's sliding ones the window
+                        // back from each query.
+                        let lo = match (sliding, dspark) {
+                            (false, _) => 0,
+                            (true, true) => j.pos.saturating_sub(c.window),
+                            (true, false) => (q + 1).saturating_sub(c.window),
+                        };
+                        (lo, hi)
                     })
                 })
                 .collect()
@@ -629,10 +738,13 @@ impl Dflash2 {
             let _scope = self.gpu.scratch_scope();
             let mut s = Vec::new();
 
-            // ---- attention sublayer, wrapped in its own two convolutions ----
+            // ---- attention sublayer, wrapped in its own two convolutions (DFlash2) ----
             let xn1 = self.rms(&mut s, &x, &lb.input_norm, d, rows);
-            let dyn1 = self.matmul(&mut s, &xn1, 0, rows, &lb.attn_conv_proj);
-            let h = self.dyn_conv(&mut s, &xn1, &dyn1, &lb.attn_conv_base, rows, n, 0);
+            let conv1 = lb.conv.as_ref().map(|cv| (self.matmul(&mut s, &xn1, 0, rows, &cv.attn_proj), &cv.attn_base));
+            let h = match &conv1 {
+                Some((dynamic, base)) => self.dyn_conv(&mut s, &xn1, dynamic, base, rows, n, 0),
+                None => xn1.clone(),
+            };
 
             let act = self.act(&mut s, &h, 0, rows, d, &[&lb.wq, &lb.wk, &lb.wv]);
             let project = |s: &mut Vec<Step>, w: &Weight, width: u32| {
@@ -656,13 +768,19 @@ impl Dflash2 {
                 LayerKind::Full => self.attend(&mut s, l, &qn, &full_table, &full_lens, rows, bs, max_bt, cap_full),
             };
             let proj = self.matmul(&mut s, &attn, 0, rows, &lb.wo);
-            let post = self.dyn_conv(&mut s, &proj, &dyn1, &lb.attn_conv_base, rows, n, 1);
+            let post = match &conv1 {
+                Some((dynamic, base)) => self.dyn_conv(&mut s, &proj, dynamic, base, rows, n, 1),
+                None => proj,
+            };
             let xmid = self.add(&mut s, &x, &post, rows * d);
 
             // ---- MLP sublayer, same convolution sandwich ----
             let xn2 = self.rms(&mut s, &xmid, &lb.post_attn_norm, d, rows);
-            let dyn2 = self.matmul(&mut s, &xn2, 0, rows, &lb.mlp_conv_proj);
-            let hm = self.dyn_conv(&mut s, &xn2, &dyn2, &lb.mlp_conv_base, rows, n, 0);
+            let conv2 = lb.conv.as_ref().map(|cv| (self.matmul(&mut s, &xn2, 0, rows, &cv.mlp_proj), &cv.mlp_base));
+            let hm = match &conv2 {
+                Some((dynamic, base)) => self.dyn_conv(&mut s, &xn2, dynamic, base, rows, n, 0),
+                None => xn2.clone(),
+            };
             let am = self.act(&mut s, &hm, 0, rows, d, &[&lb.gate, &lb.up]);
             let gate = self.gpu.storage(u64::from(rows) * u64::from(ff));
             self.ops.matmul(&mut s, &lb.gate, &am, &gate, 0);
@@ -671,7 +789,10 @@ impl Dflash2 {
             let act_ff = self.gpu.storage(u64::from(rows) * u64::from(ff));
             s.push(self.gpu.step(self.k.silu_mul, &[&gate, &upb, &act_ff], &[rows * ff], rows * ff));
             let dn = self.matmul(&mut s, &act_ff, 0, rows, &lb.down);
-            let postm = self.dyn_conv(&mut s, &dn, &dyn2, &lb.mlp_conv_base, rows, n, 1);
+            let postm = match &conv2 {
+                Some((dynamic, base)) => self.dyn_conv(&mut s, &dn, dynamic, base, rows, n, 1),
+                None => dn,
+            };
             let xnext = self.add(&mut s, &xmid, &postm, rows * d);
 
             self.gpu.submit(&[], &s);

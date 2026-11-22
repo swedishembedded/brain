@@ -132,7 +132,23 @@ the one that holds.
 - A 3-layer block drafter (block 8) with RoPE theta 1e6 and context K/V projections over
   target taps at logical depths 5, 23, 41 and 48.
 - It adds a rank-256 Markov head. The tensor names (`dflare_*`, `k_proj_ctx`) put it in
-  the DFlash family.
+  the DFlash family; the vendor calls it DSpark.
+- Algorithm (pinned 2026-11-22 from vLLM main 8c17e469 `vllm/models/inkling2/{speculator.py, nvidia/dspark.py,
+  nvidia/ops/dspark.py, configs.py}` and the generic `vllm/v1/worker/gpu/spec_decode/{dflash,dspark}/speculator.py`,
+  copies in `~/resources/reference/inkling2-mtp/`; the pinned transformers commit has no MTP code). Reference:
+  `tools/goldens/inkling2_mtp_reference.py`.
+  - Taps: tap `v < 48` is the carried partial ENTERING visit `v` (after a pass restart); tap 48 is the final normalised
+    row. Each committed position keeps its four rows.
+  - Context: per draft layer `l`, `softmax(fuse_weight[l])` over the taps, RMS-normed with `layers.l.dflare_norm`, then
+    `k_proj_ctx` (keys per-head `k_norm_ctx`, RoPE at the position) and `v_proj_ctx`.
+  - Block at positions `n .. n + 8` (`n` committed): row 0 the anchor (the token the next target step consumes), the
+    target's embedding with its embedding norm; rows 1..7 `mask_embed`. Pre-norm layers (q/k per-head norms, RoPE,
+    SwiGLU); attention NOT causal: every row reads the whole block plus the context, a local layer (0, 2) only the 1024
+    positions before the block. Final `norm`. Mask row `i` predicts the token at position `n + i`: 7 proposals.
+  - Markov head: `f = rms(mix(taps of position n - 1, softmax(fuse_weight[3]))) * markov_head.dflare_norm`; `state = 0`,
+    `prev = anchor`; per step `raw = rnn_proj([state, markov_w1[prev], h_i, f]) + b`, `gate = sigmoid(raw[:256])`,
+    `state = gate * state + (1 - gate) * tanh(raw[256:512])`, logits `= softcap30(head(h_i) + head(hidden_out(tanh(
+    raw[512:]))))`, draft = argmax, `prev` = draft. Greedy drafting (the vendor samples drafts only with draft logits).
 
 **Sizes**
 - About 24.5B expert parameters: 11.5 GB as NVFP4 and 4.2 GB as MXFP8.
@@ -965,6 +981,16 @@ Driven by the per-device gap list, as new candidates only:
     (`a_verify_that_keeps_part_of_its_rows_leaves_every_ring_and_convolution_as_decoding_them`, and the conformance
     suite's `speculation_equals_plain_greedy` on the tiny looped decoder, which now speculates); removing the rollback
     fails both.
+  - Done (2026-11-22): the drafter is `dflash2` with a `DraftKind::Dspark { markov_rank }` variant
+    (`Dflash2Config::dspark(&DsparkShape)`): per-layer tap mixing and context projections (`LayerCtx`), the learned mask
+    row (`Dflash2::learned_noise`), local layers anchored at the block start, no convolutions, and
+    `dflash2::markov::MarkovHead` (`Dflash2::markov_walk`, one head product per step of the summed row
+    `h_i + hidden_out(latent)`, exact by the head's linearity); `Dflash2Drafter` walks it for a DSpark draft;
+    `HfDraft::from_reader` opens a draft with its target's declaration. Gates (`dflash2/tests/it/dspark.rs`, CPU):
+    tiny random draft against the reference at 2e-6 scaled (layers, post-norm rows, every Markov step's logits, the
+    path; a round after the context grew in pieces; two sequences in one forward; the serving drafter end to end), the
+    released `mtp.safetensors` over the real golden's visit inputs for the three prompts at 3e-6 scaled, path exact.
+    The per-row window instead of the block-anchored one fails the tiny gate (3.9e-1).
 
 ## Decisions (2026-11-21)
 

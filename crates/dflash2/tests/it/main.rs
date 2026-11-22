@@ -4,6 +4,7 @@
 //! The crate's integration tests, linked as one binary. A test here must not change process-wide state.
 
 mod common;
+mod dspark;
 mod hf_fixture;
 mod real;
 mod tiny;

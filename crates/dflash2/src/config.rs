@@ -14,10 +14,51 @@ const MODEL: &str = "dflash2";
 /// The GGUF architecture string [`Dflash2Config::from_gguf`] loads.
 pub const GGUF_ARCHITECTURE: &str = "dflash";
 
+/// Which member of the block-drafter family a checkpoint is. Both denoise one block `[anchor, MASK ...]` in one
+/// non-causal pass over K/V computed from the target's tapped hidden states; they differ in how the taps become
+/// context, what wraps the sublayers and how a block's rows become tokens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DraftKind {
+    /// DFlash2: the taps concatenated through `fc` and `hidden_norm` into one context row that every layer's own
+    /// `k_proj`/`v_proj` read; dynamic convolutions around every sublayer; the noise rows are the target's embedding
+    /// of `mask_token_id`; a sliding layer reads `window` positions back from each query; the candidate selector.
+    Dflash2,
+    /// DSpark (the Inkling 2 MTP drafter, `mtp.safetensors`): each layer mixes the taps itself (a softmax over the
+    /// taps of its row of `fuse_weight`, then its `dflare_norm`) and projects them with its own `k_proj_ctx` /
+    /// `v_proj_ctx` (keys normed by `k_norm_ctx`); plain pre-norm sublayers; the mask rows are a learned `mask_embed`;
+    /// a local layer reads the `window` positions before the block; a recurrent Markov head of rank `markov_rank`
+    /// corrects the head's logits left to right.
+    Dspark { markov_rank: u32 },
+}
+
+/// The shape of a DSpark draft, as its target's configuration declares it (`mtp_config` of an Inkling 2 checkpoint,
+/// parsed and validated by the target's crate).
+#[derive(Clone, Debug, PartialEq)]
+pub struct DsparkShape {
+    pub d_model: u32,
+    pub n_layers: usize,
+    pub n_heads: u32,
+    pub n_kv_heads: u32,
+    pub head_dim: u32,
+    pub d_ff: u32,
+    pub eps: f32,
+    pub rope_theta: f32,
+    /// The layers that attend only the `window` positions before the block; the others read the whole context.
+    pub local_layers: Vec<usize>,
+    pub window: u32,
+    pub block_size: u32,
+    pub markov_rank: u32,
+    /// The target's logical depths whose hidden states are the taps, in row order.
+    pub target_depths: Vec<usize>,
+    /// The target's vocabulary (its head's rows), which the Markov head's embedding is indexed by.
+    pub vocab: u32,
+}
+
 /// How a draft layer attends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LayerKind {
-    /// Within `window` positions of the query, in both directions (the attention is not causal).
+    /// Within `window` positions, in both directions (the attention is not causal): back from each query for DFlash2,
+    /// back from the block's first row for DSpark.
     Sliding,
     /// Every position of the context and the block.
     Full,
@@ -35,6 +76,7 @@ pub struct LayerSpec {
 /// The draft model's shape, read from the checkpoint's own configuration and cross-checked against its tensors.
 #[derive(Clone, Debug)]
 pub struct Dflash2Config {
+    pub kind: DraftKind,
     pub n_layers: usize,
     pub d_model: u32,
     pub d_ff: u32,
@@ -50,6 +92,7 @@ pub struct Dflash2Config {
     /// Rows per denoising block: one anchor plus `block_size - 1` masks, so the largest `k` the draft can answer
     /// is `block_size - 1`.
     pub block_size: u32,
+    /// DFlash2's convolutions and selector and the token its noise rows embed; 0 for DSpark, which has none.
     pub conv_kernel: u32,
     pub conv_group: u32,
     pub selector_rank: u32,
@@ -58,8 +101,9 @@ pub struct Dflash2Config {
     /// `false` in every published DFlash2 checkpoint; a field because it is configuration and configuration is
     /// what a loader believes.
     pub causal: bool,
-    /// **0-based decoder-layer indices** of the target whose residual stream (the output of that layer) feeds `fc`,
-    /// in concatenation order.
+    /// The target's **logical depths** whose hidden states are the taps, in row order: for DFlash2 0-based decoder
+    /// layers (the residual leaving the layer), for DSpark the visits of a looped target (the state entering the
+    /// visit; the full depth is the final normalised row). [`model::serve::PagedDecoder::enable_taps`] takes them.
     pub target_layers: Vec<usize>,
     /// The target's vocabulary, which is the draft's (it reuses the target's head).
     pub vocab: u32,
@@ -117,6 +161,7 @@ impl Dflash2Config {
             .map(|v| v.as_u64().map(|i| i as usize).ok_or_else(|| format!("{MODEL}: target_layer_ids holds a non-integer")))
             .collect::<Result<_, _>>()?;
         let cfg = Dflash2Config {
+            kind: DraftKind::Dflash2,
             n_layers,
             d_model,
             d_ff: uint(&raw, "intermediate_size")?,
@@ -169,6 +214,7 @@ impl Dflash2Config {
             .and_then(|v| v.as_u64())
             .ok_or_else(|| format!("{MODEL}: tokenizer.ggml.mask_token_id missing - a masked denoiser cannot draft without it"))? as u32;
         let cfg = Dflash2Config {
+            kind: DraftKind::Dflash2,
             n_layers,
             d_model,
             d_ff: kv.req_u32("feed_forward_length")?,
@@ -205,6 +251,46 @@ impl Dflash2Config {
         Ok(cfg)
     }
 
+    /// A DSpark draft of `shape`: every layer rotates, the local ones slide.
+    pub fn dspark(shape: &DsparkShape) -> Result<Dflash2Config, String> {
+        if let Some(&bad) = shape.local_layers.iter().find(|&&l| l >= shape.n_layers) {
+            return Err(format!("{MODEL}: local layer {bad} of a {}-layer draft", shape.n_layers));
+        }
+        let layers = (0..shape.n_layers).map(|l| LayerSpec { kind: if shape.local_layers.contains(&l) { LayerKind::Sliding } else { LayerKind::Full }, rope: true }).collect();
+        let cfg = Dflash2Config {
+            kind: DraftKind::Dspark { markov_rank: shape.markov_rank },
+            n_layers: shape.n_layers,
+            d_model: shape.d_model,
+            d_ff: shape.d_ff,
+            n_heads: shape.n_heads,
+            n_kv_heads: shape.n_kv_heads,
+            head_dim: shape.head_dim,
+            eps: shape.eps,
+            rope_theta: shape.rope_theta,
+            window: shape.window,
+            layers,
+            block_size: shape.block_size,
+            conv_kernel: 0,
+            conv_group: 0,
+            selector_rank: 0,
+            selector_top_k: 0,
+            mask_token_id: 0,
+            causal: false,
+            target_layers: shape.target_depths.clone(),
+            vocab: shape.vocab,
+        };
+        cfg.validate()?;
+        Ok(cfg)
+    }
+
+    /// The Markov head's rank, for a DSpark draft.
+    pub fn markov_rank(&self) -> Option<u32> {
+        match self.kind {
+            DraftKind::Dspark { markov_rank } => Some(markov_rank),
+            DraftKind::Dflash2 => None,
+        }
+    }
+
     /// Refuse a shape the forward cannot run, by name, before any device work.
     pub fn validate(&self) -> Result<(), String> {
         let bad = |what: String| Err(format!("{MODEL}: {what}"));
@@ -217,11 +303,29 @@ impl Dflash2Config {
         if self.head_dim == 0 || !self.head_dim.is_multiple_of(2) {
             return bad(format!("head_dim {} must be positive and even (RoPE rotates pairs)", self.head_dim));
         }
-        if self.conv_group == 0 || !self.d_model.is_multiple_of(self.conv_group) {
-            return bad(format!("conv group {} does not divide the width {}", self.conv_group, self.d_model));
+        if self.block_size < 2 {
+            return bad(format!("a block of {} rows proposes nothing (at least 2)", self.block_size));
         }
-        if self.conv_kernel == 0 || self.block_size < 2 || self.selector_top_k == 0 || self.selector_rank == 0 {
-            return bad("conv_kernel_size, selector_top_k and selector_rank must be positive and block_size at least 2".into());
+        match self.kind {
+            DraftKind::Dflash2 => {
+                if self.conv_group == 0 || !self.d_model.is_multiple_of(self.conv_group) {
+                    return bad(format!("conv group {} does not divide the width {}", self.conv_group, self.d_model));
+                }
+                if self.conv_kernel == 0 || self.selector_top_k == 0 || self.selector_rank == 0 {
+                    return bad("conv_kernel_size, selector_top_k and selector_rank must be positive".into());
+                }
+                if self.selector_top_k > self.vocab {
+                    return bad(format!("selector top-k {} exceeds the vocabulary of {}", self.selector_top_k, self.vocab));
+                }
+            }
+            DraftKind::Dspark { markov_rank } => {
+                if markov_rank == 0 {
+                    return bad("a Markov head of rank 0".into());
+                }
+                if self.vocab == 0 || self.d_model == 0 || self.d_ff == 0 {
+                    return bad(format!("width {}, MLP {} and vocabulary {} must be positive", self.d_model, self.d_ff, self.vocab));
+                }
+            }
         }
         if self.window == 0 {
             return bad("a sliding window of 0 positions".into());
@@ -232,9 +336,6 @@ impl Dflash2Config {
         if self.mask_token_id >= self.vocab {
             return bad(format!("mask token {} is outside the vocabulary of {}", self.mask_token_id, self.vocab));
         }
-        if self.selector_top_k > self.vocab {
-            return bad(format!("selector top-k {} exceeds the vocabulary of {}", self.selector_top_k, self.vocab));
-        }
         Ok(())
     }
 
@@ -244,8 +345,9 @@ impl Dflash2Config {
         2 * self.conv_kernel * self.groups()
     }
 
+    /// Channel groups of the dynamic convolutions; 0 for a draft without them.
     pub fn groups(&self) -> u32 {
-        self.d_model / self.conv_group
+        self.d_model.checked_div(self.conv_group).unwrap_or(0)
     }
 
     pub fn kv_dim(&self) -> u32 {
@@ -256,14 +358,14 @@ impl Dflash2Config {
         self.n_heads * self.head_dim
     }
 
-    /// Width of one row of target taps: the tapped layers' residual streams concatenated.
+    /// Width of one row of target taps: the tapped depths' hidden states concatenated.
     pub fn tap_width(&self) -> usize {
         self.target_layers.len() * self.d_model as usize
     }
 
     /// Rows of one slot's K/V cache for layer `layer` when a sequence holds `cap` positions: a sliding layer keeps
-    /// the window plus one block (a query of the block reads back `window - 1` positions and forward to the end
-    /// of its block), a full layer keeps every position plus the block.
+    /// the window plus one block (a query of the block reads back `window - 1` positions, or the `window` before the
+    /// block, and forward to the end of its block), a full layer keeps every position plus the block.
     pub fn cache_rows(&self, layer: usize, cap: u32) -> u32 {
         let block = u64::from(self.block_size);
         let rows = match self.layers[layer].kind {

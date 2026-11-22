@@ -18,8 +18,8 @@
 //! predecessor and an earlier position is never revisited. That is the reference's own search, not a
 //! simplification of it: a max-product pass over the same lattice would be a different and unvalidated drafter.
 //!
-//! `hidden` is the draft's PRE-final-norm block, the thing the denoising pass returns; the final norm is applied
-//! here because the selector's projection consumes the POST-norm hidden and nothing else. The pre-norm hidden has
+//! The selector reads the block AFTER the draft's final norm ([`crate::Dflash2::normed`]): its projection consumes the
+//! POST-norm hidden and nothing else. The pre-norm hidden has
 //! an RMS near a thousand on the published drafts, so projecting it would scale the pairwise term by that against
 //! logits of order ten and the selector would override the head at every position, including the ones the head had
 //! right - which no output check sees, because every proposal is verified, and which shows up only as an
@@ -32,41 +32,21 @@ use crate::Dflash2Config;
 /// million elements is not worth a dispatch.
 pub struct Selector {
     sel_hidden: Vec<f32>,
-    out_norm: Vec<f32>,
 }
 
 impl Selector {
     pub fn load(src: &dyn DraftSource) -> Result<Selector, String> {
-        Ok(Selector { sel_hidden: src.vector(Tensor::SelectorHidden)?, out_norm: src.vector(Tensor::OutNorm)? })
+        Ok(Selector { sel_hidden: src.vector(Tensor::SelectorHidden)? })
     }
 
-    /// The draft's final RMSNorm gain: handed to the target's head in place of the target's own, which is the
-    /// composition the reference performs (the draft's `norm`, then the target's `lm_head`).
-    pub fn output_norm(&self) -> &[f32] {
-        &self.out_norm
-    }
-
-    /// `hidden` rows RMS-normed with the draft's final norm.
-    pub fn normed(&self, cfg: &Dflash2Config, hidden: &[f32]) -> Vec<f32> {
-        let d = cfg.d_model as usize;
-        hidden
-            .chunks_exact(d)
-            .flat_map(|row| {
-                let inv = 1.0 / (row.iter().map(|v| v * v).sum::<f32>() / d as f32 + cfg.eps).sqrt();
-                row.iter().zip(&self.out_norm).map(move |(x, w)| x * inv * w)
-            })
-            .collect()
-    }
-
-    /// The chosen token of each of the `n` rows of `hidden`, given the target head's `logits` for them
-    /// (`[n, vocab]`) and the `anchor` token before the first.
-    pub fn select(&self, cfg: &Dflash2Config, src: &dyn DraftSource, hidden: &[f32], logits: &[f32], anchor: u32) -> Result<Vec<u32>, String> {
+    /// The chosen token of each of the `n` rows of `normed` (the block rows after the draft's final norm), given the
+    /// target head's `logits` for them (`[n, vocab]`) and the `anchor` token before the first.
+    pub fn select(&self, cfg: &Dflash2Config, src: &dyn DraftSource, normed: &[f32], logits: &[f32], anchor: u32) -> Result<Vec<u32>, String> {
         let (d, rank, top_k, vocab) = (cfg.d_model as usize, cfg.selector_rank as usize, cfg.selector_top_k as usize, cfg.vocab as usize);
-        let n = hidden.len() / d;
+        let n = normed.len() / d;
         if logits.len() != n * vocab {
             return Err(format!("dflash2: the selector got {} logits for {n} rows of {vocab}", logits.len()));
         }
-        let normed = self.normed(cfg, hidden);
         let proj: Vec<Vec<f32>> = normed.chunks_exact(d).map(|row| model::hostmath::matvec_par(&self.sel_hidden, row, rank, d)).collect();
         let mut path = Vec::with_capacity(n);
         let mut prev = anchor;

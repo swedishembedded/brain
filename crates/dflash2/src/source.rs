@@ -46,6 +46,12 @@ pub enum Leaf {
     AttnConvProj,
     MlpConvBase,
     MlpConvProj,
+    /// DSpark: the RMSNorm gain of the layer's mixed taps.
+    ContextNorm,
+    /// DSpark: the layer's own projections of its mixed taps to context keys and values, and the keys' per-head norm.
+    KCtx,
+    VCtx,
+    KNormCtx,
 }
 
 /// A tensor of the draft model, by role.
@@ -60,6 +66,20 @@ pub enum Tensor {
     SelectorHidden,
     SelectorPredecessor,
     SelectorSuccessor,
+    /// DSpark `[layers + 1, taps]`: per layer (and, last, the Markov head) the logits of its softmax over the taps.
+    FuseWeight,
+    /// DSpark `[d_model]`: the input row of every mask position.
+    MaskEmbed,
+    /// DSpark Markov head: `[3 rank, 2 rank + 2 d_model]` and its bias, over `[state, embed(prev), hidden, context]`.
+    MarkovRnn,
+    MarkovRnnBias,
+    /// `[d_model, rank]` and its bias: the latent's correction of the hidden row the head reads.
+    MarkovOut,
+    MarkovOutBias,
+    /// `[vocab, rank]`: the previous token's embedding.
+    MarkovEmbed,
+    /// The RMSNorm gain of the head's mixed taps.
+    MarkovNorm,
     Layer(usize, Leaf),
 }
 
@@ -73,6 +93,14 @@ impl Tensor {
             Tensor::SelectorHidden => "candidate_selector.hidden_projection.weight".into(),
             Tensor::SelectorPredecessor => "candidate_selector.predecessor_codebook".into(),
             Tensor::SelectorSuccessor => "candidate_selector.successor_codebook".into(),
+            Tensor::FuseWeight => "fuse_weight".into(),
+            Tensor::MaskEmbed => "mask_embed".into(),
+            Tensor::MarkovRnn => "markov_head.rnn_proj.weight".into(),
+            Tensor::MarkovRnnBias => "markov_head.rnn_proj.bias".into(),
+            Tensor::MarkovOut => "markov_head.hidden_out.weight".into(),
+            Tensor::MarkovOutBias => "markov_head.hidden_out.bias".into(),
+            Tensor::MarkovEmbed => "markov_head.markov_w1.weight".into(),
+            Tensor::MarkovNorm => "markov_head.dflare_norm.weight".into(),
             Tensor::Layer(l, leaf) => {
                 let tail = match leaf {
                     Leaf::InputNorm => "input_layernorm.weight",
@@ -90,15 +118,21 @@ impl Tensor {
                     Leaf::AttnConvProj => "attention_conv.kernel_projection.weight",
                     Leaf::MlpConvBase => "mlp_conv.base_kernel",
                     Leaf::MlpConvProj => "mlp_conv.kernel_projection.weight",
+                    Leaf::ContextNorm => "dflare_norm.weight",
+                    Leaf::KCtx => "self_attn.k_proj_ctx.weight",
+                    Leaf::VCtx => "self_attn.v_proj_ctx.weight",
+                    Leaf::KNormCtx => "self_attn.k_norm_ctx.weight",
                 };
                 format!("layers.{l}.{tail}")
             }
         }
     }
 
-    /// The name in the GGUF.
+    /// The name in the GGUF. DSpark drafts are published as safetensors only; their tensors keep the Hugging Face
+    /// spelling here, so a GGUF lookup of one misses by that name.
     pub fn name_gguf(self) -> String {
         match self {
+            Tensor::FuseWeight | Tensor::MaskEmbed | Tensor::MarkovRnn | Tensor::MarkovRnnBias | Tensor::MarkovOut | Tensor::MarkovOutBias | Tensor::MarkovEmbed | Tensor::MarkovNorm => self.name_hf(),
             Tensor::Fc => "fc.weight".into(),
             Tensor::HiddenNorm => "enc.output_norm.weight".into(),
             Tensor::OutNorm => "output_norm.weight".into(),
@@ -122,6 +156,10 @@ impl Tensor {
                     Leaf::AttnConvProj => "attn_conv_proj.weight",
                     Leaf::MlpConvBase => "ffn_conv_base",
                     Leaf::MlpConvProj => "ffn_conv_proj.weight",
+                    Leaf::ContextNorm => "ctx_norm.weight",
+                    Leaf::KCtx => "attn_k_ctx.weight",
+                    Leaf::VCtx => "attn_v_ctx.weight",
+                    Leaf::KNormCtx => "attn_k_ctx_norm.weight",
                 };
                 format!("blk.{l}.{tail}")
             }
@@ -155,8 +193,14 @@ impl HfDraft {
     /// The draft in `path`, a safetensors file or a Hugging Face directory of them.
     pub fn open(path: &Path) -> Result<HfDraft, String> {
         let reader = PackedReader::open(path).map_err(|e| format!("{MODEL}: cannot open {}: {e}", path.display()))?;
+        Ok(Self::from_reader(reader))
+    }
+
+    /// The draft `reader` reads: a draft shipped beside its target (`mtp.safetensors`) opens its file with the
+    /// target's quantization declaration, whose draft section declares its tensors.
+    pub fn from_reader(reader: PackedReader) -> HfDraft {
         let src = PackedSource::identity_lenient(Box::new(reader), CodecRegistry::reference());
-        Ok(HfDraft { src, staging: BoundedWorkspace::new(MemoryBudget::new(STAGING_BYTES, 0)) })
+        HfDraft { src, staging: BoundedWorkspace::new(MemoryBudget::new(STAGING_BYTES, 0)) }
     }
 }
 
@@ -166,20 +210,16 @@ impl HfDraft {
     pub fn device_weight_bytes(&self, cfg: &Dflash2Config) -> u64 {
         let (d, ff, hq, hkv) = (cfg.d_model as usize, cfg.d_ff as usize, cfg.q_dim() as usize, cfg.kv_dim() as usize);
         let dynamic = cfg.dyn_width() as usize;
-        let mut linears = vec![(Tensor::Fc, d, cfg.tap_width())];
+        let dspark = cfg.markov_rank().is_some();
+        let mut linears = if dspark { Vec::new() } else { vec![(Tensor::Fc, d, cfg.tap_width())] };
         for l in 0..cfg.n_layers {
             let t = |leaf| Tensor::Layer(l, leaf);
-            linears.extend([
-                (t(Leaf::Q), hq, d),
-                (t(Leaf::K), hkv, d),
-                (t(Leaf::V), hkv, d),
-                (t(Leaf::O), d, hq),
-                (t(Leaf::Gate), ff, d),
-                (t(Leaf::Up), ff, d),
-                (t(Leaf::Down), d, ff),
-                (t(Leaf::AttnConvProj), dynamic, d),
-                (t(Leaf::MlpConvProj), dynamic, d),
-            ]);
+            linears.extend([(t(Leaf::Q), hq, d), (t(Leaf::K), hkv, d), (t(Leaf::V), hkv, d), (t(Leaf::O), d, hq), (t(Leaf::Gate), ff, d), (t(Leaf::Up), ff, d), (t(Leaf::Down), d, ff)]);
+            if dspark {
+                linears.extend([(t(Leaf::KCtx), hkv, d), (t(Leaf::VCtx), hkv, d)]);
+            } else {
+                linears.extend([(t(Leaf::AttnConvProj), dynamic, d), (t(Leaf::MlpConvProj), dynamic, d)]);
+            }
         }
         linears.into_iter().map(|(t, n, k)| Weight::bytes_for(stored_tier(&self.src, &t.name_hf()).unwrap_or(Dtype::F32), n, k)).sum()
     }

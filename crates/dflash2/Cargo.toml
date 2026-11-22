@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 homepage.workspace = true
-description = "DFlash2 block-diffusion draft model, generic over the target: per-layer sliding/full/NoPE attention, dynamic convolutions and the candidate selector, loaded from Hugging Face safetensors or a GGUF, with a per-sequence serving drafter that reads the target's retained hidden states."
+description = "Block-diffusion draft models, generic over the target: DFlash2 (per-layer sliding/full/NoPE attention, dynamic convolutions, the candidate selector) and DSpark (per-layer tap mixing, a learned mask row, the recurrent Markov head), loaded from Hugging Face safetensors or a GGUF, with a per-sequence serving drafter that reads the target's retained hidden states."
 
 [lib]
 name = "dflash2"

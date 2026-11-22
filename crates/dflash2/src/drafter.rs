@@ -19,7 +19,8 @@
 //!    all of them the first time and the few the last verify accepted afterwards;
 //! 2. denoises one block `[anchor, MASK x (block - 1)]` at position `L - 1`, with the other sequences' blocks in the
 //!    same forward;
-//! 3. runs the shared head over the mask rows with the draft's own final norm and lets the selector walk its candidates.
+//! 3. runs the shared head over the mask rows with the draft's own final norm and lets the selector walk its candidates
+//!    (DFlash2), or walks the Markov head over them, one head product per step (DSpark).
 //!
 //! The block is always the draft's full `block_size`: its rows attend to each other, so a shorter block would
 //! propose differently. Proposals beyond what the scheduler asked for are dropped.
@@ -34,15 +35,17 @@ use std::time::Instant;
 
 use model::paged::BlockTable;
 
+use crate::markov::MarkovJob;
 use crate::model::{BlockJob, Dflash2};
 
 /// What the draft shares with its target: the token embedding in and the output head out.
 pub trait DraftHost {
-    /// The target's embedding of `tokens`, `[tokens, d_model]`, as the draft's noise input.
+    /// The target's embedding of `tokens`, `[tokens, d_model]`, as the draft's noise input: the rows the target's
+    /// first layer reads (with whatever norm the target applies to its embedding).
     fn embed(&self, tokens: &[u32]) -> Result<Vec<f32>, String>;
 
     /// The target head's logits (`[rows, vocab]`) for `rows` rows that already carry the final norm the caller chose
-    /// (the draft's own).
+    /// (the draft's own), with the target's own logit transform (soft cap, padding rows floored).
     fn project(&self, normed: &[f32]) -> Result<Vec<f32>, String>;
 }
 
@@ -110,7 +113,7 @@ impl Dflash2Drafter {
         self.model.cfg.block_size as usize - 1
     }
 
-    /// The target layers whose residual the draft reads, in row order.
+    /// The target depths whose hidden states the draft reads, in row order.
     pub fn target_layers(&self) -> &[usize] {
         &self.model.cfg.target_layers
     }
@@ -215,10 +218,17 @@ impl Dflash2Drafter {
                 }
             }
             self.stats.feed_s += t0.elapsed().as_secs_f64();
-            let mut ids = Vec::with_capacity(block);
-            ids.push(*r.context.last().expect("a context of at least two tokens"));
-            ids.extend(std::iter::repeat_n(cfg.mask_token_id, block - 1));
-            jobs.push((i, slot, ctx_len, host.embed(&ids)?));
+            let anchor = *r.context.last().expect("a context of at least two tokens");
+            let noise = match self.model.learned_noise(&host.embed(&[anchor])?) {
+                Some(rows) => rows,
+                None => {
+                    let mut ids = Vec::with_capacity(block);
+                    ids.push(anchor);
+                    ids.extend(std::iter::repeat_n(cfg.mask_token_id, block - 1));
+                    host.embed(&ids)?
+                }
+            };
+            jobs.push((i, slot, ctx_len, noise));
         }
         if jobs.is_empty() {
             return Ok(out);
@@ -234,6 +244,9 @@ impl Dflash2Drafter {
         // Row 0 of each block is the anchor's own denoised state and proposes nothing; the MASK rows are the proposals.
         let t = Instant::now();
         let mask_rows: Vec<&[f32]> = hidden.iter().map(|h| &h[d..]).collect();
+        if cfg.markov_rank().is_some() {
+            return self.walk(host, taps, requests, &jobs, &mask_rows, out, t);
+        }
         let normed: Vec<f32> = mask_rows.iter().flat_map(|rows| self.model.normed(rows)).collect();
         let logits = host.project(&normed)?;
         self.stats.head_s += t.elapsed().as_secs_f64();
@@ -249,6 +262,29 @@ impl Dflash2Drafter {
             out[*i] = path;
         }
         self.stats.select_s += t.elapsed().as_secs_f64();
+        Ok(out)
+    }
+
+    /// DSpark: the Markov head's walk over each job's normed mask rows, from the target's taps at its last committed
+    /// position, one head product per step for every sequence still walking.
+    #[allow(clippy::too_many_arguments)]
+    fn walk(&mut self, host: &dyn DraftHost, taps: &dyn TapRows, requests: &[DraftRequest<'_>], jobs: &[(usize, u32, u32, Vec<f32>)], mask_rows: &[&[f32]], mut out: Vec<Vec<u32>>, t: Instant) -> Result<Vec<Vec<u32>>, String> {
+        let normed: Vec<Vec<f32>> = mask_rows.iter().map(|rows| self.model.normed(rows)).collect();
+        let last: Vec<Vec<f32>> = jobs.iter().map(|(i, _, ctx_len, _)| taps.tap_rows(requests[*i].table, ctx_len - 1, 1)).collect::<Result<_, _>>()?;
+        let rows = self.model.cfg.block_size as usize - 1;
+        let walks: Vec<MarkovJob<'_>> = jobs
+            .iter()
+            .zip(&normed)
+            .zip(&last)
+            .map(|(((i, ..), hidden), last_taps)| MarkovJob { hidden, last_taps, anchor: *requests[*i].context.last().expect("checked when the job was made"), want: requests[*i].want.min(rows) })
+            .collect();
+        let mut project = |rows: &[f32]| host.project(rows);
+        let paths = self.model.markov_walk(&walks, &mut project)?;
+        self.stats.head_s += t.elapsed().as_secs_f64();
+        for ((i, ..), path) in jobs.iter().zip(paths) {
+            self.stats.proposed += path.len() as u64;
+            out[*i] = path;
+        }
         Ok(out)
     }
 }
