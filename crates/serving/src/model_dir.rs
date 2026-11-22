@@ -135,6 +135,9 @@ pub struct Discovered {
     /// The Ripple checkpoints among `residents` and `multi`, as concrete handles: `--adapter` offers its adapter as
     /// a model of its own ([`ricursive::resident::RicursiveResident::with_adapter`]).
     pub ricursive: Vec<Arc<ricursive::resident::RicursiveResident>>,
+    /// The Inkling 2 directories among `residents`, as concrete handles: the adapters found beside one are served as
+    /// views over it ([`llmserve::adapter_registry::AdapterHost`]).
+    pub inkling2: Vec<Arc<catalog::resident_inkling2::Inkling2Resident>>,
     /// Every [`DiscoveryError`] a compound model produced -- a partial scan
     /// still serves what it can.
     pub errors: Vec<DiscoveryError>,
@@ -198,7 +201,8 @@ pub fn discover(dir: &Path, settings: &ScanSettings) -> Discovered {
     }
     let qwen35 = scan.qwen35_bases.values().cloned().collect();
     let qwen = scan.qwen_bases.values().cloned().collect();
-    Discovered { residents: scan.out, multi: scan.multi, qwen, qwen35, ricursive: scan.ricursive, errors }
+    let inkling2 = scan.inkling2_bases.values().cloned().collect();
+    Discovered { residents: scan.out, multi: scan.multi, qwen, qwen35, ricursive: scan.ricursive, inkling2, errors }
 }
 
 /// `local`, read from the copy among `copies` made of its entry directory, if there is one.
@@ -235,6 +239,16 @@ fn hf_qwen35_dir(local: &brain_modelstore::LocalModel) -> Option<PathBuf> {
 /// [`ricursive::resident::RicursiveResident`], every tensor held as the release stores it.
 fn hf_ricursive_dir(local: &brain_modelstore::LocalModel) -> Option<PathBuf> {
     if local.card.as_ref().is_none_or(|c| c.family != "ricursive") {
+        return None;
+    }
+    let dir = local.roles.as_ref()?.get("weights")?;
+    (dir.is_dir() && dir.join("config.json").is_file()).then(|| dir.clone())
+}
+
+/// The published Inkling 2 directory `local` names as its `weights` role: served by
+/// [`catalog::resident_inkling2::Inkling2Resident`], with the adapters the store holds for it.
+fn hf_inkling2_dir(local: &brain_modelstore::LocalModel) -> Option<PathBuf> {
+    if local.card.as_ref().is_none_or(|c| c.family != catalog::resident_inkling2::FAMILY) {
         return None;
     }
     let dir = local.roles.as_ref()?.get("weights")?;
@@ -280,6 +294,10 @@ struct Scan {
     ricursive_bases: BTreeMap<String, Arc<ricursive::resident::RicursiveResident>>,
     /// The adapter bank each Ripple base that has adapters in the store is built with, by base id.
     ricursive_banks: BTreeMap<String, AdapterBankSettings>,
+    /// The Inkling 2 bases built so far, by served id: an adapter found beside one is served as a view over it.
+    inkling2_bases: BTreeMap<String, Arc<catalog::resident_inkling2::Inkling2Resident>>,
+    /// The adapter bank each Inkling 2 base that has adapters in the store is built with, by base id.
+    inkling2_banks: BTreeMap<String, AdapterBankSettings>,
     /// Multi-device residents ([`Discovered::multi`]).
     multi: Vec<Arc<dyn MultiDeviceResidentModel>>,
     /// The adapter bank every released Qwen3.8 GGUF is built with: the
@@ -327,7 +345,32 @@ impl Scan {
                 *bank = widen_to_hold(bank.clone(), card, Widen { rank: true, targets: false });
             }
         }
-        Scan { seen: BTreeSet::new(), out: Vec::new(), qwen_bases: BTreeMap::new(), qwen35_bases: BTreeMap::new(), multi: Vec::new(), ricursive: Vec::new(), ricursive_bases: BTreeMap::new(), ricursive_banks, qwen35_bank, settings: settings.clone(), banks }
+        // An Inkling 2 adapter is trained on every site by default: a bank nobody sized takes all of them (the default
+        // targets), grown to the highest rank the store's adapters hold; the `--adapter-*` flags size it otherwise.
+        let mut inkling2_banks: BTreeMap<String, AdapterBankSettings> = BTreeMap::new();
+        for local in adapters {
+            let Some((base, card)) = local.card.as_ref().filter(|c| c.family == catalog::resident_inkling2::FAMILY).and_then(|c| Some((base_id_of(&c.id)?, c))) else { continue };
+            let operator = settings.qwen.adapter_bank.clone();
+            let bank = inkling2_banks.entry(base).or_insert_with(|| operator.clone().unwrap_or_default());
+            if operator.is_none() {
+                *bank = widen_to_hold(bank.clone(), card, Widen { rank: true, targets: false });
+            }
+        }
+        Scan {
+            seen: BTreeSet::new(),
+            out: Vec::new(),
+            qwen_bases: BTreeMap::new(),
+            qwen35_bases: BTreeMap::new(),
+            multi: Vec::new(),
+            ricursive: Vec::new(),
+            ricursive_bases: BTreeMap::new(),
+            ricursive_banks,
+            inkling2_bases: BTreeMap::new(),
+            inkling2_banks,
+            qwen35_bank,
+            settings: settings.clone(),
+            banks,
+        }
     }
 
     /// The serving config for the Qwen3 base `id`: the operator's, plus a
@@ -352,19 +395,21 @@ impl Scan {
         let on_qwen = named.as_ref().and_then(|b| self.qwen_bases.get(b).cloned());
         let on_qwen35 = named.as_ref().and_then(|b| self.qwen35_bases.get(b).cloned()).or_else(|| self.released_base_of(card));
         let on_ricursive = named.as_ref().and_then(|b| self.ricursive_bases.get(b).cloned());
-        if on_qwen.is_none() && on_qwen35.is_none() && on_ricursive.is_none() {
-            eprintln!("brain: skip {shown} (its base is not served as a Qwen3, Qwen3.8 or Ripple model, so adapter {} has nothing to ride on)", card.id);
+        let on_inkling2 = named.as_ref().and_then(|b| self.inkling2_bases.get(b).cloned());
+        if on_qwen.is_none() && on_qwen35.is_none() && on_ricursive.is_none() && on_inkling2.is_none() {
+            eprintln!("brain: skip {shown} (its base is not served as a Qwen3, Qwen3.8, Ripple or Inkling 2 model, so adapter {} has nothing to ride on)", card.id);
             return;
         }
         if !self.seen.insert(card.id.clone()) {
             eprintln!("brain: skip {shown} (duplicate model id '{}')", card.id);
             return;
         }
-        let kept = match (on_qwen, on_qwen35, on_ricursive) {
+        let kept = match (on_qwen, on_qwen35, on_ricursive, on_inkling2) {
             (Some(base), ..) => verify_adapter(path, &base.served_base()).and_then(|loaded| base.adapter_view(loaded)).map(|view| self.out.push(Arc::new(view))),
-            (None, Some(base), _) => verify_adapter(path, &base.served_base()).and_then(|loaded| base.adapter_view(loaded)).map(|view| self.multi.push(Arc::new(view))),
-            (None, None, Some(base)) => verify_adapter(path, &base.served_base()).and_then(|loaded| base.adapter_view(loaded)).map(|view| if base.on_cards() { self.multi.push(Arc::new(view)) } else { self.out.push(Arc::new(view)) }),
-            (None, None, None) => unreachable!("checked above"),
+            (None, Some(base), ..) => verify_adapter(path, &base.served_base()).and_then(|loaded| base.adapter_view(loaded)).map(|view| self.multi.push(Arc::new(view))),
+            (None, None, Some(base), _) => verify_adapter(path, &base.served_base()).and_then(|loaded| base.adapter_view(loaded)).map(|view| if base.on_cards() { self.multi.push(Arc::new(view)) } else { self.out.push(Arc::new(view)) }),
+            (None, None, None, Some(base)) => verify_adapter(path, &base.served_base()).and_then(|loaded| base.adapter_view(loaded)).map(|view| self.out.push(Arc::new(view))),
+            (None, None, None, None) => unreachable!("checked above"),
         };
         if let Err(e) = kept {
             self.seen.remove(&card.id);
@@ -458,6 +503,23 @@ impl Scan {
                 } else {
                     self.multi.push(resident);
                 }
+            }
+            Err(reason) => {
+                eprintln!("brain: skip {id} ({weights}: {reason})");
+                self.seen.remove(id);
+            }
+        }
+    }
+
+    /// Serve the Inkling 2 directory `weights` as the model `id`, with an adapter bank when the store holds adapters for
+    /// it or the `--adapter-*` flags size one, or leave it out with the reason.
+    fn register_inkling2(&mut self, weights: &str, id: &str) {
+        let bank = self.inkling2_banks.get(id).cloned().or_else(|| self.settings.qwen.adapter_bank.clone());
+        match catalog::resident_inkling2::Inkling2Resident::from_hf_dir(weights, id, self.settings.qwen35.fp32).and_then(|r| r.with_adapter_bank(bank)) {
+            Ok(resident) => {
+                let resident = Arc::new(resident);
+                self.inkling2_bases.insert(id.to_string(), resident.clone());
+                self.out.push(resident);
             }
             Err(reason) => {
                 eprintln!("brain: skip {id} ({weights}: {reason})");
@@ -634,6 +696,10 @@ fn register_compound(local: &brain_modelstore::LocalModel, scan: &mut Scan, erro
     }
     if let Some(dir) = hf_ricursive_dir(local) {
         scan.register_ricursive(&dir.to_string_lossy(), &id);
+        return;
+    }
+    if let Some(dir) = hf_inkling2_dir(local) {
+        scan.register_inkling2(&dir.to_string_lossy(), &id);
         return;
     }
     let gpus: Vec<u32> = scan.settings.gpus.iter().map(|&(i, _)| i).collect();
@@ -1902,6 +1968,51 @@ mod tests {
         let key = by_id(base_id).instance_key("generate", &inv);
         assert!(adapter_ids.iter().all(|id| by_id(id).instance_key("generate", &inv) == key), "the adapters batch with the base");
         assert!(adapter_ids.iter().all(|id| by_id(id).estimate(&key).vram == by_id(base_id).estimate(&key).vram), "and are budgeted as the base, whose placement holds the bank");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Adapters in the store ride on an Inkling 2 directory as they ride on a Qwen3 or a Ripple: each a view of the one
+    /// base resident (its instance key, its budget), found by the base id its card names; the base gets a bank, and an
+    /// adapter whose base is not served is left out.
+    #[test]
+    fn discover_serves_the_stores_inkling2_adapters_as_views_of_one_base() {
+        use brain_testutil::adapters::{write_lora_adapter_of, Linear};
+        let tiny = brain_testutil::testdata_path("golden/inkling2/tiny/checkpoint/config.json");
+        if !tiny.is_file() {
+            brain_testutil::skip("testdata/golden/inkling2/tiny absent (make testdata/fetch, or run tools/goldens/inkling2_dump_reference.py tiny)");
+            return;
+        }
+        let root = tmp_dir("discover-inkling2-adapters");
+        let repo = root.join("thinkingmachines").join("Inkling-tiny");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::copy(&tiny, repo.join("config.json")).unwrap();
+        std::fs::copy(tiny.with_file_name("model.safetensors"), repo.join("model.safetensors")).unwrap();
+        // The scan reads the configuration and the generation defaults; the instance reads the rest when it is built.
+        std::fs::write(repo.join("tokenizer.json"), "{}").unwrap();
+        std::fs::write(repo.join("generation_config.json"), serde_json::json!({"eos_token_id": 1}).to_string()).unwrap();
+        let manifest = brain_modelstore::CompoundManifest { id: "thinkingmachines/Inkling-tiny".into(), family: "inkling2".into(), roles: [("weights".to_string(), ".".to_string())].into() };
+        std::fs::write(repo.join(brain_modelstore::MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let base_id = "thinkingmachines/Inkling-tiny";
+        let linears = [Linear { base: "model.llm.layers.0.attn.wq_du.weight".into(), out: 4, inn: 3 }];
+        let adapter_ids = ["lab-alpha", "lab-beta"].map(|name| format!("{base_id}:{name}:sft:v1"));
+        for (i, (name, id)) in ["lab-alpha", "lab-beta"].iter().zip(&adapter_ids).enumerate() {
+            let dir = repo.join("adapters").join(name).join("sft").join("v1");
+            std::fs::create_dir_all(&dir).unwrap();
+            write_lora_adapter_of("inkling2", &dir.join("adapter.brain.safetensors"), id, base_id, 2 + 2 * i as u32, &linears, 3 + i as u64);
+        }
+        let found = discover(&root, &ScanSettings::default());
+        assert!(found.errors.is_empty(), "{:?}", found.errors);
+        let got = ids(&found.residents);
+        for id in adapter_ids.iter().map(String::as_str).chain([base_id]) {
+            assert!(got.iter().any(|g| g == id), "{id} is not served: {got:?}");
+        }
+        assert_eq!(found.inkling2.len(), 1, "one resident holds the weights, whatever number of adapters");
+        let by_id = |id: &str| found.residents.iter().find(|r| r.manifest().model == id).unwrap();
+        let inv = capability::Invocation::new();
+        let key = by_id(base_id).instance_key("generate", &inv);
+        assert!(adapter_ids.iter().all(|id| by_id(id).instance_key("generate", &inv) == key), "the adapters batch with the base");
+        assert!(adapter_ids.iter().all(|id| by_id(id).estimate(&key).vram == by_id(base_id).estimate(&key).vram), "and are budgeted as the base, whose estimate holds the bank");
+        assert_eq!(by_id(adapter_ids[1].as_str()).adapter_identity().map(|a| a.id), Some(adapter_ids[1].clone()));
         let _ = std::fs::remove_dir_all(&root);
     }
 

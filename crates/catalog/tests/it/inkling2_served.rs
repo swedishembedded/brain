@@ -40,7 +40,7 @@ const SPECIALS: [&str; 9] = [
 const IMAGE_TOKEN: u32 = 256 + 7;
 /// Stored unembedding rows and the valid ones (bytes and the specials, then padding).
 const VOCAB: usize = 272;
-const VALID: usize = 256 + SPECIALS.len();
+pub(crate) const VALID: usize = 256 + SPECIALS.len();
 
 /// The checkpoint's template shape: a system message with the effort, typed user and model messages (a user message's
 /// parts each its own message, an image part its placeholder), the reply ended by the sampling eos.
@@ -48,7 +48,7 @@ const TEMPLATE: &str = "<|message_system|><|content_text|>effort {{ reasoning_ef
 
 /// The tiny reference checkpoint widened to a byte-level vocabulary, with its tokenizer, template and generation
 /// config, as a pull leaves a release directory.
-fn pulled_dir(tag: &str) -> Option<PathBuf> {
+pub(crate) fn pulled_dir(tag: &str) -> Option<PathBuf> {
     let tiny = brain_testutil::testdata_path("golden/inkling2/tiny/checkpoint");
     if !tiny.join("model.safetensors").is_file() {
         brain_testutil::skip("testdata/golden/inkling2/tiny absent (make testdata/fetch, or run tools/goldens/inkling2_dump_reference.py tiny)");
@@ -223,7 +223,7 @@ fn with_images(inv: Invocation, images: &[&imaging::pixels::Rgb8]) -> Invocation
     images.iter().enumerate().fold(inv, |inv, (i, img)| inv.blob(&capability::blob::image_key(i), capability::blob::image_blob(&img.to_hwc_unit(), img.w, img.h, 3)))
 }
 
-fn log_softmax_at(row: &[f32], at: usize) -> f64 {
+pub(crate) fn log_softmax_at(row: &[f32], at: usize) -> f64 {
     let max = row.iter().fold(f64::NEG_INFINITY, |m, &x| m.max(f64::from(x)));
     let lse = max + row.iter().map(|&x| (f64::from(x) - max).exp()).sum::<f64>().ln();
     f64::from(row[at]) - lse

@@ -153,7 +153,7 @@ pub fn start_adapter_mode<R: AdapterHost>(mode: AdapterMode, resident: Option<&A
 /// binds, so the first request after readiness finds its adapter; the watcher follows the changes from here.
 pub fn start_adapter_directory(dir: PathBuf, hosts: Vec<BankHost>) -> Result<Follow, String> {
     if hosts.is_empty() {
-        return Err("--serve-adapters needs a served Qwen3, Qwen3.8 or Ripple to put the adapters on; serve their bases from the model directory, or name one with --checkpoint <dir-or-file>".to_string());
+        return Err("--serve-adapters needs a served Qwen3, Qwen3.8, Ripple or Inkling 2 to put the adapters on; serve their bases from the model directory, or name one with --checkpoint <dir-or-file>".to_string());
     }
     let mut bank = BankDirectory::new(dir, hosts);
     bank.poll();
@@ -166,6 +166,7 @@ pub struct ServedBases {
     pub qwen: Vec<Arc<QwenResident>>,
     pub qwen35: Vec<Arc<Qwen35GgufServed>>,
     pub ricursive: Vec<Arc<RicursiveResident>>,
+    pub inkling2: Vec<Arc<catalog::resident_inkling2::Inkling2Resident>>,
 }
 
 impl ServedBases {
@@ -181,6 +182,7 @@ impl ServedBases {
         let mut hosts: Vec<BankHost> = qwen.into_iter().map(|q| BankHost::new(q.clone(), executor.clone())).collect();
         hosts.extend(self.qwen35.iter().map(|g| BankHost::new(g.clone(), executor.clone())));
         hosts.extend(self.ricursive.iter().map(|r| BankHost::new(r.clone(), executor.clone())));
+        hosts.extend(self.inkling2.iter().map(|r| BankHost::new(r.clone(), executor.clone())));
         hosts
     }
 }

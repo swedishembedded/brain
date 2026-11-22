@@ -34,6 +34,11 @@
 //!   messages) through [`images::Inkling2Images`], the tower on the decoder's card; the rows stand at the template's
 //!   placeholder tokens, expanded to one per 40x40-pixel region, and the engine splices them after its embedding norm.
 //!
+//! - **Adapters**: with an adapter bank ([`Inkling2Resident::with_adapter_bank`]) the LoRA adapters the trainer saves
+//!   for this base are served as models of their own ([`AdapterHost`]: each an [`llmserve::adapter_registry::AdapterView`]
+//!   whose id is the adapter's card id): every site the trainer adapts is applied beside the published weights in the
+//!   same batches as the base ([`inkling2::serve::ServedSites`]), never folded into them.
+//!
 //! [`provider`] is the same resident behind `brain do inkling2 generate`, built on first use.
 
 pub mod images;
@@ -47,8 +52,10 @@ use data::qwen_tokenizer::QwenBpe;
 use inkling2::serve::{Engine, EngineOptions};
 use inkling2::vision::{ImageProcessorSpec, VisionTower, VisionWeights};
 use inkling2::Inkling2Config;
+use llmserve::adapter_registry::{AdaptedInstance, AdapterBankSettings, AdapterHost, AdapterRegistry, ADAPTER_PARAM};
+use llmserve::adapter_release::{LoadedAdapter, ServedBase, ServedFamily};
 use llmserve::image_frontend::ImageFrontend;
-use llmserve::{generate_spec, ScheduledInstance, TextFrontend};
+use llmserve::{generate_spec, TextFrontend};
 use model::kv_tier::KvTier;
 use model::serve::visit_state::VisitPoolSizing;
 use model::serve::{NgramDrafter, Scheduler, SpeculativeMode, TapPool};
@@ -56,6 +63,8 @@ use residency::{on_device, Device, Instance, InstanceKey, MemCost, ResidentModel
 
 use crate::resident_qwen35::Qwen35Sizing;
 
+/// The card family of an Inkling 2 checkpoint and of the adapters its trainer saves.
+pub const FAMILY: &str = inkling2::train::FAMILY;
 /// The catalog id of the in-process capability (`brain do inkling2 generate`).
 pub const MODEL: &str = "brain/inkling2";
 /// Tokens one sequence may hold when the server was not told (`--ctx`): the model's positions reach 1M, but a pool
@@ -153,6 +162,16 @@ pub struct Inkling2Resident {
     /// The expert products' activation operand (`--linear-activations`).
     linear_activations: model::policy::LinearActivations,
     drafting: Drafting,
+    /// The sampling defaults the checkpoint's `generation_config.json` declares, on every manifest it answers (an
+    /// adapter view's too).
+    sampling: data::generation::SamplingDefaults,
+    /// The adapters offered on this base, and the bank they run on (none unless [`Self::with_adapter_bank`]).
+    adapters: Arc<AdapterRegistry>,
+}
+
+/// Inkling 2 as an adapter-serving family: the card family its trainer writes and every site it serves.
+pub fn family(cfg: &Inkling2Config) -> ServedFamily {
+    ServedFamily::of(FAMILY, "Inkling 2", &inkling2::serve::ServedSites::new(cfg, true))
 }
 
 impl Inkling2Resident {
@@ -181,7 +200,21 @@ impl Inkling2Resident {
         let opts = EngineOptions { kv_tier, sizing: VisitPoolSizing { block_size: BLOCK, num_blocks: blocks, live_rows: live, snapshot_rows: live, undo_rows }, max_seq_len: ctx as usize, prefill_chunk: PREFILL_CHUNK };
         // The layout is held to the engine's own check now, so a configuration it cannot serve is refused at the scan.
         Engine::layout(&cfg, kv_tier)?;
-        Ok(Inkling2Resident { id: id.to_string(), dir: path.to_path_buf(), cfg, opts, linear_activations: sizing.linear_activations.unwrap_or_default(), drafting })
+        let sampling = data::generation::SamplingDefaults::from_generation_config(path).map_err(|e| format!("{id}: {e}"))?;
+        let adapters = AdapterRegistry::new(None, ServedBase::of_family(family(&cfg), path, Some(id.to_string())));
+        Ok(Inkling2Resident { id: id.to_string(), dir: path.to_path_buf(), cfg, opts, linear_activations: sizing.linear_activations.unwrap_or_default(), drafting, sampling, adapters })
+    }
+
+    /// This resident with an adapter bank of `bank` (none for `None`): its engine serves the adapters offered on it
+    /// ([`AdapterHost`]), and the bank's device bytes are part of its estimate. A size the engine cannot build is refused
+    /// by the flag that sets it.
+    pub fn with_adapter_bank(mut self, bank: Option<AdapterBankSettings>) -> Result<Inkling2Resident, String> {
+        if let Some(b) = &bank {
+            b.validate().map_err(|e| format!("{}: {e}", self.id))?;
+            b.bank_config(&inkling2::serve::ServedSites::new(&self.cfg, true)).map_err(|e| format!("{}: {e}", self.id))?;
+        }
+        self.adapters = AdapterRegistry::new(bank, ServedBase::of_family(family(&self.cfg), &self.dir, Some(self.id.clone())));
+        Ok(self)
     }
 
     /// Where this resident's proposals come from.
@@ -244,6 +277,13 @@ impl Inkling2Resident {
         rows * per_row * 4
     }
 
+    /// Device bytes of the adapter bank (none without one): an upper bound before the weights are opened, the expert
+    /// sites counted as though the banks were published microscaled.
+    fn bank_bytes(&self) -> u64 {
+        let rows = PREFILL_CHUNK.max(self.opts.sizing.live_rows);
+        self.adapters.settings().map_or(0, |b| b.device_bytes(&inkling2::serve::ServedSites::new(&self.cfg, true), rows))
+    }
+
     /// The vision tower on the decoder's card: its weights in f32 and the activations of its largest group, a context
     /// of regions (four patch rows each, plus class rows), about two dozen rows of the tower's width per patch row
     /// (inputs, attention, the MLP's four-wide hidden, the scratch of a block). Zero without a tower.
@@ -257,8 +297,11 @@ impl Inkling2Resident {
 }
 
 impl ResidentModel for Inkling2Resident {
+    /// Declares its architecture and the checkpoint's sampling defaults itself: the adapter views served over this
+    /// resident restate its manifest.
     fn manifest(&self) -> Manifest {
-        Manifest::new(&self.id, SUMMARY, vec![action_spec(self.cfg.vision.is_some())]).with_max_context_tokens(self.opts.max_seq_len as u64)
+        let spec = llmserve::with_sampling_defaults(action_spec(self.cfg.vision.is_some()), &self.id, &self.sampling);
+        Manifest::new(&self.id, SUMMARY, vec![spec]).with_max_context_tokens(self.opts.max_seq_len as u64).with_architecture(FAMILY)
     }
     fn instance_key(&self, _action: &str, _inv: &Invocation) -> InstanceKey {
         InstanceKey::new(&self.id, "default")
@@ -267,7 +310,18 @@ impl ResidentModel for Inkling2Resident {
         Some(self.opts.sizing.live_rows as usize)
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
-        MemCost::new(self.weight_bytes() + self.pool_bytes() + self.step_bytes() + self.tower_bytes() + self.draft_bytes(), self.tap_bytes())
+        MemCost::new(self.weight_bytes() + self.pool_bytes() + self.step_bytes() + self.tower_bytes() + self.draft_bytes() + self.bank_bytes(), self.tap_bytes())
+    }
+    /// The base answers as the base: the reserved adapter param is the views' to set ([`ResidentModel::stamp`]).
+    fn stamp(&self, inv: &mut Invocation) {
+        if let Some(params) = inv.params.as_object_mut() {
+            params.remove(ADAPTER_PARAM);
+        }
+    }
+    /// The request's prompt keyed for the prefix cache in the namespace of the adapter it names: a prefix cached under
+    /// one adapter is not another's, and the base is the empty namespace.
+    fn prefix_chain(&self, inv: &Invocation) -> residency::affinity::PrefixChain {
+        llmserve::request_prefix_chain(inv, &inv.get_str(ADAPTER_PARAM).unwrap_or_default())
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         let tok = QwenBpe::from_file(&self.dir.join("tokenizer.json").to_string_lossy())?;
@@ -307,7 +361,8 @@ impl ResidentModel for Inkling2Resident {
                 qwen3::chat::parse_request_as(tok, &text_format, inv)
             }),
         );
-        let (dir, opts, linear_activations, drafting) = (self.dir.clone(), self.opts, self.linear_activations, self.drafting);
+        let (dir, opts, linear_activations, drafting, id) = (self.dir.clone(), self.opts, self.linear_activations, self.drafting, self.id.clone());
+        let adapters = self.adapters.clone();
         let live = opts.sizing.live_rows as usize;
         on_device(device, move || -> Result<Box<dyn Instance>, String> {
             let mut ops = inkling2::serve::device_ops()?;
@@ -315,6 +370,11 @@ impl ResidentModel for Inkling2Resident {
             let mut engine = Engine::open(ops, &dir, opts)?;
             if drafting == Drafting::Mtp {
                 engine.set_drafter(&dir)?;
+            }
+            if let Some(bank) = adapters.settings() {
+                // The `all` group over this checkpoint: its expert sites only when its banks are published microscaled.
+                let cfg = bank.bank_config(&engine.served_sites()).map_err(|e| format!("{id}: {e}"))?;
+                engine.enable_adapters(cfg).map_err(|e| format!("{id}: {e}"))?;
             }
             let scheduler = |engine: Engine| {
                 let mut sched = Scheduler::new(engine, live);
@@ -324,7 +384,7 @@ impl ResidentModel for Inkling2Resident {
                 sched
             };
             let (Some(v), Some((tiling, image_token)), Some(tok)) = (vision, processor, image_tok) else {
-                return Ok(Box::new(ScheduledInstance::new(text, scheduler(engine), live)));
+                return Ok(Box::new(AdaptedInstance::new(text, scheduler(engine), live, adapters)));
             };
             // The tower shares the decoder's card: its own kernel set on the same device.
             let gpu = engine.model().ops().gpu().new_like(inkling2::vision::pipelines());
@@ -332,8 +392,19 @@ impl ResidentModel for Inkling2Resident {
             let sched = scheduler(engine);
             let build = images::Inkling2Images::new(tok, format, gpu, tower, tiling, image_token, sched.sequence_capacity());
             let front = ImageFrontend::new(text, build, "inkling2-vision")?;
-            Ok(Box::new(ScheduledInstance::new(front, sched, live)))
+            Ok(Box::new(AdaptedInstance::new(front, sched, live, adapters)))
         })?
+    }
+}
+
+impl AdapterHost for Inkling2Resident {
+    fn adapters(&self) -> &Arc<AdapterRegistry> {
+        &self.adapters
+    }
+
+    fn register_view(self: &Arc<Self>, executor: &residency::Executor, adapter: LoadedAdapter) -> Result<(), String> {
+        executor.register(Arc::new(self.adapter_view(adapter)?));
+        Ok(())
     }
 }
 

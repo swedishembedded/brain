@@ -762,6 +762,27 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
     `adapter_merged::a_bank_serves_a_merged_site_as_each_slots_effective_matrix`, `depth_attn::per_row_queries_*`,
     `message_gate::a_corrected_forward_is_the_gate_of_the_corrected_weights`. The rank-2 fixture factors are 0.15 (at
     0.3 on all 17 leaves the f32 spread of the linear corrections, about 5e-5 alone, grew to 2.6e-4 at one position).
+  - Done (2026-11-22, adapt): `brain serve` offers Inkling 2 adapters. `Inkling2Resident::with_adapter_bank` (bank bytes
+    in the estimate; the `all` group takes the expert sites only over published banks: `ServedSites::new(cfg,
+    banked_experts)`, `Engine::served_sites`), `AdapterHost for Inkling2Resident` (views registered single-device),
+    `AdaptedInstance` for text and image front ends, the reserved `__adapter` param stripped by the base's `stamp`,
+    prefix chains per adapter namespace; the resident declares its architecture and checkpoint sampling defaults itself
+    so its views restate them (`resident_inkling2::{FAMILY, family}`). Scan: `hf_inkling2_dir` -> `register_inkling2`,
+    store adapters on an Inkling 2 base registered as views (`Discovered::inkling2`, bank widened to the store's
+    highest rank unless `--adapter-*` flags size it), `Serving::inkling2` -> `--serve-adapters` binds to it.
+    Gates (CPU): catalog `inkling2_adapters` - an adapter trained by the trainer (6 AdamW steps, every site of the tiny
+    dense checkpoint), saved, verified, served as a view: greedy tokens = the trainer's adapted argmax, sampled
+    log-probabilities within 1e-4 of its log-softmax, the base in the same instance = the base forward, a mixed batch
+    answers as alone; over HTTP (OpenAI router, real resident) the adapter is listed by identity with no path, selected
+    by model id, 401 without the key identical to an absent adapter, an unoffered adapter 404 as an unknown model, and
+    `__adapter` set by a caller refused by name on `/v1/run` (the chat body cannot reach it); serving
+    `discover_serves_the_stores_inkling2_adapters_as_views_of_one_base`. API audit: no route or field added; selection
+    is the existing model-id path. Docs page: an Adapters section with the commands.
+  - Left: catalog `inkling2_served::the_resident_serves_a_typed_message_chat_within_its_context` is flaky before and
+    after this change (2 of 8 runs on the old code): its request sets `temperature` (an OpenAI field the action does not
+    read), so it samples, and one scheduler step can stream two text events before the cancellation is seen; with
+    `temp: 0` it fails every time (two byte tokens of the greedy reply arrive in one step). The certify bound counts
+    events, not steps.
 - **I3.5** Acceptance through the public API with the vendor's published verification
   suite (coding, vision, long context to 1M), after operator parity.
 
@@ -881,6 +902,9 @@ The first trainable target needs no streaming: the base is about 19.5 GB.
   - Done (2026-11-22): `Inkling2Trainer::serving_engine` opens `serve::Engine` over the release (f32 K/V, one
     sequence) for `served_loss` and precision searches; its served logits equal the trainer's at every position
     (`the_serving_engine_serves_what_the_trainer_trains`). An adapter is refused by name.
+  - Done (2026-11-22, adapt): `serving_engine(.., Some(adapter), ..)` serves the trainer's adapter (not folded): a bank
+    of the file's rank and leaves, the adapter registered and pinned, every base-namespace sequence run under it
+    (`Engine::serve_base_as`); `the_serving_engine_serves_what_the_trainer_trains` checks the adapted logits (1e-4).
   - Done (2026-11-22): real-weight QLoRA smoke run (`tests/it/real_lora.rs`, skips by name without the store entry):
     the release as published (NVFP4 layers 0-19 and MXFP8 20-23 read in place, bf16 dense linears), a rank-4 adapter
     on every site including the stacked expert pairs, one 19-token row, AdamW 2e-3: loss 1.240 -> 0.958/0.690 -> 0.204/

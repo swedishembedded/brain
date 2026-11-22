@@ -228,7 +228,8 @@ fn a_packed_row_trains_as_its_documents_alone() {
 }
 
 /// The family's serving engine (what `served_loss` and a precision search score through) serves the function the
-/// trainer trains: its logits at every position of a row equal the training build's over the same checkpoint.
+/// trainer trains: its logits at every position of a row equal the training build's over the same checkpoint, with no
+/// adapter and with an adapter the trainer saved (applied beside the base, not folded).
 #[test]
 fn the_serving_engine_serves_what_the_trainer_trains() {
     use model::finetune::ChatTrainer;
@@ -253,9 +254,27 @@ fn the_serving_engine_serves_what_the_trainer_trains() {
         let err = got.iter().zip(row).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max) / scale;
         assert!(err <= 5e-5, "position {p}: served logits differ by {err:.3e} of their scale");
     }
-    let adapter = std::path::Path::new("/nonexistent/adapter.safetensors");
-    let refused = inkling2::finetune::Inkling2Trainer::serving_engine(&ckpt, &tiers, Some(adapter), 8).expect("the family serves").err().expect("an adapter is refused");
-    assert_eq!(refused.kind(), std::io::ErrorKind::Unsupported, "{refused}");
+    // With an adapter the trainer saved (every site of a checkpoint with dense experts), the engine serves the trainer's
+    // adapted logits: the adapter rides beside the base, every sequence under it.
+    let lora = model::adapter::device::LoraCfg::new(2, 4.0, inkling2::train::targets(false));
+    let base_tier = model::ops::TierPolicy::uniform(gpu_core::select::Dtype::F32);
+    // seed: any factors; the engine reads the file the trainer saves.
+    let adapted = Inkling2Train::from_dir_lora(&ckpt, lora, &inkling2::train::BuildOptions { batch: 1, seq: tokens.len() as u32, base: &base_tier, seed: 3, continue_from: None }).unwrap();
+    random_adapters(&adapted, 3);
+    let scratch = brain_testutil::Scratch::dir("inkling2-scoring-adapter");
+    let path = scratch.path().join("adapter.safetensors");
+    inkling2::finetune::save_adapter_file(&adapted, &path).unwrap();
+    let want_adapted = adapted.logits(&tokens).unwrap();
+    let mut engine = inkling2::finetune::Inkling2Trainer::serving_engine(&ckpt, &tiers, Some(&path), tokens.len() as u32).expect("the family serves").expect("an adapter is served");
+    for (p, hidden) in engine.hidden_at(&tokens, &positions).into_iter().enumerate() {
+        let got = engine.logits(&hidden);
+        let row = &want_adapted[p * valid..(p + 1) * valid];
+        let scale = row.iter().fold(1.0f32, |m, v| m.max(v.abs()));
+        let err = got.iter().zip(row).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max) / scale;
+        assert!(err <= 1e-4, "position {p}: the adapter's served logits differ by {err:.3e} of their scale");
+        let moved = got.iter().zip(&want[p * valid..(p + 1) * valid]).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max) / scale;
+        assert!(p == 0 || moved > 1e-3, "position {p}: the adapter moves the logits ({moved:.3e})");
+    }
 }
 
 /// The backward recomputes every visit from its saved input: it accepts recompute and refuses keeping every visit by

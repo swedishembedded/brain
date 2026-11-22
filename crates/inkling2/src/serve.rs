@@ -101,6 +101,9 @@ pub struct Engine {
     drafter: Option<Dflash2Drafter>,
     /// The verify awaiting [`PagedDecoder::commit_verified`]: each sequence's rows and first position.
     pending: Vec<(Vec<u32>, u32)>,
+    /// The adapter every sequence of the base's namespace runs under ([`Engine::serve_base_as`]), pinned for the
+    /// engine's life: a scoring engine that measures what an adapter serves.
+    base_as: Option<AdapterId>,
 }
 
 /// Collects the tapped depths' rows as a pass runs (the trunk's probe keys).
@@ -135,20 +138,37 @@ impl Probe for TapProbe {
 /// - the depth-attention query banks (depth, readout and message queries) as merged sites: a matrix depth attention
 ///   reads whole, served as each bank slot's effective matrix and handed to depth attention per row
 ///   ([`model::depth_attn::DepthAttn::with_row_queries`]) when the rows of a pass run under different adapters.
-pub struct ServedSites<'a>(pub &'a Inkling2Config);
+///
+/// The expert sites are listed only over published microscaled banks (`banked_experts`): a dense f32 bank has no
+/// served expert product to correct, so an adapter of the `all` group over such a checkpoint leaves them out.
+pub struct ServedSites<'a> {
+    pub cfg: &'a Inkling2Config,
+    pub banked_experts: bool,
+}
+
+impl<'a> ServedSites<'a> {
+    /// The sites served over `cfg`, its expert banks published microscaled when `banked_experts`.
+    pub fn new(cfg: &'a Inkling2Config, banked_experts: bool) -> ServedSites<'a> {
+        ServedSites { cfg, banked_experts }
+    }
+}
 
 /// The leaves of the sites a forward reads whole: the depth-attention query banks.
 pub const QUERY_LEAVES: [&str; 5] = ["attn_queries", "mlp_queries", "output_query", "middle_cycle_cross_pass_queries", "middle_cycle_cross_pass_kv_queries"];
 
 impl LoraSites for ServedSites<'_> {
     fn lora_sites(&self) -> Vec<LinearSite> {
-        lora_sites(self.0).into_iter().map(|(site, _)| site).filter(|site| !QUERY_LEAVES.contains(&site.leaf)).collect()
+        lora_sites(self.cfg).into_iter().map(|(site, _)| site).filter(|site| !QUERY_LEAVES.contains(&site.leaf)).collect()
     }
     fn expert_sites(&self) -> Vec<ExpertSite> {
-        expert_sites(self.0)
+        if self.banked_experts {
+            expert_sites(self.cfg)
+        } else {
+            Vec::new()
+        }
     }
     fn merged_sites(&self) -> Vec<LinearSite> {
-        lora_sites(self.0).into_iter().map(|(site, _)| site).filter(|site| QUERY_LEAVES.contains(&site.leaf)).collect()
+        lora_sites(self.cfg).into_iter().map(|(site, _)| site).filter(|site| QUERY_LEAVES.contains(&site.leaf)).collect()
     }
 }
 
@@ -202,7 +222,7 @@ impl Engine {
         let layout = Self::layout(cfg, opts.kv_tier)?;
         let pool = VisitPool::new(m.ops().gpu(), layout, opts.sizing)?;
         let readout = ReadoutKernels::resolve(m.ops().gpu())?;
-        Ok(Engine { m, pool, readout, max_seq_len: opts.max_seq_len, prefill_chunk: opts.prefill_chunk, bank: None, taps: None, drafter: None, pending: Vec::new() })
+        Ok(Engine { m, pool, readout, max_seq_len: opts.max_seq_len, prefill_chunk: opts.prefill_chunk, bank: None, base_as: None, taps: None, drafter: None, pending: Vec::new() })
     }
 
     /// Load the checkpoint in `dir` onto `ops` and serve it at `opts`.
@@ -235,20 +255,41 @@ impl Engine {
         if self.bank.is_some() {
             return Err(AdapterError::BadConfig("the adapter bank is already enabled".into()));
         }
-        let sites = ServedSites(self.m.config());
-        let experts = sites.expert_sites();
-        if experts.iter().any(|e| cfg.targets.iter().any(|t| t == e.leaf)) && !self.m.experts_are_banked() {
+        let sites = self.served_sites();
+        if expert_sites(self.m.config()).iter().any(|e| cfg.targets.iter().any(|t| t == e.leaf)) && !self.m.experts_are_banked() {
             return Err(AdapterError::BadConfig("inkling2: expert adapters are served over the published NVFP4/MXFP8 banks; this checkpoint stores its experts dense".into()));
         }
         let rows = (self.pool.max_batch() as u32).max(self.prefill_chunk);
         cfg.merged = sites.merged_sites();
         let served: Vec<String> = cfg.merged.iter().filter(|m| cfg.targets.iter().any(|t| t == m.leaf)).map(|m| m.name.clone()).collect();
-        let mut bank = AdapterBank::new_with_experts(self.g(), &sites.lora_sites(), &experts, cfg, rows, 0..self.m.config().n_layers as usize)?;
+        let mut bank = AdapterBank::new_with_experts(self.g(), &sites.lora_sites(), &sites.expert_sites(), cfg, rows, 0..self.m.config().n_layers as usize)?;
         for name in served {
             let values = self.m.query_matrix(&name).ok_or_else(|| AdapterError::BadConfig(format!("inkling2: {name} is a served query bank the model does not hold")))?;
             bank.set_base_saved(self.g(), &name, &values).map_err(AdapterError::BadConfig)?;
         }
         self.bank = Some(bank);
+        Ok(())
+    }
+
+    /// The adapter sites this engine serves: every site of [`ServedSites`], the expert sites over published banks only.
+    pub fn served_sites(&self) -> ServedSites<'_> {
+        ServedSites::new(self.m.config(), self.m.experts_are_banked())
+    }
+
+    /// Run every sequence of the base's namespace under the registered adapter `id` from now on (it is made resident
+    /// and pinned for the engine's life): an engine that scores what the adapter serves through callers that address
+    /// no adapter ([`model::finetune::ChatTrainer::serving_engine`]). Sequences of an adapter's namespace keep theirs.
+    pub fn serve_base_as(&mut self, id: AdapterId) -> Result<(), AdapterError> {
+        let bank = self.bank.as_mut().ok_or(AdapterError::NoBank)?;
+        loop {
+            match bank.availability(self.m.ops().gpu(), id) {
+                model::serve::AdapterAvailability::Resident => break,
+                model::serve::AdapterAvailability::Loading => {}
+                model::serve::AdapterAvailability::Unknown => return Err(AdapterError::Unknown(id)),
+            }
+        }
+        bank.pin(id);
+        self.base_as = Some(id);
         Ok(())
     }
 
@@ -282,7 +323,11 @@ impl Engine {
             assert!(tables.iter().all(|t| t.kv_namespace() == BASE_KV_NAMESPACE), "inkling2 serve: a sequence runs under an adapter but this engine has no adapter bank");
             return None;
         };
-        let slots: Vec<u32> = tables.iter().flat_map(|t| std::iter::repeat_n(bank.slot_of(t.kv_namespace()), rows_each)).collect();
+        let namespace_of = |t: &BlockTable| match (t.kv_namespace(), self.base_as) {
+            (ns, Some(id)) if ns == BASE_KV_NAMESPACE => id.kv_namespace(),
+            (ns, _) => ns,
+        };
+        let slots: Vec<u32> = tables.iter().flat_map(|t| std::iter::repeat_n(bank.slot_of(namespace_of(t)), rows_each)).collect();
         bank.write_slots(self.g(), &slots);
         Some((bank, slots))
     }

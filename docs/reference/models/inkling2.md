@@ -93,11 +93,6 @@ curl -s localhost:8788/v1/chat/completions -H "Authorization: Bearer $KEY" -d '{
     {"type": "text", "text": "What is in this picture?"}]}]}'
 ```
 
-Adapters: the engine serves LoRA adapters of the trainer's linear and expert
-sites per sequence (`inkling2::serve::Engine::enable_adapters`, `load_adapter`),
-but `brain serve` does not yet offer an Inkling 2 adapter as a model of its
-own. Not served yet: that.
-
 ## Speculative decoding
 
 The release ships a drafter beside the decoder, `mtp.safetensors` (636 MB): a
@@ -123,6 +118,35 @@ windows and convolution states and is rolled back when proposals are rejected),
 the drafter's weights and caches are resident, and the four hidden states of every
 cached position are kept in host memory (18 KB per position). `dflash` is refused:
 this model has no DFlash2 draft model. Adapter requests decode without speculation.
+
+## Adapters
+
+A LoRA adapter the trainer saved (see Training) is served beside the base it was
+trained on, as a model of its own: its id is the adapter's card id
+(`<base>:<owner>:<name>:<tag>`, `brain finetune --adapter-id` sets it; the default
+is `<base>:local:chat:latest`), and a request selects it by naming that id as its
+`model`. Base and adapter requests run in the same batches over one resident copy
+of the weights; every site the trainer adapts is applied, beside the published
+weights, never folded into them (the expert banks stay NVFP4/MXFP8).
+
+```bash
+brain finetune thinkingmachines/Inkling-2-Mini --lora 16 --dataset train.jsonl --out runs/sft \
+  --adapter-id thinkingmachines/Inkling-2-Mini:lab:support:v1
+# either put it in the model store, where the scan finds it beside its base ...
+dest=~/.local/share/brain/models/thinkingmachines/Inkling-2-Mini/adapters/lab/support/v1
+mkdir -p "$dest" && cp runs/sft/adapter.safetensors "$dest/adapter.brain.safetensors"
+brain serve --openai 8788
+# ... or serve a directory of adapters, followed while the server runs
+mkdir -p adapters && cp runs/sft/adapter.safetensors adapters/support-v1.safetensors
+brain serve --openai 8788 --serve-adapters adapters
+curl -s localhost:8788/v1/chat/completions -H "Authorization: Bearer $KEY" \
+  -d '{"model": "thinkingmachines/Inkling-2-Mini:lab:support:v1", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+The adapter must name the served base (its card's base id or digest); the bank's
+size follows the flags of the serving guide (`--adapter-slots`,
+`--adapter-rank-cap`, `--adapter-targets`; by default every site, at the highest
+rank of the adapters the store holds).
 
 ## Training
 
