@@ -28,6 +28,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
@@ -79,7 +80,8 @@ def main() -> None:
 
     messages = [{"role": "user", "content": QUESTION}]
     for effort in ("low", "high"):
-        params = {"messages": messages, "max_new": args.max_new, "temp": 0.0}
+        # `messages` is a string param on the wire (JSON text); the HTTP transports parse it back into their body.
+        params = {"messages": json.dumps(messages), "max_new": args.max_new, "temp": 0.0}
         if args.model != "brain/mock":
             params["reasoning_effort"] = effort
         started = time.monotonic()

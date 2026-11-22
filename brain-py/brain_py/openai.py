@@ -39,6 +39,13 @@ def _normalize_base_url(url: str) -> str:
     return url
 
 
+def _reasoning_settings(params: dict, body: dict[str, Any]) -> None:
+    """The contract's reasoning params as the OpenAI dialect carries them (top level, as brain's server reads them)."""
+    for key in ("reasoning_effort", "enable_thinking"):
+        if params.get(key) is not None:
+            body[key] = params[key]
+
+
 @dataclass
 class BrainOpenAI(BrainBase):
     """Talk to `brain serve --openai <port>` over its OpenAI-compatible
@@ -141,10 +148,15 @@ class BrainOpenAI(BrainBase):
         for k, dst in (("temp", "temperature"), ("top_p", "top_p"), ("seed", "seed"), ("stop", "stop")):
             if p.get(k) is not None:
                 body[dst] = p[k]
+        _reasoning_settings(p, body)
         data = self._post_json("/chat/completions", body, timeout=timeout)
-        text = data["choices"][0]["message"]["content"]
+        message = data["choices"][0]["message"]
+        text = message.get("content") or ""
         usage = data.get("usage", {})
-        return Outcome(outputs={"text": text, **usage}, blobs={"text": text.encode("utf-8")}, meta={})
+        outputs = {"text": text, **usage}
+        if message.get("reasoning_content"):
+            outputs["reasoning_content"] = message["reasoning_content"]
+        return Outcome(outputs=outputs, blobs={"text": text.encode("utf-8")}, meta={})
 
     def subscribe(
         self,
@@ -175,6 +187,7 @@ class BrainOpenAI(BrainBase):
         body: dict[str, Any] = {"model": model, "messages": msgs, "stream": True}
         if p.get("max_new") is not None:
             body["max_tokens"] = p["max_new"]
+        _reasoning_settings(p, body)
         resp = self._post_stream("/chat/completions", body, timeout=timeout)
         text_parts: list[str] = []
         step = 0

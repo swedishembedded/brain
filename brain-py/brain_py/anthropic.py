@@ -35,6 +35,18 @@ def _normalize_base_url(url: str) -> str:
     return url.rstrip("/")
 
 
+def _reasoning_settings(params: dict, body: dict[str, Any]) -> None:
+    """The contract's `reasoning_effort` as the Anthropic dialect carries it (`output_config.effort`, which takes the
+    names low, medium, high and max), and `enable_thinking` as the `thinking` switch."""
+    effort = params.get("reasoning_effort")
+    if effort is not None:
+        if effort not in ("low", "medium", "high", "max"):
+            raise BrainError(f"anthropic: reasoning_effort {effort!r} has no output_config.effort (low, medium, high or max)")
+        body["output_config"] = {"effort": effort}
+    if params.get("enable_thinking") is False:
+        body["thinking"] = {"type": "disabled"}
+
+
 @dataclass
 class BrainAnthropic(BrainBase):
     """Talk to `brain serve --anthropic <port>` over its Anthropic-compatible
@@ -107,13 +119,19 @@ class BrainAnthropic(BrainBase):
         body: dict[str, Any] = {"model": model, "messages": msgs, "max_tokens": p.get("max_new", DEFAULT_MAX_TOKENS), "stream": False}
         if system:
             body["system"] = system
+        _reasoning_settings(p, body)
         resp = self._post("/v1/messages", body, timeout=timeout)
         try:
             data = json.loads(resp.read())
         finally:
             resp.close()
-        text = "".join(b.get("text", "") for b in data.get("content", []) if b.get("type") == "text")
-        return Outcome(outputs={"text": text, "usage": data.get("usage", {})}, blobs={"text": text.encode("utf-8")}, meta={})
+        blocks = data.get("content", [])
+        text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+        outputs = {"text": text, "usage": data.get("usage", {})}
+        thinking = "".join(b.get("thinking", "") for b in blocks if b.get("type") == "thinking")
+        if thinking:
+            outputs["reasoning_content"] = thinking
+        return Outcome(outputs=outputs, blobs={"text": text.encode("utf-8")}, meta={})
 
     def subscribe(
         self,
@@ -136,6 +154,7 @@ class BrainAnthropic(BrainBase):
         p = params or {}
         msgs, system = self._build_messages(p)
         body: dict[str, Any] = {"model": model, "messages": msgs, "max_tokens": p.get("max_new", DEFAULT_MAX_TOKENS), "stream": True}
+        _reasoning_settings(p, body)
         if system:
             body["system"] = system
         resp = self._post("/v1/messages", body, timeout=timeout)
