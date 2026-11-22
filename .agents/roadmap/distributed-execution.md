@@ -674,6 +674,18 @@ Scope: Running one training job as ranks across machines, and serving one model 
   with the bounded collectives every rank then fails 120 s later with
   "collective 31 was not done 120.0s after the ones before it" (op timeout
   120 s; before, it spun for 30+ minutes).
+- **`brain finetune`, parameter-sharded full fine-tune of Qwen3-4B end to
+  end, 2 GH200s of n442 (gpu0-1, one process per card, 2026-11-22, brain
+  88124f957, NCCL 2.32.3 over NVLink, the 256-record chat set, `--max-block
+  512` (block 73), `weights=bf16,grad=bf16,window=2,clip=running,
+  activations=recompute`, lr 1e-5, 3 steps).** Loss 4.93 (initial probe) ->
+  4.87, 1.96, 0.63; the sharded save took 1.6 s and the export wrote a
+  Hugging Face directory (16.1 GB f32 `model.safetensors`); the job took 45 s
+  wall from srun to export. The export loads on one card (`brain qwen3
+  generate --weights DIR`, 15 GiB) and generates 16 tokens in 14 s with the
+  load ("What is 147 plus 592?" -> " Also, can you explain how to add these
+  numbers step by step?\n\nSure!"). Before the shared sharded save the same
+  run failed at its end ("this model does not shard its parameters").
 - **Cost of bounding every device collective (2026-11-22, n442 cards 2-3,
   `brain bench collectives`, f32, 50 iterations, two runs each).** p50
   before -> after: all-reduce 5.9-6.8 -> 7.7-8.1 us at 8 B, 28.7 -> 31.2-31.8
@@ -938,7 +950,8 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         shard its parameters", Qwen3-4B on 2 cards, 2026-11-22). Test: qwen3
         `sharded_parameters` (2 in-process ranks, CPU: the written file opens
         as a qwen3 checkpoint within bf16 rounding of the single-rank run).
-        Not yet re-run as `brain finetune` of Qwen3-4B on cards.
+        End to end on cards (2026-11-22): `brain finetune` of Qwen3-4B over
+        2 GH200s trains, exports and the export generates (Measured).
       - [x] The 27B gate (2026-11-21): a full-parameter fine-tune step of
         Qwen3.8-27B-FP8 (all 64 layers, bf16 values from the FP8 checkpoint,
         f32 master and AdamW state) parameter-sharded over 8 GH200s on two
