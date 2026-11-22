@@ -87,6 +87,9 @@ pub struct EngineOptions {
     pub prefill_chunk: u32,
 }
 
+/// The replay arena of the decode step's temporaries ([`Engine::decode`]).
+const DECODE_ARENA: &str = "inkling2 decode";
+
 /// The served decoder. See the module doc.
 pub struct Engine {
     m: Inkling2,
@@ -499,21 +502,29 @@ impl Engine {
             self.pool.append(t);
         }
         let b = inputs.len() as u32;
-        let mut s = Vec::new();
-        let x = self.m.embed(&mut s, inputs);
+        // A decode step dispatches the same temporaries at the same sizes every time its batch repeats: they come from a
+        // replay arena (nothing allocated, freed or zero-filled once the shape has run), and the step is one pass, which a
+        // backend that records passes replays as one graph. Every caller reads the step's logits before the next step, the
+        // drain the arena's contract asks for; the arena holds one step's temporaries.
         let recording = tables.iter_mut().any(|t| t.routing_log_mut().is_some());
         let mut routes = recording.then(Vec::new);
         let mut taps = self.tap_probe();
         let logits = {
+            let g = self.m.ops().gpu();
+            let _scratch = g.scratch_scope_in(DECODE_ARENA);
+            let _pass = g.pass_scope();
+            let mut s = Vec::new();
+            let x = self.m.embed(&mut s, inputs);
             let refs: Vec<&BlockTable> = tables.iter().map(|t| &**t).collect();
             let served = self.bank_for(&refs, 1);
             let bank = served.as_ref().map(|(bank, slots)| Banked { bank, slots });
             let rows = self.pool.decode_rows(self.g(), &refs);
             let mut probe: Option<&mut dyn Probe> = taps.as_mut().map(|p| p as &mut dyn Probe);
             let normed = self.m.trunk(&mut s, &Rows::Decode { pool: &self.pool, rows: &rows, bank }, x, b, &mut probe, routes.as_mut()).expect("an admitted batch runs");
-            self.m.head(&mut s, &normed, b)
+            let logits = self.m.head(&mut s, &normed, b);
+            self.m.flush(&mut s);
+            logits
         };
-        self.m.flush(&mut s);
         if let Some(probe) = taps {
             let positions: Vec<(&BlockTable, u32)> = tables.iter().map(|t| (&**t, t.len() - 1)).collect();
             self.retain_taps(probe, &positions);
