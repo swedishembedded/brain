@@ -49,33 +49,37 @@ struct LocalGroup {
 }
 
 /// The members of a [`LocalGroup`] that joined, and why the group was broken, once it was.
+///
+/// Held weakly: each rank's collective ends with the rank, on its own thread. Ending a device group (NCCL's
+/// finalize) is itself collective, so the ranks of one process must end theirs at once; a group that outlived its
+/// ranks here would end them one after another on one thread, and the first would wait forever for the others.
 #[derive(Default)]
 struct Members {
-    joined: Vec<Arc<dyn Collective>>,
+    joined: Vec<std::sync::Weak<dyn Collective>>,
     broken: Option<String>,
 }
 
 impl LocalGroup {
-    fn new(members: Vec<Arc<dyn Collective>>) -> Arc<LocalGroup> {
-        Arc::new(LocalGroup { members: Mutex::new(Members { joined: members, broken: None }), stop_after: Mutex::new(None) })
+    fn new(members: &[Arc<dyn Collective>]) -> Arc<LocalGroup> {
+        Arc::new(LocalGroup { members: Mutex::new(Members { joined: members.iter().map(Arc::downgrade).collect(), broken: None }), stop_after: Mutex::new(None) })
     }
 
     fn abort(&self, why: &str) {
         let mut members = self.members.lock().unwrap_or_else(|e| e.into_inner());
         members.broken.get_or_insert_with(|| why.to_string());
-        for member in &members.joined {
+        for member in members.joined.iter().filter_map(std::sync::Weak::upgrade) {
             member.abort(why);
         }
     }
 
     /// Count `member` in; `Err` with the reason when the group was broken before it joined (it is then broken too).
-    fn admit(&self, member: Arc<dyn Collective>) -> Result<()> {
+    fn admit(&self, member: &Arc<dyn Collective>) -> Result<()> {
         let mut members = self.members.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(why) = &members.broken {
             member.abort(why);
             return Err(Error::Backend(format!("joining the job: the group was aborted: {why}")));
         }
-        members.joined.push(member);
+        members.joined.push(Arc::downgrade(member));
         Ok(())
     }
 }
@@ -112,7 +116,7 @@ impl JobRanks {
         }
         let context = JobContext::new(self.plan.clone(), self.secret.clone(), rank).map_err(Error::MissingArgument)?;
         let group: Arc<dyn Collective> = Arc::new(context.job_collective().map_err(|e| Error::Backend(format!("joining the job: {e}")))?);
-        self.local.admit(Arc::clone(&group))?;
+        self.local.admit(&group)?;
         Ok(DataParallel { group, rank, job: Some((self.plan.job.clone(), self.plan.identity())), sharding: self.plan.sharding, local: Some(Arc::clone(&self.local)) })
     }
 
@@ -120,6 +124,28 @@ impl JobRanks {
     /// the ones that joined fail at once, and so does a later join.
     pub fn abort(&self, why: &str) {
         self.local.abort(why);
+    }
+}
+
+/// Breaks the in-process group of one rank, as [`DataParallel::abort`] does ([`DataParallel::breaker`]).
+#[derive(Clone)]
+pub struct GroupBreaker {
+    local: Option<Arc<LocalGroup>>,
+    rank: usize,
+}
+
+impl std::fmt::Debug for GroupBreaker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GroupBreaker").field("rank", &self.rank).finish()
+    }
+}
+
+impl GroupBreaker {
+    /// [`DataParallel::abort`] for the rank this breaker was made from.
+    pub fn abort(&self, why: &str) {
+        if let Some(local) = &self.local {
+            local.abort(&format!("rank {} failed: {why}", self.rank));
+        }
     }
 }
 
@@ -149,7 +175,7 @@ impl DataParallel {
         if ranks.is_empty() || ranks.end > plan.world_size {
             return Err(Error::InvalidRequest(format!("ranks {ranks:?} are not a range of job {:?}'s {} ranks", plan.job, plan.world_size)));
         }
-        Ok(JobRanks { plan, secret, ranks, local: LocalGroup::new(Vec::new()) })
+        Ok(JobRanks { plan, secret, ranks, local: LocalGroup::new(&[]) })
     }
 
     /// `world` ranks that are threads of this process, one per card: hand rank `r` to the trainer that runs on card
@@ -162,7 +188,7 @@ impl DataParallel {
         let members: Vec<Arc<dyn Collective>> = (0..world)
             .map(|_| Arc::new(JobCollective::new(Arc::clone(&host), CollectivePath::Auto, IN_PROCESS_JOIN, IN_PROCESS_OP).with_bucket_bytes(u64::from(model::job::DEFAULT_BUCKET_MIB) << 20)) as Arc<dyn Collective>)
             .collect();
-        let local = LocalGroup::new(members.clone());
+        let local = LocalGroup::new(&members);
         Ok(members.into_iter().enumerate().map(|(rank, group)| DataParallel { group, rank, job: None, sharding: model::zero::Sharding::Replicated, local: Some(Arc::clone(&local)) }).collect())
     }
 
@@ -171,9 +197,13 @@ impl DataParallel {
     /// every card), and every later one, fails at once with `why` instead of waiting for it. Nothing for a rank of a
     /// launched job, whose launcher sees the process end.
     pub fn abort(&self, why: &str) {
-        if let Some(local) = &self.local {
-            local.abort(&format!("rank {} failed: {why}", self.rank));
-        }
+        self.breaker().abort(why);
+    }
+
+    /// What breaks this rank's in-process group ([`Self::abort`]) without holding the rank: a runner keeps it while
+    /// the rank itself moves to the thread that trains it and ends there, as its collective must.
+    pub fn breaker(&self) -> GroupBreaker {
+        GroupBreaker { local: self.local.clone(), rank: self.rank }
     }
 
     /// Whether this rank goes on after completing step `completed`, given whether its run was `cancelled`. The ranks
@@ -231,5 +261,26 @@ impl DataParallel {
     pub(crate) fn grad_sync(&self) -> model::GradSync<'_> {
         let checkpoint = self.job.as_ref().map(|(job, plan)| model::CheckpointIdentity { job, plan });
         model::GradSync { collective: &*self.group, rank: self.rank, checkpoint, observer: None }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ending a device group is collective, so each rank's must end with the rank, on its own thread, never with a
+    /// group that outlives the ranks and ends them one after another.
+    #[test]
+    fn a_ranks_collective_ends_with_the_rank_not_with_its_peers() {
+        let ranks = DataParallel::in_process(2).unwrap();
+        let breakers: Vec<GroupBreaker> = ranks.iter().map(DataParallel::breaker).collect();
+        let groups: Vec<std::sync::Weak<dyn Collective>> = ranks.iter().map(|r| Arc::downgrade(&r.group)).collect();
+        let mut ranks = ranks.into_iter();
+        drop(ranks.next());
+        assert!(groups[0].upgrade().is_none(), "rank 0's collective ended with rank 0 although rank 1 and the breakers live");
+        assert!(groups[1].upgrade().is_some());
+        breakers[0].abort("gone");
+        drop(ranks);
+        assert!(groups[1].upgrade().is_none());
     }
 }

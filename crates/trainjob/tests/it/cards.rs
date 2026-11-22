@@ -167,11 +167,13 @@ fn a_rank_that_fails_alone_mid_run_fails_the_run_at_once_with_its_reason() {
     let model = crate::fixture::qwen3_model_dir_of("cards-rank-fails", qwen3::QwenConfig::tiny());
     let train = crate::fixture::write_chat_dataset(&model, &[("cab", "bad"), ("fed", "deaf"), ("ace", "face"), ("bag", "gab"), ("dab", "bead"), ("cafe", "face")]);
     let ranks = brain::DataParallel::in_process(2).expect("a two-rank group");
-    let abort = |i: usize, why: &str| ranks[i].abort(why);
+    let breakers: Vec<brain::GroupBreaker> = ranks.iter().map(brain::DataParallel::breaker).collect();
+    let abort = |i: usize, why: &str| breakers[i].abort(why);
+    let slots: Vec<Mutex<Option<brain::DataParallel>>> = ranks.into_iter().map(|rank| Mutex::new(Some(rank))).collect();
     let peer_error: Mutex<Option<String>> = Mutex::new(None);
     let failed_at: Mutex<Option<std::time::Instant>> = Mutex::new(None);
     let body = |r: usize, _frames: Option<std::sync::mpsc::Sender<capability::Progress>>| -> Result<(), String> {
-        let rank = ranks[r].clone();
+        let rank = slots[r].lock().unwrap().take().expect("each rank runs once");
         let tune = brain::ChatFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap()).placed(true).dataset(&train).out_dir(model.join(format!("rank{r}"))).rank(2).steps(1000).lr(1e-2).seed(11).data_parallel(rank);
         let outcome = tune.run_with(&CancelToken::armed(), |step| {
             // Rank 1 fails after step 1, once the group (the device group, on cards) is formed and rank 0 is

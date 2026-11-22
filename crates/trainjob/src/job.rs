@@ -798,8 +798,15 @@ fn train_chat_ranks(request: &Request, env: &JobEnv, base_dir: &Path, teacher_di
         }
         None => {
             let ranks = brain::DataParallel::in_process(devices.len()).map_err(trainer_failure)?;
-            let body = |i: usize, frames| train_rank(ranks[i].clone(), &rank_files[i], frames);
-            run_ranks(devices, &|i, why| ranks[i].abort(why), body, progress)?
+            let breakers: Vec<brain::GroupBreaker> = ranks.iter().map(brain::DataParallel::breaker).collect();
+            // Each rank moves to the thread that trains it and ends there: ending a device group is collective, so
+            // the ranks must end theirs at once, not one after another here.
+            let slots: Vec<Mutex<Option<brain::DataParallel>>> = ranks.into_iter().map(|rank| Mutex::new(Some(rank))).collect();
+            let body = |i: usize, frames| {
+                let rank = slots[i].lock().unwrap_or_else(|e| e.into_inner()).take().ok_or("train: a rank ran twice")?;
+                train_rank(rank, &rank_files[i], frames)
+            };
+            run_ranks(devices, &|i, why| breakers[i].abort(why), body, progress)?
         }
     };
     let mut ranks_trained = ranks_trained;

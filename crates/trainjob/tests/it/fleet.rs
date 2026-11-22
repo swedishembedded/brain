@@ -43,14 +43,15 @@ fn with_job(mut params: Value, plan: &Value, first_rank: usize, digest: &str) ->
 }
 
 #[test]
-fn a_job_over_two_servers_trains_the_adapter_four_cards_of_one_server_train_and_rank_zeros_server_publishes_it() {
+fn a_job_over_two_servers_trains_the_adapter_three_cards_of_one_server_train_and_rank_zeros_server_publishes_it() {
     let secret = brain::JobSecret::random();
     let coordinator = free_address();
     let first = server("fleet-a", &secret, Some(&coordinator));
     let second = server("fleet-b", &secret, None);
-    let plan = plan(4, &coordinator, 60_000);
+    // Uneven parts: two cards on one server, one on the other.
+    let plan = plan(3, &coordinator, 60_000);
     let digest = secret.digest_hex();
-    let (a, b) = (with_job(params(&first, 2), &plan, 0, &digest), with_job(params(&second, 2), &plan, 2, &digest));
+    let (a, b) = (with_job(params(&first, 2), &plan, 0, &digest), with_job(params(&second, 1), &plan, 2, &digest));
     let (published, worker) = std::thread::scope(|scope| {
         let worker = scope.spawn(|| run(&second, b, &[], &Frames::default()));
         let published = run(&first, a, &[], &Frames::default());
@@ -61,14 +62,14 @@ fn a_job_over_two_servers_trains_the_adapter_four_cards_of_one_server_train_and_
     assert_eq!(published["status"], "completed");
     assert!(published["adapter_digest"].as_str().is_some(), "rank 0's server publishes the adapter: {published}");
     assert!(published["adapter_sha256"].as_str().is_some_and(|d| d.starts_with("sha256:")), "{published}");
-    assert_eq!(worker, json!({"status": "completed", "objective": "sft", "job": "fleet-test", "ranks": [2, 3], "adapter_sha256": published["adapter_sha256"]}), "the other server answers for its ranks only, with the same adapter");
+    assert_eq!(worker, json!({"status": "completed", "objective": "sft", "job": "fleet-test", "ranks": [2, 2], "adapter_sha256": published["adapter_sha256"]}), "the other server answers for its ranks only, with the same adapter");
     assert_reservation_returned(&first);
     assert_reservation_returned(&second);
 
-    // The same four ranks as one server's four cards: the same records per rank, the same rank-ordered sums.
-    let four = rig_qwen3_on("fleet-four", 16 << 30, &[0, 1, 2, 3], false);
-    let alone = run(&four, params(&four, 4), &[], &Frames::default()).expect("four cards of one server").outputs;
-    assert_eq!(alone["adapter_sha256"], published["adapter_sha256"], "one job over two servers is the job four cards of one server run");
+    // The same three ranks as one server's three cards: the same records per rank, the same rank-ordered sums.
+    let three = rig_qwen3_on("fleet-three", 16 << 30, &[0, 1, 2], false);
+    let alone = run(&three, params(&three, 3), &[], &Frames::default()).expect("three cards of one server").outputs;
+    assert_eq!(alone["adapter_sha256"], published["adapter_sha256"], "one job over two servers is the job three cards of one server run");
 }
 
 #[test]
