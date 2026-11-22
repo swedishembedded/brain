@@ -14,6 +14,7 @@ mod chat_packed_answers;
 mod chat_rollout_records;
 mod chat_rollout_sampled;
 mod chat_teacher_context;
+mod chat_teacher_scores;
 mod chat_sample_encode;
 mod chat_supervised_observations;
 mod chat_template_cross_check;

@@ -73,7 +73,7 @@ fn a_prepared_dataset_keeps_the_outcome_of_each_example_and_the_behaviour_log_pr
     let ids = binio::read_u32_bin(&out.join("train.u32.bin")).unwrap();
     let mask = binio::read_mask_bin(&out.join("train.mask.bin")).unwrap();
     let rollout = chat_rollout::read(&out, "train", starts.len(), ids.len()).unwrap().expect("sidecars");
-    let graded = |member, reward| Some(chat_rollout::ExampleRollout { graded: Some(chat_rollout::Graded { group: 0, member, reward }) });
+    let graded = |member, reward| Some(chat_rollout::ExampleRollout { graded: Some(chat_rollout::Graded { group: 0, member, reward, teacher_log_ratio: None }) });
     assert_eq!(rollout.groups, ["g"]);
     assert_eq!(rollout.examples, [graded(0, -1.5), None, graded(1, 0.5)], "a record without a reward is an imitation example; each record is a rollout of its own");
 

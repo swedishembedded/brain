@@ -54,6 +54,22 @@
 //!   before the record's message `at` (at or before its first supervised message). The teacher's rendering of the
 //!   conversation is the student's with those messages in it; its supervised tokens must be exactly the student's.
 //!   A record may carry a teacher context instead of a reward (the scalar advantage is then 0) or with one.
+//! * A teacher model's scores of the record's sampled answers, for on-policy distillation from another model
+//!   (`rl::objective::onpolicy_distill`), in one of two forms, on every supervised assistant message of the record:
+//!   * `"teacher_logprobs": [<number>, ...]`: the teacher's log-probability of each token of the answer, one per token
+//!     exactly as `behavior_logprobs` counts them (the `score` action's per-token reply for a token record of the
+//!     sampled `prompt_token_ids` and `token_ids`). Token-level distillation: only for a teacher whose tokenizer is the
+//!     student's, which the run checks; with it the record needs no `reward` (the scalar advantage is then 0).
+//!   * `"teacher_logprob": <number>`: the teacher's log-probability of the answer's text, rendered with the teacher's
+//!     own chat template and tokenized its own way (the `score` action's `logprob` of the answer for the same chat
+//!     record). Sequence-level distillation, for any teacher: the record's signal is the sum of its answers' scores
+//!     less the sum of their `behavior_logprobs` (which they must carry), compared with the other rollouts of its
+//!     `group` (so a `reward` and `group` are needed; a reward of 0 on every rollout when there is no verifier), and the
+//!     record is the whole rollout (no `rollout` key).
+//!
+//!   Both forms in one record, a score on some answers and not others, a score beside a `teacher_context` or a
+//!   per-answer score without what it needs is refused (rule `teacher_scores`), as is a `teacher_logprobs` that does
+//!   not number its answer's tokens (rule `teacher_logprob_count`).
 //!
 //! Version 1's precomputed `"advantage"` is refused, naming the field and its replacement: the trainer computes the
 //! advantage from the rewards of a group, so one implementation decides what a reward is worth.
@@ -63,7 +79,9 @@
 //! `<split>.blp.bin` (`f32` per token of the stream, NaN where no behaviour log-probability was recorded) and
 //! `<split>.trn.bin` (a flag per example, written only when some example is truncated). Preparing a split removes a
 //! stale sidecar. The teacher's renderings are kept as `<split>.tch.u32.bin`, `<split>.tch.mask.bin` and
-//! `<split>.tch.ex.bin` (an example without a teacher context holds none of its own: an empty range).
+//! `<split>.tch.ex.bin` (an example without a teacher context holds none of its own: an empty range). A teacher model's
+//! per-token scores are kept as `<split>.tlp.bin` (`f32` per token, NaN where none was recorded), a rollout's
+//! sequence-level signal with its outcome in `<split>.rollouts.json`.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -84,7 +102,8 @@ pub enum RecordRule {
     /// `prompt_token_ids` are not the tokens of the context the trainer renders before the answer.
     PromptTokenIdsMismatch,
     /// A rollout field (`behavior_logprobs`, `token_ids`, `truncated`, `rollout`, `tokenizer_digest`) on a record with
-    /// no `reward` (and no `teacher_context`), or a `group` without a `reward`: nothing says what its tokens earned.
+    /// no `reward` (and no `teacher_context` or `teacher_logprobs`), or a `group` without a `reward`: nothing says what
+    /// its tokens earned.
     MissingReward,
     /// A `reward` (or a `rollout`) without the `group` it is compared within.
     MissingGroup,
@@ -105,6 +124,14 @@ pub enum RecordRule {
     /// A message's `loss_weight` is not a finite number above 0, sits on a message that is not supervised
     /// (`"train": false`), or on a rollout record, whose tokens a policy gradient weighs by their advantage.
     LossWeight,
+    /// `teacher_logprobs` does not hold one value per token of its answer as the template renders it.
+    TeacherLogprobCount,
+    /// A teacher model's scores (`teacher_logprobs`, `teacher_logprob`) stated so that no distillation estimator can
+    /// use them: both forms in one record, a score on some supervised answers and not on others, beside a
+    /// `teacher_context`, a value that is not a log-probability, or a per-answer score without what the
+    /// sequence-level estimator needs (`behavior_logprobs` on the answer, a `reward` and `group`, and the record being
+    /// its whole rollout: no `rollout` key).
+    TeacherScores,
 }
 
 impl RecordRule {
@@ -123,6 +150,8 @@ impl RecordRule {
             RecordRule::BaselineTrains => "baseline_trains",
             RecordRule::TokenizerMismatch => "tokenizer_mismatch",
             RecordRule::LossWeight => "loss_weight",
+            RecordRule::TeacherLogprobCount => "teacher_logprob_count",
+            RecordRule::TeacherScores => "teacher_scores",
         }
     }
 }
@@ -212,6 +241,9 @@ pub struct Outcome {
     pub group: String,
     /// Which rollout of the group.
     pub member: Member,
+    /// The sequence-level distillation signal of the rollout, when its answers carry a teacher model's
+    /// `teacher_logprob`: the sum of those less the sum of the answers' `behavior_logprobs`, `log q(text) - log p(text)`.
+    pub teacher_log_ratio: Option<f64>,
 }
 
 /// The rollout data of one record: its outcome and, per message of the record, the behaviour log-probabilities of
@@ -230,6 +262,9 @@ pub struct Rollout {
     /// What the teacher is shown instead of the record's own conversation, when the record carries a
     /// `"teacher_context"`.
     pub teacher: Option<Teacher>,
+    /// One entry per message of the record: a teacher model's log-probability of each token of that answer
+    /// (`"teacher_logprobs"`), on a supervised assistant message whose record carries them.
+    pub teacher_logprobs: Vec<Option<Vec<f32>>>,
     /// The tokenizer the sampler encoded the rollout with (`sha256:<hex>`), when the record names it.
     pub tokenizer_digest: Option<String>,
     /// The record only sets its group's baseline (`"baseline_only": true`): its reward counts among the group's, and
@@ -262,10 +297,38 @@ impl Rollout {
         self.behavior_logprobs.iter().any(Option::is_some)
     }
 
+    /// Whether any message of the record carries a teacher model's per-token log-probabilities.
+    pub fn has_teacher_logprobs(&self) -> bool {
+        self.teacher_logprobs.iter().any(Option::is_some)
+    }
+
     /// The rollout of a sample derived from this record's (a prefix, one answer, a packing): the same outcome, with
-    /// the derived sample's log-probabilities and teacher view.
-    pub(crate) fn derived(&self, behavior_logprobs: Vec<Option<Vec<f32>>>, token_ids: Vec<Option<SampledIds>>, teacher: Option<Teacher>) -> Rollout {
-        Rollout { outcome: self.outcome.clone(), truncated: self.truncated, behavior_logprobs, token_ids, teacher, tokenizer_digest: self.tokenizer_digest.clone(), baseline_only: self.baseline_only }
+    /// the derived sample's per-message data (`sampled`) and teacher view.
+    pub(crate) fn derived(&self, sampled: PerMessage, teacher: Option<Teacher>) -> Rollout {
+        let PerMessage { behavior_logprobs, token_ids, teacher_logprobs } = sampled;
+        Rollout { outcome: self.outcome.clone(), truncated: self.truncated, behavior_logprobs, token_ids, teacher, teacher_logprobs, tokenizer_digest: self.tokenizer_digest.clone(), baseline_only: self.baseline_only }
+    }
+
+    /// The per-message data of the first `len` messages.
+    pub(crate) fn first_messages(&self, len: usize) -> PerMessage {
+        PerMessage { behavior_logprobs: self.behavior_logprobs[..len].to_vec(), token_ids: self.token_ids[..len].to_vec(), teacher_logprobs: self.teacher_logprobs[..len].to_vec() }
+    }
+}
+
+/// What a rollout records per message of its record, `Some` only on a supervised assistant message: the sampler's
+/// log-probabilities and ids, and a teacher model's per-token log-probabilities. Empty for a sample that no longer
+/// holds its messages (one rendered as asked or packed carries them on its segments).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PerMessage {
+    pub(crate) behavior_logprobs: Vec<Option<Vec<f32>>>,
+    pub(crate) token_ids: Vec<Option<SampledIds>>,
+    pub(crate) teacher_logprobs: Vec<Option<Vec<f32>>>,
+}
+
+impl PerMessage {
+    /// Nothing per message.
+    pub(crate) fn none() -> PerMessage {
+        PerMessage::default()
     }
 }
 
@@ -302,25 +365,37 @@ pub(crate) fn check_tokenizer_digest(digest: &str) -> Result<(), String> {
 }
 
 /// One message's behaviour log-probabilities: a non-empty list of finite numbers, none above zero.
-pub(crate) fn check_behavior_logprobs(values: &serde_json::Value) -> Result<Vec<f32>, String> {
-    let list = values.as_array().ok_or_else(|| "\"behavior_logprobs\" is not a list of numbers".to_string())?;
+pub(crate) fn check_logprobs(name: &str, values: &serde_json::Value) -> Result<Vec<f32>, String> {
+    let list = values.as_array().ok_or_else(|| format!("\"{name}\" is not a list of numbers"))?;
     if list.is_empty() {
-        return Err("\"behavior_logprobs\" is empty; omit it when the sampler did not record any".to_string());
+        return Err(format!("\"{name}\" is empty; omit it when none were recorded"));
     }
     list.iter()
         .enumerate()
         .map(|(k, v)| {
-            let number = v.as_f64().ok_or_else(|| format!("\"behavior_logprobs\"[{k}] is {v}, which is not a number"))?;
+            let number = v.as_f64().ok_or_else(|| format!("\"{name}\"[{k}] is {v}, which is not a number"))?;
             let narrowed = number as f32;
             if !number.is_finite() || !narrowed.is_finite() {
-                Err(format!("\"behavior_logprobs\"[{k}] is {number}, which is not a finite number"))
+                Err(format!("\"{name}\"[{k}] is {number}, which is not a finite number"))
             } else if narrowed > LOGPROB_SLACK {
-                Err(format!("\"behavior_logprobs\"[{k}] is {number}; a log-probability is at most 0"))
+                Err(format!("\"{name}\"[{k}] is {number}; a log-probability is at most 0"))
             } else {
                 Ok(narrowed.min(0.0))
             }
         })
         .collect()
+}
+
+/// One log-probability as the wire gives it (`name` the field): a finite number at most zero.
+pub(crate) fn check_logprob(name: &str, value: &serde_json::Value) -> Result<f64, String> {
+    let number = value.as_f64().ok_or_else(|| format!("\"{name}\" is {value}, which is not a number"))?;
+    if !number.is_finite() {
+        return Err(format!("\"{name}\" is {number}, which is not a finite number"));
+    }
+    if number > f64::from(LOGPROB_SLACK) {
+        return Err(format!("\"{name}\" is {number}; a log-probability is at most 0"));
+    }
+    Ok(number.min(0.0))
 }
 
 /// What a run does with a rollout marked `"truncated": true`.
@@ -482,6 +557,9 @@ pub struct Graded {
     /// The rollout within the split: examples with one `member` are calls (or answers) of one rollout.
     pub member: u32,
     pub reward: f64,
+    /// The rollout's sequence-level distillation signal ([`Outcome::teacher_log_ratio`]), when it carries one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teacher_log_ratio: Option<f64>,
 }
 
 /// What a prepared example says about its rollout; an imitation example has none.
@@ -527,8 +605,8 @@ pub fn write(dir: &Path, split: &str, rollouts: &[Option<Option<Outcome>>], base
     if rollouts.iter().all(Option::is_none) && baselines.is_empty() {
         return Ok(());
     }
-    if let Some(o) = rollouts.iter().flatten().flatten().chain(baselines).find(|o| !o.reward.is_finite()) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("group {:?}: reward {} is not a finite number", o.group, o.reward)));
+    if let Some(o) = rollouts.iter().flatten().flatten().chain(baselines).find(|o| !o.reward.is_finite() || o.teacher_log_ratio.is_some_and(|r| !r.is_finite())) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("group {:?}: reward {} or teacher log-ratio {:?} is not a finite number", o.group, o.reward, o.teacher_log_ratio)));
     }
     let mut groups: Vec<String> = Vec::new();
     let mut group_index: BTreeMap<String, u32> = BTreeMap::new();
@@ -540,7 +618,7 @@ pub fn write(dir: &Path, split: &str, rollouts: &[Option<Option<Outcome>>], base
         });
         let next = member_index.len() as u32;
         let member = *member_index.entry((group, o.member.clone())).or_insert(next);
-        Graded { group, member, reward: o.reward }
+        Graded { group, member, reward: o.reward, teacher_log_ratio: o.teacher_log_ratio }
     };
     let examples: Vec<Option<ExampleRollout>> = rollouts.iter().map(|rollout| rollout.as_ref().map(|outcome| ExampleRollout { graded: outcome.as_ref().map(&mut grade) })).collect();
     let baselines: Vec<Graded> = baselines.iter().map(&mut grade).collect();
@@ -584,7 +662,7 @@ pub fn read(dir: &Path, split: &str, examples: usize, tokens: usize) -> io::Resu
         return Err(bad(format!("{}: rollouts for {} examples, the split holds {examples}", outcomes.display(), file.examples.len())));
     }
     for (e, graded) in file.examples.iter().enumerate().filter_map(|(e, r)| r.and_then(|r| r.graded).map(|g| (e, g))).chain(file.baselines.iter().map(|g| (usize::MAX, *g))) {
-        if graded.group as usize >= file.groups.len() || !graded.reward.is_finite() {
+        if graded.group as usize >= file.groups.len() || !graded.reward.is_finite() || graded.teacher_log_ratio.is_some_and(|r| !r.is_finite()) {
             return Err(bad(format!("{}: example {e} names group {} of {} with reward {}", outcomes.display(), graded.group, file.groups.len(), graded.reward)));
         }
     }
@@ -677,4 +755,39 @@ pub fn read_teacher(dir: &Path, split: &str, examples: usize) -> io::Result<Opti
         return Err(bad(format!("{}: example starts are not ordered within the stream", starts_file.display())));
     }
     Ok(Some(TeacherStream { ids, mask, starts }))
+}
+
+fn teacher_logprobs_name(dir: &Path, split: &str) -> PathBuf {
+    dir.join(format!("{split}.tlp.bin"))
+}
+
+/// Write a split's per-token teacher log-probabilities (`teacher_logprobs[t]` token `t`'s, NaN where the record
+/// carried none). Nothing is written, and a stale sidecar is removed, when no token carries one.
+pub fn write_teacher_logprobs(dir: &Path, split: &str, teacher_logprobs: &[f32]) -> io::Result<()> {
+    let file = teacher_logprobs_name(dir, split);
+    match std::fs::remove_file(&file) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+    }
+    if teacher_logprobs.iter().all(|t| t.is_nan()) {
+        return Ok(());
+    }
+    binio::write_f32_bin(&file, teacher_logprobs)
+}
+
+/// The per-token teacher log-probabilities of `split` in `dir`, checked against the `tokens` the split holds (NaN
+/// where none was recorded); `None` when no token carries one.
+pub fn read_teacher_logprobs(dir: &Path, split: &str, tokens: usize) -> io::Result<Option<Vec<f32>>> {
+    let file = teacher_logprobs_name(dir, split);
+    if !file.exists() {
+        return Ok(None);
+    }
+    let values = binio::read_f32_bin(&file)?;
+    if values.len() != tokens {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{}: teacher log-probabilities for {} tokens, the split holds {tokens}", file.display(), values.len())));
+    }
+    if let Some(t) = values.iter().position(|v| v.is_infinite() || *v > LOGPROB_SLACK) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{}: token {t} has teacher log-probability {}, which is not a log-probability", file.display(), values[t])));
+    }
+    Ok(Some(values))
 }

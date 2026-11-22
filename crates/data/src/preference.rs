@@ -155,7 +155,7 @@ pub(crate) struct WireTurn {
 
 impl WireTurn {
     pub(crate) fn into_message(self, train: bool) -> WireMessage {
-        WireMessage { role: self.role, content: self.content.into(), tool_calls: self.tool_calls, tool_call_id: self.tool_call_id, reasoning_content: self.reasoning_content, train, behavior_logprobs: None, token_ids: None, prompt_token_ids: None, loss_weight: None }
+        WireMessage { role: self.role, content: self.content.into(), tool_calls: self.tool_calls, tool_call_id: self.tool_call_id, reasoning_content: self.reasoning_content, train, behavior_logprobs: None, token_ids: None, prompt_token_ids: None, loss_weight: None, teacher_logprobs: None, teacher_logprob: None }
     }
 }
 

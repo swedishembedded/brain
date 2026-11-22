@@ -91,7 +91,7 @@ fn a_teacher_context_may_come_with_a_reward_and_behaviour_log_probs() {
     let ids = binio::read_u32_bin(&out.join("train.u32.bin")).unwrap();
     let rollout = chat_rollout::read(&out, "train", 1, ids.len()).unwrap().unwrap();
     assert_eq!(rollout.groups, ["g"]);
-    assert_eq!(rollout.examples, [Some(chat_rollout::ExampleRollout { graded: Some(chat_rollout::Graded { group: 0, member: 0, reward: 0.75 }) })]);
+    assert_eq!(rollout.examples, [Some(chat_rollout::ExampleRollout { graded: Some(chat_rollout::Graded { group: 0, member: 0, reward: 0.75, teacher_log_ratio: None }) })]);
     assert_eq!(rollout.behavior.iter().filter(|b| !b.is_nan()).count(), 1 + "<|im_end|>".len());
 }
 

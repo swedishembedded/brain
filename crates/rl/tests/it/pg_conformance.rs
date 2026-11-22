@@ -231,8 +231,8 @@ fn run_advantages(rollouts: &[(&str, f64)], norm: AdvantageNorm) -> Vec<f64> {
     let mut split = EncodedSplit::default();
     for (k, &(group, reward)) in rollouts.iter().enumerate() {
         let ids: Vec<u32> = (0..6).map(|i| 1 + ((k + i) % 20) as u32).collect();
-        let outcome = Outcome { reward, group: group.to_string(), member: Member::Named(format!("r{k}")) };
-        split.push_rollout(&data::chat::EncodedSample { ids, mask: (0..6).map(|i| i >= 3).collect(), behavior: vec![f32::NAN; 6], loss_weights: None, teacher: None, truncated: false }, &[], Some(Some(outcome)));
+        let outcome = Outcome { reward, group: group.to_string(), member: Member::Named(format!("r{k}")), teacher_log_ratio: None };
+        split.push_rollout(&data::chat::EncodedSample { ids, mask: (0..6).map(|i| i >= 3).collect(), behavior: vec![f32::NAN; 6], loss_weights: None, teacher: None, truncated: false, teacher_logprobs: Vec::new() }, &[], Some(Some(outcome)));
     }
     data::chat::write_split(dir.path(), "train", &split).unwrap();
     data::chat::write_split(dir.path(), "val", &split).unwrap();

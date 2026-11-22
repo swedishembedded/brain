@@ -44,7 +44,7 @@ fn write_dataset(dir: &Path, examples: usize, teacher: bool) {
         });
         // Pairs of rollouts, rewards 1 and -1: advantages +1 and -1 (an odd last example joins the pair before it).
         let pair = (e / 2).min((examples / 2).max(1) - 1);
-        let outcome = data::chat_rollout::Outcome { reward: if e % 2 == 0 { 1.0 } else { -1.0 }, group: format!("pair-{pair}"), member: data::chat_rollout::Member::Named(format!("{e}")) };
+        let outcome = data::chat_rollout::Outcome { reward: if e % 2 == 0 { 1.0 } else { -1.0 }, group: format!("pair-{pair}"), member: data::chat_rollout::Member::Named(format!("{e}")), teacher_log_ratio: None };
         split.push_rollout(&EncodedSample { ids, mask, behavior: vec![f32::NAN; STUDENT_LEN], teacher, ..Default::default() }, &[], Some(Some(outcome)));
     }
     data::chat::write_split(dir, "train", &split).unwrap();
