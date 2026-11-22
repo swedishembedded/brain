@@ -11,7 +11,8 @@
 //! - an MXFP8 bank (E4M3 elements, U8-stored E8M0 scale per 32) whose gather and grouped products equal the f64
 //!   product of the decoded weights and agree with each other to the bit;
 //! - an NVFP4 bank whose per-expert second level is the release's `amax / outer_scale_denominator`, folded once at
-//!   open, carried into the bank's `global` (the product itself runs where the device has workgroup reductions).
+//!   open, carried into the bank's `global`, whose gather and grouped products likewise equal the decoded product and
+//!   agree with each other to the bit.
 
 use checkpoint::packed::{BoundedWorkspace, CodecRegistry, MemoryBudget, PackedReader, PackedSource, PackedTensorReader, SlicedReader, Tile, TileBuf};
 use data::rng::Lcg;
@@ -157,12 +158,8 @@ fn stacked_expert_projections_load_into_banks_and_multiply_as_decoded() {
     assert_eq!(nv.kind, MicroScaled::Nvfp4);
     let got: Vec<u32> = ops.gpu().read(&nv.global, E).iter().map(|v| v.to_bits()).collect();
     assert_eq!(got, globals.map(f32::to_bits), "each expert's global is its amax over the denominator, folded once");
-    if ops.gpu().caps().workgroup_reductions {
-        let (gather, grouped) = products(&ops, &nv, &x, &ids, xdiv as u32);
-        check("nvfp4 gather", &gather, &decoded(&reader, "nv_weight"), &x, &ids, xdiv);
-        check("nvfp4 grouped", &grouped, &decoded(&reader, "nv_weight"), &x, &ids, xdiv);
-    } else {
-        brain_testutil::skip_unavailable("the NVFP4 bank products need workgroup reductions; the bank's globals were checked");
-    }
+    let (gather, grouped) = products(&ops, &nv, &x, &ids, xdiv as u32);
+    check("nvfp4 gather", &gather, &decoded(&reader, "nv_weight"), &x, &ids, xdiv);
+    assert_eq!(gather.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), grouped.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), "nvfp4 grouped is the gather's arithmetic");
     let _ = std::fs::remove_dir_all(&dir);
 }

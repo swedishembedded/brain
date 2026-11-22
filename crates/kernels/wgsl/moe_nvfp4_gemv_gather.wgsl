@@ -4,9 +4,9 @@
 // expertise in 4-bit expert GEMMs then you can procure our services by sending an email to info@swedishembedded.com.
 
 // @what  Sparse-MoE NVFP4 GEMV over a fused expert bank: each slot reads ITS expert's 4-bit weight rows out of one buffer, activations stay f32 (W4A16) - the decode-regime expert GEMM
-// @how   16 lanes per weight row, 16-byte vector loads of 32 E2M1 codes, E4M3 scale per 16, f32 per-expert global scale, ordered fold
+// @how   16 lanes per weight row, 16-byte vector loads of 32 E2M1 codes, register decode, E4M3 scale per 16, f32 per-expert global scale, one top-level barrier, ordered fold
 // @opt   4
-// @cpu   no
+// @cpu   yes
 // @gpu   yes
 // @npu   no
 // @quant nvfp4
@@ -75,30 +75,18 @@ fn fp4_value(c: u32) -> f32 {
     return v;
 }
 
-// byte -> the two E2M1 values it holds (low nibble first): decoding a weight word is four table reads, not 8 decodes.
-var<workgroup> pair_lut: array<vec2<f32>, 256>;
-
-fn init_pair_lut(t: u32) {
-    for (var i = t; i < 256u; i = i + 64u) {
-        pair_lut[i] = vec2<f32>(fp4_value(i & 15u), fp4_value(i >> 4u));
-    }
-}
-
 // The dot product of the 8 codes of word `w` with the 8 activations `xa`, `xb` (low code first).
+// Decoded in registers (no workgroup table), so the kernel has one top-level barrier and runs on the CPU JIT too.
 fn dot8(w: u32, xa: vec4<f32>, xb: vec4<f32>) -> f32 {
-    let p0 = pair_lut[w & 255u];
-    let p1 = pair_lut[(w >> 8u) & 255u];
-    let p2 = pair_lut[(w >> 16u) & 255u];
-    let p3 = pair_lut[w >> 24u];
-    return p0.x * xa.x + p0.y * xa.y + p1.x * xa.z + p1.y * xa.w + p2.x * xb.x + p2.y * xb.y + p3.x * xb.z + p3.y * xb.w;
+    return fp4_value(w & 15u) * xa.x + fp4_value((w >> 4u) & 15u) * xa.y + fp4_value((w >> 8u) & 15u) * xa.z
+        + fp4_value((w >> 12u) & 15u) * xa.w + fp4_value((w >> 16u) & 15u) * xb.x + fp4_value((w >> 20u) & 15u) * xb.y
+        + fp4_value((w >> 24u) & 15u) * xb.z + fp4_value(w >> 28u) * xb.w;
 }
 
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wg: vec3<u32>,
         @builtin(local_invocation_id) li: vec3<u32>,
         @builtin(num_workgroups) nwg: vec3<u32>) {
-    init_pair_lut(li.x);
-    workgroupBarrier();
     let blk = wg.y * nwg.x + wg.x;
     let tiles = (p.n + COLS - 1u) / COLS;
     let slot = blk / tiles;
@@ -126,11 +114,14 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
     }
     partial[li.x] = acc;
     workgroupBarrier();
-    if (lane == 0u && live) {
+    // After the barrier the slot is located again, not carried across it (the CPU JIT re-initialises locals there).
+    let blk2 = wg.y * nwg.x + wg.x;
+    let slot2 = blk2 / tiles;
+    let col2 = (blk2 % tiles) * COLS + li.x / LANES;
+    if (li.x % LANES == 0u && slot2 < p.slots && col2 < p.n) {
         var s = 0.0;
         let c = (li.x / LANES) * LANES;
         for (var i = 0u; i < LANES; i = i + 1u) { s = s + partial[c + i]; }
-        // The expert is read again: a local set before the barrier is not carried across it (the CPU JIT).
-        out[slot * p.n + col] = s * gl[ids[slot]];
+        out[slot2 * p.n + col2] = s * gl[ids[slot2]];
     }
 }

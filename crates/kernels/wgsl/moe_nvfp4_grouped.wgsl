@@ -5,9 +5,9 @@
 // services by sending an email to info@swedishembedded.com.
 
 // @what  Sparse-MoE NVFP4 GEMM over a fused expert bank with each expert's slots grouped: a 4-bit weight row is decoded once for up to 8 slots - the prefill-regime expert GEMM
-// @how   16 lanes per weight row, 8 slots per weight pass, E2M1 x E4M3 x f32 decoded once per chunk, ordered fold
+// @how   16 lanes per weight row, 8 slots per weight pass, E2M1 x E4M3 x f32 decoded in registers once per chunk, one top-level barrier, ordered fold
 // @opt   4
-// @cpu   no
+// @cpu   yes
 // @gpu   yes
 // @npu   no
 // @quant nvfp4
@@ -72,30 +72,18 @@ fn fp4_value(c: u32) -> f32 {
     return v;
 }
 
-// byte -> the two E2M1 values it holds (low nibble first): decoding a weight word is four table reads, not 8 decodes.
-var<workgroup> pair_lut: array<vec2<f32>, 256>;
-
-fn init_pair_lut(t: u32) {
-    for (var i = t; i < 256u; i = i + 64u) {
-        pair_lut[i] = vec2<f32>(fp4_value(i & 15u), fp4_value(i >> 4u));
-    }
-}
-
 // The dot product of the 8 codes of word `w` with the 8 activations `xa`, `xb` (low code first).
+// Decoded in registers (no workgroup table), so the kernel has one top-level barrier and runs on the CPU JIT too.
 fn dot8(w: u32, xa: vec4<f32>, xb: vec4<f32>) -> f32 {
-    let p0 = pair_lut[w & 255u];
-    let p1 = pair_lut[(w >> 8u) & 255u];
-    let p2 = pair_lut[(w >> 16u) & 255u];
-    let p3 = pair_lut[w >> 24u];
-    return p0.x * xa.x + p0.y * xa.y + p1.x * xa.z + p1.y * xa.w + p2.x * xb.x + p2.y * xb.y + p3.x * xb.z + p3.y * xb.w;
+    return fp4_value(w & 15u) * xa.x + fp4_value((w >> 4u) & 15u) * xa.y + fp4_value((w >> 8u) & 15u) * xa.z
+        + fp4_value((w >> 12u) & 15u) * xa.w + fp4_value((w >> 16u) & 15u) * xb.x + fp4_value((w >> 20u) & 15u) * xb.y
+        + fp4_value((w >> 24u) & 15u) * xb.z + fp4_value(w >> 28u) * xb.w;
 }
 
 @compute @workgroup_size(64)
 fn main(@builtin(workgroup_id) wg: vec3<u32>,
         @builtin(local_invocation_id) li: vec3<u32>,
         @builtin(num_workgroups) nwg: vec3<u32>) {
-    init_pair_lut(li.x);
-    workgroupBarrier();
     let blk = wg.y * nwg.x + wg.x;
     let col_tiles = (p.n + COLS - 1u) / COLS;
     let tile = blk / col_tiles;
