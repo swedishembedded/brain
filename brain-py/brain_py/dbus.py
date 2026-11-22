@@ -29,6 +29,7 @@ import json
 import mmap
 import os
 import socket
+import stat
 import struct
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -426,13 +427,31 @@ def _scm_rights(ancillary: list) -> list[int]:
 
 
 def read_fd(fd: FileDescriptor | int) -> bytes:
-    """Copy the bytes behind a returned fd (mmap, offset-independent). Consumes it."""
+    """Copy the bytes behind a returned fd (offset-independent). Consumes it.
+
+    A regular file (a memfd is one) is read with ``pread``: older kernels (5.14, RHEL 9) refuse to map a write-sealed
+    memfd shared even read-only (EPERM), which is how the server seals every result. Only a dmabuf, which ``pread``
+    cannot read, is mapped, shared first and private where shared is refused (as the server reads input fds)."""
     raw = fd.to_raw_fd() if isinstance(fd, FileDescriptor) else int(fd)
     try:
-        size = os.fstat(raw).st_size
+        st = os.fstat(raw)
+        size = st.st_size
         if size == 0:
             return b""
-        with mmap.mmap(raw, size, prot=mmap.PROT_READ) as m:
+        if stat.S_ISREG(st.st_mode):
+            parts, at = [], 0
+            while at < size:
+                chunk = os.pread(raw, size - at, at)
+                if not chunk:
+                    raise BrainError(f"result fd shrank to {at} of {size} bytes while it was read")
+                parts.append(chunk)
+                at += len(chunk)
+            return b"".join(parts)
+        try:
+            m = mmap.mmap(raw, size, prot=mmap.PROT_READ)
+        except PermissionError:
+            m = mmap.mmap(raw, size, flags=mmap.MAP_PRIVATE, prot=mmap.PROT_READ)
+        with m:
             return bytes(m)
     finally:
         os.close(raw)
