@@ -57,19 +57,30 @@ struct LocalGroup {
 struct Members {
     joined: Vec<std::sync::Weak<dyn Collective>>,
     broken: Option<String>,
+    /// The rank whose failure broke the group, when a rank did.
+    broken_by: Option<usize>,
 }
 
 impl LocalGroup {
     fn new(members: &[Arc<dyn Collective>]) -> Arc<LocalGroup> {
-        Arc::new(LocalGroup { members: Mutex::new(Members { joined: members.iter().map(Arc::downgrade).collect(), broken: None }), stop_after: Mutex::new(None) })
+        Arc::new(LocalGroup { members: Mutex::new(Members { joined: members.iter().map(Arc::downgrade).collect(), broken: None, broken_by: None }), stop_after: Mutex::new(None) })
     }
 
-    fn abort(&self, why: &str) {
+    /// Break the group because `rank` failed (`why` names it).
+    fn abort(&self, rank: usize, why: &str) {
+        let why = format!("rank {rank} failed: {why}");
+        let why = why.as_str();
         let mut members = self.members.lock().unwrap_or_else(|e| e.into_inner());
-        members.broken.get_or_insert_with(|| why.to_string());
+        if members.broken.is_none() {
+            (members.broken, members.broken_by) = (Some(why.to_string()), Some(rank));
+        }
         for member in members.joined.iter().filter_map(std::sync::Weak::upgrade) {
             member.abort(why);
         }
+    }
+
+    fn first_failed(&self) -> Option<usize> {
+        self.members.lock().unwrap_or_else(|e| e.into_inner()).broken_by
     }
 
     /// Count `member` in; `Err` with the reason when the group was broken before it joined (it is then broken too).
@@ -120,10 +131,16 @@ impl JobRanks {
         Ok(DataParallel { group, rank, job: Some((self.plan.job.clone(), self.plan.identity())), sharding: self.plan.sharding, local: Some(Arc::clone(&self.local)) })
     }
 
-    /// Break the ranks of this process, joined or still joining, because one of them failed before it could join:
+    /// Break the ranks of this process, joined or still joining, because `rank` failed (before it could join, say):
     /// the ones that joined fail at once, and so does a later join.
-    pub fn abort(&self, why: &str) {
-        self.local.abort(why);
+    pub fn abort(&self, rank: usize, why: &str) {
+        self.local.abort(rank, why);
+    }
+
+    /// The rank whose failure broke this process's ranks first, if one did: the cause, where the others' failures
+    /// are its consequences.
+    pub fn first_failed(&self) -> Option<usize> {
+        self.local.first_failed()
     }
 }
 
@@ -144,7 +161,51 @@ impl GroupBreaker {
     /// [`DataParallel::abort`] for the rank this breaker was made from.
     pub fn abort(&self, why: &str) {
         if let Some(local) = &self.local {
-            local.abort(&format!("rank {} failed: {why}", self.rank));
+            local.abort(self.rank, why);
+        }
+    }
+
+    /// The rank whose failure broke the group first, if one did ([`JobRanks::first_failed`]).
+    pub fn first_failed(&self) -> Option<usize> {
+        self.local.as_ref().and_then(|local| local.first_failed())
+    }
+}
+
+/// Holds a rank's group until the rank's outcome is known, and breaks the group first when the rank failed
+/// ([`DataParallel::guard`]).
+///
+/// A device group ends collectively: a rank's communicator, finalized while its peers wait for it in a reduction,
+/// waits for them until its deadline. So a rank that fails must abort the group before its last reference to it goes,
+/// and the trainer that holds the rank drops it on the way out of a failure, an error or a panic alike. The guard is
+/// that last reference: taken before the rank is handed to the trainer, finished with the rank's result, and on a
+/// drop without one (a panic unwinding) it aborts the group.
+#[must_use = "a guard dropped at once holds nothing"]
+pub struct RankGuard {
+    rank: DataParallel,
+    finished: bool,
+}
+
+impl std::fmt::Debug for RankGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RankGuard").field("rank", &self.rank.rank).field("finished", &self.finished).finish()
+    }
+}
+
+impl RankGuard {
+    /// The rank's outcome: an error breaks the group with its message ([`DataParallel::abort`]) before the guard lets
+    /// the group go.
+    pub fn finish<T, E: std::fmt::Display>(mut self, result: &std::result::Result<T, E>) {
+        if let Err(e) = result {
+            self.rank.abort(&e.to_string());
+        }
+        self.finished = true;
+    }
+}
+
+impl Drop for RankGuard {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.rank.abort("the rank stopped without an outcome (it panicked)");
         }
     }
 }
@@ -198,6 +259,11 @@ impl DataParallel {
     /// launched job, whose launcher sees the process end.
     pub fn abort(&self, why: &str) {
         self.breaker().abort(why);
+    }
+
+    /// A [`RankGuard`] over this rank: take it before handing the rank to its trainer, finish it with the result.
+    pub fn guard(&self) -> RankGuard {
+        RankGuard { rank: self.clone(), finished: false }
     }
 
     /// What breaks this rank's in-process group ([`Self::abort`]) without holding the rank: a runner keeps it while

@@ -174,6 +174,8 @@ fn a_rank_that_fails_alone_mid_run_fails_the_run_at_once_with_its_reason() {
     let failed_at: Mutex<Option<std::time::Instant>> = Mutex::new(None);
     let body = |r: usize, _frames: Option<std::sync::mpsc::Sender<capability::Progress>>| -> Result<(), String> {
         let rank = slots[r].lock().unwrap().take().expect("each rank runs once");
+        // As the served job's ranks do: the group is broken before a failed rank lets its communicator go.
+        let guard = rank.guard();
         let tune = brain::ChatFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap()).placed(true).dataset(&train).out_dir(model.join(format!("rank{r}"))).rank(2).steps(1000).lr(1e-2).seed(11).data_parallel(rank);
         let outcome = tune.run_with(&CancelToken::armed(), |step| {
             // Rank 1 fails after step 1, once the group (the device group, on cards) is formed and rank 0 is
@@ -184,13 +186,14 @@ fn a_rank_that_fails_alone_mid_run_fails_the_run_at_once_with_its_reason() {
             }
         });
         let error = outcome.map(drop).map_err(|e| e.to_string());
+        guard.finish(&error);
         if r == 0 {
             *peer_error.lock().unwrap() = error.clone().err();
         }
         error
     };
     let devices = [Device::Gpu(0), Device::Gpu(1)];
-    let why = trainjob::job::run_ranks(&devices, &abort, body, &mut |_| {}).expect_err("the run fails with its rank");
+    let why = trainjob::job::run_ranks(&devices, &abort, &|| breakers[0].first_failed(), body, &mut |_| {}).expect_err("the run fails with its rank");
     let waited = failed_at.lock().unwrap().expect("rank 1 failed after step 1").elapsed();
     assert_eq!(why, "train: the device failed during the run (see the server log)", "the run names the first rank's failure");
     let peer = peer_error.lock().unwrap().clone().expect("rank 0 failed too");

@@ -715,6 +715,22 @@ Scope: Running one training job as ranks across machines, and serving one model 
   `exported_checkpoint` (CPU device, whose weights are host memory too:
   host peak growth 77-156 MB on a 165 MB export, bound 1.5x the file; 789 MB
   before).
+- **Served multi-card failures and one job over two servers (2026-11-22,
+  n442 gpu0-2, NCCL 2.32.3).** A rank failing alone mid-run in a served
+  two-card group (toy qwen3, rank 1 panics after step 1 while rank 0 enters
+  step 2's NCCL reduction): rank 0 fails with "rank 1 failed: ..." and the
+  test ends in 4.0 s including the model build; before the device abort it
+  waited for the 600 s op timeout, and with the group aborted only after the
+  failed rank's communicator was dropped it took 120.6 s (the finalize waits
+  for its peers until the join deadline: knowledge 556, `brain::RankGuard`).
+  Qwen3-4B LoRA (rank 8, 20 steps, 96 records, max_block 256, seed 7) as
+  one job of 3 ranks over two `brain serve` processes (gpu0-1 and gpu2,
+  NCCL across them): both answered, rank 0's server published, and the
+  adapter sha256 equals the same request on one server's three cards
+  (`e7859542...`, loss 8.307 -> 0.00214 on both); wall time from request to
+  answer 45.3 s over two servers against 21.2 s on one, both including the
+  base load (each process reads the base itself; not a training-speed
+  comparison).
 - **Cost of bounding every device collective (2026-11-22, n442 cards 2-3,
   `brain bench collectives`, f32, 50 iterations, two runs each).** p50
   before -> after: all-reduce 5.9-6.8 -> 7.7-8.1 us at 8 B, 28.7 -> 31.2-31.8

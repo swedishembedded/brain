@@ -775,15 +775,22 @@ fn train_chat_ranks(request: &Request, env: &JobEnv, base_dir: &Path, teacher_di
     let seed = files.resumable.as_ref().map(|(_, seed, _)| *seed).or(p.seed).unwrap_or_else(brain::random_seed);
     let rank_files: Vec<RunFiles> = (0..devices.len()).map(|r| files.for_rank(r, work.path())).collect();
     let train_rank = |rank: brain::DataParallel, files: &RunFiles, frames: Option<std::sync::mpsc::Sender<Progress>>| -> Result<Trained, String> {
-        let fine_tune = build_fine_tune(request, base_dir, teacher_dir, staged, files)?.seed(seed).data_parallel(rank);
-        let outcome = fine_tune
-            .run_with(cancel, |step| {
-                if let Some(frames) = &frames {
-                    let _ = frames.send(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64())));
-                }
-            })
-            .map_err(trainer_failure)?;
-        trained_chat(request, files, outcome)
+        // The group is broken before the trainer lets the rank go on a failure (ending a device group waits for the
+        // peers, which wait in a reduction for this rank); see brain::RankGuard.
+        let guard = rank.guard();
+        let trained = (|| {
+            let fine_tune = build_fine_tune(request, base_dir, teacher_dir, staged, files)?.seed(seed).data_parallel(rank);
+            let outcome = fine_tune
+                .run_with(cancel, |step| {
+                    if let Some(frames) = &frames {
+                        let _ = frames.send(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64())));
+                    }
+                })
+                .map_err(trainer_failure)?;
+            trained_chat(request, files, outcome)
+        })();
+        guard.finish(&trained);
+        trained
     };
     let ranks_trained = match &request.job {
         // This server's ranks of a job spread over several servers: each joins the job on its own thread.
@@ -794,7 +801,7 @@ fn train_chat_ranks(request: &Request, env: &JobEnv, base_dir: &Path, teacher_di
             let ranks = brain::DataParallel::job_ranks(job.plan.clone(), secret, job.ranks(p.cards)).map_err(trainer_failure)?;
             let first = job.first_rank;
             let body = |i: usize, frames| train_rank(ranks.join(first + i).map_err(trainer_failure)?, &rank_files[i], frames);
-            run_ranks(devices, &|i, why| ranks.abort(&format!("rank {} failed: {why}", first + i)), body, progress)?
+            run_ranks(devices, &|i, why| ranks.abort(first + i, why), &|| ranks.first_failed().map(|r| r - first), body, progress)?
         }
         None => {
             let ranks = brain::DataParallel::in_process(devices.len()).map_err(trainer_failure)?;
@@ -806,7 +813,7 @@ fn train_chat_ranks(request: &Request, env: &JobEnv, base_dir: &Path, teacher_di
                 let rank = slots[i].lock().unwrap_or_else(|e| e.into_inner()).take().ok_or("train: a rank ran twice")?;
                 train_rank(rank, &rank_files[i], frames)
             };
-            run_ranks(devices, &|i, why| breakers[i].abort(why), body, progress)?
+            run_ranks(devices, &|i, why| breakers[i].abort(why), &|| breakers.first().and_then(brain::GroupBreaker::first_failed), body, progress)?
         }
     };
     let mut ranks_trained = ranks_trained;
@@ -824,10 +831,12 @@ fn train_chat_ranks(request: &Request, env: &JobEnv, base_dir: &Path, teacher_di
 /// A rank that fails (an error, a panic or a cancellation) breaks the group at once with `abort(i, why)`
 /// ([`brain::DataParallel::abort`]: the host transport and the device group on every card), so the others fail in
 /// their next or current reduction instead of waiting for it until the group's op timeout; the run then fails with
-/// the reason of the rank that failed first, not the "aborted" its failure caused in the others.
+/// the reason of the rank that failed first (`first_failed`, the rank that broke the group, else the first result
+/// in), not the "aborted" its failure caused in the others.
 pub fn run_ranks<T: Send>(
     devices: &[residency::Device],
     abort: &(dyn Fn(usize, &str) + Sync),
+    first_failed: &(dyn Fn() -> Option<usize> + Sync),
     body: impl Fn(usize, Option<std::sync::mpsc::Sender<Progress>>) -> Result<T, String> + Sync,
     progress: &mut dyn FnMut(Progress),
 ) -> Result<Vec<T>, String> {
@@ -867,6 +876,11 @@ pub fn run_ranks<T: Send>(
         }
         handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("train: a rank's thread ended abnormally".to_string()))).collect()
     });
+    // The rank that broke the group failed first; the others' failures are what the break did to them. A rank can
+    // break it (its guard, `brain::RankGuard`) before its own result is in.
+    if let Some(Err(why)) = first_failed().and_then(|i| results.get(i)) {
+        return Err(why.clone());
+    }
     if let Some(why) = first_failure.into_inner().unwrap_or_else(|e| e.into_inner()) {
         return Err(why);
     }

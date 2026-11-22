@@ -218,7 +218,7 @@ pub use data::tokenizer_identity::{TokenizerDifferences, TokenizerIdentity, Toke
 #[cfg(feature = "study")]
 pub use rl::objective::dpo::{PairLoss, DEFAULT_SIMPO_GAMMA};
 #[cfg(feature = "study")]
-pub use data_parallel::{DataParallel, GroupBreaker, JobRanks};
+pub use data_parallel::{DataParallel, GroupBreaker, JobRanks, RankGuard};
 #[cfg(feature = "study")]
 pub use finetune::{DEFAULT_LORA_LR, DEFAULT_LORA_RANK, LORA_WEIGHT_DECAY, emit_held_out_records, score_chat, score_tokens, score_tokens_qwen35, HeldOutRecords, ChatFineTune, ChatFineTuneOutcome, FineTuneProgress, TrainFootprint, FineTuneStatus, HeldOutScore, MonitorPoint, PolicyGradientOutcome, RecordReadout, Selection, TokenReadout, TokenScore};
 #[cfg(feature = "study")]
