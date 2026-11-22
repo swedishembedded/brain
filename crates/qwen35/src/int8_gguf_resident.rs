@@ -4642,7 +4642,7 @@ impl Qwen35GgufResident {
     /// The front end that reads images, when the checkpoint has a vision tower: the tower is loaded onto the card
     /// `sched`'s first stage runs on, and requests with images are built beside the `text` front end, which keeps
     /// serving requests without. `Err(text)` hands `text` back for a checkpoint that reads no images.
-    pub fn vision_front_end(&self, sched: &mut model::serve::Scheduler<Qwen35GgufEngine>, text: llmserve::TextFrontend) -> Result<Result<crate::vision_frontend::VisionFrontend, llmserve::TextFrontend>, String> {
+    pub fn vision_front_end(&self, sched: &mut model::serve::Scheduler<Qwen35GgufEngine>, text: llmserve::TextFrontend) -> Result<Result<llmserve::image_frontend::ImageFrontend<crate::vision_frontend::ImageBuild>, llmserve::TextFrontend>, String> {
         let Some(spec) = self.vision_spec().cloned() else { return Ok(Err(text)) };
         let context = sched.sequence_capacity();
         let instance = sched.decoder_mut().instance();
@@ -4650,7 +4650,7 @@ impl Qwen35GgufResident {
         let tower = crate::vision_tower::VisionTower::open(std::path::Path::new(&self.gguf_path), spec, &gpu, d_model, crate::vision_tower::SERVING_MAX_IMAGE_PIXELS)?;
         let (tok, _) = self.checkpoint()?.tokenizer()?;
         eprintln!("brain: {}: reads images: vision tower loaded on the decoder's card (images up to {} pixels)", self.model_id, tower.spec().geometry.max_pixels);
-        crate::vision_frontend::VisionFrontend::new(text, tok, tower, context, parse_escaped_request).map(Ok)
+        crate::vision_frontend::vision_frontend(text, tok, tower, context, parse_escaped_request).map(Ok)
     }
 
     /// The scheduler every consumer of this resident serves through: the

@@ -25,6 +25,7 @@
 
 pub mod adapter_registry;
 pub mod adapter_release;
+pub mod image_frontend;
 mod resident;
 mod routing;
 mod score;

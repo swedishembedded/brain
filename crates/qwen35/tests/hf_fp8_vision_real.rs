@@ -74,7 +74,7 @@ fn reads_a_picture(tier: Option<gpu_core::select::Dtype>, cosine: f64, rel_l2: f
     let (mut sched, tok, stop) = resident.activate_scheduler(&[device]).expect("the FP8 release loads");
     let text = TextFrontend::new(tok, stop, "qwen35", Arc::new(parse_request));
     let front = resident.vision_front_end(&mut sched, text).expect("the tower loads").unwrap_or_else(|_| panic!("the release has a vision tower"));
-    let tower = front.tower();
+    let tower = front.builder().tower();
 
     // Preprocessing: the checkpoint's own processor settings give the reference's patches.
     let patches = tower.spec().geometry.patches(&image);

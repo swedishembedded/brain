@@ -27,7 +27,8 @@ use model::serve::PromptEmbeds;
 use qwen35::config::Qwen35Config;
 use qwen35::int8_gguf_resident::{parse_escaped_request, parse_request};
 use qwen35::model::pipelines;
-use qwen35::vision_frontend::{placeholder_runs, VisionFrontend};
+use llmserve::image_frontend::ImageFrontend;
+use qwen35::vision_frontend::{placeholder_runs, vision_frontend, ImageBuild};
 use qwen35::vision_tower::{VisionSpec, VisionTokens, VisionTower};
 use serde_json::{json, Value};
 
@@ -47,14 +48,14 @@ fn tokenizer() -> QwenBpe {
     QwenBpe::from_json_bytes(json!({"model": {"vocab": vocab, "merges": []}, "added_tokens": added}).to_string().as_bytes()).unwrap()
 }
 
-fn front_end() -> VisionFrontend {
+fn front_end() -> ImageFrontend<ImageBuild> {
     let cfg = Qwen35Config::tiny();
     let spec = VisionSpec { tokens: TOKENS, ..tiny_spec() };
     let gpu = Gpu::new_cpu(pipelines());
     let tower = VisionTower::from_weights(spec, &tiny_tower_weights(3), &gpu, cfg.d_model, 1 << 20).unwrap();
     let stop = vec![tokenizer().special_id("<|im_end|>").unwrap()];
     let text = TextFrontend::new(tokenizer(), stop, "qwen35", Arc::new(parse_request));
-    VisionFrontend::new(text, tokenizer(), tower, 4096, parse_escaped_request).expect("the vocabulary names the tower's tokens")
+    vision_frontend(text, tokenizer(), tower, 4096, parse_escaped_request).expect("the vocabulary names the tower's tokens")
 }
 
 fn with_images(messages: &Value, images: &[imaging::pixels::Rgb8]) -> Invocation {
@@ -65,7 +66,7 @@ fn with_images(messages: &Value, images: &[imaging::pixels::Rgb8]) -> Invocation
     inv
 }
 
-fn build(front: &VisionFrontend, inv: &Invocation) -> Result<(ParsedRequest, PromptEmbeds), String> {
+fn build(front: &ImageFrontend<ImageBuild>, inv: &Invocation) -> Result<(ParsedRequest, PromptEmbeds), String> {
     front.parse_embedded(inv).map(|(req, embeds)| (req, embeds.expect("a request with images carries rows")))
 }
 

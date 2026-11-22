@@ -24,7 +24,8 @@ use model::ops::TierPolicy;
 use model::{Batch, Model, Split};
 use qwen35::config::Qwen35Config;
 use qwen35::model::{pipelines, Qwen35};
-use qwen35::vision_frontend::{prompt_embeds, prompt_embeds_remembering, EncodedImages};
+use llmserve::image_frontend::EncodedImages;
+use qwen35::vision_frontend::{prompt_embeds, prompt_embeds_remembering};
 use qwen35::vision_sft::{attach_for_dataset, check_prepared, VisionFeed, VisionReader};
 use qwen35::vision_tower::VisionTower;
 use qwen3vl::mrope::PromptRope;
@@ -240,7 +241,7 @@ fn the_tower_reads_the_image_serving_reads_from_the_same_bytes() {
     let file = ppm(&image);
     let from_file = imaging::codec::decode_bounded(&file, capability::blob::MAX_IMAGE_PIXELS).unwrap();
     let blob = capability::blob::image_blob(&from_file.to_hwc_unit(), from_file.w, from_file.h, 3);
-    let served = qwen35::vision_frontend::request_images(&capability::Invocation::default().blob("image", blob)).unwrap();
+    let served = llmserve::image_frontend::request_images(&capability::Invocation::default().blob("image", blob)).unwrap();
     assert_eq!(served.len(), 1);
     assert_eq!(served[0], from_file, "serving and training decode one file to different pixels");
     assert_eq!(from_file, image);

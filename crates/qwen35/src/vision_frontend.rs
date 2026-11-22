@@ -18,12 +18,13 @@
 //! (or the reverse), a content part this model does not read, the placeholder tokens typed by hand into text, an
 //! image or a set of images the context cannot hold.
 
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::Arc;
 
 use capability::{failure::tag, FailureClass, Invocation};
 use data::qwen_tokenizer::QwenBpe;
 use imaging::pixels::Rgb8;
-use llmserve::{Encoding, Frontend, ParsedRequest, TextFrontend};
+use llmserve::image_frontend::{request_images, EncodedImages, ImageFrontend, ImageRequests};
+use llmserve::{ParsedRequest, TextFrontend};
 use model::serve::PromptEmbeds;
 use serde_json::{json, Value};
 
@@ -38,25 +39,6 @@ const RESERVED: [&str; 4] = [IMAGE_START, IMAGE_PAD, IMAGE_END, "<|video_pad|>"]
 
 fn invalid(message: impl AsRef<str>) -> String {
     tag(FailureClass::InvalidRequest, message)
-}
-
-/// The images of `inv`, in blob order (`image`, `image1`, ...).
-pub fn request_images(inv: &Invocation) -> Result<Vec<Rgb8>, String> {
-    let mut out = Vec::new();
-    for i in 0..capability::blob::MAX_IMAGES {
-        let key = capability::blob::image_key(i);
-        if inv.get_blob(&key).is_none() {
-            break;
-        }
-        let (hwc, w, h) = capability::blob::decode_image(inv, &key).map_err(invalid)?;
-        out.push(Rgb8::from_hwc_unit(&hwc, w, h).map_err(invalid)?);
-    }
-    Ok(out)
-}
-
-/// Whether `inv` carries an image.
-pub fn has_images(inv: &Invocation) -> bool {
-    inv.get_blob("image").is_some()
 }
 
 /// Whether `text` holds a reserved placeholder literal. Text a client controls must not: typed by hand it would become
@@ -144,55 +126,6 @@ pub enum EmbedRefusal {
     Invalid(String),
 }
 
-/// The rows the tower made for the images it saw lately, found again by the decoded image itself.
-///
-/// An agent resends its whole history every turn, the same attached picture in it, and its rows are the same every
-/// time: the tower is deterministic in the pixels. Serving them from here keeps the tower off a picture it has
-/// already read, and gives the decoder rows equal to the ones its prefix cache was filed under, so the picture's
-/// span of the prompt is reused with the text around it. The image is compared byte for byte (a hash of client
-/// bytes could be chosen to collide), so one client's picture can never be served another's rows.
-pub struct EncodedImages {
-    capacity: usize,
-    /// Least recently used first.
-    recent: Mutex<Vec<(Rgb8, Arc<ImageRows>)>>,
-    encodes: std::sync::atomic::AtomicU64,
-}
-
-impl EncodedImages {
-    /// A cache of the rows of the `capacity` most recently used images (0 keeps none).
-    pub fn new(capacity: usize) -> EncodedImages {
-        EncodedImages { capacity, recent: Mutex::new(Vec::new()), encodes: std::sync::atomic::AtomicU64::new(0) }
-    }
-
-    /// The rows of `image`: remembered ones, else `encode`'s, which are remembered. The lock is not held while
-    /// encoding, so a picture two requests bring at once may be encoded twice, never wrongly.
-    pub fn rows_of(&self, image: &Rgb8, encode: impl FnOnce(&Rgb8) -> ImageRows) -> Arc<ImageRows> {
-        let mut recent = self.recent.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(i) = recent.iter().position(|(seen, _)| seen == image) {
-            let hit = recent.remove(i);
-            let rows = hit.1.clone();
-            recent.push(hit);
-            return rows;
-        }
-        drop(recent);
-        let rows = Arc::new(encode(image));
-        self.encodes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if self.capacity > 0 {
-            let mut recent = self.recent.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            if recent.len() >= self.capacity {
-                recent.remove(0);
-            }
-            recent.push((image.clone(), rows.clone()));
-        }
-        rows
-    }
-
-    /// How many images went through the tower because they were not remembered.
-    pub fn encodes(&self) -> u64 {
-        self.encodes.load(std::sync::atomic::Ordering::Relaxed)
-    }
-}
-
 /// The rows and rotary positions of a prompt holding `images`, as the decoder takes them ([`PromptEmbeds`]): each
 /// image through the vision tower, standing at its run of placeholder tokens in `ids`, and the three-axis rotary
 /// position of every prompt token. Serving builds a request's embeds with this, and training a record's: the rows and
@@ -205,7 +138,7 @@ pub fn prompt_embeds(tower: &VisionTower, ids: &[u32], images: &[Rgb8], cancelle
 }
 
 /// [`prompt_embeds`] reading the rows of an image `seen` already has from it instead of running the tower.
-pub fn prompt_embeds_remembering(tower: &VisionTower, seen: &EncodedImages, ids: &[u32], images: &[Rgb8], cancelled: &dyn Fn() -> bool) -> Result<PromptEmbeds, EmbedRefusal> {
+pub fn prompt_embeds_remembering(tower: &VisionTower, seen: &EncodedImages<ImageRows>, ids: &[u32], images: &[Rgb8], cancelled: &dyn Fn() -> bool) -> Result<PromptEmbeds, EmbedRefusal> {
     let tokens = tower.spec().tokens;
     let sizes: Vec<(u32, (u32, u32))> = images.iter().map(|i| tower.tokens_for(i.h, i.w)).collect();
     let runs = placeholder_runs(ids, tokens.image);
@@ -230,18 +163,16 @@ pub fn prompt_embeds_remembering(tower: &VisionTower, seen: &EncodedImages, ids:
     Ok(PromptEmbeds::new(width, positions, rows).map_err(|e| EmbedRefusal::Invalid(format!("vision rows: {e}")))?.with_rotary_positions(rotary))
 }
 
-/// What a request for the image worker carries and where its result goes.
-type Job = (Invocation, mpsc::Sender<Result<(ParsedRequest, Option<PromptEmbeds>), String>>);
-
 /// Images whose rows the front end keeps: a conversation's pictures and a few concurrent ones, a few tens of MB each.
 const REMEMBERED_IMAGES: usize = 8;
 
-/// Everything building an image request needs.
-struct ImageBuild {
+/// How a Qwen3.8 chat request with images becomes a scheduler request ([`llmserve::image_frontend::ImageFrontend`]'s
+/// builder for this family).
+pub struct ImageBuild {
     tok: QwenBpe,
     tower: Arc<VisionTower>,
     /// The rows of the pictures the tower read lately.
-    seen: EncodedImages,
+    seen: EncodedImages<ImageRows>,
     /// The most prompt tokens the scheduler can hold for one sequence.
     context: usize,
     /// Parses a request whose client text is already escaped (`Invocation::escape_client_text` with `tok`).
@@ -249,6 +180,13 @@ struct ImageBuild {
 }
 
 impl ImageBuild {
+    /// The vision tower, for the callers that measure it.
+    pub fn tower(&self) -> &VisionTower {
+        &self.tower
+    }
+}
+
+impl ImageRequests for ImageBuild {
     /// The scheduler request for `inv`, which carries at least one image: the tower runs here.
     fn build(&self, inv: &Invocation) -> Result<(ParsedRequest, Option<PromptEmbeds>), String> {
         if inv.cancel.is_cancelled() {
@@ -301,91 +239,18 @@ impl ImageBuild {
     }
 }
 
-/// The front end of a Qwen3.8 checkpoint that reads images.
-pub struct VisionFrontend {
-    text: TextFrontend,
-    build: Arc<ImageBuild>,
-    queue: Option<mpsc::Sender<Job>>,
-    worker: Option<std::thread::JoinHandle<()>>,
-}
-
-impl VisionFrontend {
-    /// `text` serves requests without images; `tok` (a second instance of the same tokenizer) builds those with.
-    /// `context` is the longest prompt the scheduler holds. `parse` builds the scheduler request from one whose client
-    /// text this front end has already escaped and whose image parts it has replaced by their placeholder runs, so it
-    /// must not escape again.
-    pub fn new(text: TextFrontend, tok: QwenBpe, tower: VisionTower, context: usize, parse: fn(&QwenBpe, &Invocation) -> Result<ParsedRequest, String>) -> Result<VisionFrontend, String> {
-        let tokens = tower.spec().tokens;
-        for (literal, id) in [(IMAGE_START, tokens.start), (IMAGE_PAD, tokens.image), (IMAGE_END, tokens.end)] {
-            if tok.special_id(literal) != Some(id) {
-                return Err(format!("the tokenizer's {literal} is not token {id}, which the checkpoint's config names"));
-            }
-        }
-        let build = Arc::new(ImageBuild { tok, tower: Arc::new(tower), seen: EncodedImages::new(REMEMBERED_IMAGES), context, parse });
-        let (queue, jobs) = mpsc::channel::<Job>();
-        let worker_build = build.clone();
-        let worker = std::thread::Builder::new()
-            .name("qwen35-vision".to_string())
-            .spawn(move || {
-                // Requests are built in arrival order; the scheduler decodes other requests meanwhile.
-                for (inv, reply) in jobs {
-                    // The caller may have gone (the request was cancelled): nothing to deliver.
-                    let _ = reply.send(worker_build.build(&inv));
-                }
-            })
-            .map_err(|e| format!("the vision worker did not start: {e}"))?;
-        Ok(VisionFrontend { text, build, queue: Some(queue), worker: Some(worker) })
-    }
-
-    /// The vision tower, for the callers that measure it.
-    pub fn tower(&self) -> &VisionTower {
-        &self.build.tower
-    }
-}
-
-impl Drop for VisionFrontend {
-    fn drop(&mut self) {
-        drop(self.queue.take());
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+/// The front end of a Qwen3.8 checkpoint that reads images: `text` serves requests without images; `tok` (a second
+/// instance of the same tokenizer) builds those with. `context` is the longest prompt the scheduler holds. `parse`
+/// builds the scheduler request from one whose client text this front end has already escaped and whose image parts
+/// it has replaced by their placeholder runs, so it must not escape again.
+pub fn vision_frontend(text: TextFrontend, tok: QwenBpe, tower: VisionTower, context: usize, parse: fn(&QwenBpe, &Invocation) -> Result<ParsedRequest, String>) -> Result<ImageFrontend<ImageBuild>, String> {
+    let tokens = tower.spec().tokens;
+    for (literal, id) in [(IMAGE_START, tokens.start), (IMAGE_PAD, tokens.image), (IMAGE_END, tokens.end)] {
+        if tok.special_id(literal) != Some(id) {
+            return Err(format!("the tokenizer's {literal} is not token {id}, which the checkpoint's config names"));
         }
     }
-}
-
-impl Frontend for VisionFrontend {
-    fn tok(&self) -> &QwenBpe {
-        self.text.tok()
-    }
-    fn stop(&self) -> &[u32] {
-        self.text.stop()
-    }
-    fn label(&self) -> &str {
-        self.text.label()
-    }
-    fn parse(&self, inv: &Invocation) -> Result<ParsedRequest, String> {
-        if has_images(inv) {
-            return self.parse_embedded(inv).map(|(req, _)| req);
-        }
-        self.text.parse(inv)
-    }
-    fn parse_embedded(&self, inv: &Invocation) -> Result<(ParsedRequest, Option<PromptEmbeds>), String> {
-        if has_images(inv) {
-            return self.build.build(inv);
-        }
-        self.text.parse_embedded(inv)
-    }
-    fn parse_in_background(&self, inv: &Invocation) -> Option<Encoding> {
-        if !has_images(inv) {
-            return self.text.parse_in_background(inv);
-        }
-        let (reply, rx) = mpsc::channel();
-        self.queue.as_ref()?.send((inv.clone(), reply)).ok()?;
-        Some(rx)
-    }
-    /// Building an image request runs the vision tower: it is not run ahead of the request's slot.
-    fn encodes_inputs(&self) -> bool {
-        true
-    }
+    ImageFrontend::new(text, ImageBuild { tok, tower: Arc::new(tower), seen: EncodedImages::new(REMEMBERED_IMAGES), context, parse }, "qwen35-vision")
 }
 
 #[cfg(test)]
