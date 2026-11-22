@@ -50,7 +50,7 @@ heading and a `Scope: <one sentence>` line under it, then run `make generate/roa
 | [`fly`](fly.md) | fly | The fruit-fly connectome simulation (`crates/fly`, `connectome`, `neuro`, `flybody`, `mujoco`). |
 | [`forecast`](forecast.md) | forecast | The shared forecasting seam, serving and backtester (`crates/forecast`, `fcbench`). |
 | [`gauntlet`](gauntlet.md) | gauntlet | Design of a capability-acquisition benchmark (`crates/gauntlet`, not yet a crate). |
-| [`generic-learning`](generic-learning.md) | generic-learning | brain owns a thinking budget that always terminates, scoring of given tokens under a given context for any model or adapter, and KL-to-champion on a rehearsal set in SFT and PG: the model half of the generic learning loop. Items GL-R1 to GL-R3 and the brain-side stop list. |
+| [`generic-learning`](generic-learning.md) | generic-learning | brain owns a thinking budget that always terminates, scoring of given tokens under a given context for any model or adapter, KL-to-champion on a rehearsal set in SFT and PG, and on-policy distillation from a teacher model: the model half of the generic learning loop. Items GL-R1 to GL-R4 and the brain-side stop list. |
 | [`generic-training-capabilities`](generic-training-capabilities.md) | generic training capabilities | Generic LoRA/QLoRA/DPO/GRPO/distillation over capability traits. |
 | [`gguf`](gguf.md) | gguf | GGUF as container and execution representation (`checkpoint::gguf`, import, quantize). |
 | [`gh200`](gh200.md) | GH200 (Grace-Hopper) support | Grace-Hopper (GH200) performance and correctness. |

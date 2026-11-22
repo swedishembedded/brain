@@ -336,7 +336,9 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   holds (reasoning, tool calls, tokens a thinking budget forced): send back the `prompt_token_ids` and
   `completion_token_ids` (or a policy trace's `generation_token_ids`) a reply reported, under the model or adapter
   whose log-probabilities you want, for an importance ratio against the policy that sampled them or a teacher's
-  log-probabilities for distillation. Params: `per_token` (also return
+  log-probabilities for distillation (a training record's `teacher_logprobs` are a token record's `token_logprobs`, its
+  `teacher_logprob` a chat record's answer `logprob`; see the train job's `distill_teacher` in
+  `docs/guides/training/served-training.md`). Params: `per_token` (also return
   each answer's `token_ids` and `token_logprobs`), `include_stop`, `enable_thinking` (render the prompts as a request
   that allows reasoning would), `temperature` (default 1, within 0.001..=100: the log-probabilities are
   `log_softmax(logits / temperature)` over the whole vocabulary, so a ratio against a policy sampled at temperature

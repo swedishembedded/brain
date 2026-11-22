@@ -681,6 +681,15 @@ lowers the probability of its action, a positive one raises it.
   inserted before, at or before the first supervised message. Unknown fields, a missing `at`, no messages, an empty
   text, an `assistant`/`tool` role, an `at` past the first answer and a record that holds images are refused naming
   the field. A record may carry a teacher context instead of a reward (the scalar part is then 0) or with one.
+- `"teacher_logprobs"` or `"teacher_logprob"` (supervised assistant message, optional, on every supervised answer of
+  the record or none, one form per record, never beside a `"teacher_context"`): another model's scores of the sampled
+  answer, for on-policy distillation from that model (see below). `"teacher_logprobs"` is one log-probability per token
+  of the answer, counted as `"behavior_logprobs"` are (refused otherwise, rule `teacher_logprob_count`): the `score`
+  action's per-token reply for a token record of the sampled `prompt_token_ids` and `token_ids`. `"teacher_logprob"`
+  is the teacher's log-probability of the answer's text in the teacher's own chat template and tokenization: the
+  `score` action's `logprob` of the answer for the same chat record. The per-answer form needs `"behavior_logprobs"` on
+  the answer, a `"reward"` and `"group"` (0 on every rollout when no verifier is used) and no `"rollout"` key (the
+  record is the whole rollout). Any other use is refused by rule `teacher_scores`, naming the field.
 - `"truncated"` (record, optional, needs a `"reward"` or a `"teacher_context"`): `true` when the rollout did not
   reach an outcome (the token budget cut it, a step timed out), so its reward says nothing about its actions. Under
   `PolicyGradientConfig::truncated` `TruncatedRollouts::Mask` (the default) a policy gradient never draws, scores or
@@ -754,6 +763,22 @@ brain-sampled GRPO run and an external-rollout run cannot drift apart.
   number of tokens than the student, is refused by example. Each step reports the mean, the largest magnitude and the
   clipped fraction of the token advantages next to the KL and ratio. This is the sampled-token estimator (one teacher
   log-probability per sampled token), not the full-distribution reverse KL.
+- **On-policy distillation from a teacher model** (`ChatFineTune::distill_teacher(teacher)`, a model reference or
+  checkpoint directory; `rl::objective::onpolicy_distill`). The student samples, another model scores the samples
+  (the orchestrator calls its `score` action), and the student is trained toward the reverse KL
+  `KL(student || teacher)` on its own samples. Which estimator is exact is decided by comparing the two tokenizers
+  (`brain::TokenizerIdentity::check(student_dir, teacher_dir)`: model settings, vocabulary, merges, normalizer,
+  pre-tokenizer, added tokens), never by a setting; `brain::DistillEstimator::for_tokenizers` names the one to use.
+  With identical tokenizers, records carry `"teacher_logprobs"` and every sampled token gets the per-token reward
+  `A_t = log q_teacher(y_t) - old_t`, trained exactly as a teacher context's (same guards, same statistics). With
+  different tokenizers, records carry `"teacher_logprob"`, and each rollout's `log q(text) - log p(text)` (the
+  student's from its `behavior_logprobs`) against the leave-one-out mean of its group is added to its reward advantage:
+  the sequence-level REINFORCE estimator, unbiased for the reverse KL of whole completions and **higher variance** (one
+  number credits every token alike), so it wants more samples per prompt. Per-token scores with a teacher that was not
+  compared, or whose tokenizer differs, are refused with the typed `brain::DistillRefusal` before the run starts.
+  Qwen3-4B and Qwen3.8-27B do not share a tokenizer, so distilling the 4B from the 27B takes the sequence-level path.
+  The outcome's settings name the comparison (`teacher_tokenizer`) and the estimator (`distill_estimator`); the
+  statistics count `sequences_with_teacher_logprobs` and `sequences_with_teacher_logprob`.
 - **Behaviour policy** (`PolicyGradientConfig::behaviour`). `BehaviourSource::Recorded` (the default, the exact mode): the
   recorded `behavior_logprobs`, required on every supervised token of every record with a reward; a dataset missing
   any is refused before the run, naming how many tokens lack one. `BehaviourSource::StartOfRunProxy`, asked for by name:

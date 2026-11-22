@@ -159,6 +159,16 @@ brain::ChatFineTune::from_pretrained("Qwen/Qwen3.8-27B-FP8").arch("qwen35").base
     .run()?;
 ```
 
+The same call distils another model into the adapter on the adapter's own samples (on-policy distillation): the
+orchestrator samples from the student, scores each sampled answer with the teacher's `score` action and writes the
+scores on the records, and `.distill_teacher("Qwen/Qwen3.8-27B-FP8")` names the teacher. brain compares the two
+tokenizers and that decides the estimator: with identical tokenizers the records carry `"teacher_logprobs"` (one per
+sampled token; token-level reverse KL), with different ones `"teacher_logprob"` (one per answer, scored in the
+teacher's own template and tokenization; the sequence-level estimator, which is higher variance and wants more
+samples per prompt). Per-token scores from a teacher with another tokenizer are refused. Qwen3-4B and Qwen3.8-27B do
+not share a tokenizer, so distilling the 4B from the 27B is sequence-level. Details:
+[`ChatFineTune::distill_teacher`](../../reference/sdk.md#policy-gradient-fine-tuning-on-collected-rollouts).
+
 `brain qwen35 finetune` trains prepared datasets by imitation only and does not read the rollout sidecars
 (`<split>.rollouts.json`, `<split>.blp.bin`) the SDK's preparation writes beside the token files.
 
