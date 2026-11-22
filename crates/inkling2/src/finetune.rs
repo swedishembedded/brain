@@ -96,6 +96,25 @@ impl ChatTrainer for Inkling2Trainer {
         fit.fit(m)
     }
 
+    /// The served engine over the release at `base` (as published, whatever `tiers` names: the engine holds the
+    /// linears as stored and the expert banks in their encoding), f32 K/V, sized for one sequence of `max_seq_len`
+    /// tokens. An adapter is refused by name: the engine has no adapter bank yet and the expert pairs cannot be folded
+    /// into quantized banks.
+    fn serving_engine(base: &Path, _tiers: &model::ops::TierPolicy, adapter: Option<&Path>, max_seq_len: u32) -> Option<std::io::Result<Box<dyn model::serve::PagedDecoder>>> {
+        Some((|| {
+            if let Some(a) = adapter {
+                return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, format!("inkling2: the served engine applies no adapter yet ({})", a.display())));
+            }
+            const BLOCK: u32 = 16;
+            let tokens = max_seq_len.max(1);
+            let sizing = model::serve::visit_state::VisitPoolSizing { block_size: BLOCK, num_blocks: tokens.div_ceil(BLOCK) + 1, live_rows: 1, snapshot_rows: 0, undo_rows: false };
+            let opts = crate::serve::EngineOptions { kv_tier: model::kv_tier::KvTier::F32, sizing, max_seq_len: tokens as usize, prefill_chunk: tokens.min(256) };
+            let ops = crate::serve::device_ops().map_err(std::io::Error::other)?;
+            let engine = crate::serve::Engine::open(ops, base, opts).map_err(|e| invalid(base, e))?;
+            Ok(Box::new(engine) as Box<dyn model::serve::PagedDecoder>)
+        })())
+    }
+
     fn save_adapter(trained: &Inkling2Train, path: &Path, lineage: &AdapterLineage<'_>) -> std::io::Result<()> {
         let lora = trained.train_config().lora.as_ref().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "inkling2: a full fine-tune has no adapter to save"))?;
         let name = path.to_str().ok_or_else(|| invalid(path, "not a UTF-8 path"))?;

@@ -797,8 +797,12 @@ The first trainable target needs no streaming: the base is about 19.5 GB.
     store (each clipped to its own norm). Gate `tests/it/image_text.rs`: tiny decoder + tiny tower, the tower adapters'
     gradient equals central differences of the whole image-text loss (decoder routing pinned), and both adapters lower
     the loss.
-  - Left: the real-weight QLoRA smoke run (see below); `serving_engine` (lane "engine": `inkling2::serve::Engine` not
-    on main yet); C8 (chunked head) and C9 (tiers) are not run by the conformance subject (the tiny rows fit one head
+  - Done (2026-11-22): `Inkling2Trainer::serving_engine` opens `serve::Engine` over the release (f32 K/V, one
+    sequence) for `served_loss` and precision searches; its served logits equal the trainer's at every position
+    (`the_serving_engine_serves_what_the_trainer_trains`). An adapter is refused by name.
+  - Left: the served engine applies no adapter (no `AdapterBank` in `serve::Engine`; the stacked expert pairs cannot
+    be folded into quantized banks), so a trained adapter is not served yet and `serving_engine(.., Some(adapter), ..)`
+    refuses; C8 (chunked head) and C9 (tiers) are not run by the conformance subject (the tiny rows fit one head
     chunk; bf16 is gated in `training.rs` with the routing pinned); expert pairs over float banks (the shared op
     refuses them, I4.2 Left), so a small checkpoint's adapter leaves `w13_weight`/`w2_weight` out; full fine-tune of the
     released 26B needs a streamed window (I6.2), host/ZeRO optimizer state (I6.1) or expert parallelism (I6.3); the

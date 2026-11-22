@@ -224,3 +224,34 @@ fn a_packed_row_trains_as_its_documents_alone() {
         assert!(diff <= 1e-3 * norm + 1e-6, "{name}: packed gradient differs by {diff} at a norm of {norm}");
     }
 }
+
+/// The family's serving engine (what `served_loss` and a precision search score through) serves the function the
+/// trainer trains: its logits at every position of a row equal the training build's over the same checkpoint.
+#[test]
+fn the_serving_engine_serves_what_the_trainer_trains() {
+    use model::finetune::ChatTrainer;
+    let dir = brain_testutil::testdata_path("golden/inkling2/tiny");
+    if !dir.join("golden.safetensors").is_file() {
+        brain_testutil::skip("testdata/golden/inkling2/tiny absent (make testdata/fetch, or run tools/goldens/inkling2_dump_reference.py tiny)");
+        return;
+    }
+    let ckpt = dir.join("checkpoint");
+    let tokens: Vec<u32> = vec![3, 17, 5, 40, 9, 22, 61, 8, 12];
+    let trainer = Inkling2Train::from_dir(&ckpt, 1, tokens.len() as u32).unwrap();
+    let want = trainer.logits(&tokens).unwrap();
+    let valid = trainer.config().valid_vocab as usize;
+    let tiers = model::ops::TierPolicy::uniform(gpu_core::select::Dtype::F32);
+    let mut engine = inkling2::finetune::Inkling2Trainer::serving_engine(&ckpt, &tiers, None, tokens.len() as u32).expect("the family serves").unwrap();
+    let positions: Vec<usize> = (0..tokens.len()).collect();
+    for (p, hidden) in engine.hidden_at(&tokens, &positions).into_iter().enumerate() {
+        let got = engine.logits(&hidden);
+        assert_eq!(got.len(), valid, "a served row is the valid vocabulary");
+        let row = &want[p * valid..(p + 1) * valid];
+        let scale = row.iter().fold(1.0f32, |m, v| m.max(v.abs()));
+        let err = got.iter().zip(row).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max) / scale;
+        assert!(err <= 5e-5, "position {p}: served logits differ by {err:.3e} of their scale");
+    }
+    let adapter = std::path::Path::new("/nonexistent/adapter.safetensors");
+    let refused = inkling2::finetune::Inkling2Trainer::serving_engine(&ckpt, &tiers, Some(adapter), 8).expect("the family serves").err().expect("an adapter is refused");
+    assert_eq!(refused.kind(), std::io::ErrorKind::Unsupported, "{refused}");
+}
