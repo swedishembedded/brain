@@ -892,6 +892,22 @@ The first trainable target needs no streaming: the base is about 19.5 GB.
     bf16-vs-rounded-f32 and packed-row equalities failed (analytic vs central differences off by up to 4x). A build over
     in-memory tensors (`Model::new`, `from_tensors`, `load`: the tiny configurations every check trains) now pins
     `GemmPrecision::Fp32Reference`, as ouro's `Model::new` does; a build over a checkpoint directory keeps `Auto`.
+  - Done (2026-11-22): profiled one real QLoRA step on CUDA (`real_lora`, nsys, one GH200, 20-token row, the release
+    as published): 11-12 s a step. The biggest waste was the frozen banks' input gradient: `moe_nvfp4_dx_gather` took
+    42 % of the kernel time (1.08 ms a launch, 10,836 launches over the run): the training backward calls it per expert
+    on that expert's few routed rows, so a launch held `rows * k` threads, each folding every bank row serially - the
+    device latency-bound at a fraction of its lanes. Fixed by native twins `moe_nvfp4_dx_gather` /
+    `moe_mxfp8_dx_gather` (`crates/kernels-cuda/cu/moe_micro_dx_gather.cu`, redirected by name in
+    `gpu_core::native_upgrade`, same bindings and uniforms): a block per (slot, 64 inputs), the bank rows split 32 ways
+    over its threads, exact decodes, a shared-memory fold. 1.08 ms -> 53 us a launch (11.7 s -> 0.57 s over the run);
+    the step 11-12 s -> 6-7 s (both under nsys; GPU busy 80 % -> 60-80 %). The gates hold the twins to the f64 oracle
+    (`moe_micro_bwd`: the bit identity grouped == gather now holds only where both run the WGSL tier) and the layer
+    and adapter specs (`moe_micro_bwd`, `moe_expert_lora`, `micro_bank_stacked`) on CUDA; `real_lora` loss trajectory
+    unchanged (1.236 -> 0.685 -> 0.143 -> 0.0075).
+  - Left (profile after the fix): `moe_linear_gated` 25 % (the per-expert adapter products, f32 reference tier),
+    `depth_attn_bwd` 19 % and `depth_attn_fwd` 16 % (barrier-free reference kernels, 2.7-8 ms a launch), `moe_linear_gated_dx`
+    16 %; on the host 250,908 `cuMemAlloc`/`cuMemFree` pairs over the run (per-stage storage, 14.6 s in `cuMemFree`)
+    and the host gate readback per MoE call (`MoeActs::compact_for`) - not changed here.
 - **I4.4** `model::train` + `data`: packed rows with document-boundary resets of
   attention, every conv state and the relative-position origin. Gate: no supervision or
   state crosses a boundary.

@@ -3911,6 +3911,43 @@ pub const ALL: &[CudaKernel] = &[
         src: include_str!("../cu/fp8_nvfp4_gemv.cu"),
     },
     CudaKernel {
+        name: "moe_nvfp4_dx_gather",
+        // The native twin of `moe_nvfp4_dx_gather.wgsl`, redirected to by name by `gpu_core::native_upgrade`: the input
+        // gradient through a frozen NVFP4 expert bank, as a training backward runs it per expert on its routed rows.
+        op: Op::MoeExpertLinear,
+        weight: Dtype::F4E2M1,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_moe_nvfp4_dx_gather",
+        what: "transposed NVFP4 expert-bank product dx[s] = W[ids[s]]^T dy[s]: a block per slot and 64 inputs, the bank rows split 32 ways over its threads with exact integer decodes and a shared-memory fold, instead of one serial fold over every row per output",
+        reported: "native:moe_nvfp4_dx_gather",
+        block_dim: 256,
+        // 64 inputs of one slot per block, slot-major.
+        tile: (1, 64),
+        shared_bytes: 0,
+        programmatic: false,
+        src: include_str!("../cu/moe_micro_dx_gather.cu"),
+    },
+    CudaKernel {
+        name: "moe_mxfp8_dx_gather",
+        // The native twin of `moe_mxfp8_dx_gather.wgsl` (see `moe_nvfp4_dx_gather`).
+        op: Op::MoeExpertLinear,
+        weight: Dtype::F8E4M3,
+        by_name: true,
+        source: ImplSource::Tuned,
+        min_cc: BASELINE_MIN_CC,
+        entry: "brain_moe_mxfp8_dx_gather",
+        what: "transposed MXFP8 expert-bank product dx[s] = W[ids[s]]^T dy[s]: a block per slot and 64 inputs, the bank rows split 32 ways over its threads with exact E4M3 x E8M0 decodes and a shared-memory fold",
+        reported: "native:moe_mxfp8_dx_gather",
+        block_dim: 256,
+        // 64 inputs of one slot per block, slot-major.
+        tile: (1, 64),
+        shared_bytes: 0,
+        programmatic: false,
+        src: include_str!("../cu/moe_micro_dx_gather.cu"),
+    },
+    CudaKernel {
         name: "moe_router_topk",
         // The native twin of `moe_router_topk.wgsl`, redirected to by name by `gpu_core::native_upgrade`.
         op: Op::ArgMaxRow,

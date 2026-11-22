@@ -832,6 +832,32 @@ const MOE_NVFP4_GATEUP_BINDINGS: &[BindKind] = &[
     BindKind::StorageReadWrite,
 ];
 
+/// `moe_nvfp4_dx_gather.wgsl`'s bindings: params, `dy`, `ids`, `wq`, `sc`, `gl`, `dx` (the gather's list).
+const MOE_NVFP4_DX_GATHER_BINDINGS: &[BindKind] = MOE_NVFP4_GATHER_BINDINGS;
+
+/// `moe_mxfp8_dx_gather.wgsl`'s bindings: params, `dy`, `ids`, `wq`, `sc`, `dx`.
+const MOE_MXFP8_DX_GATHER_BINDINGS: &[BindKind] =
+    &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageRead, BindKind::StorageReadWrite];
+
+/// Inputs one block of the native expert-bank input gradients covers.
+const MOE_DX_GATHER_INPUTS: u32 = 64;
+
+/// The NVFP4 input gradient's `[slots, k, n, accumulate]`: `k` whole 64-input blocks (the WGSL tier's own rule).
+fn serves_moe_nvfp4_dx_gather(p: &[u32]) -> bool {
+    matches!(p, [slots, k, n, acc] if *slots >= 1 && *n >= 1 && *k >= 64 && k % 64 == 0 && *acc <= 1
+        && u64::from(*slots) * u64::from(k / MOE_DX_GATHER_INPUTS) <= u64::from(u32::MAX))
+}
+
+/// The MXFP8 input gradient's `[slots, k, n, accumulate]`: `k` whole 128-input scale words (the WGSL tier's own rule).
+fn serves_moe_mxfp8_dx_gather(p: &[u32]) -> bool {
+    serves_moe_nvfp4_dx_gather(p) && p[1].is_multiple_of(128)
+}
+
+/// One block per 64 inputs of a slot, slot-major.
+fn moe_dx_gather_blocks(p: &[u32], _tile: (u32, u32)) -> u32 {
+    p[0] * (p[1] / MOE_DX_GATHER_INPUTS)
+}
+
 /// `moe_router_topk.wgsl`'s bindings: params, `logits`, `ids`, `weight`.
 const MOE_ROUTER_TOPK_BINDINGS: &[BindKind] = &[BindKind::Uniform, BindKind::StorageRead, BindKind::StorageReadWrite, BindKind::StorageReadWrite];
 
@@ -1808,6 +1834,28 @@ pub(crate) const ROWS: &[Row] = &[
         bindings: MOE_NVFP4_GROUPED_BINDINGS,
         serves: serves_moe_nvfp4_grouped,
         blocks: moe_nvfp4_grouped_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 1,
+        input: Input::PACKED,
+        launch: CudaLaunch::NONE,
+    },
+    Row {
+        slow: "moe_nvfp4_dx_gather",
+        target: Target::Named("moe_nvfp4_dx_gather"),
+        bindings: MOE_NVFP4_DX_GATHER_BINDINGS,
+        serves: serves_moe_nvfp4_dx_gather,
+        blocks: moe_dx_gather_blocks,
+        requires_wgsl_upgrade: false,
+        align_words: 1,
+        input: Input::PACKED,
+        launch: CudaLaunch::NONE,
+    },
+    Row {
+        slow: "moe_mxfp8_dx_gather",
+        target: Target::Named("moe_mxfp8_dx_gather"),
+        bindings: MOE_MXFP8_DX_GATHER_BINDINGS,
+        serves: serves_moe_mxfp8_dx_gather,
+        blocks: moe_dx_gather_blocks,
         requires_wgsl_upgrade: false,
         align_words: 1,
         input: Input::PACKED,

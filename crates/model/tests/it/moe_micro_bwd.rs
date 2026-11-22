@@ -9,7 +9,8 @@
 //! [`MicroBank`]s, the published bytes) trains through the shared row-compacted path under a declared expert
 //! activation and gate/up layout:
 //! - the banks' transposed products (`gather_dx`, `grouped_dx`) are the f64 transposed product of the decoded weights,
-//!   and the grouped form is the gather form's arithmetic to the bit;
+//!   and the grouped form is the gather form's arithmetic to the bit where both run the WGSL tier (a native twin,
+//!   `gpu_core::native_upgrade` on a CUDA device, folds the rows in another order and is held to the oracle alone);
 //! - a softcap-sigmoid expert over a row-interleaved fused gate/up bank, behind a sigmoid router: the layer output is the
 //!   f64 forward over the dequantized weights, and the input gradient is the f64 central difference of that forward,
 //!   with the router differentiated ([`RouterGrad::Full`]) or held constant ([`RouterGrad::Detached`]);
@@ -103,7 +104,11 @@ fn bank_input_gradients_are_the_transposed_product_of_the_decoded_weights() {
                 assert!((sum - want_sum).abs() <= 2e-5 * (scale + want_sum.abs()) + 1e-9, "{kind:?} accumulated slot {s} col {i}: {sum}, want {want_sum}");
             }
         }
-        assert!(gather.iter().zip(&grouped).all(|(a, b)| a.to_bits() == b.to_bits()), "{kind:?}: the grouped input gradient is the gather form's arithmetic");
+        let fmt = if kind == MicroScaled::Nvfp4 { "nvfp4" } else { "mxfp8" };
+        let native = g.native_kernel_for(idx(&g, &format!("moe_{fmt}_dx_gather")), &[slots as u32, k as u32, n as u32, 0]).is_some();
+        if !native {
+            assert!(gather.iter().zip(&grouped).all(|(a, b)| a.to_bits() == b.to_bits()), "{kind:?}: the grouped input gradient is the gather form's arithmetic");
+        }
     }
 }
 
