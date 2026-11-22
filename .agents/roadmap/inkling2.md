@@ -632,6 +632,30 @@ The first trainable target needs no streaming: the base is about 19.5 GB.
     differences, the idle expert's gradient bits untouched, `d_x` vs f64 central differences with the router
     differentiated and detached, refusals. CPU backend; NVFP4 skips there (bank forward needs workgroup reductions);
     CUDA not exercised.
+  - Done (2026-11-22): stacked-expert sites, file format and serving overlay. `adapter::sites::{ExpertSite { name, leaf,
+    layer, experts, out, inn, top_k }, LoraSites::expert_sites (default empty), expert_tensor_shapes,
+    validate_with_experts, SiteMismatch::ExpertShape}`, `Model::adapter_expert_sites`, `TargetSelector::matches_expert`;
+    expert leaves resolve in `AdapterTargets` / `AdapterServing::all_leaves`. File: `{bank}.lora_a [E, r, in]`,
+    `{bank}.lora_b [E, out, r]` (real rank-3 shapes, written by `save_lora_with_lineage`); `DeviceAdapter::experts:
+    Vec<ExpertPair>` filled only by `read_adapter_with_experts` / `parse_adapter_with_experts`; the linear readers
+    (`read_adapter`, `parse_adapter`, `FoldedSource::open`, `AdapterFile::read`) refuse a stacked pair by name
+    (knowledge #553: `StModel` now carries the header shapes). Fold: `fold_adapter_into` folds a stacked pair into an
+    f32 bank held as one `[E, out, in]` tensor, expert by expert; a quantized bank has no fold (refused, served beside
+    the bank). Serving: `AdapterBank::new_with_experts(gpu, sites, expert_sites, cfg, rows, layers)` holds `slots * E`
+    sub-slots per targeted expert site and `AdapterBank::correct_experts(gpu, steps, bank_name, x, xdiv, ids, out,
+    slots)` corrects a routed bank product `[slots, n]` after it (kernel `lora_expert_slots` composes
+    `row_slot[s / top_k] * E + ids[s]`, `embed` gathers the token rows when `xdiv > 1`, then the existing
+    `lora_bank_rows`); kernels `model::dispatch::LORA_EXPERT_BANK_PIPELINES`. Gate
+    `crates/model/tests/it/adapter_expert_sites.rs`: one SGD step over a frozen MXFP8 bank, save, read back (shapes,
+    card, bits), bank registration, a mixed batch served (adapted rows = the training forward, others the base bits),
+    budget = allocation, per-expert fold, refusals. Ordinary linear LoRA over 2-D `Weight::Micro`: `qops_frozen_lora_grad`
+    runs every tier including nvfp4 / mxfp4 / mxfp8 forward, dX, LoRA dA/dB on the CPU backend (only the bf16
+    tile-decode case skips there); nothing missing.
+  - Left: the generic catalog path (`llmserve::adapter_release` -> `parse_adapter`) still reads linear pairs only, so a
+    stacked adapter reaches a bank through `parse_adapter_with_experts` in the model's own loading until the catalog
+    switches (every `AdapterBank::register` already checks expert pairs); adapters beside a dense expert bank in
+    training; LoRA-FA (gradient buffers for B only) on expert sites; the attention / relative /
+    sink / message-gate / depth-query sites are ordinary `LinearSite`s the model declares; CUDA not exercised.
 - **I4.3** `inkling2`:
   - A `ChatTrainer` plus `TokenObjectives`, with `LORA_BASES` naming the native
     NVFP4/MXFP8 base.

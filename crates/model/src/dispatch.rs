@@ -193,6 +193,11 @@ pub const LORA_BANK_PIPELINES: [(&str, &str); 7] = [
     ("lora_delta_rows_multi_tiled", kernels::LORA_DELTA_ROWS_MULTI_TILED),
 ];
 
+/// The kernels a stacked-expert adapter bank overlay dispatches beside [`LORA_BANK_PIPELINES`]: the per-slot index of
+/// an expert slot's adapter (`lora_expert_slots`) and the row gather of the product's input (`embed`). Resolved by
+/// name; a model whose bank targets expert sites registers these.
+pub const LORA_EXPERT_BANK_PIPELINES: [(&str, &str); 2] = [("lora_expert_slots", kernels::LORA_EXPERT_SLOTS), ("embed", kernels::EMBED)];
+
 /// The rank word a bank stores per slot: the low 16 bits are the live width the
 /// projection computes (a single linear's rank, or a group's stacked width) and
 /// the high 16 bits the adapter's own rank, which bounds the epilogue's loop (the

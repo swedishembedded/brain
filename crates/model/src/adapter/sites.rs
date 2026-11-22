@@ -28,6 +28,40 @@ use crate::lora::device_adapter::DeviceAdapter;
 /// block order. Independent of which of them a particular adapter targets.
 pub trait LoraSites {
     fn lora_sites(&self) -> Vec<LinearSite>;
+
+    /// The stacked expert banks an adapter may correct expert by expert, in block order ([`ExpertSite`]). None by
+    /// default: a model with routed experts lists them.
+    fn expert_sites(&self) -> Vec<ExpertSite> {
+        Vec::new()
+    }
+}
+
+/// One projection of a mixture-of-experts layer stored as a stacked bank of `experts` matrices `[out, in]` (one
+/// `[experts, out, in]` tensor, the routed experts' gate/up or down projection), which an adapter corrects with one
+/// low-rank pair per expert: `{name}.lora_a` of shape `[experts, r, in]` and `{name}.lora_b` of shape
+/// `[experts, out, r]` ([`crate::lora::device_adapter::ExpertPair`]). Expert `e`'s pair corrects expert `e`'s matrix
+/// on the tokens routed to it, and only there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExpertSite {
+    /// The bank's name, the stem of its adapter tensors (`layers.20.mlp.experts.w13`).
+    pub name: String,
+    /// The leaf a target list names it by (`w13`).
+    pub leaf: &'static str,
+    /// The layer it belongs to.
+    pub layer: Option<usize>,
+    pub experts: usize,
+    /// Output rows of each expert's matrix (`2 * moe_ff` for a fused gate/up bank).
+    pub out: usize,
+    /// Inputs of each expert's matrix.
+    pub inn: usize,
+    /// Experts each token routes to: a serving bank holds this many expert slots per row.
+    pub top_k: usize,
+}
+
+/// The shapes of the two tensors a rank-`rank` adapter stores for an expert `site`: `A [experts, rank, in]` and
+/// `B [experts, out, rank]`.
+pub fn expert_tensor_shapes(site: &ExpertSite, rank: usize) -> ([usize; 3], [usize; 3]) {
+    ([site.experts, rank, site.inn], [site.experts, site.out, rank])
 }
 
 /// The names of the two tensors an adapter stores for `site`.
@@ -52,6 +86,8 @@ pub enum SiteMismatch {
     SavedShape { name: String, expected: usize, got: usize },
     /// A pair's factors are not the rank-`rank` shapes of the site.
     Shape { name: String, rank: u32, expected_a: [usize; 2], expected_b: [usize; 2], got_a: usize, got_b: usize },
+    /// A stacked expert pair is not the rank-`rank` shapes of its expert site.
+    ExpertShape { name: String, rank: u32, expected_a: [usize; 3], expected_b: [usize; 3], got_experts: usize, got_a: usize, got_b: usize },
 }
 
 impl fmt::Display for SiteMismatch {
@@ -65,6 +101,10 @@ impl fmt::Display for SiteMismatch {
                 "{name}: a rank-{rank} adapter needs A {expected_a:?} ({} values) and B {expected_b:?} ({} values) but holds {got_a} and {got_b}",
                 expected_a[0] * expected_a[1],
                 expected_b[0] * expected_b[1]
+            ),
+            SiteMismatch::ExpertShape { name, rank, expected_a, expected_b, got_experts, got_a, got_b } => write!(
+                f,
+                "{name}: a rank-{rank} stacked adapter needs A {expected_a:?} and B {expected_b:?} but holds {got_experts} experts of {got_a} and {got_b} values in all",
             ),
         }
     }
@@ -92,15 +132,29 @@ pub struct SavedSite {
 }
 
 /// [`validate`] for a model that applies the full tensors in `saved_sites`: each full tensor of the adapter must be
-/// one of them, at its size.
+/// one of them, at its size. A stacked expert pair is refused ([`SiteMismatch::UnknownSite`]):
+/// [`validate_with_experts`] is the check of a model that has expert sites.
 pub fn validate_with_saved(adapter: &DeviceAdapter, sites: &[LinearSite], saved_sites: &[SavedSite]) -> Result<(), SiteMismatch> {
+    validate_with_experts(adapter, sites, &[], saved_sites)
+}
+
+/// [`validate_with_saved`] for a model with stacked expert banks: each of the adapter's expert pairs must belong to
+/// one of `expert_sites`, with its expert count and the site's rank-`rank` shapes ([`expert_tensor_shapes`]).
+pub fn validate_with_experts(adapter: &DeviceAdapter, sites: &[LinearSite], expert_sites: &[ExpertSite], saved_sites: &[SavedSite]) -> Result<(), SiteMismatch> {
+    let rank = adapter.rank as usize;
+    for pair in &adapter.experts {
+        let site = expert_sites.iter().find(|s| s.name == pair.base).ok_or_else(|| SiteMismatch::UnknownSite { name: pair.base.clone() })?;
+        let (expected_a, expected_b) = expert_tensor_shapes(site, rank);
+        if pair.experts != site.experts || pair.a.len() != expected_a.iter().product::<usize>() || pair.b.len() != expected_b.iter().product::<usize>() {
+            return Err(SiteMismatch::ExpertShape { name: pair.base.clone(), rank: adapter.rank, expected_a, expected_b, got_experts: pair.experts, got_a: pair.a.len(), got_b: pair.b.len() });
+        }
+    }
     for t in &adapter.saved {
         let site = saved_sites.iter().find(|s| s.name == t.base).ok_or_else(|| SiteMismatch::UnsavableTensor { name: t.base.clone() })?;
         if site.numel != t.data.len() {
             return Err(SiteMismatch::SavedShape { name: t.base.clone(), expected: site.numel, got: t.data.len() });
         }
     }
-    let rank = adapter.rank as usize;
     for pair in &adapter.sites {
         let site = sites.iter().find(|s| s.name == pair.base).ok_or_else(|| SiteMismatch::UnknownSite { name: pair.base.clone() })?;
         let (expected_a, expected_b) = tensor_shapes(site, rank);
@@ -136,14 +190,14 @@ mod tests {
     #[test]
     fn an_adapter_that_fits_its_sites_validates_and_may_skip_sites() {
         let sites = [site("w0", 6, 5), site("w1", 4, 7)];
-        let adapter = DeviceAdapter { rank: 2, alpha: 2.0, sites: vec![pair(&sites[1], 2)], saved: Vec::new() };
+        let adapter = DeviceAdapter { rank: 2, alpha: 2.0, sites: vec![pair(&sites[1], 2)], saved: Vec::new(), experts: Vec::new() };
         assert_eq!(validate(&adapter, &sites), Ok(()));
     }
 
     #[test]
     fn an_unknown_site_is_named() {
         let sites = [site("w0", 6, 5)];
-        let adapter = DeviceAdapter { rank: 2, alpha: 2.0, sites: vec![AdapterSite { base: "nope".into(), a: vec![0.0; 10], b: vec![0.0; 12] }], saved: Vec::new() };
+        let adapter = DeviceAdapter { rank: 2, alpha: 2.0, sites: vec![AdapterSite { base: "nope".into(), a: vec![0.0; 10], b: vec![0.0; 12] }], saved: Vec::new(), experts: Vec::new() };
         assert_eq!(validate(&adapter, &sites), Err(SiteMismatch::UnknownSite { name: "nope".into() }));
     }
 
@@ -151,7 +205,7 @@ mod tests {
     fn full_tensors_are_refused_unless_the_model_applies_them_at_their_size() {
         let sites = [site("w0", 6, 5)];
         let gain = SavedSite { name: "norm.weight".into(), numel: 6, layer: Some(0) };
-        let mut adapter = DeviceAdapter { rank: 2, alpha: 2.0, sites: vec![pair(&sites[0], 2)], saved: vec![SavedTensor { base: "norm.weight".into(), data: vec![1.0; 6] }] };
+        let mut adapter = DeviceAdapter { rank: 2, alpha: 2.0, sites: vec![pair(&sites[0], 2)], saved: vec![SavedTensor { base: "norm.weight".into(), data: vec![1.0; 6] }], experts: Vec::new() };
         // A model that knows nothing of them never drops them silently.
         let err = validate(&adapter, &sites).unwrap_err();
         assert_eq!(err, SiteMismatch::UnsavableTensor { name: "norm.weight".into() });
@@ -164,7 +218,7 @@ mod tests {
     #[test]
     fn a_wrong_rank_or_transposed_factor_is_refused_with_the_expected_shapes() {
         let sites = [site("w0", 6, 5)];
-        let mut adapter = DeviceAdapter { rank: 2, alpha: 2.0, sites: vec![pair(&sites[0], 3)], saved: Vec::new() };
+        let mut adapter = DeviceAdapter { rank: 2, alpha: 2.0, sites: vec![pair(&sites[0], 3)], saved: Vec::new(), experts: Vec::new() };
         let err = validate(&adapter, &sites).unwrap_err();
         assert!(matches!(err, SiteMismatch::Shape { rank: 2, expected_a: [2, 5], expected_b: [6, 2], .. }), "{err:?}");
         assert!(err.to_string().contains("w0") && err.to_string().contains("[2, 5]"), "{err}");

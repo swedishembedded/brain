@@ -1420,6 +1420,11 @@ pub mod device_adapter {
         let r = rank as usize;
         let targets = &lora.targets;
         let dims: std::collections::HashMap<String, (usize, usize)> = model.adapter_sites().into_iter().map(|site| (site.name, (site.spec.out, site.spec.inn))).collect();
+        // Stacked expert pairs are written with their real rank-3 shapes, `A [E, r, in]` and `B [E, out, r]`.
+        let expert_dims: std::collections::HashMap<String, (usize, usize, usize)> = model.adapter_expert_sites().into_iter().map(|site| (site.name, (site.experts, site.out, site.inn))).collect();
+        if !expert_dims.is_empty() && kind != DeviceKind::Lora {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("stacked expert sites take LoRA pairs; a {} adapter has none", kind.name())));
+        }
         // The adapter is every adapter tensor the model holds, not only the
         // optimised ones: LoRA-FA's `A` is frozen (it has no
         // gradient, so `param_names` omits it) yet the adapter is not
@@ -1436,15 +1441,39 @@ pub mod device_adapter {
                 let hp = lora.hp_for(&base);
                 let (an, bn) = (format!("{base}{LORA_A}"), format!("{base}{LORA_B}"));
                 let (a, b) = (data.remove(&an).expect("listed"), data.remove(&bn).unwrap_or_else(|| panic!("save_adapter: {bn} is missing")));
-                let (a2, b2) = normalized_pair(&a, &b, hp.rank, hp.scale(), r);
+                // A stacked pair is normalized expert by expert.
+                let experts = expert_dims.get(&base).map_or(1, |d| d.0);
+                let (mut a2, mut b2) = (Vec::new(), Vec::new());
+                for (a_e, b_e) in a.chunks(a.len() / experts).zip(b.chunks(b.len() / experts)) {
+                    let (a_n, b_n) = normalized_pair(a_e, b_e, hp.rank, hp.scale(), r);
+                    a2.extend(a_n);
+                    b2.extend(b_n);
+                }
                 data.insert(an, a2);
                 data.insert(bn, b2);
             }
         }
+        let stacked_shape = |name: &str, len: usize| -> Option<std::io::Result<Vec<usize>>> {
+            let (base, a) = match (name.strip_suffix(LORA_A), name.strip_suffix(LORA_B)) {
+                (Some(base), _) => (base, true),
+                (_, Some(base)) => (base, false),
+                _ => return None,
+            };
+            let &(e, out, inn) = expert_dims.get(base)?;
+            let shape = if a { vec![e, r, inn] } else { vec![e, out, r] };
+            Some(if shape.iter().product::<usize>() == len {
+                Ok(shape)
+            } else {
+                Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("save_adapter: {name} holds {len} values, not the {shape:?} of a rank-{r} pair over {e} experts of [{out}, {inn}]")))
+            })
+        };
         let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = names
             .into_iter()
             .map(|name| {
                 let values = data.remove(&name).expect("every listed name has data");
+                if let Some(shape) = stacked_shape(&name, values.len()) {
+                    return shape.map(|shape| (name, shape.into_iter().map(|d| d as u64).collect(), values));
+                }
                 // Real 2-D shape, not the flattened `[len]` this used to
                 // write - recovered by the kind's own definition from the
                 // length and rank (LoRA, IA3), or from the linear's recorded
@@ -1456,9 +1485,9 @@ pub mod device_adapter {
                 } else {
                     shape_of(&name, r, values.len()).unwrap_or_else(|| panic!("save_adapter: {name} holds {} elements, not a whole rank-{r} matrix", values.len()))
                 };
-                (name, shape.into_iter().map(|d| d as u64).collect(), values)
+                Ok((name, shape.into_iter().map(|d| d as u64).collect(), values))
             })
-            .collect();
+            .collect::<std::io::Result<_>>()?;
 
         let mut card = ModelCard::new(card_id, family);
         card.variant_of = Some(base_id.to_string());
@@ -1515,6 +1544,38 @@ pub mod device_adapter {
         /// Base tensors the adapter carries in full (PEFT's `modules_to_save`), sorted by name: each REPLACES the
         /// base's tensor of that name wherever the adapter applies. Empty for an adapter of factors only.
         pub saved: Vec<SavedTensor>,
+        /// Stacked expert pairs (per-expert factors over an `[experts, out, in]` bank), sorted by base name. Only the
+        /// readers that take them fill it ([`read_adapter_with_experts`], [`parse_adapter_with_experts`]); the linear
+        /// readers refuse a file that holds one, so a consumer that knows only [`Self::sites`] never drops one.
+        pub experts: Vec<ExpertPair>,
+    }
+
+    /// One stacked expert pair as an adapter file stores it: `A [experts, r, in]` and `B [experts, out, r]`,
+    /// row-major, UNSCALED (the adapter's `alpha / rank` applies, as for [`AdapterSite`]). Expert `e`'s pair corrects
+    /// expert `e`'s `[out, in]` matrix of the bank `base` names.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct ExpertPair {
+        /// The expert bank this pair corrects (e.g. `layers.20.mlp.experts.w13`).
+        pub base: String,
+        /// Experts in the bank.
+        pub experts: usize,
+        pub a: Vec<f32>,
+        pub b: Vec<f32>,
+    }
+
+    impl ExpertPair {
+        /// `(out, in)` of each expert's matrix, for a rank-`r` adapter.
+        pub fn dims(&self, r: u32) -> (usize, usize) {
+            let per = self.experts * r as usize;
+            (self.b.len() / per, self.a.len() / per)
+        }
+
+        /// Expert `e`'s `(A [r, in], B [out, r])`.
+        pub fn expert(&self, e: usize, r: u32) -> (&[f32], &[f32]) {
+            let (out, inn) = self.dims(r);
+            let r = r as usize;
+            (&self.a[e * r * inn..(e + 1) * r * inn], &self.b[e * out * r..(e + 1) * out * r])
+        }
     }
 
     /// A base tensor an adapter carries in full: `data` is the whole tensor, in the base's own layout.
@@ -1544,8 +1605,17 @@ pub mod device_adapter {
     /// multiples of the rank. A card with per-target ranks is refused: this
     /// family writes one rank for every target, and applying the scalar pair
     /// to a file that says otherwise would scale some targets wrongly.
+    ///
+    /// A stacked expert pair (rank-3 factors, [`ExpertPair`]) is refused by name: this reader's consumers apply linear
+    /// pairs only. [`read_adapter_with_experts`] takes both.
     pub fn read_adapter(adapter_path: &str) -> std::io::Result<DeviceAdapter> {
-        adapter_from_model(checkpoint::st::load_safetensors(adapter_path)?, adapter_path).map(|(adapter, _card)| adapter)
+        adapter_from_model(checkpoint::st::load_safetensors(adapter_path)?, adapter_path, false).map(|(adapter, _card)| adapter)
+    }
+
+    /// [`read_adapter`] for a consumer that also applies stacked expert pairs: they land in [`DeviceAdapter::experts`],
+    /// each checked to be `A [experts, rank, in]` and `B [experts, out, rank]` at the card's rank.
+    pub fn read_adapter_with_experts(adapter_path: &str) -> std::io::Result<DeviceAdapter> {
+        adapter_from_model(checkpoint::st::load_safetensors(adapter_path)?, adapter_path, true).map(|(adapter, _card)| adapter)
     }
 
     /// [`read_adapter`] over bytes the caller already holds, so the bytes a
@@ -1555,12 +1625,39 @@ pub mod device_adapter {
     /// what the card says (its base, its family). `origin` only names the
     /// bytes in an error.
     pub fn parse_adapter(bytes: &[u8], origin: &str) -> std::io::Result<(DeviceAdapter, ModelCard)> {
-        adapter_from_model(checkpoint::st::parse_safetensors(bytes).map_err(|e| invalid(origin, e))?, origin)
+        adapter_from_model(checkpoint::st::parse_safetensors(bytes).map_err(|e| invalid(origin, e))?, origin, false)
+    }
+
+    /// [`parse_adapter`] taking stacked expert pairs too, as [`read_adapter_with_experts`].
+    pub fn parse_adapter_with_experts(bytes: &[u8], origin: &str) -> std::io::Result<(DeviceAdapter, ModelCard)> {
+        adapter_from_model(checkpoint::st::parse_safetensors(bytes).map_err(|e| invalid(origin, e))?, origin, true)
+    }
+
+    /// How a pair's two factors are shaped in the file: a linear pair (`A [r, in]`, `B [out, r]`, or the flat `[len]`
+    /// earlier writers used) or a stacked expert pair with its expert count.
+    enum PairShape {
+        Linear,
+        Stacked { experts: usize, out: usize, inn: usize },
+    }
+
+    /// The shape of `base`'s pair at rank `r`, from the header shapes of its factors; anything but a linear pair (1-D or
+    /// 2-D factors) or a stacked pair (`A [E, r, in]`, `B [E, out, r]`, the same `E`) is refused naming both shapes.
+    fn pair_shape(base: &str, r: usize, a: &[usize], b: &[usize]) -> Result<PairShape, String> {
+        match (a, b) {
+            (&[ea, ra, inn], &[eb, out, rb]) => {
+                if ea == 0 || ea != eb || ra != r || rb != r || inn == 0 || out == 0 {
+                    return Err(format!("{base}: a stacked expert pair needs A [experts, {r}, in] and B [experts, out, {r}] over one expert count, the file holds A {a:?} and B {b:?}"));
+                }
+                Ok(PairShape::Stacked { experts: ea, out, inn })
+            }
+            _ if a.len() <= 2 && b.len() <= 2 => Ok(PairShape::Linear),
+            _ => Err(format!("{base}: factors shaped A {a:?} and B {b:?} are neither a linear pair (A [rank, in], B [out, rank]) nor a stacked expert pair (A [experts, rank, in], B [experts, out, rank])")),
+        }
     }
 
     /// The validation both readers share. Consumes `st`: the factors move out
     /// of its tensor map instead of being copied.
-    fn adapter_from_model(mut st: checkpoint::st::StModel, adapter_path: &str) -> std::io::Result<(DeviceAdapter, ModelCard)> {
+    fn adapter_from_model(mut st: checkpoint::st::StModel, adapter_path: &str, take_experts: bool) -> std::io::Result<(DeviceAdapter, ModelCard)> {
         let card = st.card().ok_or_else(|| invalid(adapter_path, "has no ModelCard".into()))?;
         let a = card.adapter.as_ref().ok_or_else(|| invalid(adapter_path, "its card has no adapter descriptor".into()))?;
         // `Adapter.kind` is load-bearing: the math below IS the lora
@@ -1586,19 +1683,37 @@ pub mod device_adapter {
         names.sort();
         let r = rank as usize;
         let mut sites = Vec::with_capacity(names.len());
+        let mut experts = Vec::new();
         for base in names {
-            let a = st.tensors.remove(&format!("{base}{LORA_A}")).expect("listed above");
-            let b = st.tensors.remove(&format!("{base}{LORA_B}")).ok_or_else(|| invalid(adapter_path, format!("missing {base}{LORA_B}")))?;
-            if a.is_empty() || b.is_empty() || !a.len().is_multiple_of(r) || b.len() % r != 0 {
-                return Err(invalid(adapter_path, format!("{base}: factor sizes {} / {} are not whole rank-{rank} matrices", a.len(), b.len())));
+            let (an, bn) = (format!("{base}{LORA_A}"), format!("{base}{LORA_B}"));
+            let a = st.tensors.remove(&an).expect("listed above");
+            let b = st.tensors.remove(&bn).ok_or_else(|| invalid(adapter_path, format!("missing {base}{LORA_B}")))?;
+            let shape_of = |name: &str| st.shapes.get(name).cloned().ok_or_else(|| invalid(adapter_path, format!("{name} has no shape in the file's header")));
+            let (a_shape, b_shape) = (shape_of(&an)?, shape_of(&bn)?);
+            match pair_shape(&base, r, &a_shape, &b_shape).map_err(|why| invalid(adapter_path, why))? {
+                PairShape::Linear => {
+                    if a.is_empty() || b.is_empty() || !a.len().is_multiple_of(r) || b.len() % r != 0 {
+                        return Err(invalid(adapter_path, format!("{base}: factor sizes {} / {} are not whole rank-{rank} matrices", a.len(), b.len())));
+                    }
+                    sites.push(AdapterSite { base, a, b });
+                }
+                PairShape::Stacked { experts: e, out, inn } => {
+                    if !take_experts {
+                        return Err(invalid(
+                            adapter_path,
+                            format!("{base}: a stacked expert pair (A {a_shape:?}, B {b_shape:?}); this reader applies linear pairs only - read it with read_adapter_with_experts and serve it through an adapter bank that targets expert sites"),
+                        ));
+                    }
+                    debug_assert_eq!((a.len(), b.len()), (e * r * inn, e * out * r), "the header shapes describe the data");
+                    experts.push(ExpertPair { base, experts: e, a, b });
+                }
             }
-            sites.push(AdapterSite { base, a, b });
         }
-        if sites.is_empty() {
+        if sites.is_empty() && experts.is_empty() {
             return Err(invalid(adapter_path, "contains no adapter pairs".into()));
         }
         if let Some(declared) = a.targets.as_deref() {
-            check_declared_targets(declared, &sites).map_err(|why| invalid(adapter_path, why))?;
+            check_declared_targets(declared, sites.iter().map(|s| s.base.as_str()).chain(experts.iter().map(|p| p.base.as_str()))).map_err(|why| invalid(adapter_path, why))?;
         }
         // The full tensors: the card lists them, the file holds each as `<name>.saved`; a listed one the file lacks,
         // or one the card does not list, is a file that disagrees with its card.
@@ -1613,7 +1728,7 @@ pub mod device_adapter {
         if let Some(unlisted) = st.tensors.keys().find(|n| n.ends_with(SAVED_SUFFIX)) {
             return Err(invalid(adapter_path, format!("{unlisted} is a saved tensor its card does not list in modules_to_save")));
         }
-        Ok((DeviceAdapter { rank, alpha, sites, saved }, card))
+        Ok((DeviceAdapter { rank, alpha, sites, saved, experts }, card))
     }
 
     /// The leaf a site corrects: its base weight's last name component, the
@@ -1628,9 +1743,9 @@ pub mod device_adapter {
     /// correct. A card claiming attention over MLP tensors (or the reverse)
     /// would be bound and served as something it is not; the message names
     /// both sets so the mismatch is visible without opening the file.
-    fn check_declared_targets(declared: &[String], sites: &[AdapterSite]) -> Result<(), String> {
+    fn check_declared_targets<'a>(declared: &[String], bases: impl Iterator<Item = &'a str>) -> Result<(), String> {
         let declared: std::collections::BTreeSet<&str> = declared.iter().map(String::as_str).collect();
-        let found: std::collections::BTreeSet<&str> = sites.iter().map(|s| leaf_of(&s.base)).collect();
+        let found: std::collections::BTreeSet<&str> = bases.map(leaf_of).collect();
         if declared == found {
             return Ok(());
         }
@@ -1654,8 +1769,20 @@ pub mod device_adapter {
     ///
     /// Every target is checked against `base` before any weight is written,
     /// so a refused adapter leaves `base` untouched.
+    ///
+    /// A stacked expert pair ([`ExpertPair`]) folds into an f32 expert bank held as one tensor `[experts, out, in]`
+    /// under its base name, expert by expert. (A bank kept in its quantized encoding has no fold: the delta would have
+    /// to be re-quantized onto the bank's grid, or the bank widened to f32; such an adapter is served beside the bank,
+    /// [`crate::adapter::bank::AdapterBank::correct_experts`], and [`FoldedSource`] refuses it.)
     pub fn fold_adapter_into(base: &mut HashMap<String, Vec<f32>>, adapter_path: &str) -> std::io::Result<(u32, f32)> {
-        let adapter = read_adapter(adapter_path)?;
+        let adapter = read_adapter_with_experts(adapter_path)?;
+        for pair in &adapter.experts {
+            let (out, inn) = pair.dims(adapter.rank);
+            let w = base.get(&pair.base).ok_or_else(|| invalid(adapter_path, format!("base has no expert bank named {}", pair.base)))?;
+            if w.len() != pair.experts * out * inn {
+                return Err(invalid(adapter_path, format!("{}: adapter is {} x [{out}, {inn}] but the base bank holds {} values", pair.base, pair.experts, w.len())));
+            }
+        }
         for site in &adapter.sites {
             let (out, inn) = site.dims(adapter.rank);
             let w = base.get(&site.base).ok_or_else(|| invalid(adapter_path, format!("base has no weight named {}", site.base)))?;
@@ -1673,6 +1800,14 @@ pub mod device_adapter {
         for site in &adapter.sites {
             let w = base.get_mut(&site.base).expect("checked above");
             fold_delta(w, &site.a, &site.b, adapter.rank as usize, scale);
+        }
+        for pair in &adapter.experts {
+            let (out, inn) = pair.dims(adapter.rank);
+            let w = base.get_mut(&pair.base).expect("checked above");
+            for (e, w_e) in w.chunks_exact_mut(out * inn).enumerate() {
+                let (a, b) = pair.expert(e, adapter.rank);
+                fold_delta(w_e, a, b, adapter.rank as usize, scale);
+            }
         }
         for saved in adapter.saved {
             base.insert(saved.base, saved.data);
@@ -1694,7 +1829,9 @@ pub mod device_adapter {
 
     impl<'a> FoldedSource<'a> {
         /// Fold the adapter at `adapter_path` into `base`. Every target is checked against the base's tensor size
-        /// where the base knows it, so an adapter for another shape is refused here, not at the first read.
+        /// where the base knows it, so an adapter for another shape is refused here, not at the first read. A stacked
+        /// expert pair is refused by name ([`read_adapter`]): a streamed base's expert banks stay in their stored
+        /// encoding, beside which such an adapter is served, not folded.
         pub fn open(base: Box<dyn checkpoint::TensorSource + 'a>, adapter_path: &str) -> std::io::Result<FoldedSource<'a>> {
             let adapter = read_adapter(adapter_path)?;
             for site in &adapter.sites {

@@ -77,6 +77,7 @@ card without quantization or sharding).
 | 4 external adapters | LoRA and LoKr fold-in for flux2 (`flux2/src/lora.rs`, `model/tests/lora_fold.rs`); LoHa and OFT keys, IA3 and textual inversion: not present |
 | 5 NF4/QLoRA | NF4 base for LoRA done for qwen35 (`tests/lora_nf4_base.rs`, real 27B run); `Weight::NF4` and its kernels exist; qwen3 and flux2 do not offer an NF4 base; double quantization and LoftQ: not present |
 | 6 OFT, 7 SVD/PiSSA/OLoRA, 8 LoKr/LoHa training, 9 VeRA | not present (no SVD primitive, no initializer family) |
+| stacked-expert LoRA | per-expert pairs over an `[E, out, in]` bank (`adapter::sites::ExpertSite`): training on the row-compacted MoE path over frozen NVFP4/MXFP8 banks, rank-3 adapter files, f32 fold, serving overlay in `AdapterBank`; status in `inkling2.md` I4.2 |
 
 The generic, format-independent continuation of this ledger (parameter-set
 driven adapters, every adapter kind over every base `Weight`, adapter serving

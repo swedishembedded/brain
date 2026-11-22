@@ -314,6 +314,9 @@ impl ModelCard {
 pub struct StModel {
     pub tensors: HashMap<String, Vec<f32>>,
     pub metadata: BTreeMap<String, String>,
+    /// Every tensor's shape as the file's header records it: what tells a reader a rank-3 tensor from the matrix its
+    /// flat data would also fill.
+    pub shapes: HashMap<String, Vec<usize>>,
 }
 
 impl StModel {
@@ -355,8 +358,9 @@ fn decode(dtype: safetensors::Dtype, raw: &[u8]) -> Result<Vec<f32>, String> {
 /// reads the file first).
 pub fn parse_safetensors(bytes: &[u8]) -> Result<StModel, String> {
     let st = safetensors::SafeTensors::deserialize(bytes).map_err(|e| format!("st: {e}"))?;
-    let mut tensors = HashMap::new();
+    let (mut tensors, mut shapes) = (HashMap::new(), HashMap::new());
     for (name, view) in st.tensors() {
+        shapes.insert(name.clone(), view.shape().to_vec());
         tensors.insert(name, decode(view.dtype(), view.data())?);
     }
     let (_, meta) = safetensors::SafeTensors::read_metadata(bytes).map_err(|e| format!("st: {e}"))?;
@@ -365,7 +369,7 @@ pub fn parse_safetensors(bytes: &[u8]) -> Result<StModel, String> {
         .clone()
         .map(|m| m.into_iter().collect())
         .unwrap_or_default();
-    Ok(StModel { tensors, metadata })
+    Ok(StModel { tensors, metadata, shapes })
 }
 
 /// Read a safetensors file from disk into fp32 tensors + metadata.
@@ -400,14 +404,17 @@ pub fn load_safetensors(path: &str) -> io::Result<StModel> {
     let m = crate::mmap::MmapSafetensors::open_populated(path)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     let mut tensors = HashMap::with_capacity(m.names().len());
+    let mut shapes = HashMap::with_capacity(m.names().len());
     for name in m.names() {
+        let shape = m.shape(name).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("st: '{name}' has no shape in the header")))?;
+        shapes.insert(name.clone(), shape.to_vec());
         let data = m
             .tensor_f32(name)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("st: '{name}' vanished between names() and tensor_f32()")))?;
         tensors.insert(name.clone(), data);
         m.advise_dontneed_tensor(name);
     }
-    Ok(StModel { tensors, metadata: m.metadata().clone() })
+    Ok(StModel { tensors, metadata: m.metadata().clone(), shapes })
 }
 
 #[cfg(not(target_arch = "wasm32"))]

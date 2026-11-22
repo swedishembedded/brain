@@ -890,7 +890,8 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
 
     fn model_with(tensors: HashMap<String, Vec<f32>>) -> checkpoint::st::StModel {
-        checkpoint::st::StModel { tensors, metadata: BTreeMap::new() }
+        let shapes = tensors.iter().map(|(n, v)| (n.clone(), vec![v.len()])).collect();
+        checkpoint::st::StModel { tensors, metadata: BTreeMap::new(), shapes }
     }
 
     /// [`Creature::save_weights`]/[`Creature::load_weights`]'s whole point:

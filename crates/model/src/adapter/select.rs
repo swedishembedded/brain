@@ -10,6 +10,7 @@
 //! three. The glob below covers every pattern a PEFT config actually needs
 //! (`blocks.*.attn.q`, `**.ffn.*`, `blocks.{0,1,2}.*`).
 
+use super::sites::ExpertSite;
 use super::LinearSite;
 
 /// Inclusive-optional layer bounds plus a stride, for `Layers { .. }`.
@@ -58,15 +59,24 @@ pub enum TargetSelector {
 
 impl TargetSelector {
     pub fn matches(&self, site: &LinearSite) -> bool {
+        self.matches_named(&site.name, site.leaf, site.layer)
+    }
+
+    /// [`Self::matches`] for a stacked expert bank: the same name, leaf and layer rules.
+    pub fn matches_expert(&self, site: &ExpertSite) -> bool {
+        self.matches_named(&site.name, site.leaf, site.layer)
+    }
+
+    fn matches_named(&self, name: &str, leaf: &str, layer: Option<usize>) -> bool {
         match self {
             TargetSelector::All => true,
-            TargetSelector::Names(names) => names.iter().any(|n| n == &site.name),
-            TargetSelector::Leaves(leaves) => leaves.iter().any(|l| l == site.leaf),
-            TargetSelector::Suffixes(suffixes) => suffixes.iter().any(|s| site.name.ends_with(s.as_str())),
-            TargetSelector::Glob(patterns) => patterns.iter().any(|p| glob_match(p, &site.name)),
-            TargetSelector::Layers { inner, range } => range.contains(site.layer) && inner.matches(site),
-            TargetSelector::Any(inner) => inner.iter().any(|s| s.matches(site)),
-            TargetSelector::Not(inner) => !inner.matches(site),
+            TargetSelector::Names(names) => names.iter().any(|n| n == name),
+            TargetSelector::Leaves(leaves) => leaves.iter().any(|l| l == leaf),
+            TargetSelector::Suffixes(suffixes) => suffixes.iter().any(|s| name.ends_with(s.as_str())),
+            TargetSelector::Glob(patterns) => patterns.iter().any(|p| glob_match(p, name)),
+            TargetSelector::Layers { inner, range } => range.contains(layer) && inner.matches_named(name, leaf, layer),
+            TargetSelector::Any(inner) => inner.iter().any(|s| s.matches_named(name, leaf, layer)),
+            TargetSelector::Not(inner) => !inner.matches_named(name, leaf, layer),
         }
     }
 

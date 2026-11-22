@@ -830,6 +830,8 @@ pub const LORA_DELTA_ROWS_MULTI: &str = include_str!("../wgsl/lora_delta_rows_mu
 pub const LORA_DELTA_ROWS_MULTI_TILED: &str = include_str!("../wgsl/lora_delta_rows_multi_tiled.wgsl");
 /// `wgsl/lora_delta_rows_tiled.wgsl`
 pub const LORA_DELTA_ROWS_TILED: &str = include_str!("../wgsl/lora_delta_rows_tiled.wgsl");
+/// `wgsl/lora_expert_slots.wgsl`
+pub const LORA_EXPERT_SLOTS: &str = include_str!("../wgsl/lora_expert_slots.wgsl");
 /// `wgsl/lora_xa_rows.wgsl`
 pub const LORA_XA_ROWS: &str = include_str!("../wgsl/lora_xa_rows.wgsl");
 /// `wgsl/lora_xa_rows_serial.wgsl`
@@ -2191,6 +2193,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("lora_delta_rows_multi", LORA_DELTA_ROWS_MULTI),
     ("lora_delta_rows_multi_tiled", LORA_DELTA_ROWS_MULTI_TILED),
     ("lora_delta_rows_tiled", LORA_DELTA_ROWS_TILED),
+    ("lora_expert_slots", LORA_EXPERT_SLOTS),
     ("lora_xa_rows", LORA_XA_ROWS),
     ("lora_xa_rows_serial", LORA_XA_ROWS_SERIAL),
     ("lora_xa_rows_tiled", LORA_XA_ROWS_TILED),

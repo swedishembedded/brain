@@ -40,7 +40,8 @@ const BASE: &[(&str, &str)] = &[
     ("silu_bwd_db", kernels::SILU_BWD_DB),
 ];
 
-fn device() -> Gpu {
+/// The layer's kernels: its own, the compacted path's, the adapters' and the bank products'.
+pub(crate) fn pipelines() -> Vec<(&'static str, &'static str)> {
     let mut pipes: Vec<(&'static str, &'static str)> = Vec::new();
     for &(name, src) in BASE.iter().chain(COMPACT_TRAIN_KERNELS).chain(EXPERT_LORA_KERNELS) {
         if !pipes.iter().any(|(n, _)| *n == name) {
@@ -48,34 +49,38 @@ fn device() -> Gpu {
         }
     }
     pipes.extend(micro_bank_kernels());
-    gpu_core::testgpu::dev(Box::leak(pipes.into_boxed_slice()))
+    pipes
 }
 
-fn idx(g: &Gpu, name: &str) -> usize {
+pub(crate) fn device() -> Gpu {
+    gpu_core::testgpu::dev(Box::leak(pipelines().into_boxed_slice()))
+}
+
+pub(crate) fn idx(g: &Gpu, name: &str) -> usize {
     g.kernel_index(name).unwrap_or_else(|| panic!("kernel '{name}' not registered"))
 }
 
-const ROWS: u32 = 7;
-const D: u32 = 128;
-const FF: u32 = 128;
-const E: u32 = 4;
-const TOP_K: u32 = 2;
-const RANK: u32 = 2;
+pub(crate) const ROWS: u32 = 7;
+pub(crate) const D: u32 = 128;
+pub(crate) const FF: u32 = 128;
+pub(crate) const E: u32 = 4;
+pub(crate) const TOP_K: u32 = 2;
+pub(crate) const RANK: u32 = 2;
 /// `alpha / rank` of both adapters.
-const LORA_SCALE: f32 = 1.5;
+pub(crate) const LORA_SCALE: f32 = 1.5;
 const ROUTE_SCALE: f32 = 2.5;
 /// Never routed: its selection bias sits below every other expert's score.
-const IDLE: usize = 3;
+pub(crate) const IDLE: usize = 3;
 const KIND: RouterKind = RouterKind::SigmoidNoAuxTc { n_group: 1, topk_group: 1, norm_topk_prob: true, routed_scaling: ROUTE_SCALE };
 const ACT: GatedAct = GatedAct::SoftcapSigmoid { gate_cap: 0.15, up_cap: 0.2 };
 
 /// One stacked adapter on the host: `a [E, RANK, k]`, `b [E, n, RANK]`.
 #[derive(Clone)]
-struct HostLora {
-    a: Vec<f32>,
-    b: Vec<f32>,
-    n: usize,
-    k: usize,
+pub(crate) struct HostLora {
+    pub(crate) a: Vec<f32>,
+    pub(crate) b: Vec<f32>,
+    pub(crate) n: usize,
+    pub(crate) k: usize,
 }
 
 impl HostLora {
@@ -93,17 +98,17 @@ impl HostLora {
 }
 
 /// The layer's inputs, the dequantized weights of its frozen banks and its adapters.
-struct Layer {
-    x: Vec<f32>,
-    router_w: Vec<f32>,
-    bias: Vec<f32>,
-    wloss: Vec<f32>,
+pub(crate) struct Layer {
+    pub(crate) x: Vec<f32>,
+    pub(crate) router_w: Vec<f32>,
+    pub(crate) bias: Vec<f32>,
+    pub(crate) wloss: Vec<f32>,
     /// `[E * 2 * FF, D]`, rows interleaved `g0, u0, g1, u1, ...`.
-    gate_up: Vec<f32>,
+    pub(crate) gate_up: Vec<f32>,
     /// `[E * D, FF]`.
-    down: Vec<f32>,
-    lora_gate_up: HostLora,
-    lora_down: HostLora,
+    pub(crate) down: Vec<f32>,
+    pub(crate) lora_gate_up: HostLora,
+    pub(crate) lora_down: HostLora,
 }
 
 type Routing = Vec<Vec<(usize, f64)>>;
@@ -206,25 +211,25 @@ fn host_dx(l: &Layer, fixed: Option<&Routing>, picks: &[usize]) -> Vec<(usize, O
 }
 
 /// The device side: router, gate, the frozen banks, the adapters and their gradient buffers (pre-filled with `prior`).
-struct DeviceLayer {
-    g: Gpu,
-    shape: MoeShape,
-    x: DeviceBuffer,
-    router_w: DeviceBuffer,
-    bias: DeviceBuffer,
-    logits: DeviceBuffer,
-    gate: DeviceBuffer,
-    probs: DeviceBuffer,
-    acc: DeviceBuffer,
-    gate_up: MicroBank,
-    down: MicroBank,
-    spec: GluSpec,
+pub(crate) struct DeviceLayer {
+    pub(crate) g: Gpu,
+    pub(crate) shape: MoeShape,
+    pub(crate) x: DeviceBuffer,
+    pub(crate) router_w: DeviceBuffer,
+    pub(crate) bias: DeviceBuffer,
+    pub(crate) logits: DeviceBuffer,
+    pub(crate) gate: DeviceBuffer,
+    pub(crate) probs: DeviceBuffer,
+    pub(crate) acc: DeviceBuffer,
+    pub(crate) gate_up: MicroBank,
+    pub(crate) down: MicroBank,
+    pub(crate) spec: GluSpec,
     /// gate_up A, gate_up B, down A, down B.
-    factors: [DeviceBuffer; 4],
+    pub(crate) factors: [DeviceBuffer; 4],
 }
 
 impl DeviceLayer {
-    fn new(g: &Gpu, kind: MicroScaled, rng: &mut Lcg) -> (DeviceLayer, Layer) {
+    pub(crate) fn new(g: &Gpu, kind: MicroScaled, rng: &mut Lcg) -> (DeviceLayer, Layer) {
         let (gate_up, gate_up_w) = build_bank(g, kind, E as usize, 2 * FF as usize, D as usize, rng);
         let (down, down_w) = build_bank(g, kind, E as usize, D as usize, FF as usize, rng);
         let mut bias = rng.vec_scaled(E as usize, 0.05);
@@ -258,11 +263,11 @@ impl DeviceLayer {
         (dev, host)
     }
 
-    fn set(&self) -> ExpertSet<'_> {
+    pub(crate) fn set(&self) -> ExpertSet<'_> {
         ExpertSet { glu: self.spec, bank: ExpertBank::Micro { gate_up: &self.gate_up, up: None, down: &self.down } }
     }
 
-    fn adapters(&self) -> ExpertAdapters<'_> {
+    pub(crate) fn adapters(&self) -> ExpertAdapters<'_> {
         let f = &self.factors;
         ExpertAdapters {
             gate_up: Some(ExpertLora { a: &f[0], b: &f[1], rank: RANK, scale: LORA_SCALE }),
@@ -271,12 +276,12 @@ impl DeviceLayer {
         }
     }
 
-    fn fwd_ids(&self) -> MoeIds {
+    pub(crate) fn fwd_ids(&self) -> MoeIds {
         let g = &self.g;
         MoeIds { router_gate: idx(g, "router_gate_sigmoid"), linear_gated: idx(g, "moe_linear_gated"), silu_mul: idx(g, "silu_mul"), scale_add: idx(g, "scale_add") }
     }
 
-    fn bwd_ids(&self) -> MoeIdsBwd {
+    pub(crate) fn bwd_ids(&self) -> MoeIdsBwd {
         let g = &self.g;
         MoeIdsBwd {
             scale_add_dexp: idx(g, "scale_add_dexp"),
@@ -289,7 +294,7 @@ impl DeviceLayer {
         }
     }
 
-    fn forward(&self) -> (Vec<f32>, MoeActs) {
+    pub(crate) fn forward(&self) -> (Vec<f32>, MoeActs) {
         let g = &self.g;
         let ids = self.fwd_ids();
         let steps = vec![
@@ -304,7 +309,7 @@ impl DeviceLayer {
     }
 
     /// The backward of `loss = <wloss, out>`: the input gradient, and the four factor gradients added onto `prior`.
-    fn backward(&self, wloss: &[f32], acts: &MoeActs, full_router: bool, prior: &[Vec<f32>; 4]) -> (Vec<f32>, [Vec<f32>; 4]) {
+    pub(crate) fn backward(&self, wloss: &[f32], acts: &MoeActs, full_router: bool, prior: &[Vec<f32>; 4]) -> (Vec<f32>, [Vec<f32>; 4]) {
         let g = &self.g;
         let (rows, d, ff, e) = (ROWS as u64, D as u64, FF as u64, E as u64);
         let d_acc = g.storage_init("d_acc", wloss);

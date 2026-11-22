@@ -44,6 +44,13 @@ impl AdapterFile {
         let a = card.adapter.as_ref().ok_or_else(|| invalid(path, "its card has no adapter descriptor".into()))?;
         let kind = DeviceKind::from_name(&a.kind).ok_or_else(|| invalid(path, format!("adapter kind {:?} is not one of lora, ia3, lokr", a.kind)))?;
         let rank = a.rank.ok_or_else(|| invalid(path, "adapter has no rank".into()))?;
+        // The kinds read here are linear: a stacked expert pair's flat data would also fill a matrix, so it is refused
+        // by its shape rather than misread.
+        let mut stacked: Vec<&String> = st.shapes.iter().filter(|(_, shape)| shape.len() > 2).map(|(n, _)| n).collect();
+        stacked.sort();
+        if let Some(name) = stacked.first() {
+            return Err(invalid(path, format!("{name} is a stacked expert factor {:?}; this reader folds linear adapters only (fold a stacked LoRA with lora::device_adapter::fold_adapter_into, or serve it through an adapter bank)", st.shapes[*name])));
+        }
         let dims = st
             .config()
             .get("sites")

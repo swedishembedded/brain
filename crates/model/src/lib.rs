@@ -625,6 +625,12 @@ pub trait Model {
         Vec::new()
     }
 
+    /// The stacked expert banks an adapter may correct expert by expert ([`adapter::sites::ExpertSite`]): what a saved
+    /// adapter's rank-3 pairs are shaped by. Empty for a model without expert sites.
+    fn adapter_expert_sites(&self) -> Vec<adapter::sites::ExpertSite> {
+        Vec::new()
+    }
+
     /// Every linear whose storage tier can be chosen on its own: what a
     /// precision search places a tier on. Defaults to [`Self::adapter_sites`];
     /// a model whose adapters target fewer linears than it stores (a

@@ -61,9 +61,10 @@ use std::fmt;
 use gpu_core::{DeviceBuffer, Gpu, Step};
 
 use super::saved_bank::SavedBank;
-use super::sites::{LoraSites, SavedSite};
+use super::sites::{ExpertSite, LoraSites, SavedSite};
 use super::LinearSite;
 use crate::dispatch::{lora_bank_group_rows, lora_bank_rows, rank_word, LoraBank, LoraBankKernels, LoraBankRows, LoraGroupBank, LoraGroupOut, LORA_GROUP_MAX, LORA_SLOT_NONE};
+use crate::lora::device_adapter::ExpertPair;
 use crate::lora::device_adapter::DeviceAdapter;
 use crate::paged::{KvNamespace, NamespaceIds, BASE_KV_NAMESPACE};
 use crate::serve::{AdapterAvailability, AdapterId};
@@ -85,9 +86,9 @@ pub trait AdapterServing: LoraSites {
     /// `all` group.
     fn all_leaves(&self) -> Vec<&'static str> {
         let mut leaves: Vec<&'static str> = Vec::new();
-        for site in self.lora_sites() {
-            if !leaves.contains(&site.leaf) {
-                leaves.push(site.leaf);
+        for leaf in self.lora_sites().iter().map(|s| s.leaf).chain(self.expert_sites().iter().map(|s| s.leaf)) {
+            if !leaves.contains(&leaf) {
+                leaves.push(leaf);
             }
         }
         leaves
@@ -267,6 +268,11 @@ impl AdapterBankConfig {
                 by_layer[l] += self.unit_bytes(&sites, &unit);
             }
         }
+        for site in model.expert_sites().iter().filter(|s| self.targets_expert(s)) {
+            if let Some(l) = site.layer.filter(|&l| l < n_layers) {
+                by_layer[l] += self.expert_unit_bytes(site);
+            }
+        }
         by_layer
     }
 
@@ -345,6 +351,29 @@ impl AdapterBankConfig {
         self.targets.iter().any(|t| t == site.leaf)
     }
 
+    fn targets_expert(&self, site: &ExpertSite) -> bool {
+        self.targets.iter().any(|t| t == site.leaf)
+    }
+
+    /// Device bytes of one targeted expert site: `slots * experts` sub-slots of factors and rank words.
+    fn expert_unit_bytes(&self, site: &ExpertSite) -> u64 {
+        let s = self.slots as u64 * site.experts as u64;
+        s * self.r_max as u64 * (site.inn + site.out) as u64 * 4 + s * 4
+    }
+
+    /// The expert slot scratch of a bank over the targeted `experts` for forwards of at most `rows` rows: per expert
+    /// slot (`rows * top_k`) its sub-slot and input row (two u32), a projection row of `r_max` and a gathered input
+    /// row of the widest input. `None` when the bank targets no expert site.
+    fn expert_scratch_shape(&self, experts: &[&ExpertSite], rows: u32) -> Option<(u64, u64)> {
+        let slots = experts.iter().map(|s| s.top_k as u64).max()? * rows as u64;
+        let widest = experts.iter().map(|s| s.inn as u64).max().unwrap_or(1);
+        Some((slots, widest))
+    }
+
+    fn expert_scratch_bytes(&self, experts: &[&ExpertSite], rows: u32) -> u64 {
+        self.expert_scratch_shape(experts, rows).map_or(0, |(slots, widest)| slots * (2 + self.r_max as u64 + widest) * 4)
+    }
+
     /// The bank's units over `sites` in `layers`: each a single linear or a
     /// group of two or more targeted linears of one layer that read one
     /// activation, as site indices. The one place the grouping is decided, for
@@ -403,7 +432,10 @@ impl AdapterBankConfig {
     pub fn device_bytes<M: LoraSites + ?Sized>(&self, model: &M, rows: u32) -> u64 {
         let sites = model.lora_sites();
         let units: u64 = self.units(&sites, &(0..usize::MAX)).iter().map(|u| self.unit_bytes(&sites, u)).sum();
-        units + self.row_scratch_bytes(rows) + SavedBank::bytes_of(&self.saved, self.slots)
+        let experts = model.expert_sites();
+        let targeted: Vec<&ExpertSite> = experts.iter().filter(|s| self.targets_expert(s)).collect();
+        let expert_units: u64 = targeted.iter().map(|s| self.expert_unit_bytes(s)).sum();
+        units + expert_units + self.row_scratch_bytes(rows) + self.expert_scratch_bytes(&targeted, rows) + SavedBank::bytes_of(&self.saved, self.slots)
     }
 }
 
@@ -495,6 +527,36 @@ enum SiteState {
     /// A site of a layer another bank owns (a pipeline stage): an adapter's
     /// pair for it is that bank's to hold, so this one skips it.
     Elsewhere,
+    /// A stacked expert bank corrected here: index into the bank's expert sites.
+    Expert(usize),
+}
+
+/// One banked stacked-expert projection: `slots * experts` sub-slots of one [`LoraBank`], adapter slot `a`'s expert
+/// `e` at sub-slot `a * experts + e`.
+struct ExpertBankSite {
+    bank: LoraBank,
+    k: u32,
+    n: u32,
+    experts: u32,
+    top_k: u32,
+}
+
+/// What the expert overlay dispatches besides the bank kernels, and its per-slot scratch.
+struct ExpertScratch {
+    /// `lora_expert_slots`.
+    slots_kernel: usize,
+    /// `embed` (the row gather of a projection input shared by a row's expert slots).
+    gather_kernel: usize,
+    /// `[max_slots]` u32: each expert slot's sub-slot.
+    eslot: DeviceBuffer,
+    /// `[max_slots]` u32: each expert slot's input row.
+    xrow: DeviceBuffer,
+    /// `[max_slots, widest input]`: the gathered input rows.
+    xg: DeviceBuffer,
+    /// `[max_slots, r_max]`: the projection scratch.
+    tscr: DeviceBuffer,
+    max_slots: u32,
+    widest: u32,
 }
 
 /// One banked linear: its adapters on the device and its shape.
@@ -526,6 +588,8 @@ struct HostSite {
 enum HostUnit {
     Single { bank_ix: usize, site: HostSite },
     Group { group: usize, members: Vec<Option<HostSite>> },
+    /// A stacked expert pair: `a [experts, rank, k]`, `bt [experts, rank, n]` (each expert's `B` transposed, scaled).
+    Expert { ix: usize, a: Vec<f32>, bt: Vec<f32> },
 }
 
 enum Phase {
@@ -556,6 +620,8 @@ pub struct AdapterBank {
     kernels: LoraBankKernels,
     sites: Vec<BankSite>,
     groups: Vec<GroupSite>,
+    experts: Vec<ExpertBankSite>,
+    expert_scratch: Option<ExpertScratch>,
     /// Base weight name of every site of the model, banked or not: tells "not
     /// a linear of this model" from "not a site this bank targets".
     model_sites: HashMap<String, SiteState>,
@@ -595,14 +661,22 @@ impl AdapterBank {
     /// stage that owns them. Every stage's bank sees the same registrations,
     /// uploads and pins, so their slots and ids agree.
     pub fn new_for_layers(gpu: &Gpu, sites: &[LinearSite], cfg: AdapterBankConfig, rows: u32, layers: std::ops::Range<usize>) -> Result<AdapterBank, AdapterError> {
+        AdapterBank::new_with_experts(gpu, sites, &[], cfg, rows, layers)
+    }
+
+    /// [`AdapterBank::new_for_layers`] for a model with stacked expert banks ([`LoraSites::expert_sites`]): a targeted
+    /// expert site holds `slots * experts` sub-slots, and the model's MoE forward calls
+    /// [`AdapterBank::correct_experts`] after each routed expert product of a targeted bank. `rows` bounds the token
+    /// rows of a forward; the expert slot scratch holds `rows * top_k` slots.
+    pub fn new_with_experts(gpu: &Gpu, sites: &[LinearSite], expert_sites: &[ExpertSite], cfg: AdapterBankConfig, rows: u32, layers: std::ops::Range<usize>) -> Result<AdapterBank, AdapterError> {
         if cfg.slots == 0 || cfg.r_max == 0 || cfg.targets.is_empty() || cfg.max_registered < cfg.slots {
             return Err(AdapterError::BadConfig("needs slots > 0, r_max > 0, at least one target and max_registered >= slots".into()));
         }
-        if let Some(unknown) = cfg.targets.iter().find(|t| !sites.iter().any(|s| s.leaf == t.as_str())) {
+        if let Some(unknown) = cfg.targets.iter().find(|t| !sites.iter().map(|s| s.leaf).chain(expert_sites.iter().map(|s| s.leaf)).any(|leaf| leaf == t.as_str())) {
             let mut known: Vec<&str> = Vec::new();
-            for s in sites {
-                if !known.contains(&s.leaf) {
-                    known.push(s.leaf);
+            for leaf in sites.iter().map(|s| s.leaf).chain(expert_sites.iter().map(|s| s.leaf)) {
+                if !known.contains(&leaf) {
+                    known.push(leaf);
                 }
             }
             return Err(AdapterError::BadConfig(format!("{unknown:?} is not an adapter target of this model; it has {}", known.join(", "))));
@@ -659,13 +733,57 @@ impl AdapterBank {
                 grouped.push(GroupSite { bank, k, ns });
             }
         }
+        let mut experts = Vec::new();
+        let mut targeted: Vec<&ExpertSite> = Vec::new();
+        for site in expert_sites {
+            if site.layer.is_some_and(|l| !layers.contains(&l)) {
+                model_sites.insert(site.name.clone(), SiteState::Elsewhere);
+                continue;
+            }
+            if !cfg.targets_expert(site) {
+                model_sites.insert(site.name.clone(), SiteState::Untargeted);
+                continue;
+            }
+            if site.experts == 0 || site.top_k == 0 || site.top_k > site.experts || site.out == 0 || site.inn == 0 {
+                return Err(AdapterError::BadConfig(format!("expert site {}: {} experts of [{}, {}] with top-{} is not a routed expert bank", site.name, site.experts, site.out, site.inn, site.top_k)));
+            }
+            let sub = s * site.experts as u64;
+            let widest = sub * r * site.inn.max(site.out) as u64 * 4;
+            if widest > gpu.max_storage_binding_bytes() || sub > u32::MAX as u64 {
+                return Err(AdapterError::BadConfig(format!("{} slots of rank {} over {} experts of {} x {} exceed one storage binding ({widest} bytes)", cfg.slots, cfg.r_max, site.experts, site.inn, site.out)));
+            }
+            let rank = gpu.storage(sub);
+            gpu.write(&rank, &vec![0u32; sub as usize]);
+            let bank = LoraBank { a: gpu.storage(sub * r * site.inn as u64), bt: gpu.storage(sub * r * site.out as u64), rank, slots: sub as u32, r_max: cfg.r_max };
+            bytes += cfg.expert_unit_bytes(site);
+            model_sites.insert(site.name.clone(), SiteState::Expert(experts.len()));
+            experts.push(ExpertBankSite { bank, k: site.inn as u32, n: site.out as u32, experts: site.experts as u32, top_k: site.top_k as u32 });
+            targeted.push(site);
+        }
+        let expert_scratch = match cfg.expert_scratch_shape(&targeted, rows) {
+            None => None,
+            Some((max_slots, widest)) => {
+                let find = |name: &str| gpu.kernel_index(name).ok_or_else(|| AdapterError::BadConfig(format!("the device does not register the `{name}` kernel a stacked-expert bank needs (model::dispatch::LORA_EXPERT_BANK_PIPELINES)")));
+                bytes += cfg.expert_scratch_bytes(&targeted, rows);
+                Some(ExpertScratch {
+                    slots_kernel: find("lora_expert_slots")?,
+                    gather_kernel: find("embed")?,
+                    eslot: gpu.storage(max_slots),
+                    xrow: gpu.storage(max_slots),
+                    xg: gpu.storage(max_slots * widest),
+                    tscr: gpu.storage(max_slots * r),
+                    max_slots: max_slots as u32,
+                    widest: widest as u32,
+                })
+            }
+        };
         let slot_buf = gpu.storage(rows as u64);
         let saved = SavedBank::new(gpu, &cfg.saved, cfg.slots).map_err(AdapterError::BadConfig)?;
         bytes += saved.bytes();
         let tscr = gpu.storage(rows as u64 * cfg.scratch_width());
         bytes += cfg.row_scratch_bytes(rows);
         let slot_owner = vec![None; cfg.slots as usize];
-        Ok(AdapterBank { cfg, kernels, sites: banked, groups: grouped, model_sites, by_layer, slot_buf, saved, tscr, entries: HashMap::new(), by_digest: HashMap::new(), slot_owner, resident_slot: HashMap::new(), ids: NamespaceIds::default(), offered: None, pending_purge: Vec::new(), tick: 0, bytes })
+        Ok(AdapterBank { cfg, kernels, sites: banked, groups: grouped, experts, expert_scratch, model_sites, by_layer, slot_buf, saved, tscr, entries: HashMap::new(), by_digest: HashMap::new(), slot_owner, resident_slot: HashMap::new(), ids: NamespaceIds::default(), offered: None, pending_purge: Vec::new(), tick: 0, bytes })
     }
 
     /// Device bytes the bank occupies.
@@ -738,6 +856,33 @@ impl AdapterBank {
         }
     }
 
+    /// Correct the routed expert product of the stacked expert bank `base` (the bank product `out [slots, n]`, slot
+    /// `s` running expert `ids[s]` for token row `s / top_k` on the row of `x` at `s / xdiv`: `xdiv` = top_k for a
+    /// projection of the token rows (gate/up), 1 for one of per-slot rows (down, on `h [slots, ff]`), as the product's
+    /// own [`crate::ops::MicroBank::gather`] reads it). Each slot of a row whose adapter slot ([`Self::slot_buf`]) is
+    /// resident gains `scale * B_e (A_e x)` of that adapter's expert `e`; a row without an adapter keeps the
+    /// product's bits. Nothing when the bank does not correct `base`.
+    ///
+    /// # Panics
+    ///
+    /// On more slots than the bank was built for (`rows * top_k`), or an input wider than the site's.
+    #[allow(clippy::too_many_arguments)]
+    pub fn correct_experts(&self, gpu: &Gpu, steps: &mut Vec<Step>, base: &str, x: &DeviceBuffer, xdiv: u32, ids: &DeviceBuffer, out: &DeviceBuffer, slots: u32) {
+        let Some(&SiteState::Expert(ix)) = self.model_sites.get(base) else { return };
+        let (site, sc) = (&self.experts[ix], self.expert_scratch.as_ref().expect("a bank with expert sites has their scratch"));
+        assert!(slots > 0 && slots <= sc.max_slots && xdiv > 0, "correct_experts: {slots} expert slots (xdiv {xdiv}) for a bank built for {}", sc.max_slots);
+        assert!(site.k <= sc.widest, "correct_experts: {base} reads {} inputs, the scratch holds {}", site.k, sc.widest);
+        steps.push(gpu.step(sc.slots_kernel, &[&self.slot_buf, ids, &sc.eslot, &sc.xrow], &[slots, site.top_k, xdiv, site.experts, self.cfg.slots], slots));
+        let x = if xdiv == 1 {
+            x
+        } else {
+            steps.push(gpu.step(sc.gather_kernel, &[&sc.xrow, x, &sc.xg], &[site.k, slots], slots * site.k));
+            &sc.xg
+        };
+        let rq = LoraBankRows { kernels: self.kernels, bank: &site.bank, slot: &sc.eslot, tscr: &sc.tscr, x, out, row0: 0, rows: slots, k: site.k, n: site.n, out_stride: site.n, out_col0: 0 };
+        steps.extend(lora_bank_rows(gpu, &rq));
+    }
+
     /// Does the bank hold full tensors adapters may carry?
     pub fn has_saved(&self) -> bool {
         !self.saved.is_empty()
@@ -805,6 +950,7 @@ impl AdapterBank {
             let (k, n) = match state {
                 SiteState::Banked(ix) => (self.sites[ix].k as usize, self.sites[ix].n as usize),
                 SiteState::Grouped { group, member } => (self.groups[group].k as usize, self.groups[group].ns[member] as usize),
+                SiteState::Expert(_) => return Err(bad(format!("{} is a stacked expert bank; the adapter carries a linear pair for it", site.base))),
                 _ => unreachable!("filtered above"),
             };
             if site.a.len() != r * k || site.b.len() != n * r {
@@ -829,6 +975,15 @@ impl AdapterBank {
             }
         }
         units.extend(group_members.into_iter().map(|(group, members)| HostUnit::Group { group, members }));
+        for pair in &a.adapter.experts {
+            match self.model_sites.get(&pair.base) {
+                None => return Err(bad(format!("{} is not a site of this model", pair.base))),
+                Some(SiteState::Untargeted) => return Err(bad(format!("{} is not a site this bank targets", pair.base))),
+                Some(SiteState::Elsewhere) => continue,
+                Some(&SiteState::Expert(ix)) => units.push(self.expert_unit(ix, pair, rank, scale).map_err(bad)?),
+                Some(_) => return Err(bad(format!("{} is a linear of this model; the adapter carries a stacked expert pair for it", pair.base))),
+            }
+        }
         let sites = units;
         // The full tensors: the ones this bank holds are kept for the upload; the others belong to another stage's bank.
         if self.saved.is_empty() {
@@ -849,6 +1004,18 @@ impl AdapterBank {
         self.by_digest.insert(a.digest.clone(), id);
         self.entries.insert(id, Entry { label: a.label, digest: a.digest, rank, sites, saved, phase: Phase::Cold, pins: 0, draining: false, last_used: 0 });
         Ok(id)
+    }
+
+    /// The host form of a stacked pair for expert site `ix`: its shapes checked against the site, each expert's `B`
+    /// transposed to `[rank, n]` with `scale` folded in.
+    fn expert_unit(&self, ix: usize, pair: &ExpertPair, rank: u32, scale: f32) -> Result<HostUnit, String> {
+        let site = &self.experts[ix];
+        let (e, k, n, r) = (site.experts as usize, site.k as usize, site.n as usize, rank as usize);
+        if pair.experts != e || pair.a.len() != e * r * k || pair.b.len() != e * n * r {
+            return Err(format!("{} is {e} experts of [{n}, {k}] but the rank-{rank} pair holds {} experts, A {} / B {} values", pair.base, pair.experts, pair.a.len(), pair.b.len()));
+        }
+        let bt: Vec<f32> = pair.b.chunks_exact(n * r).flat_map(|b| (0..r).flat_map(move |c| b.iter().skip(c).step_by(r).map(move |&v| v * scale))).collect();
+        Ok(HostUnit::Expert { ix, a: pair.a.clone(), bt })
     }
 
     /// Upload up to one quantum of `id`'s linears into its reserved slot;
@@ -887,6 +1054,18 @@ impl AdapterBank {
                     gpu.write_f32_at(&gs.bank.bt, slot as u64 * bt.len() as u64, &bt);
                     sent += (a.len() + bt.len()) as u64 * 4;
                 }
+                HostUnit::Expert { ix, a, bt } => {
+                    // Expert `x` of this slot is sub-slot `slot * experts + x`; its first `rank` rows are written.
+                    let es = &self.experts[*ix];
+                    let (ne, k, n) = (es.experts as u64, es.k as u64, es.n as u64);
+                    let (a_per, bt_per) = (a.len() / ne as usize, bt.len() / ne as usize);
+                    for x in 0..ne {
+                        let sub = slot as u64 * ne + x;
+                        gpu.write_f32_at(&es.bank.a, sub * r_max * k, &a[x as usize * a_per..(x as usize + 1) * a_per]);
+                        gpu.write_f32_at(&es.bank.bt, sub * r_max * n, &bt[x as usize * bt_per..(x as usize + 1) * bt_per]);
+                    }
+                    sent += (a.len() + bt.len()) as u64 * 4;
+                }
             }
             next += 1;
         }
@@ -903,11 +1082,16 @@ impl AdapterBank {
         // word's high half (`rank_word`), where the epilogue's loop bound reads it.
         let mut ranks = vec![0u32; self.sites.len()];
         let mut group_ranks = vec![0u32; self.groups.len()];
+        let mut expert_ranks = vec![0u32; self.experts.len()];
         for unit in &e.sites {
             match unit {
                 HostUnit::Single { bank_ix, .. } => ranks[*bank_ix] = rank_word(e.rank, e.rank),
                 HostUnit::Group { group, members } => group_ranks[*group] = rank_word(e.rank, r_max as u32 * members.len() as u32),
+                HostUnit::Expert { ix, .. } => expert_ranks[*ix] = rank_word(e.rank, e.rank),
             }
+        }
+        for (es, rank) in self.experts.iter().zip(expert_ranks) {
+            gpu.write_at(&es.bank.rank, slot as u64 * es.experts as u64, &vec![rank; es.experts as usize]);
         }
         for (bs, rank) in self.sites.iter().zip(ranks) {
             gpu.write_at(&bs.bank.rank, slot as u64, &[rank]);
