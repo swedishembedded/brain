@@ -81,7 +81,7 @@
 //! as [`crate::Gpu::step`]'s own `params` slice does
 //! (`tests/gemv_reg_upgrade_step_buf.rs`).
 
-use backend_api::{select, DeviceCaps};
+use backend_api::{select, select::KernelVariant, DeviceCaps};
 
 /// One drop-in replacement: dispatch `fast` instead of `slow`, with the thread
 /// count multiplied by `thread_mul`.
@@ -331,6 +331,9 @@ pub(crate) struct Twin {
     /// The workgroup-per-row (or workgroup-cooperative) kernel appended beside it.
     pub twin: &'static str,
     pub twin_src: &'static str,
+    /// The candidate family the twin implements for its op (`WorkgroupPerOutput` for the per-row twins; a reference
+    /// may carry one twin per family, e.g. the extended attention's per-row and query-tiled forms).
+    pub variant: KernelVariant,
 }
 
 /// The cooperative twins. Every twin needs a workgroup reduction, so none is appended for the CPU JIT, whose
@@ -340,7 +343,8 @@ pub(crate) struct Twin {
 pub(crate) fn twins() -> &'static [Twin] {
     static TWINS: std::sync::OnceLock<Vec<Twin>> = std::sync::OnceLock::new();
     TWINS.get_or_init(|| {
-        let plain = |base, base_src, twin, twin_src| Twin { base, base_src, twin, twin_src };
+        let plain = |base, base_src, twin, twin_src| Twin { base, base_src, twin, twin_src, variant: KernelVariant::WorkgroupPerOutput };
+        let tiled = |base, base_src, twin, twin_src| Twin { base, base_src, twin, twin_src, variant: KernelVariant::RowTiled };
         let mut t = vec![
             plain("rmsnorm", kernels::RMSNORM, "rmsnorm_rows", kernels::RMSNORM_ROWS),
             plain("rmsnorm_dx", kernels::RMSNORM_DX, "rmsnorm_dx_rows", kernels::RMSNORM_DX_ROWS),
@@ -352,6 +356,7 @@ pub(crate) fn twins() -> &'static [Twin] {
             plain("depth_attn_fwd", kernels::DEPTH_ATTN_FWD, "depth_attn_fwd_rows", kernels::DEPTH_ATTN_FWD_ROWS),
             plain("depth_attn_bwd", kernels::DEPTH_ATTN_BWD, "depth_attn_bwd_rows", kernels::DEPTH_ATTN_BWD_ROWS),
             plain("flash_attn_gqa_ext", kernels::FLASH_ATTN_GQA_EXT, "flash_attn_gqa_ext_rows", kernels::FLASH_ATTN_GQA_EXT_ROWS),
+            tiled("flash_attn_gqa_ext", kernels::FLASH_ATTN_GQA_EXT, "flash_attn_gqa_ext_tiled", kernels::FLASH_ATTN_GQA_EXT_TILED),
         ];
         // The extended attention over a bf16 K/V pool, and its twin under the same rewrite.
         let bf16_pools = |name: &str, src: &'static str| {
@@ -362,13 +367,15 @@ pub(crate) fn twins() -> &'static [Twin] {
         let (base, base_src) = bf16_pools("flash_attn_gqa_ext", kernels::FLASH_ATTN_GQA_EXT);
         let (twin, twin_src) = bf16_pools("flash_attn_gqa_ext_rows", kernels::FLASH_ATTN_GQA_EXT_ROWS);
         t.push(plain(base, base_src, twin, twin_src));
+        let (twin, twin_src) = bf16_pools("flash_attn_gqa_ext_tiled", kernels::FLASH_ATTN_GQA_EXT_TILED);
+        t.push(tiled(base, base_src, twin, twin_src));
         t
     })
 }
 
-/// The registered name of `base`'s cooperative twin, if it has one in [`twins`].
-pub(crate) fn twin_name(base: &str) -> Option<&'static str> {
-    twins().iter().find(|t| t.base == base).map(|t| t.twin)
+/// The registered name of `base`'s twin of the `variant` family, if it has one in [`twins`].
+pub(crate) fn twin_name(base: &str, variant: KernelVariant) -> Option<&'static str> {
+    twins().iter().find(|t| t.base == base && t.variant == variant).map(|t| t.twin)
 }
 
 static DISABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -559,7 +566,27 @@ mod tests {
         assert_eq!(out[2..].iter().map(|k| k.0).collect::<Vec<_>>(), ["rmsnorm_rows", "gradnorm_part"]);
         assert!(expand(own, true).is_none(), "the CPU JIT cannot run the twins");
         assert!(expand(&[("rmsnorm", "// a model's own rmsnorm")], false).is_none(), "the twin's contract is the canonical source's");
-        assert_eq!(twin_name("layernorm_dx"), Some("layernorm_dx_rows"));
+        assert_eq!(twin_name("layernorm_dx", KernelVariant::WorkgroupPerOutput), Some("layernorm_dx_rows"));
+        assert_eq!(twin_name("flash_attn_gqa_ext", KernelVariant::RowTiled), Some("flash_attn_gqa_ext_tiled"), "a reference may carry a twin per family");
+        assert_eq!(twin_name("layernorm_dx", KernelVariant::RowTiled), None);
+    }
+
+    /// The selection admits the query-tiled extended attention by the workgroup memory it declares: the constant is
+    /// the sum of the source's `var<workgroup>` arrays (4 bytes a word, 16 a vec4).
+    #[test]
+    fn the_tiled_attentions_workgroup_memory_is_what_its_source_declares() {
+        let bytes: u32 = kernels::FLASH_ATTN_GQA_EXT_TILED
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("var<workgroup>"))
+            .map(|decl| {
+                // `name: array<elem, n>;`
+                let inner = decl.split_once("array<").and_then(|(_, r)| r.rsplit_once('>')).map(|(a, _)| a).expect("a workgroup array");
+                let (elem, n) = inner.rsplit_once(',').expect("an array length");
+                let words = if elem.trim().starts_with("vec4") { 4 } else { 1 };
+                n.trim().parse::<u32>().expect("a literal array length") * words * 4
+            })
+            .sum();
+        assert_eq!(bytes, select::FLASH_EXT_TILE_WORKGROUP_BYTES);
     }
 
     /// A model that registers the slow kernel gets the fast one appended — at

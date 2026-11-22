@@ -39,6 +39,7 @@
 //! The optional per-row inputs travel to the kernels in one packed `aux` buffer (sink, rel, bank at word
 //! offsets) because a kernel binds at most 8 storage buffers; the packing is internal to the functions here.
 
+use gpu_core::select::KernelVariant;
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
 
 use crate::kv_tier::{KvLayer, KvTier};
@@ -209,9 +210,17 @@ impl FwdKernel {
 /// kernel list that includes [`pipelines`].
 #[derive(Clone, Copy, Debug)]
 pub struct FlashExtIds {
+    /// The per-row forward: the reference, or its per-(row, head) twin where the handle selected it.
     pub fwd: FwdKernel,
     /// The forward over a bf16 KV pool (`pool_k`/`pool_v` read as packed bf16 pairs).
     pub fwd_bf16: FwdKernel,
+    /// The query-tiled twins `(f32 pools, bf16 pools)` (`flash_attn_gqa_ext_tiled`) where the handle carries them
+    /// beside the per-row twins: `select::Op::FlashAttentionExt` takes them per dispatch, by the query rows a
+    /// sequence carries. Bit-identical per row to the per-row twin, so the choice never changes a row's result.
+    pub tiled: Option<(usize, usize)>,
+    /// `None`: each forward dispatch takes the candidate the selection picks for its rows. `Some(v)`: every forward
+    /// runs candidate `v` ([`Self::pinned`]), how the gate holds the candidates to each other.
+    pub pin: Option<KernelVariant>,
     pub bwd_prep: usize,
     pub bwd_dq: usize,
     pub bwd_dkv: usize,
@@ -242,20 +251,54 @@ pub fn pipelines() -> Vec<(&'static str, &'static str)> {
 }
 
 impl FlashExtIds {
-    /// The indices of [`pipelines`] on `g`, each forward its cooperative twin where the handle carries one and
-    /// `select::Op::FlashAttentionExt` picks it on this device (no shape gate, so one choice per handle). Panics when
-    /// a kernel is not registered.
+    /// The indices of [`pipelines`] on `g`: the per-row forward is its cooperative twin where the handle carries one
+    /// and `select::Op::FlashAttentionExt` picks it for a single row on this device, and the query-tiled twins are
+    /// kept where the handle carries them, for the dispatches the selection gives them. Panics when a kernel is not
+    /// registered.
     pub fn resolve(g: &Gpu) -> FlashExtIds {
-        use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
-        let coop = gpu_core::select::DefaultSelector.select(Op::FlashAttentionExt, OpShape { m: 1, n: 1, k: 0, dtype: Dtype::F32 }, &g.caps()) == KernelVariant::WorkgroupPerOutput;
+        let coop = select_forward(g, 1) == KernelVariant::WorkgroupPerOutput;
         let fwd = |reference: usize| match g.twin_of(reference).filter(|_| coop) {
             Some(twin) => FwdKernel { kernel: twin, per_pair_workgroup: true },
             None => FwdKernel { kernel: reference, per_pair_workgroup: false },
         };
         let mut ids = Self::reference(g);
+        ids.tiled = coop.then(|| Some((g.twin_for(ids.fwd.kernel, KernelVariant::RowTiled)?, g.twin_for(ids.fwd_bf16.kernel, KernelVariant::RowTiled)?))).flatten();
         ids.fwd = fwd(ids.fwd.kernel);
         ids.fwd_bf16 = fwd(ids.fwd_bf16.kernel);
         ids
+    }
+
+    /// The ids whose every forward runs candidate `variant` of `select::Op::FlashAttentionExt`, or `None` where this
+    /// handle has no kernel for it (the CPU JIT carries only the reference). Every candidate the selection can name
+    /// has a kernel here: the gate that holds them to each other runs each of them.
+    pub fn pinned(g: &Gpu, variant: KernelVariant) -> Option<FlashExtIds> {
+        let reference = Self::reference(g);
+        let twin = |kernel: usize, v: KernelVariant| g.twin_for(kernel, v).map(|kernel| FwdKernel { kernel, per_pair_workgroup: true });
+        let ids = match variant {
+            KernelVariant::Reference => reference,
+            KernelVariant::WorkgroupPerOutput => FlashExtIds { fwd: twin(reference.fwd.kernel, variant)?, fwd_bf16: twin(reference.fwd_bf16.kernel, variant)?, ..reference },
+            KernelVariant::RowTiled => FlashExtIds { tiled: Some((g.twin_for(reference.fwd.kernel, variant)?, g.twin_for(reference.fwd_bf16.kernel, variant)?)), ..reference },
+            other => panic!("flash_ext: select::Op::FlashAttentionExt names {other:?}, which this module has no kernel for"),
+        };
+        Some(FlashExtIds { pin: Some(variant), ..ids })
+    }
+
+    /// The forward kernel and grid of a dispatch over `n_seqs` sequences of up to `max_q` query rows: the query-tiled
+    /// twin where the selection (or the pin) takes it and the kernel serves the options, else the per-row forward.
+    fn forward(&self, g: &Gpu, bf16: bool, heads: &HeadShape, opts: &AttnOptions, n_seqs: u32, max_q: u32) -> (usize, gpu_core::Dispatch) {
+        let serves = !opts.documents && heads.head_dim <= TILED_MAX_HEAD_DIM && opts.bias.is_none_or(|b| b.d_rel <= TILED_MAX_D_REL);
+        let wants = || self.pin.unwrap_or_else(|| select_forward(g, max_q)) == KernelVariant::RowTiled;
+        match self.tiled.filter(|_| serves && wants()) {
+            Some((f32_pools, bf16_pools)) => {
+                let groups = word(u64::from(n_seqs) * u64::from(max_q.div_ceil(TILED_ROWS)) * u64::from(heads.n_heads), "sequences * row blocks * heads");
+                (if bf16 { bf16_pools } else { f32_pools }, gpu_core::Dispatch::Workgroups(groups))
+            }
+            None => {
+                let k = if bf16 { self.fwd_bf16 } else { self.fwd };
+                let pairs = word(u64::from(n_seqs) * u64::from(max_q) * u64::from(heads.n_heads), "sequences * query rows * heads");
+                (k.kernel, k.dispatch(pairs))
+            }
+        }
     }
 
     /// [`Self::resolve`] held to the barrier-free reference forwards whatever the device: the arm the twins are gated
@@ -266,6 +309,8 @@ impl FlashExtIds {
         FlashExtIds {
             fwd: reference("flash_attn_gqa_ext"),
             fwd_bf16: reference(fwd_bf16_variant().0),
+            tiled: None,
+            pin: None,
             bwd_prep: at("flash_attn_gqa_ext_bwd_prep"),
             bwd_dq: at("flash_attn_gqa_ext_bwd_dq"),
             bwd_dkv: at("flash_attn_gqa_ext_bwd_dkv"),
@@ -273,6 +318,19 @@ impl FlashExtIds {
             splice_at: at("splice_at"),
         }
     }
+}
+
+/// Query rows one workgroup of the tiled forward covers (`QB` of `flash_attn_gqa_ext_tiled.wgsl`).
+const TILED_ROWS: u32 = 32;
+/// The widest head and relative state the tiled forward stages (`HD`, `DREL`); the per-row forms serve wider ones.
+const TILED_MAX_HEAD_DIM: u32 = 128;
+const TILED_MAX_D_REL: u32 = 16;
+
+/// The forward candidate `select::Op::FlashAttentionExt` picks on `g` for a dispatch whose sequences carry up to
+/// `max_q` query rows.
+fn select_forward(g: &Gpu, max_q: u32) -> KernelVariant {
+    use gpu_core::select::{Dtype, KernelSelector, Op, OpShape};
+    gpu_core::select::DefaultSelector.select(Op::FlashAttentionExt, OpShape { m: max_q, n: 0, k: 0, dtype: Dtype::F32 }, &g.caps())
 }
 
 /// A count as the kernels' `u32` element index.
@@ -361,8 +419,9 @@ pub fn flash_ext_fwd(g: &Gpu, ids: &FlashExtIds, heads: &HeadShape, opts: &AttnO
     let spare = g.storage(1);
     let index = inputs.doc_pos.unwrap_or(&spare);
     let p = params(opts, heads, layout.b, layout.t, 0, 0, 0, 0, &aux, layout.pos0);
-    let threads = word(rows * u64::from(heads.n_heads), "query rows * heads");
-    steps.push(g.dispatch(ids.fwd.kernel, &[q, k, v, index, &aux.buf, out, lse], &p, ids.fwd.dispatch(threads)));
+    word(rows * u64::from(heads.n_heads), "query rows * heads");
+    let (kernel, grid) = ids.forward(g, false, heads, opts, layout.b, layout.t);
+    steps.push(g.dispatch(kernel, &[q, k, v, index, &aux.buf, out, lse], &p, grid));
     steps
 }
 
@@ -490,14 +549,14 @@ pub fn flash_ext_paged_fwd(g: &Gpu, ids: &FlashExtIds, heads: &HeadShape, opts: 
         assert!(w <= paged.ring, "flash_ext_paged_fwd: a ring of {} rows cannot serve a window of {w} keys", paged.ring);
         assert!(paged.ring <= paged.block_size * paged.max_bt, "flash_ext_paged_fwd: a ring of {} rows exceeds the {} rows its block table addresses", paged.ring, paged.block_size * paged.max_bt);
     }
-    let (kernel, k, v) = match kv {
-        KvPlanes::F32 { k, v } => (ids.fwd, k, v),
-        KvPlanes::Bf16 { k, v } => (ids.fwd_bf16, k, v),
+    let (bf16, k, v) = match kv {
+        KvPlanes::F32 { k, v } => (false, k, v),
+        KvPlanes::Bf16 { k, v } => (true, k, v),
     };
     let mut steps = Vec::new();
     let aux = pack_aux(g, ids, opts, heads, inputs, u64::from(paged.n_rows), &mut steps);
     let p = params(opts, heads, paged.n_seqs, paged.max_q, paged.block_size, paged.max_bt, paged.ring, PAGED, &aux, 0);
-    let threads = word(u64::from(paged.n_seqs) * u64::from(paged.max_q) * u64::from(heads.n_heads), "sequences * query rows * heads");
-    steps.push(g.dispatch(kernel.kernel, &[q, k, v, paged.index, &aux.buf, out, lse], &p, kernel.dispatch(threads)));
+    let (kernel, grid) = ids.forward(g, bf16, heads, opts, paged.n_seqs, paged.max_q);
+    steps.push(g.dispatch(kernel, &[q, k, v, paged.index, &aux.buf, out, lse], &p, grid));
     steps
 }

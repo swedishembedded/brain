@@ -102,12 +102,23 @@ pub enum Op {
     RouterGate,
     /// The extended causal GQA attention (`flash_attn_gqa_ext`, window, sinks,
     /// distance bias, log-position scale; contiguous or paged) vs its
-    /// workgroup-per-(row, head) twin `flash_attn_gqa_ext_rows`. The reference
-    /// gives one thread a query row and head and walks its keys serially, so a
-    /// decode step or a short prompt runs a few hundred threads. The twin
-    /// reassociates the softmax sums (a numerical gate at the call site, not a
-    /// transparent upgrade). `Op::RmsNorm`'s rule; `m` = query rows x heads,
-    /// `n` = keys.
+    /// workgroup-per-(row, head) twin `flash_attn_gqa_ext_rows` and its
+    /// query-tiled twin `flash_attn_gqa_ext_tiled` (16 rows of one head a
+    /// workgroup, each key tile staged once for them). The reference gives one
+    /// thread a query row and head and walks its keys serially, so a decode
+    /// step or a short prompt runs a few hundred threads; the per-row twin
+    /// reads every key once per (row, head), which is the whole cost of a long
+    /// prompt chunk. The twins reassociate the softmax sums (a numerical gate
+    /// at the call site, not a transparent upgrade).
+    ///
+    /// The twins compute a row BIT-IDENTICALLY to each other (key tiles at
+    /// absolute positions, the same per-tile arithmetic in the same order), so
+    /// a handle may switch between them per dispatch: a served position must
+    /// not depend on how its prompt was cut into chunks or which rows shared
+    /// its dispatch. A new candidate for this op owes the same: `model`'s
+    /// `flash_ext` test runs every candidate this list names, whole and in
+    /// chunks, and holds each to the others bit for bit. `m` = the query rows
+    /// one sequence carries in the dispatch (the most of any), `n` = keys.
     FlashAttentionExt,
     /// Paged-attention decode SCORES (`paged_decode_scores_wg` vs
     /// `paged_decode_scores_batched`, plus the INT8 KV tier
@@ -886,6 +897,16 @@ fn no_coop_gradnorm() -> bool {
 /// for a weight tall enough for the dense GEMM's tiles; above it the weight is decoded and the dense product runs.
 pub const CQ_GEMV_MAX_ROWS: u32 = 16;
 
+/// Query rows of one sequence from which the extended attention takes its query-tiled twin
+/// (`Op::FlashAttentionExt`): half a block of the kernel's 32 rows already reads each key once
+/// for 16 rows where the per-row twin reads it 16 times.
+pub const FLASH_EXT_TILE_MIN_ROWS: u32 = 16;
+
+/// Workgroup memory `flash_attn_gqa_ext_tiled` declares (its query rows, a tile's probabilities, a
+/// K/V slice, the bias coefficients, the key offsets and the row state); `kernels` holds the
+/// source to it in a test.
+pub const FLASH_EXT_TILE_WORKGROUP_BYTES: u32 = (4096 + 4096 + 2176 + 1024 + 512 + 128 + 7 * 32) * 4;
+
 /// (row, rank index) pairs from which the row-tiled per-row-adapter LoRA kernels lead the
 /// row-wise ones (`Op::LoraBankProject`): a tile covers 4 x 4 of them, so this many give 128
 /// tiles, about one per multiprocessor of the GH200 it was measured on (the 27B's groups at 32
@@ -1103,7 +1124,9 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         Op::DepthAttention => vec![WorkgroupPerOutput, Reference],
         // The sigmoid router: `Op::MaxAbsRow`'s rule (see the Op's doc).
         Op::RouterGate => vec![WorkgroupPerOutput, Reference],
-        // The extended attention: `Op::RmsNorm`'s rule (see the Op's doc).
+        // The extended attention: `Op::RmsNorm`'s rule (see the Op's doc), and from a full block of query rows a
+        // sequence the query-tiled twin, where the device holds its workgroup memory.
+        Op::FlashAttentionExt if shape.m >= FLASH_EXT_TILE_MIN_ROWS && caps.workgroup_mem_bytes >= FLASH_EXT_TILE_WORKGROUP_BYTES => vec![RowTiled, WorkgroupPerOutput, Reference],
         Op::FlashAttentionExt => vec![WorkgroupPerOutput, Reference],
         // Paged-attention decode SCORES. At F32 (and the storage tiers)
         // this is `Op::MaxAbsRow`'s exact shape - a per-(batch,head)
@@ -2162,6 +2185,24 @@ mod tests {
             assert_eq!(s.select(Op::RouterGate, sh, &cpu_caps()), KernelVariant::Reference, "m={m}");
             assert_eq!(s.select(Op::FlashAttentionExt, sh, &gpu_caps()), KernelVariant::WorkgroupPerOutput, "m={m}");
             assert_eq!(s.select(Op::FlashAttentionExt, sh, &cpu_caps()), KernelVariant::Reference, "m={m}");
+        }
+    }
+
+    /// The extended attention takes its query-tiled twin from a full block of rows a sequence where the device holds
+    /// its workgroup memory, the per-row twin below that and on a device that does not; the per-row twin stays a
+    /// candidate (they compute a row bit-identically, see the Op's doc).
+    #[test]
+    fn extended_attention_tiles_queries_from_a_full_block_where_the_memory_fits() {
+        let s = DefaultSelector;
+        let mut big = gpu_caps();
+        big.workgroup_mem_bytes = 48 * 1024;
+        for m in [1u32, 8, 15, 16, 512, 8192] {
+            let sh = shape(m, 8192, 0, Dtype::F32);
+            let tiled = m >= FLASH_EXT_TILE_MIN_ROWS;
+            assert_eq!(s.select(Op::FlashAttentionExt, sh, &big), if tiled { KernelVariant::RowTiled } else { KernelVariant::WorkgroupPerOutput }, "m={m}");
+            assert_eq!(s.select(Op::FlashAttentionExt, sh, &gpu_caps()), KernelVariant::WorkgroupPerOutput, "m={m}: 16 KB of workgroup memory");
+            assert_eq!(s.select(Op::FlashAttentionExt, sh, &cpu_caps()), KernelVariant::Reference, "m={m}");
+            assert!(candidates(Op::FlashAttentionExt, sh, &big).contains(&KernelVariant::WorkgroupPerOutput));
         }
     }
 

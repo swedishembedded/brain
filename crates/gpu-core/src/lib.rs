@@ -3515,7 +3515,13 @@ mod native_facade {
         /// The handle appends the twin itself when the model registered the canonical reference - see
         /// [`crate::upgrade`] - so a shared seam asks here instead of requiring each model to list the twin.
         pub fn twin_of(&self, kind: usize) -> Option<usize> {
-            self.kernel_index(crate::upgrade::twin_name(self.names.get(kind)?)?)
+            self.twin_for(kind, crate::select::KernelVariant::WorkgroupPerOutput)
+        }
+
+        /// [`Self::twin_of`] for the twin of another candidate family (`select::KernelVariant::RowTiled`: the extended
+        /// attention's query-tiled form), or `None` when that kernel has none or this handle does not carry it.
+        pub fn twin_for(&self, kind: usize, variant: crate::select::KernelVariant) -> Option<usize> {
+            self.kernel_index(crate::upgrade::twin_name(self.names.get(kind)?, variant)?)
         }
     }
 
@@ -3856,7 +3862,13 @@ mod wasm_facade {
 
         /// See the native facade's `twin_of`.
         pub fn twin_of(&self, kind: usize) -> Option<usize> {
-            self.kernel_index(crate::upgrade::twin_name(self.names.get(kind)?)?)
+            self.twin_for(kind, crate::select::KernelVariant::WorkgroupPerOutput)
+        }
+
+        /// [`Self::twin_of`] for the twin of another candidate family (`select::KernelVariant::RowTiled`: the extended
+        /// attention's query-tiled form), or `None` when that kernel has none or this handle does not carry it.
+        pub fn twin_for(&self, kind: usize, variant: crate::select::KernelVariant) -> Option<usize> {
+            self.kernel_index(crate::upgrade::twin_name(self.names.get(kind)?, variant)?)
         }
     }
 }

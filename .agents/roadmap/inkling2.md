@@ -1265,6 +1265,36 @@ of 1024 or 8192 tokens, 2-token output, `ttfa` p50.
   decode need the same key tiles at absolute positions and the same per-tile arithmetic. A first tiled kernel (16 rows
   x 32-key tiles, 47 KB of workgroup memory) passed the oracle gates on CUDA and Vulkan and broke exactly that, so it
   did not land.
+  - Done (2026-11-22): `flash_attn_gqa_ext_tiled` (32 query rows of one head a workgroup, 128 threads, each 128-key
+    tile of K and V staged once for the 32 rows, 8x4 register tiles, the tile's distance-bank columns staged too; 49,024
+    bytes of workgroup memory) is `select::Op::FlashAttentionExt`'s `RowTiled` candidate from 16 query rows a sequence
+    where the device holds that memory (`FLASH_EXT_TILE_MIN_ROWS`, `FLASH_EXT_TILE_WORKGROUP_BYTES`), carried as a second
+    twin of the reference (`Gpu::twin_for`), f32 and bf16 pools, chosen per dispatch (`FlashExtIds::tiled`). Its key
+    tiles sit at absolute positions and the per-row twin's moved to the same grid, so the two compute a row bit for bit
+    alike (knowledge #571). Gate (`model` `flash_ext::every_forward_candidate_computes_a_row_the_same_however_its_prompt_
+    is_cut`): every candidate the selection names (`FlashExtIds::pinned`, which refuses one it has no kernel for) runs a
+    300-row sequence whole, in chunks of 1 to 130 rows, row by row and through a gathered ring, f32 and bf16 planes,
+    window 200 and none, every option on, and each row is held to the whole pass and to the other twin in bits; CUDA and
+    Vulkan pass, tiles at the block's first key fail it. `serve_visit_state`, `flash_ext` and `inkling2` `serve`/
+    `real_parity` pass on CUDA (`serve_adapters::a_trained_adapter_...` and `training::the_serving_engine_...` fail as
+    listed below, before and after). Same GH200 (gpu2, shared with another lane's process), `brain perf run serve
+    --target inkling2:<dir>:ctx<N>` (the target's new `:ctx<N>`, 256 for decode, 1100/8256/32800 for prefill), seed 7,
+    before = main at 821fadcf2 plus `:ctx<N>`:
+
+    | | before | after |
+    |---|---|---|
+    | prefill 1k (ttfa p50) | 0.83 s (1230 tok/s) | 0.56 s (1840 tok/s) |
+    | prefill 8k | 22.8 s (359 tok/s) | 4.32 s (1896 tok/s) |
+    | prefill 32k | 152.5 s (215 tok/s) | 23.8 s (1377 tok/s) |
+    | decode, batch 1 (inter-token p50) | 26.1 ms (38.3 tok/s) | 26.2 ms (38.2 tok/s) |
+    | decode, batch 32 | 39.8 ms (804 tok/s) | 39.6 ms (808 tok/s) |
+
+    nsys, the warm-up and one 1k prompt: the attention's kernel time 892 ms (`_rows`) -> 235 ms (`_tiled` 531 launches,
+    ~0.45 ms each at 512 rows) - ncu on one launch: 384 workgroups (0.7 of a wave at 4 a multiprocessor), 25% theoretical
+    occupancy, 46% of the SM's issue rate.
+  - Left: the tiled kernel is binary32 CUDA-core work at about a quarter of that roof (a 512-row chunk fills 0.7 of a
+    wave); a tensor-core form must keep the per-row form's bits, so decode would take the same kernel (or the same
+    arithmetic); the backward still runs the reference `flash_attn_gqa_ext_bwd_*` kernels.
 - Left: the decode step was host-bound before the arena (kernels 40-48% of its wall at batch 1 and 64 under nsys,
   ~3,500 launches a step); with it the step replays as captured CUDA graphs (nsys: 96 `cuGraphLaunch` over a warm-up
   and two 24-token generations at batch 1), the remaining host time not re-measured. `depth_attn_fwd_rows` is

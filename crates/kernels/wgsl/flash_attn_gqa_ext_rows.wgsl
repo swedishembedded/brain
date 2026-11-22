@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 // @what  Causal GQA online-softmax attention with window, sinks, distance-bank bias, log-position scale and documents, one WORKGROUP per (query row, head): flash_attn_gqa_ext's cooperative twin
-// @how   128-thread workgroup; keys in tiles of 128 (one logit per lane), tile max/sum by tree, the value mix coalesced over head_dim
+// @how   128-thread workgroup; keys in 128-key tiles at absolute positions (one logit per lane), tile max/sum by tree, the value mix coalesced over head_dim
 // @opt   4
 // @cpu   no
 // @gpu   yes
@@ -22,6 +22,11 @@
 // bias coefficients staged in workgroup memory), the tile's maximum and exp-sum fold by tree, and each lane mixes the
 // values of its own head_dim columns (coalesced across lanes). The online softmax rescales once per tile instead of
 // once per key, so the sums reassociate: held to the reference within a tolerance (`model` tests `flash_ext`).
+//
+// The tiles are the 128 positions `[128 c, 128 c + 128)` (absolute positions, a key below the row's window masked), so a
+// row's arithmetic is a function of its position alone, and flash_attn_gqa_ext_tiled (the prompt-chunk form) computes
+// the same bits per row: change the tiling, a score, the tree or an update order here and there together (`model` tests
+// `flash_ext` hold the two bit for bit).
 //
 // Dispatch: one workgroup per (sequence, query row, head) - `n_seqs * max_q * n_heads` workgroups, the reference's
 // thread count - 2D-grid safe. A workgroup past its sequence's `n_q` returns whole.
@@ -142,13 +147,14 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
     var o1 = 0.0;
     var m = FLOOR;
     var l = 0.0;
-    for (var t0 = lo; t0 <= pos; t0 = t0 + WG) {
+    for (var t0 = lo - lo % WG; t0 <= pos; t0 = t0 + WG) {
         workgroupBarrier();
         // Score one key of the tile.
         let kp = t0 + lane;
+        let reads = kp <= pos && kp >= lo;
         var logit = FLOOR;
         var kb = 0u;
-        if (kp <= pos) {
+        if (reads) {
             var krow = key_row0 + (kp - kv_pos0);
             if (paged) {
                 var slot = kp - kv_pos0;
@@ -177,18 +183,20 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>,
         let m_new = max(m, red[0]);
         workgroupBarrier();
         var e = 0.0;
-        if (kp <= pos) { e = exp(logit - m_new); }
+        if (reads) { e = exp(logit - m_new); }
         prob[lane] = e;
         red[lane] = e;
         fold(lane, false);
         let corr = exp(m - m_new);
         l = l * corr + red[0];
         m = m_new;
-        // Mix the tile's values into this lane's columns.
+        // Mix the tile's values (the row's keys, ascending) into this lane's columns.
         let n_keys = min(WG, pos + 1u - t0);
+        var j_lo = 0u;
+        if (lo > t0) { j_lo = lo - t0; }
         o0 = o0 * corr;
         o1 = o1 * corr;
-        for (var j = 0u; j < n_keys; j = j + 1u) {
+        for (var j = j_lo; j < n_keys; j = j + 1u) {
             let pj = prob[j];
             let vb = kbase[j];
             if (lane < hd) {

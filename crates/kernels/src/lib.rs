@@ -564,6 +564,8 @@ pub const FLASH_ATTN_GQA_EXT_BWD_DQ: &str = include_str!("../wgsl/flash_attn_gqa
 pub const FLASH_ATTN_GQA_EXT_BWD_PREP: &str = include_str!("../wgsl/flash_attn_gqa_ext_bwd_prep.wgsl");
 /// `wgsl/flash_attn_gqa_ext_rows.wgsl`
 pub const FLASH_ATTN_GQA_EXT_ROWS: &str = include_str!("../wgsl/flash_attn_gqa_ext_rows.wgsl");
+/// `wgsl/flash_attn_gqa_ext_tiled.wgsl`
+pub const FLASH_ATTN_GQA_EXT_TILED: &str = include_str!("../wgsl/flash_attn_gqa_ext_tiled.wgsl");
 /// `wgsl/flash_attn_vsa.wgsl`
 pub const FLASH_ATTN_VSA: &str = include_str!("../wgsl/flash_attn_vsa.wgsl");
 /// `wgsl/focal_dice_grad.wgsl`
@@ -2082,6 +2084,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("flash_attn_gqa_ext_bwd_dq", FLASH_ATTN_GQA_EXT_BWD_DQ),
     ("flash_attn_gqa_ext_bwd_prep", FLASH_ATTN_GQA_EXT_BWD_PREP),
     ("flash_attn_gqa_ext_rows", FLASH_ATTN_GQA_EXT_ROWS),
+    ("flash_attn_gqa_ext_tiled", FLASH_ATTN_GQA_EXT_TILED),
     ("flash_attn_vsa", FLASH_ATTN_VSA),
     ("focal_dice_grad", FOCAL_DICE_GRAD),
     ("focal_dice_stats", FOCAL_DICE_STATS),

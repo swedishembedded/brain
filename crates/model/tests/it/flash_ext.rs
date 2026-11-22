@@ -13,10 +13,16 @@
 //! * packed rows (several documents per row): the oracle and finite differences above, and every output and input
 //!   gradient of each packed document equal to that document run alone.
 //!
-//! The forwards are the ones `FlashExtIds::resolve` selects: the barrier-free reference on the CPU JIT, the
-//! cooperative twin (`flash_attn_gqa_ext_rows`, its bf16-pool form included) on a device with workgroup reductions, so
-//! every check above holds both. One more holds the twin at the decoder's shapes (128-wide heads, 24 over 8, keys over
-//! several of its 128-key tiles) against the oracle and the reference kernel.
+//! The forwards are the ones `FlashExtIds::resolve` selects: the barrier-free reference on the CPU JIT; on a device
+//! with workgroup reductions the per-row twin (`flash_attn_gqa_ext_rows`) and, for a dispatch of a full block of query
+//! rows a sequence, the query-tiled twin (`flash_attn_gqa_ext_tiled`), their bf16-pool forms included, so every check
+//! above holds them. One more holds the twins at the decoder's shapes (128-wide heads, 24 over 8, keys over several
+//! 128-key tiles) against the oracle and the reference kernel.
+//!
+//! The selection gate: every candidate `select::Op::FlashAttentionExt` can name on the device runs a sequence whole, in
+//! chunks of every size class, row by row and (in a window) through a gathered ring, and each row is held BIT FOR BIT to
+//! the whole pass and to every other candidate of the family the handle selects from: a served position must not
+//! depend on how its prompt was cut or which candidate a dispatch's size picked.
 //!
 //! Swedish Embedded AB implements memory-bounded attention for long-context models for its clients. If your team
 //! needs expertise in verifying attention kernels against reference implementations then you can procure our
@@ -25,6 +31,7 @@
 use std::sync::OnceLock;
 
 use data::rng::Lcg;
+use gpu_core::select::{Dtype, KernelVariant, Op, OpShape};
 use gpu_core::Gpu;
 use model::flash_ext::{
     flash_ext_bwd, flash_ext_fwd, flash_ext_paged_fwd, log_position_scale, paged_index, AttnInputGrads, AttnInputs, AttnOptions, Contiguous, DistanceBias, FlashExtIds, HeadShape, KvPlanes, LogPositionScale, PagedKv, PagedSeq,
@@ -701,4 +708,117 @@ fn documents_on_the_paged_layout_are_refused() {
     let o = AttnOptions { documents: true, ..AttnOptions::plain(0.5) };
     let paged = PagedKv { index: &x, n_seqs: 1, max_q: 4, n_rows: 4, block_size: 4, max_bt: 1, ring: 0 };
     let _ = flash_ext_paged_fwd(&g, &ids, &heads, &o, &AttnInputs { doc_pos: Some(&x), ..AttnInputs::default() }, &paged, &x, KvPlanes::F32 { k: &x, v: &x }, &out, &lse);
+}
+
+// ---- the selection gate: chunk invariance across every candidate -------------------------------------------------
+
+/// The forward candidates `select::Op::FlashAttentionExt` names on `g` at any row count, each pinned. A candidate this
+/// module has no kernel for fails here ([`FlashExtIds::pinned`]), so a new one cannot join the list ungated.
+fn forward_candidates(g: &Gpu) -> Vec<(KernelVariant, FlashExtIds)> {
+    let caps = g.caps();
+    let mut seen: Vec<KernelVariant> = Vec::new();
+    for m in [1u32, 2, 8, 15, 16, 17, 64, 512, 1 << 14] {
+        for v in gpu_core::select::candidates(Op::FlashAttentionExt, OpShape { m, n: 0, k: 0, dtype: Dtype::F32 }, &caps) {
+            if !seen.contains(&v) {
+                seen.push(v);
+            }
+        }
+    }
+    seen.into_iter().map(|v| (v, FlashExtIds::pinned(g, v).unwrap_or_else(|| panic!("the selection names {v:?} on this device, which carries no kernel for it")))).collect()
+}
+
+#[track_caller]
+fn assert_bits(what: &str, got: &[f32], want: &[f32]) {
+    assert_eq!(got.len(), want.len(), "{what}: length");
+    if let Some(e) = got.iter().zip(want).position(|(a, b)| a.to_bits() != b.to_bits()) {
+        let differ = got.iter().zip(want).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+        panic!("{what}: {differ} of {} values differ in their bits, first at {e}: {} vs {}", got.len(), got[e], want[e]);
+    }
+}
+
+/// Spec (the selection gate): each forward candidate computes a row's output and log-sum-exp as a function of its
+/// position alone - the whole sequence, chunks of 1 to 130 rows that cross the 128-key tiles at odd places, single
+/// rows, and (for a window) chunks over a gathered ring that starts at the window's first key all give the whole pass's
+/// bits - and the candidates of the family a handle selects from give each other's bits. f32 and bf16 planes, a window
+/// that is not a multiple of the tile and none, every option on, the decoder's head width.
+#[test]
+fn every_forward_candidate_computes_a_row_the_same_however_its_prompt_is_cut() {
+    let (g, selected) = device();
+    let mut sets = forward_candidates(&g);
+    if selected.fwd.per_pair_workgroup && g.caps().workgroup_mem_bytes >= gpu_core::select::FLASH_EXT_TILE_WORKGROUP_BYTES {
+        assert!(sets.iter().any(|(v, _)| *v == KernelVariant::RowTiled), "a device with the twins and the workgroup memory offers the query-tiled forward");
+    }
+    sets.push((KernelVariant::Reference, selected));
+    // The family the handle selects from: the reference alone where it has no twins, else every twin.
+    let selected_family = |pin: Option<KernelVariant>| pin.is_none() || (pin == Some(KernelVariant::Reference)) == !selected.fwd.per_pair_workgroup;
+    let mut rng = Lcg::new(data::rng::random_seed());
+    let heads = HeadShape { n_heads: 4, n_kv_heads: 2, head_dim: 128 };
+    let (t, bs) = (300u32, 16u32);
+    let (nh, hd, kvd) = (4usize, 128usize, 256usize);
+    let chunks = [37u32, 1, 130, 16, 17, 99];
+    let blocks = t.div_ceil(bs);
+    let table: Vec<u32> = (0..blocks).map(|b| (b * 7) % blocks).collect();
+    let pool_rows: Vec<u32> = (0..t).map(|p| table[(p / bs) as usize] * bs + p % bs).collect();
+    for window in [Some(200), None] {
+        let o = opts(128f32.powf(-0.5), window, true, Some(DistanceBias { extent: 150, d_rel: 16 }), Some(LogPositionScale { alpha: 0.1, n_floor: 64.0, scales_bias: true }));
+        for tier in [KvTier::F32, KvTier::BF16] {
+            let mut c = Case::new(1, t, 0, heads, o, &mut rng);
+            if tier == KvTier::BF16 {
+                c.k = c.k.iter().map(|&x| bf16_round(x)).collect();
+                c.v = c.v.iter().map(|&x| bf16_round(x)).collect();
+            }
+            let layer = KvLayer::new(&g, tier, u64::from(blocks * bs), kvd as u64, hd as u64);
+            write_rows(&g, &layer, tier, &c.k, &c.v, kvd, &pool_rows);
+            let (want, _) = eval(&c, &host_of(&c));
+            let mut family: Option<(Vec<f32>, Vec<f32>)> = None;
+            for (variant, ids) in &sets {
+                let name = if ids.pin.is_none() { "as selected".to_string() } else { format!("{variant:?}") };
+                let tag = format!("window {window:?} {tier} {name}");
+                let whole = run_device_fwd(&g, ids, &c);
+                assert_close(&format!("{tag}: whole out"), &whole.0, &want, 2e-5);
+                let mut start = 0u32;
+                for n in chunks {
+                    let (out, lse) = paged_rows(&g, ids, &c, &layer, PagedSeq { q_row0: start, n_q: n, q_pos0: start, kv_pos0: 0 }, &table, bs, 0);
+                    let r = start as usize;
+                    assert_bits(&format!("{tag}: chunk of {n} at {start} out"), &out, &whole.0[r * nh * hd..][..n as usize * nh * hd]);
+                    assert_bits(&format!("{tag}: chunk of {n} at {start} lse"), &lse, &whole.1[r * nh..][..n as usize * nh]);
+                    if let Some(w) = window {
+                        // The ring chunk's layout: the last min(start, w) keys gathered before the chunk's own.
+                        let m = start.min(w);
+                        let gathered = KvLayer::new(&g, tier, u64::from(m + n), kvd as u64, hd as u64);
+                        let lo = (start - m) as usize;
+                        write_rows(&g, &gathered, tier, &c.k[lo * kvd..(start + n) as usize * kvd], &c.v[lo * kvd..(start + n) as usize * kvd], kvd, &(0..m + n).collect::<Vec<_>>());
+                        let (out, _) = paged_rows(&g, ids, &c, &gathered, PagedSeq { q_row0: start, n_q: n, q_pos0: start, kv_pos0: start - m }, &[0], m + n, 0);
+                        assert_bits(&format!("{tag}: gathered ring chunk of {n} at {start} out"), &out, &whole.0[r * nh * hd..][..n as usize * nh * hd]);
+                    }
+                    start += n;
+                }
+                for p in (0..t).step_by(23).chain([127, 128, 255, 256, t - 1]) {
+                    let (out, _) = paged_rows(&g, ids, &c, &layer, PagedSeq { q_row0: p, n_q: 1, q_pos0: p, kv_pos0: 0 }, &table, bs, 0);
+                    assert_bits(&format!("{tag}: row {p} alone"), &out, &whole.0[p as usize * nh * hd..][..nh * hd]);
+                }
+                if selected_family(ids.pin) {
+                    match &family {
+                        Some((out, lse)) => {
+                            assert_bits(&format!("{tag}: out against the family's first candidate"), &whole.0, out);
+                            assert_bits(&format!("{tag}: lse against the family's first candidate"), &whole.1, lse);
+                        }
+                        None => family = Some(whole),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `(out, lse)` of the contiguous forward of `c` through `ids`.
+fn run_device_fwd(g: &Gpu, ids: &FlashExtIds, c: &Case) -> (Vec<f32>, Vec<f32>) {
+    let rows = c.rows();
+    let (nh, hd) = (c.heads.n_heads as usize, c.heads.head_dim as usize);
+    let (q, k, v) = (upload(g, "q", &c.q), upload(g, "k", &c.k), upload(g, "v", &c.v));
+    let (sink, rel, bank) = (upload(g, "sink", &c.sink), upload(g, "rel", &c.rel), upload(g, "bank", &c.bank));
+    let inputs = AttnInputs { sink: c.opts.sink.then_some(&sink), rel: c.opts.bias.map(|_| &rel), bank: c.opts.bias.map(|_| &bank), doc_pos: None };
+    let (out, lse) = (g.storage((rows * nh * hd) as u64), g.storage((rows * nh) as u64));
+    g.submit(&[], &flash_ext_fwd(g, ids, &c.heads, &c.opts, &inputs, Contiguous { b: c.b, t: c.t, pos0: c.pos0 }, &q, &k, &v, &out, &lse));
+    (g.read(&out, rows * nh * hd), g.read(&lse, rows * nh))
 }
