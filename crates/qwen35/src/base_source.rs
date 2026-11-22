@@ -73,7 +73,9 @@ pub fn open_base(path: &Path) -> Result<BaseCheckpoint, String> {
     let name = path.to_str().ok_or_else(|| format!("{}: not a UTF-8 path", path.display()))?;
     let reader = WeightReader::open(name).map_err(|e| format!("open {name}: {e}"))?;
     let cfg = Qwen35Config::from_json_checked(&reader.config()).map_err(|e| format!("{name}: {e}"))?;
-    Ok(BaseCheckpoint { cfg, src: Box::new(reader) })
+    // Read through the file's packed view, so a bf16 or int8 tensor reaches a tier as stored (or converted tile by
+    // tile), never through a whole-tensor f32 copy, and the stored tier of each tensor can be asked for.
+    Ok(BaseCheckpoint { cfg, src: checkpoint::packed::stored_source(reader) })
 }
 
 /// A GGUF as a streamed base: the config from its metadata, every parameter the

@@ -7314,6 +7314,17 @@ impl Qwen35 {
         (out, out_hidden, stats)
     }
 
+    /// The logits of ONE final-normed hidden row (`[d_model]` floats), projected on the device through the resident
+    /// head ([`Self::head_logits_dev`]): the row goes up, the `[vocab]` logits come back, the head never leaves the
+    /// card.
+    pub fn head_logits(&self, hidden: &[f32]) -> Vec<f32> {
+        let d = self.cfg.d_model as usize;
+        assert_eq!(hidden.len(), d, "qwen35: head_logits takes exactly one row of {d} floats, got {}", hidden.len());
+        let x = self.gpu.storage_init("qwen35.head_logits.hidden", hidden);
+        let logits = self.head_logits_dev(&x);
+        self.gpu.read(&logits, self.cfg.vocab as usize)
+    }
+
     /// Device-side head epilogue: `logits[vocab] = hidden[d_model] @
     /// head[vocab, d_model]^T` - the SAME `MATMUL` dispatch [`Self::
     /// run_forward`]'s head epilogue and [`Self::logits_all`] already issue,

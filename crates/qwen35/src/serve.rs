@@ -458,11 +458,7 @@ impl Engine {
     /// [`Engine::forward_batched_greedy`]/[`Engine::forward_batched_topk`],
     /// which stay on the device end to end instead.
     fn logits(&self, hidden: &[f32]) -> Vec<f32> {
-        let d = self.model.cfg.d_model as usize;
-        assert_eq!(hidden.len(), d, "qwen35::serve::Engine::logits: hidden must be exactly one row of {d} floats, got {}", hidden.len());
-        let x = self.model.gpu.storage_init("qwen35.serve.logits.hidden", hidden);
-        let logits = self.model.head_logits_dev(&x);
-        self.model.gpu.read(&logits, self.model.cfg.vocab as usize)
+        self.model.head_logits(hidden)
     }
 
     /// Admission's greedy pick, entirely on the device: uploads `hidden`

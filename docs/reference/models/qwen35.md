@@ -51,8 +51,11 @@ closely as one calibrated scale.
 brain qwen35 generate --weights qwen35.safetensors --tokenizer tokenizer.json --prompt "..." --seed $RANDOM
 ```
 
-The model's actions are `generate` (KV-cache decode; `--adapter FILE` folds a trained LoRA adapter into the weights
-once, `--tokenizer` may also name a GGUF whose embedded tokenizer is used), `finetune` (full or LoRA, see
+The model's actions are `generate` (KV-cache decode; `--weights` names a brain checkpoint, such as the one a full
+fine-tune exports, or a Hugging Face directory, streamed onto the card one tensor at a time; `--precision` is `stored`
+by default, each tensor as the file stores it, so a bf16 export runs in bf16, or `fp32`, `bf16`, `int8`; `--adapter
+FILE` folds a trained LoRA adapter into each targeted weight as it is read, `--tokenizer` may also name a GGUF whose
+embedded tokenizer is used), `finetune` (full or LoRA, see
 [LoRA training](#lora-training)), `sample_adapter` (greedy answers of a streamed base with an adapter overlaid, or
 the base alone, or both) and `import` (a GGUF into a brain checkpoint, MTP head included, or a Hugging Face release
 re-encoded once at a narrow format); `brain qwen35 <action> --help` lists every parameter. The same actions are

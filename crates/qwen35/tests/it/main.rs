@@ -34,6 +34,7 @@ mod edgerock_hf_fixture;
 mod edgerock_real_weights;
 mod edgerock_serve;
 mod edgerock_training;
+mod exported_checkpoint;
 mod finetune_streamed_guard;
 mod fp8_source;
 mod full_ft_precision;

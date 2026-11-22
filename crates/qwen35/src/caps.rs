@@ -10,11 +10,14 @@
 //! own doc for the design.
 //!
 //! What differs from `qwen35moe::caps`:
-//! - `precision` selects fp32 or int8 WEIGHTS only (`Qwen35::new_on` vs
-//!   `Qwen35::new_i8`, dispatching through `model::ops::{Ops, Weight}` - see
-//!   `crate::model::is_i8_linear`); the KV cache itself is always fp32 (no
-//!   int8 KV path for this model, same scope note as `qwen35moe::caps`).
-//! - Decoding is `crate::sample::generate_kv_stream_with_head`, itself a thin
+//! - The checkpoint is streamed onto the device one tensor at a time from its
+//!   mapping (`crate::base_source::open_base`), never read into a whole-model
+//!   host copy: the host peak of a load stays a small fraction of the file.
+//! - `precision` selects the WEIGHT tier: `stored` (default: each tensor in
+//!   the encoding the checkpoint stores it in, the policy `brain serve` uses),
+//!   fp32, bf16 or int8; the KV cache itself is always fp32 (no int8 KV path
+//!   for this model, same scope note as `qwen35moe::caps`).
+//! - Decoding is `crate::sample::generate_kv_stream`, itself a thin
 //!   wrapper around [`Qwen35::step`] fed one token at a time (the
 //!   single-sequence incremental decode primitive) - no fast batched prefill
 //!   path yet, same as `qwen35moe::caps`'s own scope note.
@@ -28,8 +31,8 @@
 //!   (the template's own default `xhigh` when the request leaves it out,
 //!   nothing when thinking is disabled), as the upstream Qwen3.8 chat
 //!   template does.
-//! - A LoRA adapter (`adapter`) is folded into the loaded base tensors once,
-//!   before the model is built (`crate::lora::fold_adapter_into`), so decoding
+//! - A LoRA adapter (`adapter`) is folded into each targeted base tensor as it
+//!   is read (`model::lora::device_adapter::FoldedSource`), so decoding
 //!   is a plain adapted model at no per-token cost. No multi-GPU sharding is
 //!   wired into this action (`crate::shard` exists), and the streaming path
 //!   takes no adapter. See `crates/qwen35/src/serve.rs`'s own module doc for the
@@ -51,6 +54,8 @@ use serde_json::json;
 use qwen3::chat::{parse_request, ParsedRequest, SeqState};
 
 use crate::config::Qwen35Config;
+use gpu_core::select::Dtype;
+use model::ops::TierPolicy;
 use crate::model::Qwen35;
 
 /// The model id used on the CLI (`brain do qwen35 ...`) and the event API. A
@@ -165,8 +170,12 @@ pub fn manifest() -> Manifest {
         .param(ParamSpec::new("top_p", ParamType::Float, "nucleus sampling threshold (>= 1 = disabled)").default(json!(1.0)))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (omit for random)"))
         .param(
-            ParamSpec::new("precision", ParamType::Str, "model WEIGHT precision: fp32, or int8 (per-channel weights + dynamic activation quant); the KV cache is always fp32")
-                .default(json!("fp32")),
+            ParamSpec::new(
+                "precision",
+                ParamType::Enum(PRECISIONS.map(String::from).to_vec()),
+                "model WEIGHT precision: stored (each tensor as the checkpoint stores it: a bf16 checkpoint stays bf16), fp32, bf16, or int8 (group-wise weights + dynamic activation quant); the KV cache is always fp32",
+            )
+            .default(json!("stored")),
         )
         .param(ParamSpec::new("eos", ParamType::Int, "stop token id (default: the tokenizer's <|im_end|>/<|endoftext|> when a tokenizer is given; -1 disables)"))
         .param(ParamSpec::new("chat", ParamType::Bool, "apply the chat template to the prompt (needs a tokenizer)").default(json!(false)))
@@ -208,10 +217,6 @@ pub fn manifest() -> Manifest {
 /// otherwise.
 struct QwenResident {
     model: Qwen35,
-    /// The LM head, read once when this resident is (re)built - see
-    /// `crate::sample::generate_kv_stream_with_head`'s doc comment for the
-    /// per-request cost re-reading it every call otherwise pays.
-    head: Vec<f32>,
 }
 
 /// What a built [`QwenResident`] is reused for: its checkpoint, the adapter
@@ -327,12 +332,10 @@ impl Action for GenerateAction {
             return Self::run_streaming(inv, &weights);
         }
         // `crate::spec::Qwen35Spec`'s `weights` role accepts a Q8_0 GGUF as
-        // well as a brain-format checkpoint (see that module's doc), but this
-        // resident path only ever calls `checkpoint::load`, which reads
-        // safetensors alone and panics on anything else - a clean error here,
-        // before that call, is what makes a store holding only a GGUF fail
-        // safely instead of taking the process down. A GGUF checkpoint is
-        // served through the multi-GPU int8 resident instead
+        // well as a brain-format checkpoint (see that module's doc); this
+        // single-card resident path reads brain-format safetensors and Hugging
+        // Face directories only. A GGUF checkpoint is served through the
+        // multi-GPU int8 resident instead
         // (`qwen35::int8_gguf_resident::Qwen35GgufResident`).
         if weights.ends_with(".gguf") {
             return Err(format!(
@@ -340,9 +343,9 @@ impl Action for GenerateAction {
             ));
         }
 
-        let precision = inv.get_str("precision").unwrap_or_else(|| "fp32".to_string());
-        if precision != "fp32" && precision != "int8" {
-            return Err(format!("qwen35 generate: precision must be fp32 or int8, got {precision:?}"));
+        let precision = inv.get_str("precision").unwrap_or_else(|| "stored".to_string());
+        if !PRECISIONS.contains(&precision.as_str()) {
+            return Err(format!("qwen35 generate: precision must be one of {PRECISIONS:?}, got {precision:?}"));
         }
         let adapter = inv.get_str("adapter").filter(|a| !a.is_empty()).unwrap_or_default();
         if !adapter.is_empty() && !Path::new(&adapter).is_file() {
@@ -414,30 +417,11 @@ impl Action for GenerateAction {
             key,
             || {
                 let cap = need.max(64);
-                // `read_config` alone (a header parse, no tensor data) is enough
-                // to estimate the build BEFORE paying for `checkpoint::load`'s
-                // eager whole-checkpoint-to-host-RAM read - at this model's real
-                // ~108 GB fp32 scale, refusing here instead of after that load
-                // saves minutes on top of the driver-crash `place_and_build`
-                // itself prevents (see its own doc).
-                let cfg = Qwen35Config::from_json(&checkpoint::read_config(&weights));
-                let tier =
-                    if precision == "int8" { model::ops::TierPolicy::uniform(gpu_core::select::Dtype::I8) } else { model::ops::TierPolicy::uniform(gpu_core::select::Dtype::F32) };
+                let (cfg, src, tier) = open_weights(&weights, &adapter, &precision)?;
+                // The estimate is the header's alone: a checkpoint that does not fit is refused before any tensor is read.
                 let bytes = cfg.infer_footprint_bytes(&tier, cap);
-                let model = place_and_build(bytes, || {
-                    let container = checkpoint::load(&weights);
-                    let mut init = container.by_role("");
-                    if !adapter.is_empty() {
-                        crate::lora::fold_adapter_into(&mut init, &adapter).map_err(|e| format!("qwen35 generate: adapter {adapter:?}: {e}"))?;
-                    }
-                    Ok(if precision == "int8" {
-                        Qwen35::new_i8(cfg.clone(), 1, cap, &init)
-                    } else {
-                        Qwen35::new_on(gpu_core::Gpu::new(crate::model::pipelines()), cfg.clone(), 1, cap, &init)
-                    })
-                })?;
-                let head = model.read_weight(model.cfg.head_weight());
-                Ok(QwenResident { model, head })
+                let model = place_and_build(bytes, || Ok(Qwen35::new_on_dt(gpu_core::Gpu::new(crate::model::pipelines()), cfg.clone(), 1, cap, &*src, &tier)))?;
+                Ok(QwenResident { model })
             },
             |hot| {
                 let model = &hot.model;
@@ -449,7 +433,7 @@ impl Action for GenerateAction {
                 let mut rng = Rng::new(seed);
                 let mut seq = SeqState::new(&req, inv.cancel.clone());
                 let mut ids_out: Vec<u32> = Vec::with_capacity(req.max_new.unwrap_or(DEFAULT_MAX_NEW as usize));
-                let gen = crate::sample::generate_kv_stream_with_head(
+                let gen = crate::sample::generate_kv_stream(
                     model,
                     &req.ids,
                     req.max_new.unwrap_or(DEFAULT_MAX_NEW as usize),
@@ -458,7 +442,6 @@ impl Action for GenerateAction {
                     req.top_p,
                     &eos,
                     &mut rng,
-                    &hot.head,
                     &mut |_i, t| {
                         ids_out.push(t);
                         !seq.advance(&tok, &ids_out, progress)
@@ -469,7 +452,7 @@ impl Action for GenerateAction {
             Plan::Raw { ids, max_new, temp, top_k, top_p, seed, eos } => {
                 let mut rng = Rng::new(seed);
                 let total = max_new as u32;
-                let gen = crate::sample::generate_kv_stream_with_head(model, &ids, max_new, temp, top_k, top_p, &eos, &mut rng, &hot.head, &mut |i, _t| {
+                let gen = crate::sample::generate_kv_stream(model, &ids, max_new, temp, top_k, top_p, &eos, &mut rng, &mut |i, _t| {
                     progress(Progress::step(i as u32 + 1, total, "token"));
                     true
                 });
@@ -578,6 +561,30 @@ impl GenerateAction {
         let text = crate::stream::generate(dir, &cfg, Path::new(&tokenizer), &prompt, max_new, temp, top_k, top_p, WINDOW_BUDGET, seed, use_mtp)?;
         Ok(Outcome::new().set("text", json!(text.clone())).set("seed", json!(seed)).blob("text", Blob::new(Media::Text, text.into_bytes())))
     }
+}
+
+/// The weight precisions `generate` builds at; `stored` is the default.
+const PRECISIONS: [&str; 4] = ["stored", "fp32", "bf16", "int8"];
+
+/// The checkpoint at `weights` as a streamed source (a brain `.safetensors` file or a Hugging Face directory, read
+/// one tensor at a time from its mapping, never a whole-model host copy), with the adapter at `adapter` (empty for
+/// none) folded into each targeted linear as it is read, and the tier policy `precision` names. `stored` keeps every
+/// tensor in the encoding the file stores it in (a bf16 export stays bf16 on the device), read off the base before
+/// the fold: a folded linear has no packed view, but it is still held at its base's tier.
+fn open_weights(weights: &str, adapter: &str, precision: &str) -> Result<(Qwen35Config, Box<dyn checkpoint::TensorSource>, TierPolicy), String> {
+    let crate::base_source::BaseCheckpoint { cfg, src } = crate::base_source::open_base(Path::new(weights)).map_err(|e| format!("qwen35 generate: {e}"))?;
+    let tier = match precision {
+        "fp32" => TierPolicy::uniform(Dtype::F32),
+        "bf16" => TierPolicy::uniform(Dtype::BF16),
+        "int8" => TierPolicy::uniform(Dtype::I8),
+        _ => model::ops::stored_tier_policy(&*src, cfg.param_list().iter().map(|(name, _)| name.as_str())),
+    };
+    let src: Box<dyn checkpoint::TensorSource> = if adapter.is_empty() {
+        src
+    } else {
+        Box::new(model::lora::device_adapter::FoldedSource::open(src, adapter).map_err(|e| format!("qwen35 generate: adapter {adapter:?}: {e}"))?)
+    };
+    Ok((cfg, src, tier))
 }
 
 /// The tokenizer at `path`: a `tokenizer.json`, or a GGUF release whose
@@ -733,9 +740,8 @@ mod tests {
     }
 
     /// `crate::spec::Qwen35Spec`'s `weights` role accepts a Q8_0 GGUF (see
-    /// that module's own doc), but this action's resident path only ever
-    /// calls `checkpoint::load`, which panics on a non-safetensors file - a
-    /// GGUF checkpoint must be refused cleanly here, never reach that call.
+    /// that module's own doc), but this action's resident path does not read
+    /// one: a GGUF checkpoint is refused cleanly by name, never a panic.
     #[test]
     fn a_gguf_weights_path_is_a_clean_error_not_a_panic() {
         let dir = std::env::temp_dir().join(format!("qwen35-caps-gguf-refused-{}", std::process::id()));

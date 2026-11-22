@@ -669,7 +669,8 @@ Scope: Running one training job as ranks across machines, and serving one model 
   s after the processes started (148 s wall for the job). The export
   generates on one card (`qwen35 generate --precision int8`, 43 s with the
   load; "147 plus 592 is 7..." at 12 tokens); that load needed more than
-  200 GB of host memory (OOM at 200 GB, fine at 400 GB). Without the fabric
+  200 GB of host memory (OOM at 200 GB, fine at 400 GB; since streamed, see
+  the next entry). Without the fabric
   variable the run deadlocks in the probe's 31st all-gather (knowledge 552);
   with the bounded collectives every rank then fails 120 s later with
   "collective 31 was not done 120.0s after the ones before it" (op timeout
@@ -686,6 +687,24 @@ Scope: Running one training job as ranks across machines, and serving one model 
   load ("What is 147 plus 592?" -> " Also, can you explain how to add these
   numbers step by step?\n\nSure!"). Before the shared sharded save the same
   run failed at its end ("this model does not shard its parameters").
+- **Loading and serving the sharded export on one card (2026-11-22, n442
+  card 3, Qwen3.8-27B in the sharded save's layout - bf16 linears and
+  tables, f32 norms, card; 53.8 GB, re-encoded from the FP8 release on
+  node-local NVMe; `brain qwen35 generate`, 16 greedy tokens, host peak as
+  `ru_maxrss`).** Before (`--precision int8`; fp32 does not fit a card):
+  198.4 GiB, 56.4 s wall. After: default (`stored`, bf16 on the card)
+  0.49 GiB, 24-27 s; `bf16` 0.53 GiB, 27 s; `int8` 0.46-0.60 GiB, 77-80 s
+  (the bf16-to-int8 conversion through the tiled packed path is slower than
+  the old f32 route, which took 26 s at a 5 GiB peak; not yet profiled).
+  The same 16 tokens at every precision. The load itself peaks at 0.68 GB
+  of host memory; the rest of the old peak after streaming was the f32 host
+  copy of the head that decoding projected through (5 GB, a 10 GB transient),
+  now projected on the card. `brain serve --models-dir` of the same file
+  answers the same completion (built in 30.6 s, 0.53 GiB host peak; it read
+  the file streamed already, 28.5 s and 0.49 GiB before). Gate: qwen35
+  `exported_checkpoint` (CPU device, whose weights are host memory too:
+  host peak growth 77-156 MB on a 165 MB export, bound 1.5x the file; 789 MB
+  before).
 - **Cost of bounding every device collective (2026-11-22, n442 cards 2-3,
   `brain bench collectives`, f32, 50 iterations, two runs each).** p50
   before -> after: all-reduce 5.9-6.8 -> 7.7-8.1 us at 8 B, 28.7 -> 31.2-31.8
@@ -939,7 +958,8 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         uninterrupted one does and writes the same file (CPU tests). End to end
         on cards (2026-11-22): `brain finetune` of Qwen3.8-27B-FP8 over 8
         GH200s on two nodes trains, exports its checkpoint directory and the
-        export generates on one card (Measured); it needs
+        export generates and serves on one card, streamed at under 1 GB of
+        host memory and held as the bf16 it is stored in (Measured); it needs
         `FI_CXI_DISABLE_HOST_REGISTER=1` on a CXI fabric (knowledge 552). Open:
         selection on held-out loss and timed model saves are not run for such
         a run. The sharded save is one implementation since 2026-11-22

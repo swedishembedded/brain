@@ -12,6 +12,7 @@
 
 #![allow(dead_code)]
 
+pub mod exported;
 pub mod fused_decode;
 pub mod golden_vl;
 pub mod hf_fixture;

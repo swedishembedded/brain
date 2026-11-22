@@ -4,7 +4,7 @@
 //! Autoregressive sampling from a [`Qwen35`] over its single-sequence
 //! incremental decode path ([`Qwen35::step`]). Mirrors
 //! `qwen35moe::sample` exactly (same temperature/top-k/top-p contract, same
-//! host-side head application, same reasoning for why the sampling helpers
+//! reasoning for why the sampling helpers
 //! below are a small, deliberate duplication of `qwen3::sample`'s private
 //! `argmax`/`sample_logits` rather than a shared crate - every model crate in
 //! this repo owns its own tiny sampling tail, not a cross-model dependency
@@ -43,63 +43,19 @@ pub use qwen3vl::sample::sample_logits;
 /// `temperature <= 0` is greedy; `top_k = 0` disables top-k; `top_p` in
 /// `(0,1)` enables nucleus filtering. Stops early at any id in `eos`.
 ///
-/// Reads the LM head weight fresh from `model` - a `[vocab, d_model]`
-/// device-to-host transfer once per call, not once per token. A caller
-/// serving many requests against one resident model should read it once and
-/// reuse the buffer - not done here since this is not that caller (that's
-/// `crates/qwen35/src/serve.rs`'s own, separate concern).
+/// Each step's logits are projected on the device through the model's
+/// resident head ([`Qwen35::head_logits`]): only the `[vocab]` row comes back,
+/// and no host copy of the head is ever made.
 #[allow(clippy::too_many_arguments)]
 pub fn generate_kv(model: &Qwen35, prompt: &[u32], max_new: usize, temperature: f32, top_k: usize, top_p: f32, eos: &[u32], rng: &mut Rng) -> Vec<u32> {
-    let head = model.read_weight(model.cfg.head_weight());
-    generate_kv_with_head(model, prompt, max_new, temperature, top_k, top_p, eos, rng, &head)
-}
-
-/// [`generate_kv`] with the LM head weight supplied by the caller instead of
-/// read fresh from `model` - see [`generate_kv`]'s own doc for why a
-/// multi-request caller wants this instead.
-#[allow(clippy::too_many_arguments)]
-pub fn generate_kv_with_head(
-    model: &Qwen35,
-    prompt: &[u32],
-    max_new: usize,
-    temperature: f32,
-    top_k: usize,
-    top_p: f32,
-    eos: &[u32],
-    rng: &mut Rng,
-    head: &[f32],
-) -> Vec<u32> {
-    let vocab = model.cfg.vocab as usize;
-    let d = model.cfg.d_model as usize;
-    let logits_of = |hidden: &[f32]| -> Vec<f32> { model::hostmath::matvec_par(head, hidden, vocab, d) };
-
-    model.reset_decode_cache();
-    let seed_prompt: &[u32] = if prompt.is_empty() { &[0] } else { prompt };
-    let mut hidden = Vec::new();
-    for &tok in seed_prompt {
-        hidden = model.step(tok);
-    }
-
-    let mut out = Vec::with_capacity(max_new);
-    for _ in 0..max_new {
-        let next = sample_logits(&logits_of(&hidden), temperature, top_k, top_p, rng);
-        if eos.contains(&next) {
-            break;
-        }
-        out.push(next);
-        hidden = model.step(next);
-    }
-    out
+    generate_kv_stream(model, prompt, max_new, temperature, top_k, top_p, eos, rng, &mut |_, _| true)
 }
 
 /// [`generate_kv`] with a per-token callback: `on_token(index, token)` fires
 /// as each token is accepted (before the next decode step), giving callers a
 /// true streaming timeline (TTFT/ITL) without re-implementing the decode
 /// loop. Returning `false` from `on_token` stops generation early (the token
-/// is kept), letting callers honour cancellation or stop-strings. Reads the
-/// head fresh from `model` on every call; a caller serving many requests
-/// against one resident model should read it once and call
-/// [`generate_kv_stream_with_head`] directly instead.
+/// is kept), letting callers honour cancellation or stop-strings.
 #[allow(clippy::too_many_arguments)]
 pub fn generate_kv_stream(
     model: &Qwen35,
@@ -112,32 +68,6 @@ pub fn generate_kv_stream(
     rng: &mut Rng,
     on_token: &mut dyn FnMut(usize, u32) -> bool,
 ) -> Vec<u32> {
-    let head = model.read_weight(model.cfg.head_weight());
-    generate_kv_stream_with_head(model, prompt, max_new, temperature, top_k, top_p, eos, rng, &head, on_token)
-}
-
-/// [`generate_kv_stream`] with the LM head weight supplied by the caller
-/// instead of read fresh from `model` on every call - same reasoning as
-/// [`generate_kv_with_head`] vs [`generate_kv`], now with the per-token
-/// callback. This IS the streaming implementation; [`generate_kv_stream`]
-/// delegates here with a freshly-read head.
-#[allow(clippy::too_many_arguments)]
-pub fn generate_kv_stream_with_head(
-    model: &Qwen35,
-    prompt: &[u32],
-    max_new: usize,
-    temperature: f32,
-    top_k: usize,
-    top_p: f32,
-    eos: &[u32],
-    rng: &mut Rng,
-    head: &[f32],
-    on_token: &mut dyn FnMut(usize, u32) -> bool,
-) -> Vec<u32> {
-    let vocab = model.cfg.vocab as usize;
-    let d = model.cfg.d_model as usize;
-    let logits_of = |hidden: &[f32]| -> Vec<f32> { model::hostmath::matvec_par(head, hidden, vocab, d) };
-
     model.reset_decode_cache();
     let seed_prompt: &[u32] = if prompt.is_empty() { &[0] } else { prompt };
     let mut hidden = Vec::new();
@@ -147,7 +77,7 @@ pub fn generate_kv_stream_with_head(
 
     let mut out = Vec::with_capacity(max_new);
     for _ in 0..max_new {
-        let next = sample_logits(&logits_of(&hidden), temperature, top_k, top_p, rng);
+        let next = sample_logits(&model.head_logits(&hidden), temperature, top_k, top_p, rng);
         if eos.contains(&next) {
             break;
         }
