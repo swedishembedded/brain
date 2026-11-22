@@ -11,7 +11,7 @@
 //! same sequence. A parameter brain cannot honour is refused by name rather
 //! than ignored.
 
-use capability::{ActionSpec, Invocation};
+use capability::{bounds, ActionSpec, Invocation};
 use serde_json::{json, Value};
 
 use crate::error::ApiError;
@@ -69,11 +69,7 @@ impl Field {
 }
 
 /// Upper bound on `top_k`, the range the `generate` actions declare.
-const MAX_TOP_K: i64 = 1000;
-
-/// Upper bound on `temperature`, the range the `generate` actions declare
-/// (and OpenAI's).
-const MAX_TEMPERATURE: f64 = 2.0;
+const MAX_TOP_K: i64 = bounds::TOP_K as i64;
 
 /// Every sampling field a chat surface forwards, in the order [`honoured`] lists them: the OpenAI `temperature`,
 /// `top_p`, `seed`, `presence_penalty` and `frequency_penalty`, `top_k`, vLLM's `min_p`, `repetition_penalty` and
@@ -82,16 +78,16 @@ const MAX_TEMPERATURE: f64 = 2.0;
 /// budget under each name servers use for it (the first one sent counts). The one table [`apply`] forwards from and
 /// [`honoured`] reads.
 const FIELDS: [Field; 16] = [
-    Field::new("temperature", "temp", Kind::Number { lo: 0.0, hi: MAX_TEMPERATURE, neutral: None }),
-    Field::new("top_p", "top_p", Kind::Number { lo: 0.0, hi: 1.0, neutral: None }),
+    Field::new("temperature", "temp", Kind::Number { lo: 0.0, hi: bounds::TEMPERATURE, neutral: None }),
+    Field::new("top_p", "top_p", Kind::Number { lo: 0.0, hi: bounds::UNIT, neutral: None }),
     Field::new("top_k", "top_k", Kind::Integer { lo: 0, hi: MAX_TOP_K }),
     Field::new("seed", "seed", Kind::Seed),
-    Field::new("presence_penalty", "presence_penalty", Kind::Number { lo: -2.0, hi: 2.0, neutral: Some(0.0) }),
-    Field::new("frequency_penalty", "frequency_penalty", Kind::Number { lo: -2.0, hi: 2.0, neutral: Some(0.0) }),
-    Field::new("min_p", "min_p", Kind::Number { lo: 0.0, hi: 1.0, neutral: Some(0.0) }),
-    Field::new("repetition_penalty", "repetition_penalty", Kind::Number { lo: 0.01, hi: 4.0, neutral: Some(1.0) }),
-    Field::new("dry_multiplier", "dry_multiplier", Kind::Number { lo: 0.0, hi: 100.0, neutral: Some(0.0) }),
-    Field::new("dry_base", "dry_base", Kind::Number { lo: 1.0, hi: 16.0, neutral: None }),
+    Field::new("presence_penalty", "presence_penalty", Kind::Number { lo: -bounds::LOGIT_PENALTY, hi: bounds::LOGIT_PENALTY, neutral: Some(0.0) }),
+    Field::new("frequency_penalty", "frequency_penalty", Kind::Number { lo: -bounds::LOGIT_PENALTY, hi: bounds::LOGIT_PENALTY, neutral: Some(0.0) }),
+    Field::new("min_p", "min_p", Kind::Number { lo: 0.0, hi: bounds::UNIT, neutral: Some(0.0) }),
+    Field::new("repetition_penalty", "repetition_penalty", Kind::Number { lo: 0.01, hi: bounds::REPETITION_PENALTY, neutral: Some(1.0) }),
+    Field::new("dry_multiplier", "dry_multiplier", Kind::Number { lo: 0.0, hi: bounds::DRY_MULTIPLIER, neutral: Some(0.0) }),
+    Field::new("dry_base", "dry_base", Kind::Number { lo: 1.0, hi: bounds::DRY_BASE, neutral: None }),
     Field::new("dry_allowed_length", "dry_allowed_length", Kind::Integer { lo: 0, hi: 4096 }),
     Field::new("dry_sequence_breakers", "dry_sequence_breakers", Kind::Strings),
     Field::new("thinking_budget", "thinking_budget", Kind::Integer { lo: 0, hi: i64::MAX }),

@@ -57,3 +57,17 @@ pub const UNIT: f64 = 1.0;
 /// The largest integer a JSON number read as `f64` holds exactly (2^53 - 1): the ceiling of an identifier-like count
 /// such as a seed, so the value a caller sends is the value a run uses and reports.
 pub const EXACT_INTEGER: f64 = 9_007_199_254_740_991.0;
+
+/// A sampler's seed: any 64-bit unsigned integer, the range a generation draws its own seed from and echoes back, so a
+/// seed brain reported can always be sent again. As an `f64` this rounds up to 2^64, which no caller's `u64` exceeds.
+pub const SEED: f64 = u64::MAX as f64;
+/// A sampling temperature (`temp`; OpenAI's `temperature` ceiling).
+pub const TEMPERATURE: f64 = 2.0;
+/// A logit penalty subtracted per presence or per occurrence (`presence_penalty`, `frequency_penalty`), either sign.
+pub const LOGIT_PENALTY: f64 = 2.0;
+/// The divisor a repetition penalty applies to a repeated token's positive logit (`repetition_penalty`).
+pub const REPETITION_PENALTY: f64 = 4.0;
+/// The strength of a DRY repetition penalty (`dry_multiplier`).
+pub const DRY_MULTIPLIER: f64 = 100.0;
+/// The growth of a DRY penalty per extra repeated token (`dry_base`).
+pub const DRY_BASE: f64 = 16.0;
