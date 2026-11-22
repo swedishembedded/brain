@@ -70,23 +70,7 @@ pub fn decode_bounded(bytes: &[u8], max_pixels: u64) -> Result<Rgb8, String> {
     }
 }
 
-/// A decoded image with its transparency kept: [`Decoded::Rgba`] for a source whose colour type has an alpha channel
-/// (PNG RGBA, grey+alpha, palette with transparency), [`Decoded::Rgb`] for every other. 8-bit sources are exact; a
-/// 16-bit source goes through `image`'s 16-to-8-bit conversion.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Decoded {
-    Rgb(Rgb8),
-    Rgba(Rgba8),
-}
-
-impl Decoded {
-    pub fn size(&self) -> (u32, u32) {
-        match self {
-            Decoded::Rgb(i) => (i.w, i.h),
-            Decoded::Rgba(i) => (i.w, i.h),
-        }
-    }
-}
+pub use capability::pixels::Decoded;
 
 /// [`decode_bounded`] that does not throw the alpha channel away: the form a preprocessor that composites onto a
 /// background needs. The same pixel bound applies, checked from the header before any pixel is decoded.

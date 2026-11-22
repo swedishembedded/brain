@@ -2104,7 +2104,6 @@ dependencies = [
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",
- "brain-imaging",
  "brain-model",
  "brain-modelref",
  "brain-modelstore",

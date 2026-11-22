@@ -18,8 +18,7 @@ use std::sync::{mpsc, Arc, Mutex};
 
 use capability::{failure::tag, FailureClass, Invocation};
 use data::qwen_tokenizer::QwenBpe;
-use imaging::pixels::{Rgb8, Rgba8};
-use imaging::Decoded;
+use capability::pixels::{Decoded, Rgb8, Rgba8};
 use model::serve::PromptEmbeds;
 
 use crate::{Encoding, Frontend, ParsedRequest, TextFrontend};

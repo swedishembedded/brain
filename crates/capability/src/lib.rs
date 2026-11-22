@@ -40,6 +40,7 @@ pub mod bounds;
 pub mod failure;
 pub mod scratch;
 pub mod hot;
+pub mod pixels;
 pub mod presentation;
 pub mod video;
 
