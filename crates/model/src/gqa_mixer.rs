@@ -425,8 +425,20 @@ pub fn ring_chunk_attend(g: &Gpu, ring: &RingChunk, heads: &HeadShape, opts: &At
         }
         p += run;
     }
-    steps.extend(copy_rows(g, ring.copy, k, 0, &ctx_k, u64::from(m), u64::from(n), kvd));
-    steps.extend(copy_rows(g, ring.copy, v, 0, &ctx_v, u64::from(m), u64::from(n), kvd));
+    // The chunk's own rows are read at the ring's tier, as every later read of them will be: rounded through bf16 on
+    // a bf16 ring, so a position's attention does not depend on where a chunk boundary fell (a prefill cut anywhere
+    // and a token-by-token decode read the same keys).
+    let rounded = (ring.layer.k.tier() == crate::kv_tier::KvTier::BF16).then(|| g.storage_uninit((u64::from(n) * kvd).div_ceil(2)));
+    for (src, dst) in [(k, &ctx_k), (v, &ctx_v)] {
+        match &rounded {
+            None => steps.extend(copy_rows(g, ring.copy, src, 0, dst, u64::from(m), u64::from(n), kvd)),
+            Some(packed) => {
+                let words = u64::from(n) * kvd;
+                steps.push(g.step(ring.copy.pack_at, &[src, packed], &[word(words), 0, 0], words.div_ceil(2) as u32));
+                steps.push(g.step(ring.copy.unpack_at, &[packed, dst], &[word(words), 0, word(u64::from(m) * kvd)], words as u32));
+            }
+        }
+    }
     g.submit(&[], &steps);
 
     let plain_window = AttnOptions { window: Some(win), ..AttnOptions::plain(1.0 / (hd as f32).sqrt()) };
