@@ -258,8 +258,8 @@ No dataset or adapter travels through the API as a message body.
 | `steps`, `grad_accum`, `rank`, `alpha`, `lr`, `weight_decay`, `seed` | the optimiser's settings; what is not named is the trainer's own default, which `GET /v1/capabilities` lists as the param's `implied_default` |
 | `strict_updates` | abort at the first optimiser step whose loss or gradient is not finite (default off: such a step is skipped, the weights untouched, and the run aborts on the third in a row) |
 | `max_block` | the longest training row in tokens (default 8192). The memory reserved for the run is sized to it and a longer record is refused by name |
-| `cards` | how many of the server's cards the run trains on at once (default 1, at most the cards the server has). Each card runs one data-parallel rank holding the run's whole footprint and its own share of the records, all with the same `seed` (one is drawn for all of them when the request names none), and every step's gradients are reduced over the cards, so each step sees `cards` times the records of a one-card step. The result is the same document as on one card, from rank 0; the same request trains the same adapter, byte for byte, though not the adapter of a one-card run. `sft` and `policy_gradient` only: another objective naming more than one card is refused by name (see [why](#which-objectives-train-as-ranks)) |
-| `job` | makes the run this server's part of one data-parallel job spread over several servers (below); `sft` and `policy_gradient` only, with `seed`, without `resume_key` |
+| `cards` | how many of the server's cards the run trains on at once (default 1, at most the cards the server has). Each card runs one data-parallel rank holding the run's whole footprint and its own share of the records, all with the same `seed` (one is drawn for all of them when the request names none), and every step's gradients are reduced over the cards, so each step sees `cards` times the records of a one-card step. The result is the same document as on one card, from rank 0; the same request trains the same adapter, byte for byte, though not the adapter of a one-card run. Every objective but `feedback`, which is refused by name (see [why](#which-objectives-train-as-ranks)) |
+| `job` | makes the run this server's part of one data-parallel job spread over several servers (below); every objective but `feedback`, with `seed`, without `resume_key` |
 | `thinking`, `pack_answers` | how records are rendered |
 | `base_format` | how the frozen base is held: `bf16`, `fp8`, `nf4`, ...; default the tier that fits the card |
 | `eval_every`, `patience`, `replay_share`, `keep_evaluations` | monitoring and early stopping |
@@ -339,7 +339,7 @@ step's statistics, is published to the artifact store beside the adapter
 (`record_digest`), and returned as the blob `record` when the call sets
 `return_adapter` or the server has no store.
 
-Every chat fine-tune report, adapter or full (`objective` `full_sft`), and the
+Every chat fine-tune report but `feedback`'s, adapter or full (`objective` `full_sft`), and the
 `report.json` `brain finetune --out` writes, has a `parallel` object that
 records how the run was spread, as it ran. Fields that were not observed are
 `null`:
@@ -450,9 +450,12 @@ gradient of the whole batch.
   before training) and train as ranks.
 - `preference` (DPO, IPO, SimPO, ORPO: a loss per pair, the frozen reference
   being the starting policy every rank holds) and `distill` (a KL per token to
-  the teacher) are such sums too, with each pair or record as the unit, so they
-  would shard cleanly; their trainers do not take a group yet, so `cards` above
-  one and `job` are refused by name for them.
+  the teacher) are such sums too, with each pair or record as the unit, and
+  train as ranks: rank `r` of `N` trains the `n`-th pair or record drawn when
+  `n % N == r`, so a step of `N` ranks trains what one card accumulating `N`
+  pairs or records (`grad_accum`) trains. Every rank scores the frozen
+  reference of every pair, or has the teacher score every record, before the
+  first step: that pass takes as long on `N` cards as on one.
 - `feedback` (KTO) is not: its reference point is a KL estimate over the step's
   batch, from mismatched pairs of that batch, so a rank holding a shard would
   estimate a different reference point and optimise a different objective unless

@@ -109,6 +109,8 @@ pub struct PreferenceFineTune {
     /// What each step's backward keeps of its forward ([`PreferenceFineTune::activations`]); `None` is the base's own.
     activations: Option<model::saved::SavedPolicy>,
     base_format: Option<String>,
+    /// This run as one rank of a data-parallel group ([`PreferenceFineTune::data_parallel`]).
+    parallel: Option<crate::DataParallel>,
 }
 
 impl PreferenceFineTune {
@@ -147,7 +149,20 @@ impl PreferenceFineTune {
             placed: false,
             activations: None,
             base_format: None,
+            parallel: None,
         }
+    }
+
+    /// Train as one rank of a data-parallel group ([`crate::DataParallel`]), as [`crate::ChatFineTune::data_parallel`]
+    /// does: every rank runs this fine-tune with the same settings and the same [`Self::seed`], each on its own card,
+    /// trains on its own shard of the pairs (rank `r` of `world` trains the `n`-th pair drawn when `n % world == r`,
+    /// so a step of `world` ranks trains the pairs one rank accumulating `world` would), and every step's gradients
+    /// are reduced over the group, so the ranks' adapters stay byte-identical. Each rank scores the frozen reference of
+    /// every pair (any of them can be drawn on any rank); rank 0 alone scores the exported adapter, the other ranks'
+    /// outcomes carry no score.
+    pub fn data_parallel(mut self, rank: crate::DataParallel) -> Self {
+        self.parallel = Some(rank);
+        self
     }
 
     /// Hold the frozen base in the named format (`f32`, `bf16`, `int8`, `nf4`, `fp8`; default
@@ -440,9 +455,8 @@ impl PreferenceFineTune {
             .map(|(i, (c, r))| rl::objective::dpo::PackedPair::from_masked(seq_len, (&c.ids, &c.mask), (&r.ids, &r.mask)).map_err(|e| Error::Backend(format!("{}: record {}: {e}", dataset.display(), i + 1))))
             .collect::<Result<Vec<_>>>()?;
 
-        if !self.placed {
-            crate::device::resolve(&self.device)?;
-        }
+        let gpus: Vec<u32> = if self.placed { gpu_core::devices::current_gpu().into_iter().collect() } else { crate::device::resolve(&self.device)?.gpus };
+        let ran_on = crate::data_parallel::place_rank("PreferenceFineTune", self.parallel.as_ref(), self.seed, &gpus)?;
 
         let state_path = self.resume_state.clone().unwrap_or_else(|| out_dir.join(STATE_FILE));
         let seed = resolve_seed(self.seed, Some(&state_path))?;
@@ -474,9 +488,9 @@ impl PreferenceFineTune {
         std::fs::create_dir_all(out_dir).map_err(|e| Error::Backend(format!("{}: {e}", out_dir.display())))?;
         let mut on_step = |s: &model::StepReport| {
             on_progress(&FineTuneProgress::of(s));
-            !cancel.is_cancelled()
+            crate::data_parallel::keep_going(self.parallel.as_ref(), s.step, cancel)
         };
-        let control = model::FitControl { on_step: Some(&mut on_step), state: Some(&state_path), state_every: self.checkpoint_every, identity, snapshots: None, grad_sync: None };
+        let control = model::FitControl { on_step: Some(&mut on_step), state: Some(&state_path), state_every: self.checkpoint_every, identity, snapshots: None, grad_sync: self.parallel.as_ref().map(crate::DataParallel::grad_sync) };
         let adapter_path = out_dir.join(ADAPTER_FILE);
         let adapter_id = self.adapter_id.clone().unwrap_or_else(|| format!("{base_id}:local:dpo:latest"));
         let provenance = checkpoint::st::TrainingProvenance {
@@ -557,6 +571,7 @@ impl PreferenceFineTune {
             train_score: None,
             held_out_score: None,
             held_out_repeats,
+            parallel: crate::data_parallel::ParallelReport::of(self.parallel.as_ref(), ran_on),
         };
         if report.interrupted {
             outcome.status = FineTuneStatus::Cancelled;
@@ -570,9 +585,12 @@ impl PreferenceFineTune {
         if chat.scores_exported_pairs {
             // Each scored pair is four forwards of two rows (policy and reference, chosen and rejected) on the serving
             // path, so the training pairs are estimated on an even sample: the held-out pairs are the measurement.
-            let sample = even_sample(&train, MAX_TRAIN_SCORE_PAIRS);
-            outcome.train_score = score_pairs(&chat, &weights, reference, &adapter_path, &sample, base_format);
-            outcome.held_out_score = held_out.as_ref().and_then(|pairs| score_pairs(&chat, &weights, reference, &adapter_path, pairs, base_format));
+            // The ranks of a group hold the same adapter: rank 0 alone scores it.
+            if self.parallel.as_ref().is_none_or(|p| p.rank() == 0) {
+                let sample = even_sample(&train, MAX_TRAIN_SCORE_PAIRS);
+                outcome.train_score = score_pairs(&chat, &weights, reference, &adapter_path, &sample, base_format);
+                outcome.held_out_score = held_out.as_ref().and_then(|pairs| score_pairs(&chat, &weights, reference, &adapter_path, pairs, base_format));
+            }
         } else {
             outcome.train_score = resident.first().map(|margins| margins_score(margins, 0));
             outcome.held_out_score = resident.get(1).map(|margins| margins_score(margins, held_out_skipped));
@@ -643,6 +661,8 @@ pub struct PreferenceFineTuneOutcome {
     /// a training pair's): held-out pairs may repeat training pairs on purpose, to measure fit, and their score is
     /// then partly a training score. `None` without a held-out set.
     pub held_out_repeats: Option<usize>,
+    /// How the run was spread over ranks, cards and servers, as it ran ([`crate::ParallelReport`]).
+    pub parallel: crate::ParallelReport,
 }
 
 impl PreferenceFineTuneOutcome {
@@ -671,6 +691,7 @@ impl PreferenceFineTuneOutcome {
             "train_score": score(&self.train_score),
             "held_out_score": score(&self.held_out_score),
             "held_out_repeats": self.held_out_repeats,
+            "parallel": self.parallel,
         })
     }
 }

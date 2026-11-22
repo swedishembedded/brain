@@ -130,11 +130,36 @@ fn cards_are_refused_at_the_door_past_the_servers_cards_and_for_objectives_that_
     zero["cards"] = json!(0);
     assert!(invocation(zero, &[]).is_err(), "the spec bounds cards below at one");
 
-    let pairs = data_digest(&rig, &pairs());
-    let preference = json!({"base": BASE, "arch": "qwen3", "objective": "preference", "steps": 1, "rank": 2, "seed": 7, "max_block": 128, "cards": 2, "data": json!({"train": {"digest": pairs.hex()}}).to_string()});
-    let refused = crate::support::run(&rig, preference, &[], &crate::support::Frames::default()).unwrap_err();
-    assert!(refused.contains("cards 2") && refused.contains("preference objective trains on one card"), "{refused}");
+    let judged = data_digest(&rig, &crate::support::feedback());
+    let feedback = json!({"base": BASE, "arch": "qwen3", "objective": "feedback", "steps": 1, "rank": 2, "seed": 7, "max_block": 128, "cards": 2, "data": json!({"train": {"digest": judged.hex()}}).to_string()});
+    let refused = crate::support::run(&rig, feedback, &[], &crate::support::Frames::default()).unwrap_err();
+    assert!(refused.contains("cards 2") && refused.contains("feedback objective trains on one card") && refused.contains("KL estimate"), "{refused}");
     assert_reservation_returned(&rig);
+}
+
+/// Preference optimization and distillation train as ranks too (a loss per pair, a KL per token): on two cards each
+/// rank trains its own pairs or records, rank 0 streams the steps, the ranks end with the same adapter, the report
+/// says how the run was spread, and the same request trains the same adapter again.
+#[test]
+fn preference_and_distillation_train_on_two_cards_and_report_their_group() {
+    let rig = two_cards("cards-paired");
+    let pairs = data_digest(&rig, &pairs());
+    let records = data_digest(&rig, &plain());
+    let preference = json!({"base": BASE, "arch": "qwen3", "objective": "preference", "steps": 2, "rank": 2, "lr": 2e-2, "seed": 7, "max_block": 128, "cards": 2, "data": json!({"train": {"digest": pairs.hex()}}).to_string()});
+    let distill = json!({"base": BASE, "arch": "qwen3", "objective": "distill", "top_k": 4, "steps": 2, "rank": 2, "lr": 2e-2, "seed": 7, "max_block": 128, "cards": 2, "data": json!({"train": {"digest": records.hex()}}).to_string()});
+    for (objective, params) in [("preference", preference), ("distill", distill)] {
+        let observed = run_observed(&rig, params.clone(), false);
+        let held = observed.held.expect("a step was reported");
+        let outcome = observed.result.unwrap_or_else(|e| panic!("{objective} on two cards: {e}")).outputs;
+        assert_eq!(cards_charged(&held), BTreeSet::from([0, 1]), "{objective}: the run holds both cards: {held:?}");
+        assert_eq!(observed.steps, 2, "{objective}: rank 0 streams each step once");
+        assert_eq!((&outcome["status"], &outcome["objective"], &outcome["steps_completed"]), (&json!("completed"), &json!(objective), &json!(2)), "{outcome}");
+        assert_eq!((&outcome["parallel"]["world_size"], &outcome["parallel"]["ranks"], &outcome["parallel"]["sharding"]), (&json!(2), &json!([0, 2]), &json!("replicated")), "{outcome}");
+        assert!(crate::support::work_is_clean(&rig.work_root), "every rank's files are removed with the job");
+        assert_reservation_returned(&rig);
+        let again = crate::support::run(&rig, params, &[], &crate::support::Frames::default()).expect("the repeat").outputs;
+        assert_eq!(again["adapter_digest"], outcome["adapter_digest"], "{objective}: the same request on two cards trains the same adapter");
+    }
 }
 
 /// A resumable run on two cards stopped mid-way continues on two cards to the adapter an uninterrupted two-card run
@@ -181,6 +206,7 @@ fn a_rank_that_fails_alone_mid_run_fails_the_run_at_once_with_its_reason() {
         let rank = slots[r].lock().unwrap().take().expect("each rank runs once");
         // As the served job's ranks do: the group is broken before a failed rank lets its communicator go.
         let guard = rank.guard();
+        // seed: every rank of a group trains with the same one.
         let tune = brain::ChatFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap()).placed(true).dataset(&train).out_dir(model.join(format!("rank{r}"))).rank(2).steps(1000).lr(1e-2).seed(11).data_parallel(rank);
         let outcome = tune.run_with(&CancelToken::armed(), |step| {
             // Rank 1 fails after step 1, once the group (the device group, on cards) is formed and rank 0 is

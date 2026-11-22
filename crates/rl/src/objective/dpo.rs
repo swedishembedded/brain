@@ -591,6 +591,22 @@ pub struct Dpo {
     refusal: Option<String>,
     /// The model's vocabulary, known once [`Objective::check_data`] ran: ids past it are refused.
     vocab: Option<u32>,
+    /// `(rank, world)`: the shard of the pair stream this rank trains ([`Objective::shard`]); `(0, 1)`, all of it.
+    shard: (usize, usize),
+}
+
+/// Rank `rank`'s pair of the next `world` a dataset draws with the loop's generator: every rank draws all `world`, so
+/// the generators stay together, and trains its own, so the ranks' pairs are the ones one rank accumulating `world`
+/// micro-steps draws.
+fn shard_choice<'a>(rng: &mut Rng, pairs: &'a [PackedPair], (rank, world): (usize, usize)) -> &'a PackedPair {
+    let mut mine = None;
+    for r in 0..world {
+        let pair = rng.choice(pairs);
+        if r == rank {
+            mine = Some(pair);
+        }
+    }
+    mine.expect("a rank is one of its world")
 }
 
 /// Where a [`Dpo`]'s pairs and their reference come from.
@@ -615,7 +631,7 @@ impl Dpo {
         R: Fn(&DpoPair) -> (Vec<f32>, Vec<f32>) + 'static,
     {
         cfg.validate().map_err(DpoConfigError::Invalid)?;
-        Ok(Dpo { cfg, source: Source::Stream { next: IndexedStream::new(source), ref_logprobs: Box::new(ref_logprobs), pending: VecDeque::new() }, last_margin: 0.0, trained: 0, refusal: None, vocab: None })
+        Ok(Dpo { cfg, source: Source::Stream { next: IndexedStream::new(source), ref_logprobs: Box::new(ref_logprobs), pending: VecDeque::new() }, last_margin: 0.0, trained: 0, refusal: None, vocab: None, shard: (0, 1) })
     }
 
     /// A fixed preference dataset (see the module doc): each micro-step
@@ -630,7 +646,7 @@ impl Dpo {
         if let Some((index, pair)) = pairs.iter().enumerate().find(|(_, p)| p.seq_len() != cfg.seq_len) {
             return Err(DpoConfigError::PairWidth { index, got: pair.seq_len(), expected: cfg.seq_len });
         }
-        Ok(Dpo { cfg, source: Source::Dataset { pairs, referenced: false }, last_margin: 0.0, trained: 0, refusal: None, vocab: None })
+        Ok(Dpo { cfg, source: Source::Dataset { pairs, referenced: false }, last_margin: 0.0, trained: 0, refusal: None, vocab: None, shard: (0, 1) })
     }
 
     /// Convenience over [`Self::try_new`]: a fixed, cycling dataset of
@@ -655,6 +671,20 @@ impl<M: Model> Objective<M> for Dpo {
 
     fn prepare(&mut self, model: &mut M) -> Result<(), Unsupported> {
         model::training::require_token_objectives(model)?.enable_weighted_loss();
+        Ok(())
+    }
+
+    /// Pairs split as [`Objective::shard`] says: a stream's by index, a dataset's draws by their place in the
+    /// generator's sequence ([`shard_choice`]). Every rank scores the frozen reference of every dataset pair, since any
+    /// of them can be drawn by any rank.
+    fn shard(&mut self, rank: usize, world: usize) -> Result<(), std::io::Error> {
+        if world == 0 || rank >= world {
+            return Err(std::io::Error::other(format!("rank {rank} is not one of a world of {world}")));
+        }
+        if let Source::Stream { next, .. } = &mut self.source {
+            next.shard(rank, world)?;
+        }
+        self.shard = (rank, world);
         Ok(())
     }
 
@@ -696,7 +726,7 @@ impl<M: Model> Objective<M> for Dpo {
             }
             Source::Dataset { pairs, referenced } => {
                 assert!(*referenced, "Dpo::micro_step: a dataset objective scores its reference in check_data(), which was not called");
-                weigh_pair(self.cfg.loss, self.cfg.beta, self.cfg.nll_weight, model, rng.choice(pairs))
+                weigh_pair(self.cfg.loss, self.cfg.beta, self.cfg.nll_weight, model, shard_choice(rng, pairs, self.shard))
             }
         };
         self.last_margin = margin;
@@ -722,7 +752,7 @@ impl<M: Model> Objective<M> for Dpo {
                 }
                 weigh_pair(self.cfg.loss, self.cfg.beta, self.cfg.nll_weight, model, pending.front().expect("just ensured pending is non-empty")).0.loss
             }
-            Source::Dataset { pairs, .. } => weigh_pair(self.cfg.loss, self.cfg.beta, self.cfg.nll_weight, model, rng.choice(pairs)).0.loss,
+            Source::Dataset { pairs, .. } => weigh_pair(self.cfg.loss, self.cfg.beta, self.cfg.nll_weight, model, shard_choice(rng, pairs, self.shard)).0.loss,
         }
     }
 

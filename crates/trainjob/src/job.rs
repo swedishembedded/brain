@@ -692,6 +692,7 @@ fn preference_summary(outcome: &brain::PreferenceFineTuneOutcome) -> Value {
         "train_score": preference_score_json(outcome.train_score),
         "held_out_score": preference_score_json(outcome.held_out_score),
         "held_out_repeats": outcome.held_out_repeats,
+        "parallel": outcome.parallel,
     })
 }
 
@@ -741,6 +742,7 @@ fn distill_summary(outcome: &brain::DistillFineTuneOutcome) -> Value {
         "alpha": outcome.alpha,
         "initial_loss": outcome.initial_loss,
         "final_loss": outcome.final_loss,
+        "parallel": outcome.parallel,
     })
 }
 
@@ -756,34 +758,79 @@ pub(crate) fn trainer_failure(e: brain::Error) -> String {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn train_chat(request: &Request, base_dir: &Path, teacher_dir: Option<&Path>, staged: &Staged, files: &RunFiles, cancel: &capability::CancelToken, began: Instant, progress: &mut dyn FnMut(Progress)) -> Result<Trained, String> {
-    let fine_tune = build_fine_tune(request, base_dir, teacher_dir, staged, files)?;
-    let outcome = fine_tune.run_with(cancel, |step| progress(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64())))).map_err(trainer_failure)?;
-    trained_chat(request, files, outcome)
+/// Where a run's datasets, base, teachers and files are: what every rank of it trains from.
+struct Inputs<'a> {
+    base_dir: &'a Path,
+    /// The model store directory of the request's `distill_teacher`, when it names one.
+    teacher_dir: Option<&'a Path>,
+    /// A distillation's teacher adapter, staged when the request names one by digest.
+    teacher_adapter: Option<&'a Path>,
+    staged: &'a Staged,
 }
 
-/// [`train_chat`] as this server's ranks of the request's spread ([`crate::parallel::train_as_ranks`]): every rank
-/// trains the same request with the same seed on its own card and shard of the records, and every step's gradients
-/// are reduced over the group, so every rank ends with the same adapter (checked). The first rank streams the steps
-/// and its outcome is the run's; the ranks share the run's cancellation and stop after the same step.
+/// Trains `request`'s objective once, writing where `files` says, on the device this thread is scoped to: as `rank`
+/// (with the seed every rank shares) when it is one rank of a data-parallel run. Every step reaches `on_step`.
+fn train_objective(request: &Request, inputs: &Inputs<'_>, files: &RunFiles, rank: Option<(u64, brain::DataParallel)>, cancel: &capability::CancelToken, on_step: &mut dyn FnMut(&brain::FineTuneProgress)) -> Result<Trained, String> {
+    let Inputs { base_dir, teacher_dir, teacher_adapter, staged } = *inputs;
+    let completed = |status: brain::FineTuneStatus| if status == brain::FineTuneStatus::Completed { Ok(()) } else { Err("cancelled".to_string()) };
+    let adapter = |path: &Option<PathBuf>| path.clone().ok_or_else(|| "train: the run completed with no adapter".to_string());
+    match request.params.objective {
+        Objective::Preference => {
+            let mut ft = build_preference(request, base_dir, staged, files)?;
+            if let Some((seed, rank)) = rank {
+                ft = ft.seed(seed).data_parallel(rank);
+            }
+            let outcome = ft.run_with(cancel, on_step).map_err(trainer_failure)?;
+            completed(outcome.status)?;
+            Ok(Trained { adapter: adapter(&outcome.adapter)?, record: outcome.record.clone(), adapter_sha256: outcome.adapter_digest.clone().unwrap_or_default(), evaluations: Vec::new(), resumed_at: outcome.resumed_at, summary: preference_summary(&outcome) })
+        }
+        Objective::Feedback => {
+            if rank.is_some() {
+                return Err("train: the feedback objective does not train as ranks".to_string());
+            }
+            let outcome = build_feedback(request, base_dir, staged, files)?.run_with(cancel, on_step).map_err(trainer_failure)?;
+            completed(outcome.status)?;
+            Ok(Trained { adapter: adapter(&outcome.adapter)?, record: outcome.record.clone(), adapter_sha256: outcome.adapter_digest.clone().unwrap_or_default(), evaluations: Vec::new(), resumed_at: outcome.resumed_at, summary: feedback_summary(&outcome) })
+        }
+        Objective::Distill => {
+            let mut ft = build_distill(request, base_dir, staged, teacher_adapter, files)?;
+            if let Some((seed, rank)) = rank {
+                ft = ft.seed(seed).data_parallel(rank);
+            }
+            let outcome = ft.run_with(cancel, on_step).map_err(trainer_failure)?;
+            completed(outcome.status)?;
+            Ok(Trained { adapter: adapter(&outcome.adapter)?, record: outcome.record.clone(), adapter_sha256: outcome.adapter_digest.clone().unwrap_or_default(), evaluations: Vec::new(), resumed_at: outcome.resumed_at, summary: distill_summary(&outcome) })
+        }
+        Objective::Sft | Objective::PolicyGradient => {
+            let mut ft = build_fine_tune(request, base_dir, teacher_dir, staged, files)?;
+            if let Some((seed, rank)) = rank {
+                ft = ft.seed(seed).data_parallel(rank);
+            }
+            let outcome = ft.run_with(cancel, on_step).map_err(trainer_failure)?;
+            completed(outcome.status)?;
+            let evaluations = if request.params.keep_evaluations { outcome.curve.iter().map(|p| (p.step, files.evaluations.join(format!("step-{}.safetensors", p.step)))).collect() } else { Vec::new() };
+            Ok(Trained { adapter: adapter(&outcome.adapter)?, record: outcome.record.clone(), adapter_sha256: outcome.adapter_digest.clone().unwrap_or_default(), evaluations, resumed_at: outcome.resumed_at, summary: outcome.report() })
+        }
+    }
+}
+
+/// [`train_objective`] as this server's ranks of the request's spread ([`crate::parallel::train_as_ranks`]): every
+/// rank trains the same request with the same seed on its own card and shard of the records, and every step's
+/// gradients are reduced over the group, so every rank ends with the same adapter (checked). The first rank streams
+/// the steps and its outcome is the run's; the ranks share the run's cancellation and stop after the same step.
 #[allow(clippy::too_many_arguments)]
-fn train_chat_ranks(request: &Request, env: &JobEnv, base_dir: &Path, teacher_dir: Option<&Path>, staged: &Staged, files: &RunFiles, work: &Workdir, devices: &[residency::Device], cancel: &capability::CancelToken, began: Instant, progress: &mut dyn FnMut(Progress)) -> Result<Trained, String> {
+fn train_ranks(request: &Request, env: &JobEnv, inputs: &Inputs<'_>, files: &RunFiles, work: &Workdir, devices: &[residency::Device], cancel: &capability::CancelToken, began: Instant, progress: &mut dyn FnMut(Progress)) -> Result<Trained, String> {
     // Every rank must draw the same batch order and initialisation: the resumable run's seed, the request's, or one
     // drawn here for all of them.
     let seed = files.resumable.as_ref().map(|(_, seed, _)| *seed).or(request.params.seed).unwrap_or_else(brain::random_seed);
     let rank_files: Vec<RunFiles> = (0..devices.len()).map(|r| files.for_rank(r, work.path())).collect();
     let train_rank = |i: usize, rank: brain::DataParallel, frames: Option<std::sync::mpsc::Sender<Progress>>| -> Result<Trained, String> {
-        let files = &rank_files[i];
-        let fine_tune = build_fine_tune(request, base_dir, teacher_dir, staged, files)?.seed(seed).data_parallel(rank);
-        let outcome = fine_tune
-            .run_with(cancel, |step| {
-                if let Some(frames) = &frames {
-                    let _ = frames.send(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64())));
-                }
-            })
-            .map_err(trainer_failure)?;
-        trained_chat(request, files, outcome)
+        let mut on_step = |step: &brain::FineTuneProgress| {
+            if let Some(frames) = &frames {
+                let _ = frames.send(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64())));
+            }
+        };
+        train_objective(request, inputs, &rank_files[i], Some((seed, rank)), cancel, &mut on_step)
     };
     let mut ranks_trained = crate::parallel::train_as_ranks(&request.spread, ACTION, env, devices, brain::Sharding::Replicated, train_rank, progress)?;
     let first = ranks_trained.swap_remove(0);
@@ -791,47 +838,6 @@ fn train_chat_ranks(request: &Request, env: &JobEnv, base_dir: &Path, teacher_di
         return Err(format!("train: the ranks ended with different adapters ({} and {}); the run is not published", first.adapter_sha256, other.adapter_sha256));
     }
     Ok(first)
-}
-
-/// What a completed chat fine-tune produced, from the trainer's `outcome`; a cancelled one is the error "cancelled".
-fn trained_chat(request: &Request, files: &RunFiles, outcome: brain::ChatFineTuneOutcome) -> Result<Trained, String> {
-    if outcome.status != brain::FineTuneStatus::Completed {
-        return Err("cancelled".into());
-    }
-    let adapter = outcome.adapter.clone().ok_or("train: the run completed with no adapter")?;
-    let evaluations = if request.params.keep_evaluations { outcome.curve.iter().map(|p| (p.step, files.evaluations.join(format!("step-{}.safetensors", p.step)))).collect() } else { Vec::new() };
-    Ok(Trained { adapter, record: outcome.record.clone(), adapter_sha256: outcome.adapter_digest.clone().unwrap_or_default(), evaluations, resumed_at: outcome.resumed_at, summary: outcome.report() })
-}
-
-fn train_preference(request: &Request, base_dir: &Path, staged: &Staged, files: &RunFiles, cancel: &capability::CancelToken, began: Instant, progress: &mut dyn FnMut(Progress)) -> Result<Trained, String> {
-    let fine_tune = build_preference(request, base_dir, staged, files)?;
-    let outcome = fine_tune.run_with(cancel, |step| progress(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64())))).map_err(trainer_failure)?;
-    if outcome.status != brain::FineTuneStatus::Completed {
-        return Err("cancelled".into());
-    }
-    let adapter = outcome.adapter.clone().ok_or("train: the run completed with no adapter")?;
-    Ok(Trained { adapter, record: outcome.record.clone(), adapter_sha256: outcome.adapter_digest.clone().unwrap_or_default(), evaluations: Vec::new(), resumed_at: outcome.resumed_at, summary: preference_summary(&outcome) })
-}
-
-fn train_feedback(request: &Request, base_dir: &Path, staged: &Staged, files: &RunFiles, cancel: &capability::CancelToken, began: Instant, progress: &mut dyn FnMut(Progress)) -> Result<Trained, String> {
-    let fine_tune = build_feedback(request, base_dir, staged, files)?;
-    let outcome = fine_tune.run_with(cancel, |step| progress(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64())))).map_err(trainer_failure)?;
-    if outcome.status != brain::FineTuneStatus::Completed {
-        return Err("cancelled".into());
-    }
-    let adapter = outcome.adapter.clone().ok_or("train: the run completed with no adapter")?;
-    Ok(Trained { adapter, record: outcome.record.clone(), adapter_sha256: outcome.adapter_digest.clone().unwrap_or_default(), evaluations: Vec::new(), resumed_at: outcome.resumed_at, summary: feedback_summary(&outcome) })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn train_distill(request: &Request, base_dir: &Path, staged: &Staged, teacher_adapter: Option<&Path>, files: &RunFiles, cancel: &capability::CancelToken, began: Instant, progress: &mut dyn FnMut(Progress)) -> Result<Trained, String> {
-    let fine_tune = build_distill(request, base_dir, staged, teacher_adapter, files)?;
-    let outcome = fine_tune.run_with(cancel, |step| progress(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64())))).map_err(trainer_failure)?;
-    if outcome.status != brain::FineTuneStatus::Completed {
-        return Err("cancelled".into());
-    }
-    let adapter = outcome.adapter.clone().ok_or("train: the run completed with no adapter")?;
-    Ok(Trained { adapter, record: outcome.record.clone(), adapter_sha256: outcome.adapter_digest.clone().unwrap_or_default(), evaluations: Vec::new(), resumed_at: outcome.resumed_at, summary: distill_summary(&outcome) })
 }
 
 /// Runs the job `inv` on the device this thread is scoped to, reporting each step as a frame. With a `resume_key`
@@ -860,24 +866,22 @@ pub fn run(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], progre
     }
     let files = RunFiles::of(run.as_ref(), &request, work.path().join("run"));
     progress(Progress::event(0, steps, json!({"type": "stage", "stage": "loading the base and training"})));
-    let began = Instant::now();
-    let trained = match p.objective {
-        Objective::Preference => train_preference(&request, &base_dir, &staged, &files, &inv.cancel, began, progress)?,
-        Objective::Feedback => train_feedback(&request, &base_dir, &staged, &files, &inv.cancel, began, progress)?,
-        Objective::Distill => {
-            // The teacher's adapter, when the request names one by digest, is fetched into the job's directory like a dataset.
-            let teacher = match crate::request::DistillTeacherRef::parse(p.teacher.as_deref())? {
-                crate::request::DistillTeacherRef::Adapter(digest) => {
-                    let path = work.path().join("teacher.safetensors");
-                    bring(&Source::Digest(digest), &inv.blobs, env.store.as_ref(), work.staging(), &path)?;
-                    Some(path)
-                }
-                _ => None,
-            };
-            train_distill(&request, &base_dir, &staged, teacher.as_deref(), &files, &inv.cancel, began, progress)?
+    // A distillation's teacher adapter, when the request names one by digest, is fetched into the job's directory like
+    // a dataset.
+    let teacher_adapter = match (p.objective, crate::request::DistillTeacherRef::parse(p.teacher.as_deref())?) {
+        (Objective::Distill, crate::request::DistillTeacherRef::Adapter(digest)) => {
+            let path = work.path().join("teacher.safetensors");
+            bring(&Source::Digest(digest), &inv.blobs, env.store.as_ref(), work.staging(), &path)?;
+            Some(path)
         }
-        Objective::Sft | Objective::PolicyGradient if request.spread.ranked() => train_chat_ranks(&request, env, &base_dir, teacher_dir.as_deref(), &staged, &files, &work, devices, &inv.cancel, began, progress)?,
-        Objective::Sft | Objective::PolicyGradient => train_chat(&request, &base_dir, teacher_dir.as_deref(), &staged, &files, &inv.cancel, began, progress)?,
+        _ => None,
+    };
+    let inputs = Inputs { base_dir: &base_dir, teacher_dir: teacher_dir.as_deref(), teacher_adapter: teacher_adapter.as_deref(), staged: &staged };
+    let began = Instant::now();
+    let trained = if request.spread.ranked() {
+        train_ranks(&request, env, &inputs, &files, &work, devices, &inv.cancel, began, progress)?
+    } else {
+        train_objective(&request, &inputs, &files, None, &inv.cancel, &mut |step| progress(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64()))))?
     };
     work.ensure_within_quota()?;
     // A server that runs none of a job's rank 0 answers for its ranks only: the server of rank 0 publishes the run.

@@ -501,10 +501,7 @@ impl ChatFullFineTune {
             crate::device::resolve(&self.device)?
         };
         // Where this rank trains, as resolved: what the run's report says it ran on.
-        let ran_on = crate::data_parallel::RankDevice::resolved(self.parallel.as_ref().map_or(0, crate::DataParallel::rank), &set.gpus);
-        if let Some(parallel) = &self.parallel {
-            parallel.ran_on(ran_on.clone());
-        }
+        let ran_on = crate::data_parallel::place_rank("ChatFullFineTune", self.parallel.as_ref(), self.seed, &set.gpus)?;
         // The fp32 plan below prices every weight and gradient on the cards; a resident build holds its linears in
         // their own encoding (streamed through a window, sharded over a group) and its planner checks that build
         // before anything is allocated.
@@ -512,9 +509,6 @@ impl ChatFullFineTune {
             plan_before_load(&open, block, &set)?;
         }
 
-        if self.parallel.is_some() && self.seed.is_none() {
-            return Err(Error::MissingArgument("ChatFullFineTune: a data-parallel rank needs the seed every rank shares; call .seed(n) with the same n on every rank".to_string()));
-        }
         let seed = resolve_seed(self.seed, self.resume_state.as_deref())?;
         let (opts, exit_entropy) = self.plan(&chat, block, seed)?;
         let digest_clock = std::time::Instant::now();
@@ -609,11 +603,7 @@ impl FullRun<'_> {
     pub(crate) fn train_and_export(&self, cancel: &CancelToken, on_progress: &mut dyn FnMut(&FineTuneProgress)) -> Result<FullTrained> {
         let mut on_step = |s: &model::StepReport| {
             on_progress(&FineTuneProgress::of(s));
-            // The ranks of a group stop after the same step.
-            match self.parallel {
-                Some(rank) => rank.keep_going(s.step, cancel.is_cancelled()),
-                None => !cancel.is_cancelled(),
-            }
+            crate::data_parallel::keep_going(self.parallel, s.step, cancel)
         };
         let control = model::FitControl {
             on_step: Some(&mut on_step),

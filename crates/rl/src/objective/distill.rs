@@ -391,6 +391,11 @@ impl<M: Model> Objective<M> for DistillTopK {
         Ok(())
     }
 
+    /// Examples split by their index in the stream: rank `rank` trains example `n` exactly when `n % world == rank`.
+    fn shard(&mut self, rank: usize, world: usize) -> Result<(), std::io::Error> {
+        self.source.shard(rank, world)
+    }
+
     fn micro_step(&mut self, model: &M, _rng: &mut Rng) -> f32 {
         // No example this round is a legitimate no-op micro-step, matching GRPO's/DPO's own convention.
         if !self.enqueue() {

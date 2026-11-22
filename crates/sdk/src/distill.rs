@@ -91,6 +91,8 @@ pub struct DistillFineTune {
     device: Device,
     placed: bool,
     base_format: Option<String>,
+    /// This run as one rank of a data-parallel group ([`DistillFineTune::data_parallel`]).
+    parallel: Option<crate::DataParallel>,
 }
 
 impl DistillFineTune {
@@ -121,7 +123,18 @@ impl DistillFineTune {
             device: Device::default(),
             placed: false,
             base_format: None,
+            parallel: None,
         }
+    }
+
+    /// Train as one rank of a data-parallel group ([`crate::DataParallel`]), as [`crate::ChatFineTune::data_parallel`]
+    /// does: every rank runs this distillation with the same settings and the same [`Self::seed`], each on its own
+    /// card, trains on its own shard of the records (rank `r` of `world` trains the `n`-th record of the stream when
+    /// `n % world == r`), and every step's gradients are reduced over the group, so the ranks' adapters stay
+    /// byte-identical. Each rank has the teacher score every record before the first step.
+    pub fn data_parallel(mut self, rank: crate::DataParallel) -> Self {
+        self.parallel = Some(rank);
+        self
     }
 
     /// The architecture of the base; unnamed, the base's own `config.json` tells it (`qwen3` where there is none).
@@ -309,9 +322,8 @@ impl DistillFineTune {
         };
         let base_tiers = model::ops::TierPolicy::uniform(base_format);
         let (rank, alpha, parent) = lora_shape(self.continue_from.as_deref(), self.rank, self.alpha, Default::default())?;
-        if !self.placed {
-            crate::device::resolve(&self.device)?;
-        }
+        let gpus: Vec<u32> = if self.placed { gpu_core::devices::current_gpu().into_iter().collect() } else { crate::device::resolve(&self.device)?.gpus };
+        let ran_on = crate::data_parallel::place_rank("DistillFineTune", self.parallel.as_ref(), self.seed, &gpus)?;
         let state_path = self.resume_state.clone().unwrap_or_else(|| out_dir.join(STATE_FILE));
         let seed = resolve_seed(self.seed, Some(&state_path))?;
         // One record per row: the teacher reads whole-row logits, and the student trains one example per micro-step.
@@ -345,9 +357,9 @@ impl DistillFineTune {
         std::fs::create_dir_all(out_dir).map_err(|e| Error::Backend(format!("{}: {e}", out_dir.display())))?;
         let mut on_step = |s: &model::StepReport| {
             on_progress(&FineTuneProgress::of(s));
-            !cancel.is_cancelled()
+            crate::data_parallel::keep_going(self.parallel.as_ref(), s.step, cancel)
         };
-        let control = model::FitControl { on_step: Some(&mut on_step), state: Some(&state_path), state_every: self.checkpoint_every, identity, snapshots: None, grad_sync: None };
+        let control = model::FitControl { on_step: Some(&mut on_step), state: Some(&state_path), state_every: self.checkpoint_every, identity, snapshots: None, grad_sync: self.parallel.as_ref().map(crate::DataParallel::grad_sync) };
         let adapter_path = out_dir.join(ADAPTER_FILE);
         let adapter_id = self.adapter_id.clone().unwrap_or_else(|| format!("{base_id}:local:distill:latest"));
         let provenance = checkpoint::st::TrainingProvenance {
@@ -392,6 +404,7 @@ impl DistillFineTune {
             teacher_adapter: teacher_digest,
             trained_from: parent,
             base_digest: Some(base_digest),
+            parallel: crate::data_parallel::ParallelReport::of(self.parallel.as_ref(), ran_on),
         };
         if report.interrupted {
             outcome.status = FineTuneStatus::Cancelled;
@@ -438,6 +451,8 @@ pub struct DistillFineTuneOutcome {
     pub teacher_adapter: Option<String>,
     pub trained_from: Option<String>,
     pub base_digest: Option<String>,
+    /// How the run was spread over ranks, cards and servers, as it ran ([`crate::ParallelReport`]).
+    pub parallel: crate::ParallelReport,
 }
 
 impl DistillFineTuneOutcome {
@@ -462,6 +477,7 @@ impl DistillFineTuneOutcome {
             "rank": self.rank,
             "alpha": self.alpha,
             "base_digest": self.base_digest,
+            "parallel": self.parallel,
         })
     }
 }

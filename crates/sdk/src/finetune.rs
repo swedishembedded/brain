@@ -1283,10 +1283,7 @@ impl ChatFineTune {
             crate::device::resolve(&self.device)?.gpus
         };
         // Where this rank trains, as resolved: what the run's report says it ran on.
-        let ran_on = crate::data_parallel::RankDevice::resolved(self.parallel.as_ref().map_or(0, crate::DataParallel::rank), &selected_gpus);
-        if let Some(parallel) = &self.parallel {
-            parallel.ran_on(ran_on.clone());
-        }
+        let ran_on = crate::data_parallel::place_rank("ChatFineTune", self.parallel.as_ref(), self.seed, &selected_gpus)?;
         let explicit = self.bf16_base || self.int8_base || self.nf4_base || self.f32_base || self.base_format.is_some();
         let (family, base_tier_reason) = if explicit {
             (family, "asked for".to_string())
@@ -1310,9 +1307,6 @@ impl ChatFineTune {
             return Err(Error::InvalidRequest("ChatFineTune: grad_accum must be at least 1".to_string()));
         }
         let state_path = self.resume_state.clone().unwrap_or_else(|| out_dir.join(STATE_FILE));
-        if self.parallel.is_some() && self.seed.is_none() {
-            return Err(Error::MissingArgument("ChatFineTune: a data-parallel rank needs the seed every rank shares; call .seed(n) with the same n on every rank".to_string()));
-        }
         let seed = resolve_seed(self.seed, Some(&state_path))?;
         let requested = model::FitOpts {
             grad_accum: self.grad_accum,
@@ -1385,11 +1379,7 @@ impl ChatFineTune {
         let mut on_step = |s: &model::StepReport| {
             step_work.push(s.work);
             on_progress(&FineTuneProgress::of(s));
-            // The ranks of a group stop after the same step.
-            match &self.parallel {
-                Some(rank) => rank.keep_going(s.step, cancel.is_cancelled()),
-                None => !cancel.is_cancelled(),
-            }
+            crate::data_parallel::keep_going(self.parallel.as_ref(), s.step, cancel)
         };
         let snapshot_card = format!("{base_id}:local:chat:step");
         let snapshots = match &self.evaluations_dir {

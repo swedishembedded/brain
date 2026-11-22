@@ -55,6 +55,7 @@ mod model_optimizer;
 mod model_pruner;
 mod distill_finetune;
 mod feedback_finetune;
+mod pair_and_distill_data_parallel;
 mod preference_finetune;
 mod score_long_record_real;
 mod score_tokens_qwen35;

@@ -109,8 +109,8 @@ fn spec_without_defaults() -> ActionSpec {
         .param(ParamSpec::new("grad_accum", ParamType::Int, "records averaged into one optimiser step").default(json!(1)).min(1.0).max(4096.0).step(1.0))
         .param(ParamSpec::new("strict_updates", ParamType::Bool, "abort at the first optimiser step whose loss or gradient is not finite (off: such a step is skipped, and the run aborts on the third in a row); the adapter is never updated with a non-finite value").default(json!(false)))
         .param(ParamSpec::new("seed", ParamType::Int, "seed of a fresh adapter's initialisation and the batch order (random when omitted; the report carries the one used)").min(0.0))
-        .param(crate::parallel::cards_param("the run's whole footprint", "sft and policy_gradient only"))
-        .param(crate::parallel::job_param("sharding replicated", "sft or policy_gradient, "))
+        .param(crate::parallel::cards_param("the run's whole footprint", "every objective but feedback"))
+        .param(crate::parallel::job_param("sharding replicated", "an objective other than feedback, "))
         .param(ParamSpec::new("max_block", ParamType::Int, "the longest training row in tokens: the memory reserved for the run is sized to it, and a record longer than it is refused by name").default(json!(8192)).min(64.0).max(1_048_576.0).step(1.0))
         .param(ParamSpec::new("thinking", ParamType::Bool, "train the model to reason before it answers (off: trained for no-think mode); sft and policy_gradient only").default(json!(true)))
         .param(ParamSpec::new("pack_answers", ParamType::Bool, "train a record that supervises several turns as one sequence; sft and policy_gradient only").default(json!(false)))
@@ -294,6 +294,9 @@ impl DataRefs {
     }
 }
 
+/// Why the feedback objective (KTO) does not train as ranks: what a shard of its step would optimise.
+const FEEDBACK_ON_ONE_CARD: &str = "its reference point is a KL estimate over the step's whole batch, so a rank holding a shard of the batch would estimate another one and optimise another objective";
+
 /// The objective the run trains.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -473,8 +476,8 @@ impl Request {
             crate::job::policy_gradient_config(&params)?.validate().map_err(|why| format!("train: {why}"))?;
         }
         crate::consolidate::check_resume(ACTION, params.resume_key.as_deref(), params.checkpoint_every)?;
-        if params.cards > 1 && !matches!(params.objective, Objective::Sft | Objective::PolicyGradient) {
-            return refused(&format!("cards {} trains data-parallel, one rank per card, and the {} objective trains on one card; sft and policy_gradient train on several", params.cards, params.objective.name()));
+        if params.cards > 1 && params.objective == Objective::Feedback {
+            return refused(&format!("cards {} trains data-parallel, one rank per card, and the feedback objective trains on one card: {FEEDBACK_ON_ONE_CARD}", params.cards));
         }
         if params.keep_evaluations && params.eval_every == 0 {
             return refused("keep_evaluations needs eval_every > 0");
@@ -496,8 +499,8 @@ impl Request {
             }
         }
         let spread = crate::parallel::Spread::parse(ACTION, params.cards, params.job.as_deref(), params.seed, params.resume_key.as_deref(), false)?;
-        if spread.job.is_some() && !matches!(params.objective, Objective::Sft | Objective::PolicyGradient) {
-            return refused(&format!("job trains data-parallel across servers, and the {} objective trains on one card; sft and policy_gradient train as ranks", params.objective.name()));
+        if spread.job.is_some() && params.objective == Objective::Feedback {
+            return refused(&format!("job trains data-parallel across servers, and the feedback objective trains on one card: {FEEDBACK_ON_ONE_CARD}"));
         }
         check_attached(&data, inv)?;
         Ok(Request { params, data, spread })

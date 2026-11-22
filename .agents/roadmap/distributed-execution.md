@@ -994,8 +994,8 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         (2026-11-21; Qwen3-4B on 4 cards: 3.6x the records per second of one
         card, byte-identical adapters across a repeat, see Measured). The
         request field `cards`
-        (default 1, at most the server's cards, refused by name for the
-        preference, feedback and distill objectives) runs the `sft` and
+        (default 1, at most the server's cards; preference and distill since
+        2026-11-22, below; feedback refused by name) runs the `sft` and
         `policy_gradient` job as `brain::DataParallel::in_process` ranks, one
         per card, same seed (drawn once when the request names none), rank 0
         streaming the steps and answering with the one-card `report()`; the
@@ -1073,11 +1073,35 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         fine-tune on several cards does not resume (`resume_key` refused);
         the optimizer and gradient stages spare no card memory below a
         replica (ZeRO-2 gradient memory, below), so the rule only ever moves
-        from replicated to parameters; `preference` and `distill` are
-        per-pair and per-token sums that would shard cleanly but their
-        trainers take no group yet; `feedback` (KTO) estimates its reference
-        point over the step's batch and stays on one card (served-training
-        guide, "Which objectives train as ranks").
+        from replicated to parameters; `feedback` (KTO) estimates its
+        reference point over the step's batch and stays on one card
+        (served-training guide, "Which objectives train as ranks").
+      - [x] Preference and distillation train as ranks (2026-11-22): the
+        served `train`'s `cards` and `job` take every objective but
+        `feedback` (refused by name with the reason). One path for every
+        objective: `trainjob::job::train_objective` builds and runs the
+        request's trainer, as a rank when `train_ranks` (over
+        `parallel::train_as_ranks`) hands it one; `PreferenceFineTune` and
+        `DistillFineTune` take `data_parallel` like the chat fine-tunes, and
+        every SDK trainer places its rank through
+        `data_parallel::place_rank` (seed required, device recorded for
+        `report.parallel`) and stops through `data_parallel::keep_going`.
+        The objectives shard by index (`Objective::shard`): the distillation
+        stream and a DPO stream through `IndexedStream::shard` (rank `r` of
+        `N` asks for record `kN + r`; its saved position is the whole
+        stream's), a DPO dataset by the draw's place in the loop generator's
+        sequence (`dpo::shard_choice`: every rank draws `N`, trains its own).
+        Every rank still scores the DPO reference of every pair and the
+        teacher of every record before step 1 (any pair can be drawn on any
+        rank), so that pass is not shortened by the cards; rank 0 alone
+        scores the exported adapter. Tests: `sdk`
+        `pair_and_distill_data_parallel` (two ranks of one pair or record
+        each within 1e-2 of a step of one rank accumulating the same two,
+        apart from a one-record run, byte-identical ranks, `parallel`),
+        `rl` `stream` (disjoint shards, resume position), `trainjob` `cards`
+        (both objectives on two cards: held, streamed once, reported,
+        repeatable; feedback refused). Open: `brain finetune --job-plan`
+        still refuses the paired objectives.
       - [x] One served job over several servers (2026-11-22): a `train`
         request's `job` document (the plan, `first_rank`, the secret's
         SHA-256; at most 4 KiB, data-parallel replicated plans of at most

@@ -113,6 +113,30 @@ impl ParallelReport {
     }
 }
 
+/// Where `trainer` runs as `parallel`'s rank (or as no rank), on the cards `gpus` its device selection resolved to:
+/// the device its report names, recorded with the group for the run's [`ParallelReport`]. A rank needs the seed every
+/// rank of its group shares (`seed`), or the ranks would draw different initialisations and batch orders: refused
+/// without one. What every SDK trainer that takes a [`DataParallel`] does before it trains.
+pub(crate) fn place_rank(trainer: &str, parallel: Option<&DataParallel>, seed: Option<u64>, gpus: &[u32]) -> Result<RankDevice> {
+    if parallel.is_some() && seed.is_none() {
+        return Err(Error::MissingArgument(format!("{trainer}: a data-parallel rank needs the seed every rank shares; call .seed(n) with the same n on every rank")));
+    }
+    let device = RankDevice::resolved(parallel.map_or(0, DataParallel::rank), gpus);
+    if let Some(parallel) = parallel {
+        parallel.ran_on(device.clone());
+    }
+    Ok(device)
+}
+
+/// Whether a trainer goes on after completing `step` given `cancel`: as [`DataParallel::keep_going`] for a rank (the
+/// ranks of a group stop after the same step), until it is cancelled for a run that is no rank.
+pub(crate) fn keep_going(parallel: Option<&DataParallel>, step: u32, cancel: &crate::CancelToken) -> bool {
+    match parallel {
+        Some(rank) => rank.keep_going(step, cancel.is_cancelled()),
+        None => !cancel.is_cancelled(),
+    }
+}
+
 /// What the ranks that are threads of this process share: each one's collective (so a rank that fails can break the
 /// group on the host and on every card at once) and the step they agreed to stop after.
 struct LocalGroup {
