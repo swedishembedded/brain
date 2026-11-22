@@ -543,7 +543,7 @@ volumes:
         question: "What if a model could think longer by reusing the same layers more times?"
         introduces: [weight-shared-depth, looped-transformer, adaptive-computation, recurrent-depth]
         requires: [transformer-block, residual-stream, pre-norm, rms-normalization, recurrent-neural-network, backpropagation-through-time, vanishing-gradient, euler-method, kv-cache, expert, sigmoid, cross-entropy, gradient-check, adam]
-        brain: [ouro, huginn]
+        brain: [ouro, huginn, inkling2]
       - id: long-context
         title: "Long Context"
         question: "How do models trained on short texts read long ones?"
