@@ -4795,6 +4795,32 @@ async fn every_chat_route_holds_its_call_to_the_served_spec() {
     }
 }
 
+/// `reasoning_effort` is a name (`"high"`) or, for a template that reads a numeric level (Inkling 2's), a number
+/// (`0.5`): a JSON number reaches the model as its decimal text, which the template's typed effort reads, never
+/// dropped for not being a string. Any other JSON type is refused by name, top level or in `chat_template_kwargs`.
+#[tokio::test]
+async fn a_numeric_reasoning_effort_reaches_the_model() {
+    let (app, key) = spec_chat_app(Provider::OpenAI);
+    let messages = json!([{"role": "user", "content": "hi"}]);
+    for (body, want) in [
+        (json!({"model": SPEC_CHAT, "messages": messages, "reasoning_effort": 0.5}), r#"reasoning_effort=Some("0.5")"#),
+        (json!({"model": SPEC_CHAT, "messages": messages, "reasoning_effort": 0}), r#"reasoning_effort=Some("0")"#),
+        (json!({"model": SPEC_CHAT, "messages": messages, "chat_template_kwargs": {"reasoning_effort": 0.25}}), r#"reasoning_effort=Some("0.25")"#),
+        (json!({"model": SPEC_CHAT, "messages": messages, "reasoning_effort": "high"}), r#"reasoning_effort=Some("high")"#),
+    ] {
+        let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+        assert_eq!(st, StatusCode::OK, "{body}: {v}");
+        let text = v["choices"][0]["message"]["content"].as_str().unwrap_or_default();
+        assert!(text.contains(want), "{body}: {text}");
+    }
+    for bad in [json!(true), json!({"level": 1}), json!([0.5])] {
+        let body = json!({"model": SPEC_CHAT, "messages": messages, "reasoning_effort": bad});
+        let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{body}: {v}");
+        assert!(v["error"]["message"].as_str().unwrap_or_default().contains("reasoning_effort"), "{v}");
+    }
+}
+
 /// [`served_objects`] over an app already built: the `brain` object of the reply and of the streamed reply's
 /// terminal event, both of which must succeed.
 async fn served_objects_of(app: &Router, key: &str, provider: Provider, path: &str, body: &Value) -> Vec<Value> {

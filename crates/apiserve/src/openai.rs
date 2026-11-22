@@ -525,17 +525,19 @@ pub fn to_invocation(provider: Provider, body: &Value) -> Result<(String, Invoca
     if let Some(et) = enable_thinking {
         inv = inv.set("enable_thinking", json!(et));
     }
-    // `reasoning_effort` (Qwen3.8 xhigh/medium/low): same extension point as
-    // `enable_thinking` - nested under `chat_template_kwargs` or, tolerated,
-    // top-level. The value is validated downstream by the chat template
-    // renderer itself (unknown values error with the template's own message).
-    let reasoning_effort = body
-        .get("chat_template_kwargs")
-        .and_then(|k| k.get("reasoning_effort"))
-        .and_then(|v| v.as_str())
-        .or_else(|| body.get("reasoning_effort").and_then(|v| v.as_str()));
-    if let Some(re) = reasoning_effort {
-        inv = inv.set("reasoning_effort", json!(re));
+    // `reasoning_effort` (Qwen3.8 xhigh/medium/low, Inkling 2's names or a
+    // numeric level): same extension point as `enable_thinking` - nested under
+    // `chat_template_kwargs` or, tolerated, top-level. A number travels as its
+    // decimal text, which the template's typed effort reads as a level; the
+    // value is validated downstream by the chat template renderer itself
+    // (unknown values error with the template's own message). Any other JSON
+    // type is the client's error, never dropped.
+    let reasoning_effort = body.get("chat_template_kwargs").and_then(|k| k.get("reasoning_effort")).or_else(|| body.get("reasoning_effort")).filter(|v| !v.is_null());
+    match reasoning_effort {
+        None => {}
+        Some(Value::String(name)) => inv = inv.set("reasoning_effort", json!(name)),
+        Some(Value::Number(level)) => inv = inv.set("reasoning_effort", json!(level.to_string())),
+        Some(_) => return Err(ApiError::invalid_request(provider, "'reasoning_effort' must be a name (\"low\", \"high\", ...) or a number")),
     }
     // `max_tiles`: the most local tiles a model that reads an image in tiles may cut it into (`0` reads the whole image as one
     // view, the cheap reading); the same extension point as the kwargs above. A model that does not tile ignores it.
