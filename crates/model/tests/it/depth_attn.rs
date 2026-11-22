@@ -12,6 +12,10 @@
 //!   for every retained state, the partial and every query;
 //! * the gradient of a retained state read by two consumers is the sum of what each contributes, and the producer
 //!   collects it with `grad_add_step`;
+//! * where the device runs the cooperative twins, they agree with the host reference (forward) and with the
+//!   barrier-free reference kernels (every backward output) at the Inkling 2 width and stack depths;
+//! * a row's mix is the same bits whichever rows share its pass (a prompt served in chunks reads every position as the
+//!   whole sequence does);
 //! * against the Inkling 2 reference golden, every recorded attention input and the final readout are reproduced
 //!   from the recorded block states and the checkpoint's queries.
 
@@ -242,6 +246,60 @@ fn a_stack_is_refused_when_it_names_a_slot_twice_or_one_the_store_lacks() {
     assert!(DepthAttn::new(&store, &[], 1, EPS).is_ok(), "a stack of the partial alone is a plain residual");
 }
 
+/// One forward and backward through `ids`: (out, stats, every slot's gradient, dpartial, dz, dquery).
+#[allow(clippy::type_complexity)]
+fn pass(g: &Gpu, ids: &DepthAttnIds, case: &Case, slots: &[u32], queries: &[f32], nq: u32, dout: &[f32]) -> (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>) {
+    let (store, partial) = case.upload(g);
+    let da = DepthAttn::new(&store, slots, nq, EPS).unwrap();
+    let query = g.storage_init("query", queries);
+    let (out, stats, dz) = (g.storage(da.out_len()), g.storage(da.stats_len()), g.storage(da.dz_len()));
+    let doutb = g.storage_init("dout", dout);
+    let dpartial = g.storage_init("dpartial", &vec![0.0; case.rows * case.d]);
+    let dquery = g.storage_init("dquery", &vec![0.0; queries.len()]);
+    let mut steps = vec![da.forward(g, ids, &store, &partial, &query, &out, &stats)];
+    steps.extend(da.backward(g, ids, &store, &partial, &query, &stats, &doutb, &dpartial, &dz, &dquery));
+    g.submit(&[], &steps);
+    let grads = g.read(store.grads().unwrap(), case.store.len());
+    (g.read(&out, da.out_len() as usize), g.read(&stats, da.stats_len() as usize), grads, g.read(&dpartial, case.rows * case.d), g.read(&dz, da.dz_len() as usize), g.read(&dquery, queries.len()))
+}
+
+/// The cooperative twins against the references at the width and stack depths the Inkling 2 decoder dispatches (a
+/// 2304-wide row; the deepest stack, eight retained states, and the largest the op admits), with one, three and four
+/// queries. The forward is held to the host reference, the backward to the barrier-free kernels: both reassociate
+/// sums over a row of 2304, so the bound is a few f32 ulps of the values' scale, not the bits.
+#[test]
+fn the_cooperative_twins_agree_with_the_references_at_the_decoders_width() {
+    let g = gpu_core::testgpu::dev(pipes());
+    let ids = DepthAttnIds::resolve(&g).unwrap();
+    if !ids.fwd.per_row_workgroup || !ids.bwd.per_row_workgroup {
+        brain_testutil::skip_unavailable("the cooperative depth-attention twins (this device has no workgroup reductions)");
+        return;
+    }
+    let reference = DepthAttnIds::reference(&g).unwrap();
+    let mut rng = Lcg::new(random_seed());
+    let (rows, d) = (5usize, 2304usize);
+    let case = Case::new(&mut rng, rows, d, model::depth_attn::MAX_RETAINED);
+    for (slots, nq) in [((0..8u32).rev().collect::<Vec<_>>(), 3usize), ((0..32u32).collect(), 4), (vec![], 1)] {
+        let queries = rng.vec_scaled(nq * d, 0.2);
+        let dout = rng.vec_scaled(nq * rows * d, 1.0);
+        let twin = pass(&g, &ids, &case, &slots, &queries, nq as u32, &dout);
+        let base = pass(&g, &reference, &case, &slots, &queries, nq as u32, &dout);
+        let stack: Vec<&[f32]> = slots.iter().map(|s| case.state(*s as usize)).chain([case.partial.as_slice()]).collect();
+        let host = model::hostmath::depth_attention(&stack, rows, d, &queries, nq, EPS);
+        let close = |got: &[f32], want: &[f32], what: &str| {
+            let scale = want.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(1e-3);
+            let err = got.iter().zip(want).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+            assert!(err <= 2e-5 * scale, "{what} ({} states, {nq} queries): max |d| {err} at scale {scale}", slots.len() + 1);
+        };
+        close(&twin.0, &host, "forward vs host");
+        close(&twin.1, &base.1, "saved statistics");
+        close(&twin.2, &base.2, "retained-state gradients");
+        close(&twin.3, &base.3, "partial gradient");
+        close(&twin.4, &base.4, "score gradients");
+        close(&twin.5, &base.5, "query gradient");
+    }
+}
+
 fn golden(dir: &std::path::Path, file: &str) -> HashMap<String, (Vec<usize>, Vec<f32>)> {
     let path = dir.join(file);
     checkpoint::safetensors::read(&path.to_string_lossy()).expect("read golden").into_iter().map(|t| (t.name, (t.shape, t.data))).collect()
@@ -293,4 +351,35 @@ fn inkling2_tiny_golden_attention_inputs_are_reproduced() {
     let last = manifest["visits"].as_array().unwrap().len() - 1;
     check(&gold[&format!("visit{last}.block_states")].1, &gold[&format!("visit{last}.out")].1, &ckpt["model.llm.attn_res.output_query"].1, &gold["final_in"].1, "final readout");
     assert!(checked >= 8, "only {checked} visits checked");
+}
+
+/// A row's mix does not depend on the other rows of its pass: the rows `4..10` of a 28-row pass and the same rows run
+/// as a 6-row pass of their own agree to the bit (a served prompt cut into chunks reads every position as the whole
+/// sequence does).
+#[test]
+fn a_rows_mix_does_not_depend_on_the_other_rows_of_its_pass() {
+    let g = gpu_core::testgpu::dev(pipes());
+    let ids = DepthAttnIds::resolve(&g).unwrap();
+    let mut rng = Lcg::new(random_seed());
+    let (rows, d, cap) = (28usize, 96usize, 4usize);
+    let case = Case::new(&mut rng, rows, d, cap);
+    let queries = rng.vec_scaled(3 * d, 0.5);
+    let (r0, n) = (4usize, 6usize);
+    let run = |store: &[f32], partial: &[f32], rows: usize| {
+        let s = RetainedStates::new(&g, cap as u32, rows as u32, d as u32, false).unwrap();
+        g.write_f32(s.values(), store);
+        let da = DepthAttn::new(&s, &[2, 0, 3], 3, EPS).unwrap();
+        let (p, q) = (g.storage_init("partial", partial), g.storage_init("query", &queries));
+        let (out, stats) = (g.storage(da.out_len()), g.storage(da.stats_len()));
+        g.submit(&[], &[da.forward(&g, &ids, &s, &p, &q, &out, &stats)]);
+        g.read(&out, da.out_len() as usize)
+    };
+    let whole = run(&case.store, &case.partial, rows);
+    let sub_store: Vec<f32> = (0..cap).flat_map(|slot| case.store[(slot * rows + r0) * d..(slot * rows + r0 + n) * d].to_vec()).collect();
+    let part = run(&sub_store, &case.partial[r0 * d..(r0 + n) * d], n);
+    for q in 0..3 {
+        let w = &whole[(q * rows + r0) * d..(q * rows + r0 + n) * d];
+        let p = &part[q * n * d..(q + 1) * n * d];
+        assert_eq!(w.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), p.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), "query {q}: rows {r0}..{} differ between the passes", r0 + n);
+    }
 }

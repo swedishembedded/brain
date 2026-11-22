@@ -186,13 +186,32 @@ pub struct Contiguous {
     pub pos0: u32,
 }
 
+/// A forward kernel slot and its dispatch geometry: the barrier-free reference (one thread per query row and head)
+/// or its cooperative twin (one workgroup per pair, `flash_attn_gqa_ext_rows`, appended by `gpu_core`'s twin table on
+/// a device with workgroup reductions), as `select::Op::FlashAttentionExt` chose for the handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FwdKernel {
+    pub kernel: usize,
+    pub per_pair_workgroup: bool,
+}
+
+impl FwdKernel {
+    fn dispatch(self, pairs: u32) -> gpu_core::Dispatch {
+        if self.per_pair_workgroup {
+            gpu_core::Dispatch::Workgroups(pairs)
+        } else {
+            gpu_core::Dispatch::Threads(pairs)
+        }
+    }
+}
+
 /// Pipeline indices of the kernels this module dispatches, resolved by name ([`FlashExtIds::resolve`]) from a
 /// kernel list that includes [`pipelines`].
 #[derive(Clone, Copy, Debug)]
 pub struct FlashExtIds {
-    pub fwd: usize,
+    pub fwd: FwdKernel,
     /// The forward over a bf16 KV pool (`pool_k`/`pool_v` read as packed bf16 pairs).
-    pub fwd_bf16: usize,
+    pub fwd_bf16: FwdKernel,
     pub bwd_prep: usize,
     pub bwd_dq: usize,
     pub bwd_dkv: usize,
@@ -223,12 +242,30 @@ pub fn pipelines() -> Vec<(&'static str, &'static str)> {
 }
 
 impl FlashExtIds {
-    /// The indices of [`pipelines`] on `g`. Panics when one is not registered.
+    /// The indices of [`pipelines`] on `g`, each forward its cooperative twin where the handle carries one and
+    /// `select::Op::FlashAttentionExt` picks it on this device (no shape gate, so one choice per handle). Panics when
+    /// a kernel is not registered.
     pub fn resolve(g: &Gpu) -> FlashExtIds {
+        use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
+        let coop = gpu_core::select::DefaultSelector.select(Op::FlashAttentionExt, OpShape { m: 1, n: 1, k: 0, dtype: Dtype::F32 }, &g.caps()) == KernelVariant::WorkgroupPerOutput;
+        let fwd = |reference: usize| match g.twin_of(reference).filter(|_| coop) {
+            Some(twin) => FwdKernel { kernel: twin, per_pair_workgroup: true },
+            None => FwdKernel { kernel: reference, per_pair_workgroup: false },
+        };
+        let mut ids = Self::reference(g);
+        ids.fwd = fwd(ids.fwd.kernel);
+        ids.fwd_bf16 = fwd(ids.fwd_bf16.kernel);
+        ids
+    }
+
+    /// [`Self::resolve`] held to the barrier-free reference forwards whatever the device: the arm the twins are gated
+    /// against.
+    pub fn reference(g: &Gpu) -> FlashExtIds {
         let at = |name: &str| g.kernel_index(name).unwrap_or_else(|| panic!("{name} is not registered on this Gpu (see model::flash_ext::pipelines)"));
+        let reference = |name: &str| FwdKernel { kernel: at(name), per_pair_workgroup: false };
         FlashExtIds {
-            fwd: at("flash_attn_gqa_ext"),
-            fwd_bf16: at(fwd_bf16_variant().0),
+            fwd: reference("flash_attn_gqa_ext"),
+            fwd_bf16: reference(fwd_bf16_variant().0),
             bwd_prep: at("flash_attn_gqa_ext_bwd_prep"),
             bwd_dq: at("flash_attn_gqa_ext_bwd_dq"),
             bwd_dkv: at("flash_attn_gqa_ext_bwd_dkv"),
@@ -325,7 +362,7 @@ pub fn flash_ext_fwd(g: &Gpu, ids: &FlashExtIds, heads: &HeadShape, opts: &AttnO
     let index = inputs.doc_pos.unwrap_or(&spare);
     let p = params(opts, heads, layout.b, layout.t, 0, 0, 0, 0, &aux, layout.pos0);
     let threads = word(rows * u64::from(heads.n_heads), "query rows * heads");
-    steps.push(g.dispatch(ids.fwd, &[q, k, v, index, &aux.buf, out, lse], &p, gpu_core::Dispatch::Threads(threads)));
+    steps.push(g.dispatch(ids.fwd.kernel, &[q, k, v, index, &aux.buf, out, lse], &p, ids.fwd.dispatch(threads)));
     steps
 }
 
@@ -461,6 +498,6 @@ pub fn flash_ext_paged_fwd(g: &Gpu, ids: &FlashExtIds, heads: &HeadShape, opts: 
     let aux = pack_aux(g, ids, opts, heads, inputs, u64::from(paged.n_rows), &mut steps);
     let p = params(opts, heads, paged.n_seqs, paged.max_q, paged.block_size, paged.max_bt, paged.ring, PAGED, &aux, 0);
     let threads = word(u64::from(paged.n_seqs) * u64::from(paged.max_q) * u64::from(heads.n_heads), "sequences * query rows * heads");
-    steps.push(g.dispatch(kernel, &[q, k, v, paged.index, &aux.buf, out, lse], &p, gpu_core::Dispatch::Threads(threads)));
+    steps.push(g.dispatch(kernel.kernel, &[q, k, v, paged.index, &aux.buf, out, lse], &p, kernel.dispatch(threads)));
     steps
 }

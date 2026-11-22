@@ -82,6 +82,7 @@ mod i8_gemv_native_bench;
 mod i8_gemv_reg_upgrade;
 mod kernel_catalog_validation;
 mod kernel_upgrade;
+mod router_gate_upgrade;
 mod kq_gemv_reg_speed_bench;
 mod kq_gemv_reg_upgrade;
 mod kq_native;

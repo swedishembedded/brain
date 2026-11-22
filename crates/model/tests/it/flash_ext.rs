@@ -13,7 +13,10 @@
 //! * packed rows (several documents per row): the oracle and finite differences above, and every output and input
 //!   gradient of each packed document equal to that document run alone.
 //!
-//! The kernels are the barrier-free reference tier, so these run on every backend, the CPU JIT included.
+//! The forwards are the ones `FlashExtIds::resolve` selects: the barrier-free reference on the CPU JIT, the
+//! cooperative twin (`flash_attn_gqa_ext_rows`, its bf16-pool form included) on a device with workgroup reductions, so
+//! every check above holds both. One more holds the twin at the decoder's shapes (128-wide heads, 24 over 8, keys over
+//! several of its 128-key tiles) against the oracle and the reference kernel.
 //!
 //! Swedish Embedded AB implements memory-bounded attention for long-context models for its clients. If your team
 //! needs expertise in verifying attention kernels against reference implementations then you can procure our
@@ -281,6 +284,38 @@ fn check_case(g: &Gpu, ids: &FlashExtIds, c: &Case, tag: &str) {
             continue;
         }
         assert_close(&format!("{tag} {name}"), &got.grads[which], &fd_grad(c, which), 1e-4);
+    }
+}
+
+/// The cooperative forward at the Inkling 2 decoder's shapes: 24 query heads over 8 KV heads of 128, a 300-row
+/// prompt (three of the twin's key tiles) at a nonzero position, every option on, with a window shorter than the
+/// prompt and without one. Held to the f64 oracle at the reference kernel's bound, and to the reference kernel itself.
+#[test]
+fn the_cooperative_forward_matches_the_oracle_at_the_decoders_shape() {
+    let (g, ids) = device();
+    if !ids.fwd.per_pair_workgroup {
+        brain_testutil::skip_unavailable("the cooperative extended attention (this device has no workgroup reductions)");
+        return;
+    }
+    let reference = FlashExtIds::reference(&g);
+    let heads = HeadShape { n_heads: 24, n_kv_heads: 8, head_dim: 128 };
+    let mut rng = Lcg::new(data::rng::random_seed());
+    for window in [Some(200), None] {
+        let o = opts(128f32.powf(-0.5), window, true, Some(DistanceBias { extent: 256, d_rel: 16 }), Some(LogPositionScale { alpha: 0.1, n_floor: 64.0, scales_bias: true }));
+        let c = Case::new(1, 300, 37, heads, o, &mut rng);
+        let (want_out, want_lse) = eval(&c, &host_of(&c));
+        let fwd = |ids: &FlashExtIds| {
+            let (q, k, v) = (upload(&g, "q", &c.q), upload(&g, "k", &c.k), upload(&g, "v", &c.v));
+            let (sink, rel, bank) = (upload(&g, "sink", &c.sink), upload(&g, "rel", &c.rel), upload(&g, "bank", &c.bank));
+            let inputs = AttnInputs { sink: Some(&sink), rel: Some(&rel), bank: Some(&bank), doc_pos: None };
+            let (out, lse) = (g.storage(c.q.len() as u64), g.storage((c.rows() * 24) as u64));
+            g.submit(&[], &flash_ext_fwd(&g, ids, &c.heads, &c.opts, &inputs, Contiguous { b: c.b, t: c.t, pos0: c.pos0 }, &q, &k, &v, &out, &lse));
+            (g.read(&out, c.q.len()), g.read(&lse, c.rows() * 24))
+        };
+        let (twin, base) = (fwd(&ids), fwd(&reference));
+        assert_close(&format!("window {window:?}: twin out"), &twin.0, &want_out, 2e-5);
+        assert_close(&format!("window {window:?}: twin lse"), &twin.1, &want_lse, 2e-5);
+        assert_close(&format!("window {window:?}: twin out vs the reference kernel"), &twin.0, &wide(&base.0), 2e-5);
     }
 }
 

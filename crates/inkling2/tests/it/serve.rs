@@ -270,7 +270,12 @@ impl Probe for Depths {
     }
 }
 
-/// `got` (bf16-rounded taps) against the forward's rows of `seq[..n]` at `depths`: within bf16's rounding.
+/// `got` (bf16-rounded taps) against the forward's rows of `seq[..n]` at `depths`: within bf16's rounding, plus the f32
+/// noise by which the served path's arithmetic may differ from the whole-sequence forward's, a fraction of the row's
+/// scale. Measured on a GH200 (CUDA, tiny checkpoint, a 20-token prompt served in slices of 6, every depth): the served
+/// rows are not the forward's bits there (the excess over a 4e-3 bf16 bound reaches 2.7e-6 of the row's largest value
+/// with the per-row reference attention and depth kernels, 6.4e-7 with their cooperative forms), and such an excess
+/// on an element near zero is far past any bound relative to the element itself.
 fn check_taps(e: &Engine, got: &[f32], seq: &[u32], depths: &[usize], what: &str) {
     let visits = e.model().plan().visits().len();
     let keys: Vec<String> = depths.iter().map(|&v| if v == visits { "final_norm".to_string() } else { format!("visit{v}.in") }).collect();
@@ -281,8 +286,9 @@ fn check_taps(e: &Engine, got: &[f32], seq: &[u32], depths: &[usize], what: &str
         for (j, key) in keys.iter().enumerate() {
             let want = &probe.rows[key][p * d..(p + 1) * d];
             let row = &got[(p * depths.len() + j) * d..(p * depths.len() + j + 1) * d];
+            let scale = want.iter().fold(0.0f32, |m, v| m.max(v.abs()));
             for (a, b) in row.iter().zip(want) {
-                assert!((a - b).abs() <= 8e-3 * b.abs() + 1e-6, "{what}: position {p} depth {} differs: {a} against {b}", depths[j]);
+                assert!((a - b).abs() <= 8e-3 * b.abs() + 1e-5 * scale + 1e-6, "{what}: position {p} depth {} differs: {a} against {b} (row scale {scale})", depths[j]);
             }
         }
     }

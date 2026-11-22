@@ -46,7 +46,7 @@
 //! ## Cooperative twins, resolved by name
 //!
 //! A *sum* reduction cannot be a transparent rewrite (bar 2), but it can still be made **available**: the second table,
-//! [`TWINS`], appends the workgroup-per-row twin of a kernel the model registered (`rmsnorm` -> `rmsnorm_rows`, the
+//! [`twins`], appends the workgroup-per-row twin of a kernel the model registered (`rmsnorm` -> `rmsnorm_rows`, the
 //! LayerNorm family, the optimiser's `gradnorm_sq` + `clip_coef` -> `gradnorm_part` + `clip_coef_wg`) WITHOUT rewriting
 //! any dispatch. The explicit seams (`model::block::rms_variant`/`ln_variant`, `optim::Optim`) then find the twin by name
 //! and keep their numerical gates visible at the call site, so no model opts in by listing the twin in its own PIPELINES.
@@ -196,6 +196,22 @@ pub(crate) const UPGRADES: &[Upgrade] = &[
         gpu_only: false,
     },
     Upgrade {
+        // The sigmoid "noaux_tc" MoE router every DeepSeek-V3-style MoE dispatches (`model::moe::router_fwd_kind`):
+        // one thread scans a row's experts `top_k` times, so a prompt of tens of rows ran tens of threads, 0.3 ms a
+        // launch for 25 x 128 scores on a GH200. The twin is a selection over the same per-element arithmetic, so
+        // its BITS are the reference's (`tests/it/router_gate_upgrade.rs`).
+        slow: "router_gate_sigmoid",
+        fast: "router_gate_sigmoid_rows",
+        src: kernels::ROUTER_GATE_SIGMOID_ROWS,
+        thread_mul: 64,
+        op: select::Op::RouterGate,
+        probe: ANY_SHAPE,
+        knob: None,
+        buckets: &[],
+        extra: &[],
+        gpu_only: true,
+    },
+    Upgrade {
         // The decode-regime GEMM every LM, DiT and depth decoder in this tree
         // dispatches for `m <= 32` (`model::block::gemm_variant`).
         // `matmul_gemv` accumulates in workgroup memory sized for the WORST
@@ -318,20 +334,41 @@ pub(crate) struct Twin {
 }
 
 /// The cooperative twins. Every twin needs a workgroup reduction, so none is appended for the CPU JIT, whose
-/// `workgroup_reductions` capability is false: it can never select them.
-pub(crate) const TWINS: &[Twin] = &[
-    Twin { base: "rmsnorm", base_src: kernels::RMSNORM, twin: "rmsnorm_rows", twin_src: kernels::RMSNORM_ROWS },
-    Twin { base: "rmsnorm_dx", base_src: kernels::RMSNORM_DX, twin: "rmsnorm_dx_rows", twin_src: kernels::RMSNORM_DX_ROWS },
-    Twin { base: "layernorm", base_src: kernels::LAYERNORM, twin: "layernorm_rows", twin_src: kernels::LAYERNORM_ROWS },
-    Twin { base: "ln_stats", base_src: kernels::LN_STATS, twin: "ln_stats_rows", twin_src: kernels::LN_STATS_ROWS },
-    Twin { base: "layernorm_dx", base_src: kernels::LAYERNORM_DX, twin: "layernorm_dx_rows", twin_src: kernels::LAYERNORM_DX_ROWS },
-    Twin { base: "gradnorm_sq", base_src: kernels::GRADNORM_SQ, twin: "gradnorm_part", twin_src: kernels::GRADNORM_PART },
-    Twin { base: "clip_coef", base_src: kernels::CLIP_COEF, twin: "clip_coef_wg", twin_src: kernels::CLIP_COEF_WG },
-];
+/// `workgroup_reductions` capability is false: it can never select them. Built once: a storage-tier variant of a
+/// reference (its pool bindings read as packed bf16, `kernels::template::dtype_variant`) has its twin under the same
+/// rewrite, and both sources are generated.
+pub(crate) fn twins() -> &'static [Twin] {
+    static TWINS: std::sync::OnceLock<Vec<Twin>> = std::sync::OnceLock::new();
+    TWINS.get_or_init(|| {
+        let plain = |base, base_src, twin, twin_src| Twin { base, base_src, twin, twin_src };
+        let mut t = vec![
+            plain("rmsnorm", kernels::RMSNORM, "rmsnorm_rows", kernels::RMSNORM_ROWS),
+            plain("rmsnorm_dx", kernels::RMSNORM_DX, "rmsnorm_dx_rows", kernels::RMSNORM_DX_ROWS),
+            plain("layernorm", kernels::LAYERNORM, "layernorm_rows", kernels::LAYERNORM_ROWS),
+            plain("ln_stats", kernels::LN_STATS, "ln_stats_rows", kernels::LN_STATS_ROWS),
+            plain("layernorm_dx", kernels::LAYERNORM_DX, "layernorm_dx_rows", kernels::LAYERNORM_DX_ROWS),
+            plain("gradnorm_sq", kernels::GRADNORM_SQ, "gradnorm_part", kernels::GRADNORM_PART),
+            plain("clip_coef", kernels::CLIP_COEF, "clip_coef_wg", kernels::CLIP_COEF_WG),
+            plain("depth_attn_fwd", kernels::DEPTH_ATTN_FWD, "depth_attn_fwd_rows", kernels::DEPTH_ATTN_FWD_ROWS),
+            plain("depth_attn_bwd", kernels::DEPTH_ATTN_BWD, "depth_attn_bwd_rows", kernels::DEPTH_ATTN_BWD_ROWS),
+            plain("flash_attn_gqa_ext", kernels::FLASH_ATTN_GQA_EXT, "flash_attn_gqa_ext_rows", kernels::FLASH_ATTN_GQA_EXT_ROWS),
+        ];
+        // The extended attention over a bf16 K/V pool, and its twin under the same rewrite.
+        let bf16_pools = |name: &str, src: &'static str| {
+            use backend_api::select::Dtype;
+            let (n, s) = kernels::template::dtype_variant(name, src, "pool_k", Dtype::BF16).expect("pool_k is read by bare index");
+            kernels::template::dtype_variant(n, s, "pool_v", Dtype::BF16).expect("pool_v is read by bare index")
+        };
+        let (base, base_src) = bf16_pools("flash_attn_gqa_ext", kernels::FLASH_ATTN_GQA_EXT);
+        let (twin, twin_src) = bf16_pools("flash_attn_gqa_ext_rows", kernels::FLASH_ATTN_GQA_EXT_ROWS);
+        t.push(plain(base, base_src, twin, twin_src));
+        t
+    })
+}
 
-/// The registered name of `base`'s cooperative twin, if it has one in [`TWINS`].
+/// The registered name of `base`'s cooperative twin, if it has one in [`twins`].
 pub(crate) fn twin_name(base: &str) -> Option<&'static str> {
-    TWINS.iter().find(|t| t.base == base).map(|t| t.twin)
+    twins().iter().find(|t| t.base == base).map(|t| t.twin)
 }
 
 static DISABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -364,7 +401,7 @@ pub(crate) fn expand<'a>(
     }
     let mut add: Vec<(&'static str, &'static str)> = Vec::new();
     if !cpu_jit {
-        for t in TWINS {
+        for t in twins() {
             let registered = kernels.iter().any(|(n, src)| *n == t.base && *src == t.base_src);
             if registered && !kernels.iter().any(|(n, _)| *n == t.twin) {
                 add.push((t.twin, t.twin_src));

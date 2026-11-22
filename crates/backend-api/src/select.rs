@@ -86,6 +86,29 @@ pub enum Op {
     /// efficiency, which more rows never fixes. `m` = `bsz * n_heads *
     /// tcols` (one row per query position); `n`/`k` unused.
     AttnBwdDScores,
+    /// Depth attention (`depth_attn_fwd` / `depth_attn_bwd` vs their `_rows`
+    /// cooperative twins): per row, a softmax over a short stack of RMS-normed
+    /// states, each read whole. The reference gives one thread a row and walks
+    /// `count + 1` states of `dim` serially - `Op::RmsNorm`'s bug with the
+    /// stack as a multiplier - so it takes that rule: no shape gate,
+    /// `workgroup_reductions` the correctness gate. `m` = rows, `n` = width.
+    DepthAttention,
+    /// The sigmoid "noaux_tc" MoE router (`router_gate_sigmoid` vs its
+    /// workgroup-per-row twin `router_gate_sigmoid_rows`): one thread scans a
+    /// row's experts `top_k` times from global memory. `Op::MaxAbsRow`'s rule:
+    /// the twin is exact (a selection, the same per-element arithmetic), so a
+    /// transparent upgrade with no shape gate; `workgroup_reductions` the
+    /// correctness gate. `m` = rows, `n` = experts.
+    RouterGate,
+    /// The extended causal GQA attention (`flash_attn_gqa_ext`, window, sinks,
+    /// distance bias, log-position scale; contiguous or paged) vs its
+    /// workgroup-per-(row, head) twin `flash_attn_gqa_ext_rows`. The reference
+    /// gives one thread a query row and head and walks its keys serially, so a
+    /// decode step or a short prompt runs a few hundred threads. The twin
+    /// reassociates the softmax sums (a numerical gate at the call site, not a
+    /// transparent upgrade). `Op::RmsNorm`'s rule; `m` = query rows x heads,
+    /// `n` = keys.
+    FlashAttentionExt,
     /// Paged-attention decode SCORES (`paged_decode_scores_wg` vs
     /// `paged_decode_scores_batched`, plus the INT8 KV tier
     /// `paged_decode_scores_i8_batched`) - the SCORES half only. The
@@ -1076,6 +1099,12 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         // exact reason (see this Op's own doc) - one thread per query row,
         // no row/col gate.
         Op::AttnBwdDScores => vec![WorkgroupPerOutput, Reference],
+        // Depth attention: `Op::RmsNorm`'s rule, for its reason (see the Op's doc).
+        Op::DepthAttention => vec![WorkgroupPerOutput, Reference],
+        // The sigmoid router: `Op::MaxAbsRow`'s rule (see the Op's doc).
+        Op::RouterGate => vec![WorkgroupPerOutput, Reference],
+        // The extended attention: `Op::RmsNorm`'s rule (see the Op's doc).
+        Op::FlashAttentionExt => vec![WorkgroupPerOutput, Reference],
         // Paged-attention decode SCORES. At F32 (and the storage tiers)
         // this is `Op::MaxAbsRow`'s exact shape - a per-(batch,head)
         // reduction over `cap` keys, no row/col gate,
@@ -2119,6 +2148,23 @@ mod tests {
         }
     }
 
+    /// Depth attention, the sigmoid router and the extended attention take `Op::RmsNorm`'s rule: cooperative at every
+    /// row count where the device has workgroup reductions (at a prompt of 25 rows their one-thread-per-row references
+    /// ran 2.8 ms, 0.3 ms and 0.45 ms a launch), the reference otherwise.
+    #[test]
+    fn depth_attention_the_router_and_extended_attention_are_cooperative_at_every_shape() {
+        let s = DefaultSelector;
+        for m in [1u32, 25, 512, 8192] {
+            let sh = shape(m, 2304, 0, Dtype::F32);
+            assert_eq!(s.select(Op::DepthAttention, sh, &gpu_caps()), KernelVariant::WorkgroupPerOutput, "m={m}");
+            assert_eq!(s.select(Op::DepthAttention, sh, &cpu_caps()), KernelVariant::Reference, "m={m}");
+            assert_eq!(s.select(Op::RouterGate, sh, &gpu_caps()), KernelVariant::WorkgroupPerOutput, "m={m}");
+            assert_eq!(s.select(Op::RouterGate, sh, &cpu_caps()), KernelVariant::Reference, "m={m}");
+            assert_eq!(s.select(Op::FlashAttentionExt, sh, &gpu_caps()), KernelVariant::WorkgroupPerOutput, "m={m}");
+            assert_eq!(s.select(Op::FlashAttentionExt, sh, &cpu_caps()), KernelVariant::Reference, "m={m}");
+        }
+    }
+
     /// Paged-attention decode SCORES (`paged_decode_scores_wg` vs
     /// `paged_decode_scores_batched`) has the same F32 shape as
     /// `Op::MaxAbsRow`: a per-(batch,head) reduction over `cap` keys, no
@@ -2313,6 +2359,9 @@ mod tests {
                 Op::LoraBankProject,
                 Op::Softmax,
                 Op::AttnBwdDScores,
+                Op::DepthAttention,
+                Op::RouterGate,
+                Op::FlashAttentionExt,
                 Op::PagedAttention,
                 Op::MoeExpertLinear,
             ] {

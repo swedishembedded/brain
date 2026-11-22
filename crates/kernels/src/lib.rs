@@ -440,8 +440,12 @@ pub const DECODE_SOFTMAX_BATCHED: &str = include_str!("../wgsl/decode_softmax_ba
 pub const DEPTH_ATTN_BWD: &str = include_str!("../wgsl/depth_attn_bwd.wgsl");
 /// `wgsl/depth_attn_bwd_query.wgsl`
 pub const DEPTH_ATTN_BWD_QUERY: &str = include_str!("../wgsl/depth_attn_bwd_query.wgsl");
+/// `wgsl/depth_attn_bwd_rows.wgsl`
+pub const DEPTH_ATTN_BWD_ROWS: &str = include_str!("../wgsl/depth_attn_bwd_rows.wgsl");
 /// `wgsl/depth_attn_fwd.wgsl`
 pub const DEPTH_ATTN_FWD: &str = include_str!("../wgsl/depth_attn_fwd.wgsl");
+/// `wgsl/depth_attn_fwd_rows.wgsl`
+pub const DEPTH_ATTN_FWD_ROWS: &str = include_str!("../wgsl/depth_attn_fwd_rows.wgsl");
 /// `wgsl/depth_to_space3d.wgsl`
 pub const DEPTH_TO_SPACE3D: &str = include_str!("../wgsl/depth_to_space3d.wgsl");
 /// `wgsl/dfl_decode.wgsl`
@@ -558,6 +562,8 @@ pub const FLASH_ATTN_GQA_EXT_BWD_DKV: &str = include_str!("../wgsl/flash_attn_gq
 pub const FLASH_ATTN_GQA_EXT_BWD_DQ: &str = include_str!("../wgsl/flash_attn_gqa_ext_bwd_dq.wgsl");
 /// `wgsl/flash_attn_gqa_ext_bwd_prep.wgsl`
 pub const FLASH_ATTN_GQA_EXT_BWD_PREP: &str = include_str!("../wgsl/flash_attn_gqa_ext_bwd_prep.wgsl");
+/// `wgsl/flash_attn_gqa_ext_rows.wgsl`
+pub const FLASH_ATTN_GQA_EXT_ROWS: &str = include_str!("../wgsl/flash_attn_gqa_ext_rows.wgsl");
 /// `wgsl/flash_attn_vsa.wgsl`
 pub const FLASH_ATTN_VSA: &str = include_str!("../wgsl/flash_attn_vsa.wgsl");
 /// `wgsl/focal_dice_grad.wgsl`
@@ -1531,6 +1537,8 @@ pub const ROUTER_GATE: &str = include_str!("../wgsl/router_gate.wgsl");
 pub const ROUTER_GATE_REPLAY: &str = include_str!("../wgsl/router_gate_replay.wgsl");
 /// `wgsl/router_gate_sigmoid.wgsl`
 pub const ROUTER_GATE_SIGMOID: &str = include_str!("../wgsl/router_gate_sigmoid.wgsl");
+/// `wgsl/router_gate_sigmoid_rows.wgsl`
+pub const ROUTER_GATE_SIGMOID_ROWS: &str = include_str!("../wgsl/router_gate_sigmoid_rows.wgsl");
 /// `wgsl/router_gate_train.wgsl`
 pub const ROUTER_GATE_TRAIN: &str = include_str!("../wgsl/router_gate_train.wgsl");
 /// `wgsl/router_topk_compact.wgsl`
@@ -2012,7 +2020,9 @@ pub const ALL: &[(&str, &str)] = &[
     ("decode_softmax_batched", DECODE_SOFTMAX_BATCHED),
     ("depth_attn_bwd", DEPTH_ATTN_BWD),
     ("depth_attn_bwd_query", DEPTH_ATTN_BWD_QUERY),
+    ("depth_attn_bwd_rows", DEPTH_ATTN_BWD_ROWS),
     ("depth_attn_fwd", DEPTH_ATTN_FWD),
+    ("depth_attn_fwd_rows", DEPTH_ATTN_FWD_ROWS),
     ("depth_to_space3d", DEPTH_TO_SPACE3D),
     ("dfl_decode", DFL_DECODE),
     ("dfl_grad", DFL_GRAD),
@@ -2071,6 +2081,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("flash_attn_gqa_ext_bwd_dkv", FLASH_ATTN_GQA_EXT_BWD_DKV),
     ("flash_attn_gqa_ext_bwd_dq", FLASH_ATTN_GQA_EXT_BWD_DQ),
     ("flash_attn_gqa_ext_bwd_prep", FLASH_ATTN_GQA_EXT_BWD_PREP),
+    ("flash_attn_gqa_ext_rows", FLASH_ATTN_GQA_EXT_ROWS),
     ("flash_attn_vsa", FLASH_ATTN_VSA),
     ("focal_dice_grad", FOCAL_DICE_GRAD),
     ("focal_dice_stats", FOCAL_DICE_STATS),
@@ -2540,6 +2551,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("router_gate", ROUTER_GATE),
     ("router_gate_replay", ROUTER_GATE_REPLAY),
     ("router_gate_sigmoid", ROUTER_GATE_SIGMOID),
+    ("router_gate_sigmoid_rows", ROUTER_GATE_SIGMOID_ROWS),
     ("router_gate_train", ROUTER_GATE_TRAIN),
     ("router_topk_compact", ROUTER_TOPK_COMPACT),
     ("row_dot", ROW_DOT),

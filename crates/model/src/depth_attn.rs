@@ -27,7 +27,11 @@
 //!
 //! Kernels: `depth_attn_fwd` (norm, scores, softmax and mix in one pass per row, saving per-row RMS and weights),
 //! `depth_attn_bwd` (state gradients and score gradients) and `depth_attn_bwd_query` (the query gradient, reduced over
-//! rows). The host reference is [`crate::hostmath::depth_attention`].
+//! rows). The host reference is [`crate::hostmath::depth_attention`]. The first two are the barrier-free references
+//! (one thread per row); a handle on a device with workgroup reductions also carries their cooperative twins
+//! (`depth_attn_fwd_rows`, `depth_attn_bwd_rows`, appended by `gpu_core`'s twin table), and [`DepthAttn`] dispatches
+//! whichever `select::Op::DepthAttention` chooses. The twins reassociate the row sums, so they agree with the
+//! reference within a tolerance, not to the bit.
 
 use gpu_core::{DeviceBuffer, Gpu, Step};
 
@@ -46,18 +50,53 @@ pub fn kernels() -> &'static [(&'static str, &'static str)] {
     &[("depth_attn_fwd", kernels::DEPTH_ATTN_FWD), ("depth_attn_bwd", kernels::DEPTH_ATTN_BWD), ("depth_attn_bwd_query", kernels::DEPTH_ATTN_BWD_QUERY)]
 }
 
-/// The kernel slots of [`kernels`] on one device.
+/// The kernel slots of [`kernels`] on one device: the forward and state backward as the selector chose them for this
+/// handle (the cooperative twin or the reference), and the query backward.
 #[derive(Clone, Copy, Debug)]
 pub struct DepthAttnIds {
-    pub fwd: usize,
-    pub bwd: usize,
+    pub fwd: Variant,
+    pub bwd: Variant,
     pub bwd_query: usize,
 }
 
+/// A depth-attention kernel slot and its dispatch geometry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Variant {
+    pub kernel: usize,
+    /// One workgroup per row (a cooperative twin) rather than one thread per row (the reference).
+    pub per_row_workgroup: bool,
+}
+
+impl Variant {
+    fn dispatch(self, rows: u32) -> gpu_core::Dispatch {
+        if self.per_row_workgroup {
+            gpu_core::Dispatch::Workgroups(rows)
+        } else {
+            gpu_core::Dispatch::Threads(rows)
+        }
+    }
+}
+
 impl DepthAttnIds {
+    /// The slots on `gpu`, each reference replaced by its cooperative twin where the handle carries one and
+    /// `select::Op::DepthAttention` picks it on this device (its rule has no shape gate, so one choice per handle).
     pub fn resolve(gpu: &Gpu) -> Result<DepthAttnIds, String> {
+        use gpu_core::select::{Dtype, KernelSelector, KernelVariant, Op, OpShape};
         let k = |name: &str| gpu.kernel_index(name).ok_or_else(|| format!("depth attention: kernel {name} is not registered (append model::depth_attn::kernels() to the kernel list)"));
-        Ok(DepthAttnIds { fwd: k("depth_attn_fwd")?, bwd: k("depth_attn_bwd")?, bwd_query: k("depth_attn_bwd_query")? })
+        let coop = gpu_core::select::DefaultSelector.select(Op::DepthAttention, OpShape { m: 1, n: 1, k: 0, dtype: Dtype::F32 }, &gpu.caps()) == KernelVariant::WorkgroupPerOutput;
+        let variant = |reference: usize| match gpu.twin_of(reference).filter(|_| coop) {
+            Some(twin) => Variant { kernel: twin, per_row_workgroup: true },
+            None => Variant { kernel: reference, per_row_workgroup: false },
+        };
+        Ok(DepthAttnIds { fwd: variant(k("depth_attn_fwd")?), bwd: variant(k("depth_attn_bwd")?), bwd_query: k("depth_attn_bwd_query")? })
+    }
+
+    /// [`Self::resolve`] held to the barrier-free references whatever the device: the A/B arm the twins are gated
+    /// against.
+    pub fn reference(gpu: &Gpu) -> Result<DepthAttnIds, String> {
+        let ids = Self::resolve(gpu)?;
+        let k = |name: &str| gpu.kernel_index(name).expect("resolved above");
+        Ok(DepthAttnIds { fwd: Variant { kernel: k("depth_attn_fwd"), per_row_workgroup: false }, bwd: Variant { kernel: k("depth_attn_bwd"), per_row_workgroup: false }, ..ids })
     }
 }
 
@@ -162,7 +201,7 @@ impl DepthAttn {
     #[allow(clippy::too_many_arguments)]
     pub fn forward(&self, gpu: &Gpu, ids: &DepthAttnIds, store: &RetainedStates, partial: &DeviceBuffer, query: &DeviceBuffer, out: &DeviceBuffer, stats: &DeviceBuffer) -> Step {
         self.check_store(store);
-        gpu.step(ids.fwd, &[store.values(), partial, query, out, stats], &self.params(), self.rows)
+        gpu.dispatch(ids.fwd.kernel, &[store.values(), partial, query, out, stats], &self.params(), ids.fwd.dispatch(self.rows))
     }
 
     /// The backward of [`Self::forward`] given `dout` (`[nq, rows, width]`): ADDS each retained state's gradient into
@@ -187,7 +226,7 @@ impl DepthAttn {
         let grads = store.grads().expect("depth attention backward: an inference store has no gradients");
         let params = self.params();
         vec![
-            gpu.step(ids.bwd, &[store.values(), partial, query, stats, dout, grads, dpartial, dz], &params, self.rows),
+            gpu.dispatch(ids.bwd.kernel, &[store.values(), partial, query, stats, dout, grads, dpartial, dz], &params, ids.bwd.dispatch(self.rows)),
             gpu.step(ids.bwd_query, &[store.values(), partial, stats, dz, dquery], &params, self.nq * self.dim),
         ]
     }
