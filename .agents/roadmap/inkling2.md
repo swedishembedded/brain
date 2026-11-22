@@ -973,6 +973,11 @@ The first trainable target needs no streaming: the base is about 19.5 GB.
     whatever the model's GEMM precision (`ops::fp32_kernels`, which now also covers `matmul_dx` / `matmul_dw` of an
     f32 weight): the served bank forms the effective matrix exactly on the host, and TF32 rounded the factors' product
     (`adapter_merged` failed on CUDA at 5e-5 of 1e-5, passes now).
+  - Done (2026-11-22, fix2): `kv_precision` tiny on CUDA and Vulkan was a router near tie, not the tier: MoE call 9 at
+    position 9 takes experts [5, 7] under bf16 K/V on a GPU ([1, 5] on CPU, whose f32 rows equal the GPU's to 4.6e-5),
+    moving positions 9-12 (the sliding window of 4) by up to 0.44 logits. The test records both tiers' routing and
+    leaves a flip and its window out of the tiny checkpoint's statistics (counted, at most two); over the rest every
+    backend measures mean KL 1.2e-4, max 6.5e-4.
 - **I4.4** `model::train` + `data`: packed rows with document-boundary resets of
   attention, every conv state and the relative-position origin. Gate: no supervision or
   state crosses a boundary.
