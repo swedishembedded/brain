@@ -64,6 +64,17 @@ pub fn rig_qwen3_serving_jobs(tag: &str, memory: u64, gpus: &[u32], cpu_compute:
     rig_budgeted(tag, budgets, true, None, Vec::new(), qwen3_model_dir_of(&format!("{tag}-base"), qwen3::QwenConfig::tiny()), job_access)
 }
 
+/// [`rig_qwen3_on`] on cards of `card` bytes each, the largest card's size known to the service as a server measures
+/// it, computing on the CPU backend.
+pub fn rig_qwen3_cards(tag: &str, gpus: &[u32], card: u64) -> Rig {
+    let mut budgets = Budgets::new();
+    for &i in gpus {
+        budgets.set(Device::Gpu(i), card, 0);
+    }
+    budgets.set(Device::Cpu, 16 << 30, 0).exclude_cpu_compute(true);
+    rig_budgeted(tag, budgets, true, Some(card), Vec::new(), qwen3_model_dir_of(&format!("{tag}-base"), qwen3::QwenConfig::tiny()), None)
+}
+
 /// A server whose store holds `made` (a model directory) as `local/toy`.
 fn rig_over(tag: &str, memory: u64, store: bool, card: Option<u64>, extra: Vec<Arc<dyn residency::ResidentModel>>, made: TempDir) -> Rig {
     let mut budgets = Budgets::new();

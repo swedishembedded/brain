@@ -107,6 +107,9 @@ pub fn full_spec() -> ActionSpec {
         .param(ParamSpec::new("grad_accum", ParamType::Int, "records averaged into one optimiser step").default(json!(1)).min(1.0).max(4096.0).step(1.0))
         .param(ParamSpec::new("strict_updates", ParamType::Bool, "abort at the first optimiser step whose loss or gradient is not finite (off: such a step is skipped)").default(json!(false)))
         .param(ParamSpec::new("seed", ParamType::Int, "seed of the batch order (random when omitted; the report carries the one used)").min(0.0))
+        .param(crate::parallel::cards_param("one rank of the run, sharded as `sharding` says", "without resume_key"))
+        .param(crate::parallel::job_param("its sharding is the run's", ""))
+        .param(ParamSpec::new("sharding", ParamType::Str, "what the ranks of a run on several cards (or a job) shard among themselves: `replicated` (each holds everything), `optimizer` (ZeRO-1: the master copy and AdamW moments), `gradients` (ZeRO-2: those and the reduced gradients) or `parameters` (ZeRO-3: the weights too, gathered layer by layer; needs a resident train_precision such as weights=bf16). Omitted, the run takes the first of replicated, gradients and parameters whose rank fits the server's largest card; with a job, the plan's sharding, which a named one must equal"))
         .param(ParamSpec::new("max_block", ParamType::Int, "the longest training row in tokens: the memory reserved for the run is sized to it, and a longer record is refused by name").default(json!(8192)).min(64.0).max(1_048_576.0).step(1.0))
         .param(ParamSpec::new("thinking", ParamType::Bool, "train the model to reason before it answers (off: trained for no-think mode)").default(json!(true)))
         .param(ParamSpec::new("arch", ParamType::Str, "the base's architecture when its directory carries no config.json to tell it by"))
@@ -148,6 +151,9 @@ pub struct FullParams {
     pub grad_accum: u32,
     pub strict_updates: bool,
     pub seed: Option<u64>,
+    pub cards: u32,
+    pub job: Option<String>,
+    pub sharding: Option<String>,
     pub max_block: u32,
     pub thinking: bool,
     pub arch: Option<String>,
@@ -166,6 +172,10 @@ pub struct FullParams {
 pub struct FullRequest {
     pub params: FullParams,
     pub data: DataRefs,
+    /// How the run is spread over this server's cards and, with a `job`, over several servers.
+    pub spread: crate::parallel::Spread,
+    /// The sharding the request names, or its job's plan does; `None` leaves it to [`full_plan`].
+    pub sharding: Option<brain::Sharding>,
 }
 
 impl FullRequest {
@@ -193,8 +203,20 @@ impl FullRequest {
             brain::TrainPrecision::parse(spec).map_err(|e| format!("full_train: train_precision: {e}"))?;
         }
         check_resume(FULL_ACTION, params.resume_key.as_deref(), params.checkpoint_every)?;
+        let spread = crate::parallel::Spread::parse(FULL_ACTION, params.cards, params.job.as_deref(), params.seed, params.resume_key.as_deref(), true)?;
+        if spread.cards > 1 && params.resume_key.is_some() {
+            return Err(format!("full_train: resume_key: a full fine-tune on {} cards does not resume; run it on one card, or without resume_key", spread.cards));
+        }
+        let named = params.sharding.as_deref().map(|name| serde_json::from_value::<brain::Sharding>(json!(name)).map_err(|_| format!("full_train: sharding {name:?} is none of replicated, optimizer, gradients, parameters"))).transpose()?;
+        let sharding = match (&spread.job, named) {
+            (Some(job), Some(named)) if named != job.plan.sharding => {
+                return Err(format!("full_train: sharding {name} is not the job plan's {plan}: every server of a job shards as its plan says", name = sharding_name(named), plan = sharding_name(job.plan.sharding)));
+            }
+            (Some(job), _) => Some(job.plan.sharding),
+            (None, named) => named,
+        };
         check_attached(&data, inv)?;
-        Ok(FullRequest { params, data })
+        Ok(FullRequest { params, data, spread, sharding })
     }
 }
 
@@ -390,9 +412,26 @@ pub(crate) fn full_fine_tune(base_dir: &Path, p: &FullParams) -> Result<brain::C
     Ok(ft)
 }
 
+/// A sharding by its wire name (`gradients`).
+fn sharding_name(sharding: brain::Sharding) -> String {
+    serde_json::to_value(sharding).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()
+}
+
+/// The trainer of `request` over the base in `base_dir`, every setting checked as the run would ([`brain::ChatFullFineTune::check`]),
+/// and how it shards over its ranks with what each rank asks of a card of this server
+/// ([`brain::ChatFullFineTune::sharding_plan`]): what admission charges every claimed card and what the run trains with.
+pub(crate) fn full_plan(env: &JobEnv, request: &FullRequest, base_dir: &Path) -> Result<(brain::ChatFullFineTunePlan, brain::ShardingPlan), String> {
+    let p = &request.params;
+    let ft = full_fine_tune(base_dir, p)?;
+    let checked = ft.check().map_err(|e| format!("full_train: {e}"))?;
+    let sharded = ft.sharding_plan(p.max_block, request.spread.world(), env.largest_card_bytes, request.sharding).map_err(|e| format!("full_train: {e}"))?;
+    Ok((checked, sharded))
+}
+
 /// What `validate_only` answers: the settings the run would train with, as the trainer resolved them, and the memory
-/// it would reserve on a card.
-fn validation_report(p: &FullParams, plan: &brain::ChatFullFineTunePlan, footprint: &brain::TrainFootprint) -> Value {
+/// it would reserve on each card.
+fn validation_report(p: &FullParams, plan: &brain::ChatFullFineTunePlan, sharded: &brain::ShardingPlan) -> Value {
+    let footprint = &sharded.footprint;
     json!({
         "status": "valid",
         "objective": "full_sft",
@@ -405,23 +444,24 @@ fn validation_report(p: &FullParams, plan: &brain::ChatFullFineTunePlan, footpri
         "weight_decay": plan.weight_decay,
         "exit_entropy": plan.exit_entropy,
         "train_precision": p.train_precision.clone().unwrap_or_else(|| "fp32".to_string()),
+        "cards": p.cards,
+        "sharding": sharding_name(sharded.sharding),
         "device_bytes": footprint.device_bytes,
         "footprint": footprint.reason,
     })
 }
 
-/// Runs the `full_train` job `inv` on the device this thread is scoped to.
-pub fn run_full(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+/// Runs the `full_train` job `inv` on `devices`, the cards claimed for it: on the one this thread is scoped to, or
+/// as one rank per card of the request's spread ([`crate::parallel::train_as_ranks`]), sharded as [`full_plan`] says.
+pub fn run_full(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], progress: &mut dyn FnMut(Progress)) -> ActionResult {
     inv.cancel.check()?;
     let request = FullRequest::from_invocation(inv)?;
     let p = &request.params;
     if p.validate_only {
         let base_dir = job::resolve_base(env.models_dir.as_deref(), &p.base)?;
-        let ft = full_fine_tune(&base_dir, p)?;
-        let plan = ft.check().map_err(|e| format!("full_train: {e}"))?;
-        let footprint = ft.footprint(p.max_block).map_err(|e| format!("full_train: {e}"))?;
+        let (checked, sharded) = full_plan(env, &request, &base_dir)?;
         let mut outcome = Outcome::new();
-        outcome.outputs = validation_report(p, &plan, &footprint);
+        outcome.outputs = validation_report(p, &checked, &sharded);
         return Ok(outcome);
     }
     let run = match open_run(env, FULL_ACTION, p.resume_key.as_deref(), inv, p.seed)? {
@@ -435,6 +475,7 @@ pub fn run_full(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progres
         None => None,
     };
     let base_dir = job::resolve_base(env.models_dir.as_deref(), &p.base)?;
+    let (_, sharded) = full_plan(env, &request, &base_dir)?;
     let work = Workdir::create(env)?;
     progress(Progress::event(0, p.steps, json!({"type": "stage", "stage": "staging the datasets"})));
     let staged = job::stage(&request.data, &inv.blobs, env.store.as_ref(), &work)?;
@@ -459,13 +500,37 @@ pub fn run_full(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progres
     }
     progress(Progress::event(0, p.steps, json!({"type": "stage", "stage": "loading the base and training"})));
     let began = Instant::now();
-    let outcome = ft.run_with(&inv.cancel, |step| progress(Progress::event(step.step, step.steps, job::step_frame(step, began.elapsed().as_secs_f64())))).map_err(trainer_failure)?;
+    let frame = |step: &brain::FineTuneProgress| Progress::event(step.step, step.steps, job::step_frame(step, began.elapsed().as_secs_f64()));
+    let outcome = if request.spread.ranked() {
+        // Every rank draws the same batch order: the request's seed, or one drawn here for all of them. Rank 0 of the
+        // group writes where the run does; this server's other ranks each in a directory of their own.
+        let seed = p.seed.unwrap_or_else(brain::random_seed);
+        let rank = |i: usize, rank: brain::DataParallel, frames: Option<std::sync::mpsc::Sender<Progress>>| {
+            let dir = if i == 0 { out_dir.clone() } else { work.path().join(format!("rank-{i}")) };
+            let outcome = ft.clone().out_dir(dir).seed(seed).data_parallel(rank).run_with(&inv.cancel, |step| {
+                if let Some(frames) = &frames {
+                    let _ = frames.send(frame(step));
+                }
+            });
+            outcome.map_err(trainer_failure)
+        };
+        let mut outcomes = crate::parallel::train_as_ranks(&request.spread, FULL_ACTION, env, devices, sharded.sharding, rank, progress)?;
+        outcomes.swap_remove(0)
+    } else {
+        ft.run_with(&inv.cancel, |step| progress(frame(step))).map_err(trainer_failure)?
+    };
     if outcome.status != brain::FineTuneStatus::Completed {
         return Err("cancelled".into());
     }
+    work.ensure_within_quota()?;
+    // A server that runs none of a job's rank 0 answers for its ranks only: the server of rank 0 publishes the run.
+    if let Some(answer) = request.spread.answer_for_ranks("full_sft") {
+        let mut result = Outcome::new();
+        result.outputs = answer;
+        return Ok(result);
+    }
     let checkpoint = outcome.checkpoint.clone().ok_or("train: the run completed with no checkpoint")?;
     let report = outcome.report();
-    work.ensure_within_quota()?;
     let resumed_at = outcome.resumed_at;
     let mut result = checkpoint_outcome_of(env, &checkpoint, p.install_as.as_deref(), report, run.map(|r| (r, resumed_at)))?;
     // A server with no artifact store has nowhere to publish a checkpoint; it can only install one.

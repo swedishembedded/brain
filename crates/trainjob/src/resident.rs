@@ -30,8 +30,8 @@
 //!   serving is using - the caller retries;
 //! * one run holds one device at a time (the executor's device lane), and a
 //!   run needing more than the largest card holds is refused at the door;
-//! * a `train` run asking for `cards` N > 1 holds N cards at once, each
-//!   charged one rank's footprint ([`residency::ResidentModel::cards`]): the
+//! * a `train` or `full_train` run asking for `cards` N > 1 holds N cards at once, each
+//!   charged one rank's footprint, sharded as the run is ([`residency::ResidentModel::cards`]): the
 //!   cards with room, else ones that evicting idle residents frees, all of
 //!   them or none; a request for more cards than the server has is refused at
 //!   the door;
@@ -78,7 +78,6 @@ pub struct TrainConfig {
 /// The training workload. See the module doc.
 pub struct TrainResident {
     env: JobEnv,
-    largest_card_bytes: Option<u64>,
     devices: usize,
     footprints: FootprintCache,
     free_space: Arc<dyn FreeSpace>,
@@ -90,7 +89,7 @@ const HOST_PREFIX: &str = "host:";
 
 impl TrainResident {
     pub fn new(config: TrainConfig) -> TrainResident {
-        TrainResident { env: JobEnv { store: config.store, models_dir: config.models_dir, work_root: config.work_root, quotas: config.quotas, job_access: config.job_access }, largest_card_bytes: config.largest_card_bytes, devices: config.devices.max(1), footprints: FootprintCache::default(), free_space: config.free_space }
+        TrainResident { env: JobEnv { store: config.store, models_dir: config.models_dir, work_root: config.work_root, quotas: config.quotas, job_access: config.job_access, largest_card_bytes: config.largest_card_bytes }, devices: config.devices.max(1), footprints: FootprintCache::default(), free_space: config.free_space }
     }
 
     /// Everything about `inv` that can be known without a device: the request, the base, the artifact store it
@@ -110,9 +109,7 @@ impl TrainResident {
 
     fn admit_train(&self, inv: &Invocation) -> Result<Reservation, String> {
         let request = Request::from_invocation(inv)?;
-        if let Some(job) = &request.job {
-            crate::job::JobAccess::admit(self.env.job_access.as_ref(), job)?;
-        }
+        request.spread.admit(request::ACTION, self.devices, self.env.job_access.as_ref())?;
         if self.env.store.is_none() {
             if !request.data.digests().is_empty() {
                 return Err("train: this server has no artifact store (--artifact-store), so a dataset cannot be named by digest".to_string());
@@ -129,35 +126,31 @@ impl TrainResident {
         if let Some(teacher) = &request.params.distill_teacher {
             job::resolve_model(self.env.models_dir.as_deref(), "distill_teacher", teacher)?;
         }
-        let cards = request.params.cards;
-        if cards as usize > self.devices {
-            return Err(format!("train: cards {cards}: this server trains on at most {} card(s) at once", self.devices));
-        }
-        let footprint = self.footprints.of(&base_dir, &request, self.largest_card_bytes)?;
+        let footprint = self.footprints.of(&base_dir, &request, self.env.largest_card_bytes)?;
         self.fits_a_card("train", footprint.device_bytes, &format!("{}: {}", footprint.reason, footprint.breakdown), request.params.max_block)?;
-        Ok(Reservation::Card(footprint.device_bytes, cards))
+        Ok(Reservation::Card(footprint.device_bytes, request.spread.cards))
     }
 
     fn admit_full(&self, inv: &Invocation) -> Result<Reservation, String> {
         let request = FullRequest::from_invocation(inv)?;
         let p = &request.params;
         self.resumable(consolidate::FULL_ACTION, p.resume_key.as_deref())?;
+        request.spread.admit(consolidate::FULL_ACTION, self.devices, self.env.job_access.as_ref())?;
         if self.env.store.is_none() && p.install_as.is_none() {
             return Err("full_train: this server has no artifact store (--artifact-store) to publish the checkpoint to: set install_as to keep it in the model store".to_string());
         }
         self.check_digests(&request.data.digests())?;
         let base_dir = job::resolve_base(self.env.models_dir.as_deref(), &p.base)?;
         // Every setting the trainer would refuse is refused here, before the run is queued: the architecture and its
-        // options, the precision, the optimiser's plan (knowledge #513).
-        let ft = consolidate::full_fine_tune(&base_dir, p)?;
-        ft.check().map_err(|e| format!("full_train: {e}"))?;
-        let footprint = ft.footprint(p.max_block).map_err(|e| format!("full_train: {e}"))?;
-        self.fits_a_card("full_train", footprint.device_bytes, &format!("{}: {}", footprint.reason, footprint.breakdown), p.max_block)?;
+        // options, the precision, the optimiser's plan (knowledge #513), the sharding and whether a rank of it fits a
+        // card.
+        let (_, plan) = consolidate::full_plan(&self.env, &request, &base_dir)?;
         // A check trains nothing: it reads the base's config, host work that takes no card.
         if p.validate_only {
             return Ok(Reservation::Host(64 << 20));
         }
-        Ok(Reservation::Card(footprint.device_bytes, 1))
+        // Every claimed card holds one rank, sharded as planned.
+        Ok(Reservation::Card(plan.footprint.device_bytes, request.spread.cards))
     }
 
     fn admit_merge(&self, inv: &Invocation) -> Result<Reservation, String> {
@@ -217,7 +210,7 @@ impl TrainResident {
             return Err("timeline_train: this server has no artifact store (--artifact-store), so a dataset cannot be named by digest".to_string());
         }
         self.check_digests(&sources.digests())?;
-        if self.largest_card_bytes.is_some_and(|card| timeline::DEVICE_BUDGET > card) {
+        if self.env.largest_card_bytes.is_some_and(|card| timeline::DEVICE_BUDGET > card) {
             return Err(format!("timeline_train: a run is budgeted {} bytes of device memory and the largest card has less", timeline::DEVICE_BUDGET));
         }
         Ok(Reservation::Card(timeline::DEVICE_BUDGET, 1))
@@ -264,7 +257,7 @@ impl TrainResident {
 
     /// Refuses a run that needs more than the largest card holds.
     fn fits_a_card(&self, action: &str, bytes: u64, reason: &str, max_block: u32) -> Result<(), String> {
-        let Some(card) = self.largest_card_bytes else { return Ok(()) };
+        let Some(card) = self.env.largest_card_bytes else { return Ok(()) };
         if bytes > card {
             let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
             return Err(format!(
@@ -365,7 +358,7 @@ impl Instance for TrainInstance {
         let env = &self.env;
         let work: &mut dyn FnMut() -> ActionResult = match action {
             request::ACTION => &mut || job::run(env, inv, &self.devices, progress),
-            consolidate::FULL_ACTION => &mut || consolidate::run_full(env, inv, progress),
+            consolidate::FULL_ACTION => &mut || consolidate::run_full(env, inv, &self.devices, progress),
             consolidate::MERGE_ACTION => &mut || consolidate::run_merge(env, inv, progress),
             create::ACTION => &mut || create::run(env, inv, progress),
             pretrain::ACTION => &mut || pretrain::run(env, inv, progress),

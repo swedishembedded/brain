@@ -53,6 +53,7 @@ use std::path::{Path, PathBuf};
 
 use crate::finetune::{base_digest, block_for, digest, fit_opts, mix_rows, resolve_seed, tokenizer_and_template, Asked, Mix};
 use model::training::Capability;
+use model::zero::Sharding;
 
 use crate::{CancelToken, Device, Error, FineTuneProgress, FineTuneStatus, Result};
 
@@ -325,24 +326,64 @@ impl ChatFullFineTune {
     /// weights in host memory, so the card holds the weights and their gradients (8 bytes a parameter) and one
     /// step's activations, with the margin of [`crate::ChatFineTune::footprint`]. It reads the checkpoint's headers
     /// only; like that figure it is a model, not a measurement, and the run's own planner refuses what does not fit.
+    /// [`Self::sharded_footprint`] is the same figure for one rank of a sharded group.
     ///
     /// # Errors
     /// The base is not found or is of an architecture without a chat trainer.
     pub fn footprint(&self, block: u32) -> Result<crate::TrainFootprint> {
+        self.sharded_footprint(block, Sharding::Replicated, 1)
+    }
+
+    /// What one rank of a `world`-rank data-parallel group that shards `sharding` asks of its card, modelled as
+    /// [`Self::footprint`] is (a model, not a measurement). Per rank, with `P` parameters and `S = P / world`:
+    ///
+    /// * `replicated`: the fp32 weights and gradients, `8 P`, the optimizer state in host memory (any world);
+    /// * `optimizer`, `gradients`: `8 P` as well (the backward writes every gradient into the model's own buffers),
+    ///   plus this rank's slice of the f32 master, both moments and the reduced gradient on the card (`16 S`; with
+    ///   `moments=host` one slice buffer instead) and the two staging buffers a step packs units through;
+    /// * `parameters` (a layer-streamed resident build): this rank's slices of the master, the moments and the
+    ///   stored value (`12 S` plus the value's encoding), the window of gathered layers with their gradients, the
+    ///   largest table gathered, and one transient gradient slice.
+    ///
+    /// Each adds one step's activations, the margin and the device context.
+    ///
+    /// # Errors
+    /// The base is not found or is of an architecture without a chat trainer; a sharded stage over fewer than two
+    /// ranks.
+    pub fn sharded_footprint(&self, block: u32, sharding: Sharding, world: usize) -> Result<crate::TrainFootprint> {
         let store_root = loader::model_dir::resolve(self.models_dir.as_deref());
         let (weights, model_dir, _) = loader::model_dir::resolve_base(&self.base, store_root.as_deref()).map_err(Error::ModelNotFound)?;
         let chat = chat_entry(self.arch_of(&model_dir))?;
         let open = (chat.checkpoint_path)(&weights, &model_dir);
-        let (footprint, numel) = full_footprint(&open, block, true)?;
-        let modelled = 8 * numel + footprint.activation_bytes;
+        let (footprint, _) = full_footprint(&open, block, true)?;
+        let (modelled, terms) = rank_card_bytes(&footprint.trainable, footprint.activation_bytes, sharding, world, &self.precision)?;
         let device_bytes = model::memplan::train_reservation(modelled, None);
-        let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
+        let reason = match sharding {
+            Sharding::Replicated => "full fine-tune: fp32 weights and gradients on the card, AdamW moments and master weights in host memory".to_string(),
+            Sharding::Optimizer | Sharding::Gradients => format!("full fine-tune, one of {world} ranks sharding the optimizer state ({sharding:?}): fp32 weights and gradients and this rank's slice of the master and moments on the card"),
+            Sharding::Parameters => format!("full fine-tune, one of {world} ranks sharding the parameters: this rank's slices and the layers it gathers on the card"),
+        };
         Ok(crate::TrainFootprint {
             device_bytes,
-            breakdown: format!("fp32 weights and gradients {:.2} GiB + activations {:.2} GiB + {}% margin + {:.2} GiB device context = {:.2} GiB", gib(8 * numel), gib(footprint.activation_bytes), model::memplan::TRAIN_MARGIN_PERCENT, gib(model::memplan::TRAIN_DEVICE_CONTEXT_BYTES), gib(device_bytes)),
+            breakdown: format!("{terms} + activations {:.2} GiB + {}% margin + {:.2} GiB device context = {:.2} GiB", gib(footprint.activation_bytes), model::memplan::TRAIN_MARGIN_PERCENT, gib(model::memplan::TRAIN_DEVICE_CONTEXT_BYTES), gib(device_bytes)),
             base_tier: "f32".to_string(),
-            reason: "full fine-tune: fp32 weights and gradients on the card, AdamW moments and master weights in host memory".to_string(),
+            reason,
         })
+    }
+
+    /// How a full fine-tune over `world` ranks on cards of `card_bytes` each (`None`: not known, nothing is refused
+    /// for size) shards, and what each rank then asks of its card ([`Self::sharded_footprint`]).
+    ///
+    /// `asked` is taken as it is: refused when it needs more than the card holds, when the precision cannot shard
+    /// that way ([`Sharding::admits`]), or when a sharded stage has fewer than two ranks. Unasked, the run takes the
+    /// first of `replicated`, `gradients`, `parameters` whose rank fits the card and whose precision admits it
+    /// (`optimizer` is never chosen: it holds what `gradients` holds and moves twice the gradient traffic); a single
+    /// rank is replicated. When none fits, the refusal states what each needs and what the card holds.
+    ///
+    /// # Errors
+    /// The refusals above, and those of [`Self::sharded_footprint`].
+    pub fn sharding_plan(&self, block: u32, world: usize, card_bytes: Option<u64>, asked: Option<Sharding>) -> Result<ShardingPlan> {
+        pick_sharding(world, card_bytes, asked, |s| s.admits(&self.precision), |s| self.sharded_footprint(block, s, world))
     }
 
     /// The architecture of the base in `model_dir`: the one named, else the checkpoint's own, else `qwen3`.
@@ -790,6 +831,100 @@ fn full_footprint(open: &Path, block: u32, state_on_host: bool) -> Result<(model
     Ok((footprint, numel))
 }
 
+/// Which sharding a full fine-tune trains with over its group, and what each rank of it asks of its card
+/// ([`ChatFullFineTune::sharding_plan`]).
+#[derive(Clone, Debug)]
+pub struct ShardingPlan {
+    pub sharding: Sharding,
+    /// One rank's footprint, which every card of the group is charged.
+    pub footprint: crate::TrainFootprint,
+}
+
+fn gib(bytes: u64) -> f64 {
+    bytes as f64 / (1u64 << 30) as f64
+}
+
+/// The bytes one rank of a `world`-rank group sharding `sharding` keeps on its card for the parameters `trainable`
+/// (name, elements) and `activation` bytes of one step, before the margin and the device context, with its terms
+/// for a refusal to quote. See [`ChatFullFineTune::sharded_footprint`].
+fn rank_card_bytes(trainable: &[(String, usize)], activation: u64, sharding: Sharding, world: usize, precision: &model::TrainPrecision) -> Result<(u64, String)> {
+    let params: u64 = trainable.iter().map(|(_, n)| *n as u64).sum();
+    let largest = trainable.iter().map(|(_, n)| *n as u64).max().unwrap_or(0);
+    let weights_and_grads = 8 * params;
+    if !sharding.is_replicated() && world < 2 {
+        return Err(Error::InvalidRequest(format!("sharding {sharding:?} splits the run's state across the ranks of a data-parallel group, and this run has {world}; shard over two or more")));
+    }
+    let world = world.max(1) as u64;
+    let slice = params.div_ceil(world);
+    Ok(match sharding {
+        Sharding::Replicated => (weights_and_grads + activation, format!("fp32 weights and gradients {:.2} GiB", gib(weights_and_grads))),
+        Sharding::Optimizer | Sharding::Gradients => {
+            // A step packs units of at most the cap (a tensor larger than the cap is its own unit) through two staging
+            // buffers; the slice state is the master, both moments and the reduced gradient, or with `moments=host`
+            // one slice buffer the host state is moved through.
+            let unit = largest.max(params.min(model::zero::DEFAULT_UNIT_ELEMS));
+            let staging = 2 * 4 * unit;
+            let state = if precision.host_moments { 4 * unit.div_ceil(world) } else { 16 * slice };
+            (weights_and_grads + state + staging + activation, format!("fp32 weights and gradients {:.2} GiB + this rank's optimizer slice {:.2} GiB + staging {:.2} GiB", gib(weights_and_grads), gib(state), gib(staging)))
+        }
+        Sharding::Parameters => {
+            // Every layer is one unit and every other tensor (a table, a norm) is its own.
+            let mut layers: std::collections::BTreeMap<&str, u64> = std::collections::BTreeMap::new();
+            let mut other = 0u64;
+            for (name, n) in trainable {
+                match layer_of(name) {
+                    Some(layer) => *layers.entry(layer).or_default() += *n as u64,
+                    None => other = other.max(*n as u64),
+                }
+            }
+            let layer = layers.values().copied().max().unwrap_or(0);
+            let resident = precision.resident;
+            let value = |n: u64| resident.map_or(2 * n, |r| r.weights.device_bytes(1, n));
+            let window = resident.and_then(|r| r.window).map_or(2, |w| w as u64).max(2);
+            let slices = 12 * slice + value(slice);
+            let gathered = window * (value(layer) + 4 * layer) + value(other) + 4 * other;
+            let transient = 4 * layer.max(other).div_ceil(world);
+            (slices + gathered + transient + activation, format!("this rank's slices of master, moments and values {:.2} GiB + gathered layers and tables {:.2} GiB + a gradient slice {:.2} GiB", gib(slices), gib(gathered), gib(transient)))
+        }
+    })
+}
+
+/// The layer a parameter belongs to (`...layers.<n>.`), when it belongs to one.
+fn layer_of(name: &str) -> Option<&str> {
+    let at = name.find("layers.")?;
+    let rest = &name[at + "layers.".len()..];
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    (digits > 0).then(|| &name[..at + "layers.".len() + digits])
+}
+
+/// The rule of [`ChatFullFineTune::sharding_plan`] over `admits` (whether the run's precision can shard a way) and
+/// `footprint` (one rank's footprint sharded a way).
+fn pick_sharding(world: usize, card: Option<u64>, asked: Option<Sharding>, admits: impl Fn(Sharding) -> std::result::Result<(), String>, footprint: impl Fn(Sharding) -> Result<crate::TrainFootprint>) -> Result<ShardingPlan> {
+    let name = |s: Sharding| serde_json::to_value(s).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+    let fits = |f: &crate::TrainFootprint| card.is_none_or(|card| f.device_bytes <= card);
+    let card_text = |card: u64| format!("{:.1} GiB", gib(card));
+    if let Some(sharding) = asked {
+        admits(sharding).map_err(|why| Error::InvalidRequest(format!("sharding {}: {why}", name(sharding))))?;
+        let footprint = footprint(sharding)?;
+        if let Some(card) = card.filter(|_| !fits(&footprint)) {
+            return Err(Error::InvalidRequest(format!("sharding {} over {world} rank(s) needs about {:.1} GiB a card ({}: {}) and the largest card has {}", name(sharding), gib(footprint.device_bytes), footprint.reason, footprint.breakdown, card_text(card))));
+        }
+        return Ok(ShardingPlan { sharding, footprint });
+    }
+    let candidates: &[Sharding] = if world < 2 { &[Sharding::Replicated] } else { &[Sharding::Replicated, Sharding::Gradients, Sharding::Parameters] };
+    let mut needs = Vec::new();
+    for &sharding in candidates {
+        let footprint = footprint(sharding)?;
+        match admits(sharding) {
+            Ok(()) if fits(&footprint) => return Ok(ShardingPlan { sharding, footprint }),
+            Ok(()) => needs.push(format!("{} {:.1} GiB ({})", name(sharding), gib(footprint.device_bytes), footprint.breakdown)),
+            Err(why) => needs.push(format!("{} {:.1} GiB, not with this precision ({why})", name(sharding), gib(footprint.device_bytes))),
+        }
+    }
+    let card = card.map(card_text).unwrap_or_default();
+    Err(Error::InvalidRequest(format!("no sharding over {world} rank(s) fits a card of {card}: {}; lower max_block, hold the base narrower, or train on more cards", needs.join("; "))))
+}
+
 /// Where the AdamW moments of a full fine-tune of `open` live: beside the weights and gradients when the first selected
 /// card has room for all of it (the update is then a device kernel, not a round trip of every gradient and moment
 /// through host memory), in host memory otherwise. A CPU run, or a card whose free memory the platform does not report,
@@ -886,7 +1021,7 @@ pub(crate) fn exit_entropy_for(chat: &crate::chat_trainer::ChatEntry, asked: Opt
 mod tests {
     use model::memplan::ParamPrecision;
 
-    use super::{plan_on_cards, state_fits_on_device};
+    use super::{pick_sharding, plan_on_cards, rank_card_bytes, state_fits_on_device, Sharding};
 
     /// A `transformers` checkpoint directory: weights with no embedded config, and the config beside them.
     fn hf_dir(tag: &str) -> std::path::PathBuf {
@@ -919,5 +1054,72 @@ mod tests {
         assert!(state_fits_on_device(&dir, 64, ParamPrecision::FP32, 16 * numel + (1 << 20)).unwrap(), "room for the state and a small activation term");
         assert!(!state_fits_on_device(&dir, 64, ParamPrecision::FP32, 12 * numel).unwrap(), "room for values, gradients and one moment is not enough");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A toy decoder's parameters: `layers` layers of `per_layer` elements and two tables of `table` elements.
+    fn decoder(layers: usize, per_layer: usize, table: usize) -> Vec<(String, usize)> {
+        let mut params = vec![("model.embed_tokens.weight".to_string(), table), ("lm_head.weight".to_string(), table)];
+        for l in 0..layers {
+            params.push((format!("model.layers.{l}.mlp.weight"), per_layer / 2));
+            params.push((format!("model.layers.{l}.attn.weight"), per_layer / 2));
+        }
+        params
+    }
+
+    /// Replicated ranks hold the same whatever the group; the optimizer stages add only their slice of the state,
+    /// which shrinks as the group grows; parameter sharding is the one that holds less than a replica on a large
+    /// model, and less again on more ranks; a sharded stage needs a group.
+    #[test]
+    fn a_rank_holds_what_its_sharding_leaves_on_its_card() {
+        let default = model::TrainPrecision::default();
+        let resident = model::TrainPrecision::parse("weights=bf16").unwrap();
+        let params = decoder(36, 100 << 20, 400 << 20);
+        let bytes = |s: Sharding, world: usize, p: &model::TrainPrecision| rank_card_bytes(&params, 0, s, world, p).unwrap().0;
+        assert_eq!(bytes(Sharding::Replicated, 1, &default), bytes(Sharding::Replicated, 8, &default));
+        assert!(bytes(Sharding::Gradients, 4, &default) > bytes(Sharding::Replicated, 4, &default), "the optimizer stages keep the full weights and gradients and add a slice");
+        assert!(bytes(Sharding::Gradients, 8, &default) < bytes(Sharding::Gradients, 2, &default));
+        assert_eq!(bytes(Sharding::Optimizer, 4, &default), bytes(Sharding::Gradients, 4, &default));
+        assert!(bytes(Sharding::Gradients, 4, &model::TrainPrecision::parse("moments=host").unwrap()) < bytes(Sharding::Gradients, 4, &default), "moments=host keeps the slice off the card");
+        assert!(bytes(Sharding::Parameters, 4, &resident) < bytes(Sharding::Replicated, 4, &default), "parameter sharding holds less than a replica");
+        assert!(bytes(Sharding::Parameters, 8, &resident) < bytes(Sharding::Parameters, 4, &resident));
+        for s in [Sharding::Optimizer, Sharding::Gradients, Sharding::Parameters] {
+            let refused = rank_card_bytes(&params, 0, s, 1, &default).unwrap_err().to_string();
+            assert!(refused.contains("two or more"), "{s:?}: {refused}");
+        }
+    }
+
+    fn footprint(bytes: u64) -> crate::TrainFootprint {
+        crate::TrainFootprint { device_bytes: bytes, breakdown: format!("{bytes} bytes"), base_tier: "f32".into(), reason: "toy".into() }
+    }
+
+    /// Unasked, a run takes the first of replicated, gradients and parameters that fits the card and that its
+    /// precision admits; asked, it takes what it asked or is refused with the numbers; with nothing fitting, the
+    /// refusal states what each needs and what the card holds.
+    #[test]
+    fn a_full_fine_tune_shards_only_as_far_as_the_card_needs() {
+        let sizes = |s: Sharding| Ok(footprint(match s {
+            Sharding::Replicated => 100 << 30,
+            Sharding::Optimizer | Sharding::Gradients => 80 << 30,
+            Sharding::Parameters => 30 << 30,
+        }));
+        let any = |_: Sharding| Ok(());
+        let no_resident = |s: Sharding| if s == Sharding::Parameters { Err("needs weights=bf16".to_string()) } else { Ok(()) };
+        let pick = |card: Option<u64>, asked: Option<Sharding>, admits: &dyn Fn(Sharding) -> Result<(), String>| pick_sharding(4, card, asked, admits, sizes).map(|p| p.sharding);
+        assert_eq!(pick(None, None, &any).unwrap(), Sharding::Replicated, "an unknown card holds a replica");
+        assert_eq!(pick(Some(120 << 30), None, &any).unwrap(), Sharding::Replicated);
+        assert_eq!(pick(Some(90 << 30), None, &any).unwrap(), Sharding::Gradients);
+        assert_eq!(pick(Some(50 << 30), None, &any).unwrap(), Sharding::Parameters);
+        let none = pick(Some(50 << 30), None, &no_resident).unwrap_err().to_string();
+        assert!(none.contains("replicated 100.0 GiB") && none.contains("gradients 80.0 GiB") && none.contains("parameters 30.0 GiB") && none.contains("weights=bf16") && none.contains("50.0 GiB"), "{none}");
+        let too_small = pick(Some(10 << 30), None, &any).unwrap_err().to_string();
+        assert!(too_small.contains("no sharding over 4 rank(s) fits a card of 10.0 GiB"), "{too_small}");
+        assert_eq!(pick(Some(120 << 30), Some(Sharding::Gradients), &any).unwrap(), Sharding::Gradients, "what is asked is taken");
+        assert_eq!(pick(Some(90 << 30), Some(Sharding::Optimizer), &any).unwrap(), Sharding::Optimizer);
+        let over = pick(Some(50 << 30), Some(Sharding::Gradients), &any).unwrap_err().to_string();
+        assert!(over.contains("sharding gradients over 4 rank(s) needs about 80.0 GiB") && over.contains("50.0 GiB"), "{over}");
+        let refused = pick(None, Some(Sharding::Parameters), &no_resident).unwrap_err().to_string();
+        assert!(refused.contains("sharding parameters: needs weights=bf16"), "{refused}");
+        let alone = pick_sharding(1, Some(50 << 30), None, any, sizes).unwrap_err().to_string();
+        assert!(alone.contains("replicated 100.0 GiB") && !alone.contains("gradients"), "one rank is never sharded: {alone}");
     }
 }

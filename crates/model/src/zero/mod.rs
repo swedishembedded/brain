@@ -89,6 +89,26 @@ impl Sharding {
     pub fn is_replicated(&self) -> bool {
         *self == Sharding::Replicated
     }
+
+    /// Whether a run storing its parameters and state as `precision` can shard this way, before anything is built:
+    /// the optimizer and gradient stages hold f32 AdamW state over the parameters as the model holds them (only
+    /// `moments=host` and the activation policy may differ from the default); parameter sharding gathers each block
+    /// through a layer-streamed resident build, which `precision` must ask for (`weights=`). Replicated takes any.
+    pub fn admits(self, precision: &crate::TrainPrecision) -> Result<(), String> {
+        match self {
+            Sharding::Replicated => Ok(()),
+            Sharding::Optimizer | Sharding::Gradients => {
+                let parameters = crate::TrainPrecision { activations: None, host_moments: false, ..precision.clone() };
+                if parameters.is_default() {
+                    Ok(())
+                } else {
+                    Err("the sharded optimizer state is f32 AdamW over the parameters as the model holds them; a run asking for another parameter or state precision is not sharded".into())
+                }
+            }
+            Sharding::Parameters if precision.resident.is_some() => Ok(()),
+            Sharding::Parameters => Err("parameter sharding gathers each block where it is used through a layer-streamed resident build; ask for one with train_precision weights=bf16".into()),
+        }
+    }
 }
 
 /// Default cap of a unit, in elements (128 MiB of f32): the size of the staging buffer a step packs through, unless

@@ -50,12 +50,30 @@ Two more actions of `brain/train` produce a checkpoint instead of an adapter.
   `thinking`, `arch`, `replay_share`, `train_precision` (`key=value,...`, e.g. `state=int8,sr=on`: what each
   trainable parameter, its gradient and its optimiser state are stored as; fp32 everywhere by default, and an unknown
   key or value is refused before anything loads), `install_as`, `resume_key`, `checkpoint_every` (below),
-  `exit_entropy` (below), `validate_only`. Every setting the trainer would refuse without reading a weight (an
-  architecture option, a `train_precision` the architecture does not run, an `exit_entropy` for a model without exit
-  gates, an optimiser plan that does not hold, a run larger than the largest card) is refused at submission, a 400
-  or a bus error. `validate_only: true` makes those checks and answers `{"status": "valid", "arch", "steps",
-  "grad_accum", "max_block", "lr", "weight_decay", "exit_entropy", "train_precision", "device_bytes", "footprint"}`
-  without training: host work that takes no card. The dataset's records are checked by `check_dataset`.
+  `exit_entropy` (below), `validate_only`, and `cards`, `job` and `sharding` (below). Every setting the trainer
+  would refuse without reading a weight (an architecture option, a `train_precision` the architecture does not run,
+  an `exit_entropy` for a model without exit gates, an optimiser plan that does not hold, a sharding the precision
+  cannot take, a run no sharding fits on the largest card) is refused at submission, a 400 or a bus error.
+  `validate_only: true` makes those checks and answers `{"status": "valid", "arch", "steps", "grad_accum",
+  "max_block", "lr", "weight_decay", "exit_entropy", "train_precision", "cards", "sharding", "device_bytes",
+  "footprint"}` (`device_bytes` is what each card is charged) without training: host work that takes no card. The
+  dataset's records are checked by `check_dataset`.
+- **`full_train` on several cards and servers** takes `cards` and `job` exactly as `train` does (below): one
+  data-parallel rank per claimed card, the same `seed` on every rank, rank 0 streaming the steps and answering with
+  the report of a one-card run, whose `parallel` object says how it was spread; a server of a job that does not
+  hold rank 0 answers `{"status": "completed", "objective": "full_sft", "job", "ranks": [first, last]}`. A run on
+  several cards does not resume (`resume_key` is refused). `sharding` says what the ranks split among themselves:
+  `replicated` (each holds the fp32 weights and gradients), `optimizer` (ZeRO-1: each also holds its slice of the
+  f32 master copy and AdamW moments on the card), `gradients` (ZeRO-2: those and the reduced gradient slice, half
+  the gradient traffic) or `parameters` (ZeRO-3: the weights too, gathered layer by layer; it needs a resident
+  `train_precision` such as `weights=bf16`). Every claimed card is charged one rank's footprint under that sharding.
+  The optimizer and gradient stages take f32 AdamW state only (another `train_precision` than `moments=host` is
+  refused) and keep every gradient in the model's own buffers, so they spare host memory and the update, not the
+  card: only `parameters` makes a rank smaller than a replica. Unnamed, the run takes the **first of `replicated`,
+  `gradients`, `parameters` whose rank fits the server's largest card** and whose precision admits it (`optimizer`
+  is never chosen: it holds what `gradients` holds and moves twice the gradient traffic; one rank is always
+  replicated); when none fits, the request is refused with what each needs and what the card holds. With a `job`,
+  the plan's `sharding` is the run's, and a named one must equal it.
 - **`merge`** folds a LoRA adapter into the weights it targets (`W + alpha/r B A`). The adapter is the input blob
   `adapter` or `adapter_digest` (exactly one); the work is host-side and takes no card. Host-side work (a merge,
   `init_model`, `check_dataset`, a `validate_only` check) runs in host memory whatever `--device` the server was
@@ -239,7 +257,7 @@ No dataset or adapter travels through the API as a message body.
 | `steps`, `grad_accum`, `rank`, `alpha`, `lr`, `weight_decay`, `seed` | the optimiser's settings; what is not named is the trainer's own default, which `GET /v1/capabilities` lists as the param's `implied_default` |
 | `strict_updates` | abort at the first optimiser step whose loss or gradient is not finite (default off: such a step is skipped, the weights untouched, and the run aborts on the third in a row) |
 | `max_block` | the longest training row in tokens (default 8192). The memory reserved for the run is sized to it and a longer record is refused by name |
-| `cards` | how many of the server's cards the run trains on at once (default 1, at most the cards the server has). Each card runs one data-parallel rank holding the run's whole footprint and its own share of the records, all with the same `seed` (one is drawn for all of them when the request names none), and every step's gradients are reduced over the cards, so each step sees `cards` times the records of a one-card step. The result is the same document as on one card, from rank 0; the same request trains the same adapter, byte for byte, though not the adapter of a one-card run. `sft` and `policy_gradient` only: another objective naming more than one card is refused by name |
+| `cards` | how many of the server's cards the run trains on at once (default 1, at most the cards the server has). Each card runs one data-parallel rank holding the run's whole footprint and its own share of the records, all with the same `seed` (one is drawn for all of them when the request names none), and every step's gradients are reduced over the cards, so each step sees `cards` times the records of a one-card step. The result is the same document as on one card, from rank 0; the same request trains the same adapter, byte for byte, though not the adapter of a one-card run. `sft` and `policy_gradient` only: another objective naming more than one card is refused by name (see [why](#which-objectives-train-as-ranks)) |
 | `job` | makes the run this server's part of one data-parallel job spread over several servers (below); `sft` and `policy_gradient` only, with `seed`, without `resume_key` |
 | `thinking`, `pack_answers` | how records are rendered |
 | `base_format` | how the frozen base is held: `bf16`, `fp8`, `nf4`, ...; default the tier that fits the card |
@@ -356,9 +374,10 @@ and gives them back:
   refused (HTTP 429, a bus `error` frame), the hold ends, and the client
   retries.
 - A run holds the cards it asked for (`cards`, default one), and several runs
-  use several cards. Each card must hold the run's whole footprint; a run that
-  needs more than the largest card holds is refused at once, with what it
-  needs, and so is one asking for more cards than the server has. A run on
+  use several cards. Each card must hold one rank's footprint (a `full_train`
+  rank's under its sharding); a run that needs more than the largest card holds
+  is refused at once, with what it needs, and so is one asking for more cards
+  than the server has. A run on
   several cards takes them all at once: the cards with room, then cards that
   evicting idle instances frees, and nothing is evicted while the cards it
   needs cannot all be had (a card busy serving); it waits as a one-card run
@@ -381,8 +400,8 @@ different machines) by sending each server the same `train` request with a
 ```
 
 - `plan` is the job plan every server gets unchanged (the `--job-plan` file of
-  `brain finetune`): data-parallel only (`tp` and `pp` 1, `dp` the world size,
-  `sharding` replicated), optionally `collectives` and `bucket_mib`. At most
+  `brain finetune`): data-parallel only (`tp` and `pp` 1, `dp` the world size;
+  `sharding` replicated for `train`, any for `full_train`), optionally `collectives` and `bucket_mib`. At most
   4096 ranks, timeouts at most a day, the document at most 4 KiB.
 - The server runs ranks `first_rank` to `first_rank + cards - 1`, one per card
   it claims; the ranges of all servers cover the plan's ranks once.
@@ -415,6 +434,26 @@ different machines) by sending each server the same `train` request with a
   fallback (the server sees no card, or the placer finds none with room), the
   run is refused with the reason unless the request sets `allow_cpu: true`: a
   card trains orders of magnitude faster.
+
+### Which objectives train as ranks
+
+Data parallelism changes nothing in what a step optimises only when the objective
+is a mean of terms that each depend on one record: every rank then computes the
+gradient of its own records' terms, and their weighted sum over the group is the
+gradient of the whole batch.
+
+- `sft`, `policy_gradient` and `full_train` are such sums (a token's or a
+  rollout's loss; a group's advantages are computed from the records' rewards
+  before training) and train as ranks.
+- `preference` (DPO, IPO, SimPO, ORPO: a loss per pair, the frozen reference
+  being the starting policy every rank holds) and `distill` (a KL per token to
+  the teacher) are such sums too, with each pair or record as the unit, so they
+  would shard cleanly; their trainers do not take a group yet, so `cards` above
+  one and `job` are refused by name for them.
+- `feedback` (KTO) is not: its reference point is a KL estimate over the step's
+  batch, from mismatched pairs of that batch, so a rank holding a shard would
+  estimate a different reference point and optimise a different objective unless
+  the estimate itself were summed over the group first. It is refused by name.
 
 ## Refitting while sampling (asynchronous rollouts)
 

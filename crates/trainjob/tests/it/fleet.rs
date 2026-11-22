@@ -113,7 +113,7 @@ fn a_job_is_refused_at_the_door_for_a_secret_a_coordinator_or_a_plan_this_server
     resumable["resume_key"] = json!("k");
     assert!(refused(resumable).contains("does not resume"));
     let mut huge = params(&first, 2);
-    huge["job"] = json!("x".repeat(trainjob::request::MAX_JOB_DOCUMENT_BYTES + 1));
+    huge["job"] = json!("x".repeat(trainjob::parallel::MAX_JOB_DOCUMENT_BYTES + 1));
     assert!(refused(huge).contains("at most"));
 
     let none = rig_qwen3_on("fleet-none", 16 << 30, &[0, 1], false);
@@ -121,3 +121,49 @@ fn a_job_is_refused_at_the_door_for_a_secret_a_coordinator_or_a_plan_this_server
     assert!(off.contains("--train-job-secret"), "{off}");
     assert_reservation_returned(&first);
 }
+
+/// A full fine-tune (`full_train`) spread over two servers the same way: the plan's sharding is the run's, rank 0's
+/// server publishes the checkpoint, the other answers for its ranks, and the weights are those two cards of one
+/// server train under the same sharding.
+#[test]
+fn a_full_fine_tune_over_two_servers_shards_as_its_plan_says_and_trains_what_one_server_trains() {
+    use trainjob::consolidate::{full_spec, FULL_ACTION};
+    let secret = brain::JobSecret::random();
+    let coordinator = free_address();
+    let first = server("fleet-full-a", &secret, Some(&coordinator));
+    let second = server("fleet-full-b", &secret, None);
+    let full = |rig: &Rig, cards: u32| {
+        let train = data_digest(rig, &plain());
+        json!({"base": BASE, "steps": 2, "lr": 1e-3, "seed": 7, "max_block": 128, "cards": cards, "data": json!({"train": {"digest": train.hex()}}).to_string()})
+    };
+    let mut plan = plan(2, &coordinator, 60_000);
+    plan["sharding"] = json!("gradients");
+    let digest = secret.digest_hex();
+    let (a, b) = (with_job(full(&first, 1), &plan, 0, &digest), with_job(full(&second, 1), &plan, 1, &digest));
+    let run_full = |rig: &Rig, params: Value| crate::support::run_action(rig, FULL_ACTION, &full_spec(), params, &[], &Frames::default());
+    let (published, worker) = std::thread::scope(|scope| {
+        let worker = scope.spawn(|| run_full(&second, b));
+        let published = run_full(&first, a);
+        (published, worker.join().unwrap())
+    });
+    let published = published.expect("rank 0's server").outputs;
+    let worker = worker.expect("the other server").outputs;
+    assert!(published["checkpoint_digest"].as_str().is_some(), "rank 0's server publishes the checkpoint: {published}");
+    assert_eq!((&published["parallel"]["world_size"], &published["parallel"]["sharding"]), (&json!(2), &json!("gradients")), "{published}");
+    assert_eq!(worker, json!({"status": "completed", "objective": "full_sft", "job": "fleet-test", "ranks": [1, 1]}), "the other server answers for its ranks only");
+    assert_reservation_returned(&first);
+    assert_reservation_returned(&second);
+
+    let stranger = run_full(&second, with_job(full(&second, 1), &plan, 1, &brain::JobSecret::random().digest_hex())).unwrap_err();
+    assert!(stranger.contains("full_train: job: secret_sha256 is not the digest of this server's job secret"), "{stranger}");
+    let mut mismatch = with_job(full(&first, 1), &plan, 0, &digest);
+    mismatch["sharding"] = json!("optimizer");
+    assert!(run_full(&first, mismatch).unwrap_err().contains("plan"), "a request cannot shard other than its job's plan");
+
+    let two = rig_qwen3_on("fleet-full-two", 16 << 30, &[0, 1], false);
+    let mut alone = full(&two, 2);
+    alone["sharding"] = json!("gradients");
+    let alone = run_full(&two, alone).expect("two cards of one server").outputs;
+    assert_eq!(alone["weights_sha256"], published["weights_sha256"], "one job over two servers trains what two cards of one server train");
+}
+

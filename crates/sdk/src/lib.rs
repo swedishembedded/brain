@@ -218,6 +218,9 @@ pub use rl::objective::onpolicy_distill::{DistillEstimator, DistillRefusal};
 pub use data::tokenizer_identity::{TokenizerDifferences, TokenizerIdentity, TokenizerSize};
 #[cfg(feature = "study")]
 pub use rl::objective::dpo::{PairLoss, DEFAULT_SIMPO_GAMMA};
+/// What a data-parallel group shards across its ranks ([`DataParallel::sharded`], [`ChatFullFineTune::sharding_plan`]).
+#[cfg(feature = "study")]
+pub use model::zero::Sharding;
 #[cfg(feature = "study")]
 pub use data_parallel::{DataParallel, GroupBreaker, JobRanks, ParallelReport, RankDevice, RankGuard};
 #[cfg(feature = "study")]
@@ -225,7 +228,7 @@ pub use finetune::{DEFAULT_LORA_LR, DEFAULT_LORA_RANK, LORA_WEIGHT_DECAY, emit_h
 #[cfg(feature = "study")]
 mod full_finetune;
 #[cfg(feature = "study")]
-pub use full_finetune::{merge_adapter, ChatFullFineTune, ChatFullFineTuneOutcome, ChatFullFineTunePlan, MergedCheckpoint, FINE_TUNE_EXIT_ENTROPY};
+pub use full_finetune::{merge_adapter, ChatFullFineTune, ChatFullFineTuneOutcome, ChatFullFineTunePlan, MergedCheckpoint, ShardingPlan, FINE_TUNE_EXIT_ENTROPY};
 #[cfg(feature = "study")]
 pub mod from_scratch;
 #[cfg(feature = "study")]

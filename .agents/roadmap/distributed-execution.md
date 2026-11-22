@@ -793,6 +793,16 @@ Scope: Running one training job as ranks across machines, and serving one model 
   2.44-2.47 ms). One stream mark per operation; a start mark as well cost
   4 us, and the mark without its memory barrier is refused by the driver for
   host memory.
+- **Served full fine-tune on four cards (2026-11-22, n442, 4 GH200).**
+  `brain serve --training --device gpu0,gpu1,gpu2,gpu3 --backend cuda`,
+  `full_train` of Qwen3-4B (fp32 training, `cards` 4, `sharding` gradients,
+  20 steps, lr 1e-6, seed 7, `max_block` 512, 256 chat records): completed
+  in 102 s wall from submission (first step reported at 41.7 s: base load,
+  staging, group formation), 0.335 s a step over steps 2-20; the report's
+  `parallel` read world 4, ranks [0, 4), gpu0-gpu3, collective `nccl`,
+  transport `in_process`, sharding `gradients`. The installed export
+  (`model.safetensors`, 16.1 GB fp32) served on one card and answered
+  "What is 147 plus 592?" with "147 plus 592 is 739." One run, no repeat.
 
 ## Plan: multi-node clusters (2026-11-21)
 
@@ -971,6 +981,32 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         all or nothing; a busy one is never a victim. Test: `residency`
         `workload_cards` (an idle spanning model gives way, a busy one makes
         the claim wait, a claim that cannot complete evicts nothing).
+      - [x] The served `full_train` on several cards and servers
+        (2026-11-22): the same `cards` and `job` fields as `train`, one
+        implementation (`trainjob::parallel`: the params, `Spread`'s parsing
+        and door checks, `JobRef`, the rank runner `train_as_ranks` over
+        `run_ranks`, the answer of a server without rank 0), plus `sharding`.
+        `ChatFullFineTune::sharded_footprint` models one rank's card bytes
+        per sharding and `sharding_plan` is the rule: a named sharding is
+        taken or refused with the numbers; unnamed, the first of replicated,
+        gradients, parameters whose rank fits the largest card and whose
+        precision admits it (`Sharding::admits`, also the fit loop's check);
+        none fitting is refused listing each one's GiB and the card's.
+        Admission charges every claimed card one rank's sharded footprint;
+        with a `job` the plan's sharding is the run's. Tests: `trainjob`
+        `full_cards` (two cards held and charged the gradient-sharded
+        footprint, report `parallel`, repeatable weights, door refusals),
+        `fleet` (full fine-tune over two servers equals two cards of one,
+        byte for byte), `sdk` `full_finetune::tests` (the rule, the model).
+        On n442: Qwen3-4B on 4 cards, ZeRO-2 (Measured). Open: a full
+        fine-tune on several cards does not resume (`resume_key` refused);
+        the optimizer and gradient stages spare no card memory below a
+        replica (ZeRO-2 gradient memory, below), so the rule only ever moves
+        from replicated to parameters; `preference` and `distill` are
+        per-pair and per-token sums that would shard cleanly but their
+        trainers take no group yet; `feedback` (KTO) estimates its reference
+        point over the step's batch and stays on one card (served-training
+        guide, "Which objectives train as ranks").
       - [x] One served job over several servers (2026-11-22): a `train`
         request's `job` document (the plan, `first_rank`, the secret's
         SHA-256; at most 4 KiB, data-parallel replicated plans of at most

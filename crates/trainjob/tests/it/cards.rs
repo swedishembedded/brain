@@ -32,14 +32,19 @@ fn params(rig: &Rig, cards: u32, steps: u32) -> Value {
 }
 
 /// What a run held while its first step was reported, and how it answered.
-struct Observed {
-    result: Result<capability::Outcome, String>,
-    steps: usize,
-    held: Option<ResidencyReport>,
+pub struct Observed {
+    pub result: Result<capability::Outcome, String>,
+    pub steps: usize,
+    pub held: Option<ResidencyReport>,
 }
 
 fn run_observed(rig: &Rig, params: Value, cancel_at_first_step: bool) -> Observed {
-    let mut inv = invocation(params, &[]).unwrap();
+    run_action_observed(rig, trainjob::ACTION, invocation(params, &[]).unwrap(), cancel_at_first_step)
+}
+
+/// Runs the validated invocation `inv` of `action`, noting what was held at its first step and cancelling there when
+/// asked.
+pub fn run_action_observed(rig: &Rig, action: &'static str, mut inv: capability::Invocation, cancel_at_first_step: bool) -> Observed {
     inv.cancel = CancelToken::armed();
     let token = inv.cancel.clone();
     let held: Arc<Mutex<Option<ResidencyReport>>> = Arc::default();
@@ -47,7 +52,7 @@ fn run_observed(rig: &Rig, params: Value, cancel_at_first_step: bool) -> Observe
     let (exec, seen, counted) = (rig.exec.clone(), held.clone(), steps.clone());
     let (tx, rx) = std::sync::mpsc::channel();
     rig.exec.submit(
-        Job::new(trainjob::MODEL, trainjob::ACTION, inv)
+        Job::new(trainjob::MODEL, action, inv)
             .on_progress(move |p| {
                 if p.event.as_ref().is_some_and(|e| e["type"] == "step") {
                     *counted.lock().unwrap() += 1;
@@ -71,7 +76,7 @@ fn run_observed(rig: &Rig, params: Value, cancel_at_first_step: bool) -> Observe
 }
 
 /// The cards a running job was charged on, from a residency report.
-fn cards_charged(report: &ResidencyReport) -> BTreeSet<u32> {
+pub fn cards_charged(report: &ResidencyReport) -> BTreeSet<u32> {
     report.budgets.iter().filter(|b| b.used > 0).filter_map(|b| if let Device::Gpu(i) = b.device { Some(i) } else { None }).collect()
 }
 
@@ -193,7 +198,7 @@ fn a_rank_that_fails_alone_mid_run_fails_the_run_at_once_with_its_reason() {
         error
     };
     let devices = [Device::Gpu(0), Device::Gpu(1)];
-    let why = trainjob::job::run_ranks(&devices, &abort, &|| breakers[0].first_failed(), body, &mut |_| {}).expect_err("the run fails with its rank");
+    let why = trainjob::parallel::run_ranks(&devices, &abort, &|| breakers[0].first_failed(), body, &mut |_| {}).expect_err("the run fails with its rank");
     let waited = failed_at.lock().unwrap().expect("rank 1 failed after step 1").elapsed();
     assert_eq!(why, "train: the device failed during the run (see the server log)", "the run names the first rank's failure");
     let peer = peer_error.lock().unwrap().clone().expect("rank 0 failed too");

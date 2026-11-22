@@ -1790,10 +1790,7 @@ fn sharded_optimizer<M: Model>(model: &mut M, opts: &FitOpts, grad_sync: Option<
     // sharded optimizer's, and it holds f32 AdamW state.
     // (`moments=host` places the sharded state in host memory instead of on the card.)
     let tier = if opts.precision.host_moments { crate::zero::StateTier::Host } else { crate::zero::StateTier::Device };
-    let parameters = crate::TrainPrecision { activations: None, host_moments: false, ..opts.precision.clone() };
-    if !parameters.is_default() {
-        return Err(refuse("the sharded optimizer state is f32 AdamW over the parameters as the model holds them; a run asking for another parameter or state precision is not sharded".into()));
-    }
+    sharding.admits(&opts.precision).map_err(refuse)?;
     if model.off_device_state().is_some() {
         return Err(refuse("this model keeps its master copies and optimizer state in a state of its own, which is not sharded".into()));
     }
