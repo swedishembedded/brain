@@ -885,11 +885,51 @@ Driven by the per-device gap list, as new candidates only:
   - Once I2.2 lands, `brain pull` must accept the entry as is and write its checksums
     (I0.4).
 
-## GPU validation (2026-11-22, partial)
+## GPU validation (2026-11-22)
 
-- CUDA (GH200, gpu3) ran only `tiny_parity` before another session took the card: at the default `GemmPrecision::Auto`
-  the tiny reference drifted to 8.5e-3 relative at `final_in` (CPU: 2.9e-5). The parity tests now pin
-  `Fp32Reference` (the convention of the other reference gates); the Auto-tier distance is a precision metric of
-  the default path, still to be measured on the real checkpoint (KL/top-1 vs the f32 reference).
-- Left: every campaign test on CUDA and Vulkan, real-weight parity and the uncached forward's timing and profile on a
-  GH200, once a card is free.
+One GH200 (CUDA 13 and the native Vulkan backend, adapter `NVIDIA GH200 120GB (Vulkan compute, ash + naga
+WGSL->SPIR-V)`), main at `a799c05b6` plus the three fixes below; every suite run whole, both backends.
+
+| Suite | CUDA | Vulkan |
+|---|---|---|
+| `brain-model` it: the campaign modules (softcap ... gqa_mixer_windowed), `bf16_roundtrip`, `qops_frozen_lora_grad` | 95/95 | 95/95 (serial) |
+| `head_ce::bf16_head_at_real_width_runs_4096_tokens_and_reports_its_time` (GPU-only, ignored elsewhere) | pass: forward 0.68 s, backward 1.7-2.1 s | - |
+| `brain-model` `moe_block_gradcheck` | 17/17 | 17/17 |
+| `gpu-core` it `moe_mxfp8` | 2/2 | 2/2 |
+| `gradcheck` it `ouro_fd`, `huginn_fd`, `backend_parity` | 4/4 | 4/4 |
+| `ouro` it, `huginn` it | 24/24, 19/19 | 24/24, 19/19 |
+| `inkling2` it (layout, tiny_parity, real_parity, serve incl. the released weights' cached greedy decode, vision, vision_train) | 25/25 | 25/25 |
+| `catalog` it `inkling2_served` | 2/2 | 2/2 |
+
+Defects found and fixed:
+- `micro_bank_stacked` held the NVFP4 bank's gather and grouped products to the bit on CUDA, where both run native
+  twins that sum in other orders; each is now held to the f64 oracle and the bits only on the WGSL tier, as
+  `gpu-core`'s `moe_nvfp4` gate already states.
+- The default arithmetic (`GemmPrecision::Auto`) routed through bf16 tensor-core products while the reference keeps the
+  router in binary32: on CUDA the last visits drifted to 7.5x the bf16 reference run's distance, KL up to 1.1e-1 and a
+  greedy token led by 0.65 logits changed. The router is now an f32 weight under `fp32_kernels` (#557).
+- Vulkan reported no bf16/f16 storage, so `Ops::lands` widened such weights to f32 (`head_ce` x3, `qops_tier_coverage`
+  failed); fixed in `backend-vulkan` and `ArchDesc::numeric_view` (#558).
+- Not fixed, pre-existing (#300): tests sharing the pooled Vulkan device concurrently lose it (`flash_ext`,
+  `serve_visit_state`: DEVICE_LOST, a SIGSEGV in `router_replay`); every one passes alone or with `--test-threads=1`.
+
+Real weights (`real_parity`, binary32 products): every visit and the three full logit rows within 1.2e-4 to 3.2e-4 of
+the reference's own bf16-vs-f32 distance (CUDA and Vulkan alike; the gate allows 1e-2), router agreement at least the
+bf16 run's, the f32 run's greedy token at every position. The default arithmetic, the served path's precision metric
+against the f32 golden (worst KL of the three full rows; greedy agreement at every position), on CUDA: KL 2.2e-2 /
+3.6e-5 / 7.0e-3 nats for the three prompts (bf16 reference run 4.4e-2 / 2.4e-3 / 6.3e-3), greedy 22/22, 27/27, 26/27
+(the change at a near tie, lead 4.2e-2). On Vulkan the default is binary32 (no library GEMM): KL 5e-11.
+
+Uncached forward of one prompt (22-27 tokens): CUDA 0.51-0.54 s warm at the default arithmetic (0.57-0.66 s binary32
+with every visit read back); Vulkan 4.7-7.2 s. The model loads in about 40 s from a page-cached file.
+
+Profile (nsys, CUDA, the `real_parity` run before the rebase: 9 forwards, 4.35 s of kernels, about 0.48 s per forward),
+the Phase 7 gap list:
+1. `depth_attn_fwd` 69%: 2.8 ms a launch, 120 launches a forward; the barrier-free reference kernel (one invocation
+   per row) for a softmax over at most 8 states.
+2. `moe_nvfp4_gemv_gather` 15% (+ `moe_mxfp8_gemv_gather` 1.3%): 0.8 ms a launch; `Inkling2::forward` runs the decode
+   regime's per-slot gather for a whole prompt (the served engine groups by expert in prefill).
+3. `flash_attn_gqa_ext` 4.4% (0.44 ms a launch, barrier-free reference), `matmul_gemv_w_bf16` 4.2%,
+   `router_gate_sigmoid` 3.1% (0.31 ms for 25 x 128 scores, barrier-free).
+4. Host: about 3,500 `cuMemAlloc`/`cuMemFree` pairs and 3,000 launches a forward (2.5 s in `cuMemFree` over the run):
+   per-step storage instead of retained blocks or a step arena.
