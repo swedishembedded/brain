@@ -45,6 +45,7 @@ use model::looped::{Attention, LoopShape, Segment, Visit, VisitPlan};
 use model::message_gate::{MessageGate, MessageGateIds, MessageGateWeights};
 use model::moe::{MoeIds, MoeShape};
 use model::ops::{upload_micro_bank, upload_preserved, MicroBank, MicroRoute, Ops, Weight};
+use model::adapter::bank::AdapterBank;
 use model::paged::BlockTable;
 use model::policy::LinearActivations;
 use model::saved::RetainedStates;
@@ -93,6 +94,8 @@ pub fn kernels() -> Vec<(&'static str, &'static str)> {
     more.extend(model::act_quant::KERNELS);
     // The declared tier's routing weight per slot: the flat `[token, expert]` index of each slot, then the gather.
     more.extend(model::dispatch::LORA_EXPERT_BANK_PIPELINES);
+    // The served adapter bank's corrections.
+    more.extend(model::dispatch::LORA_BANK_PIPELINES);
     more.extend(model::head_transform::KERNELS);
     // The served engine's: the visit-state pool and the device readout.
     more.extend(model::serve::visit_state::VisitPool::<Vec<f32>>::pipelines());
@@ -121,10 +124,20 @@ pub(crate) type Pool = VisitPool<Vec<f32>>;
 pub(crate) enum Rows<'a> {
     /// One whole sequence from position 0 that keeps no state: the reference forward.
     Whole,
-    /// One prompt chunk of one served sequence at positions `start ..`.
-    Chunk { pool: &'a Pool, table: &'a BlockTable, start: u32 },
-    /// One new token of each served sequence, at the last position its table backs.
-    Decode { pool: &'a Pool, tables: &'a [&'a BlockTable] },
+    /// One prompt chunk of one served sequence at positions `start ..`, under the adapter bank's current row slots.
+    Chunk { pool: &'a Pool, table: &'a BlockTable, start: u32, bank: Option<&'a AdapterBank> },
+    /// One new token of each served sequence, at the last position its table backs, under the bank's row slots.
+    Decode { pool: &'a Pool, tables: &'a [&'a BlockTable], bank: Option<&'a AdapterBank> },
+}
+
+impl Rows<'_> {
+    /// The adapter bank correcting these rows' products (the served engine's, its row slots written for the pass).
+    fn bank(&self) -> Option<&AdapterBank> {
+        match self {
+            Rows::Whole => None,
+            Rows::Chunk { bank, .. } | Rows::Decode { bank, .. } => *bank,
+        }
+    }
 }
 
 /// The taps of one short convolution.
@@ -439,6 +452,12 @@ impl Inkling2 {
         &self.plan
     }
 
+    /// Whether every layer's experts are published microscaled banks (NVFP4 or MXFP8), the products an adapter's
+    /// stacked expert pairs correct in serving; a dense f32 bank takes no served expert adapter.
+    pub fn experts_are_banked(&self) -> bool {
+        self.w.layers.iter().all(|l| matches!(l.experts, Experts::Micro { .. }))
+    }
+
     pub fn ops(&self) -> &Ops {
         &self.ops
     }
@@ -723,7 +742,7 @@ impl Inkling2 {
         self.tap(s, probe, &key("mlp_in"), &mlp_in, n);
         let mlp_in = gated(s, probe, 3, &mlp_in, "gated_mlp");
         let hn = self.rms(s, &mlp_in, &lw.mlp_norm, t);
-        let moe = self.moe(s, v, &hn, t, !matches!(rows, Rows::Decode { .. }), probe, routes);
+        let moe = self.moe(s, v, &hn, t, !matches!(rows, Rows::Decode { .. }), rows.bank(), probe, routes);
         self.tap(s, probe, &key("mlp"), &moe, n);
         let mlp_conv = self.conv(s, rows, v.index, 3, &moe, ConvTaps::Static(&lw.mlp_conv), t, d);
         self.conv_state(s, probe, &key("conv3"), &moe, t, d);
@@ -743,10 +762,12 @@ impl Inkling2 {
         let full = cfg.kind(layer) == LayerKind::Full;
 
         let q = self.proj(s, &lw.wq, qh, t);
+        self.adapt(s, rows, layer, "wq_du", &lw.wq, qh, &q, t);
         let q = self.l2clip(s, &q, Some(&lw.q_scale), t * a.heads, a.heads, a.head_dim, cfg.qk_clip);
         let mut kv = Vec::with_capacity(2);
-        for (j, (input, w)) in [(kh, &lw.wk), (vh, &lw.wv)].into_iter().enumerate() {
+        for (j, (input, w, leaf)) in [(kh, &lw.wk, "wk_dv"), (vh, &lw.wv, "wv_dv")].into_iter().enumerate() {
             let pre = self.proj(s, w, input, t);
+            self.adapt(s, rows, layer, leaf, w, input, &pre, t);
             self.conv_state(s, probe, &key(&format!("conv{j}")), &pre, t, a.kv_dim());
             let conv = match &lw.kv_conv[j] {
                 KvConv::Static(base) => self.conv(s, rows, v.index, j, &pre, ConvTaps::Static(base), t, a.kv_dim()),
@@ -766,9 +787,11 @@ impl Inkling2 {
             kv.push(normed);
         }
         let rel = self.proj(s, &lw.wr, qh, t);
+        self.adapt(s, rows, layer, "wr_du", &lw.wr, qh, &rel, t);
         let rel = self.l2clip(s, &rel, Some(&lw.rel_scale), t * a.heads, a.heads, cfg.d_rel, cfg.rel_clip);
         self.tap(s, probe, &key("rel_states"), &rel, t * a.heads * cfg.d_rel);
         let sink = self.proj(s, &lw.sink, qh, t);
+        self.adapt(s, rows, layer, "attn_sink_proj", &lw.sink, qh, &sink, t);
 
         let heads = HeadShape { n_heads: a.heads, n_kv_heads: a.kv_heads, head_dim: a.head_dim };
         let opts = AttnOptions {
@@ -787,11 +810,11 @@ impl Inkling2 {
                 s.extend(flash_ext::flash_ext_fwd(g, &self.k.flash, &heads, &opts, &inputs, Contiguous { b: 1, t, pos0: 0 }, &q, &kv[0], &kv[1], &out, &lse));
                 out
             }
-            Rows::Chunk { pool, table, start } => {
+            Rows::Chunk { pool, table, start, .. } => {
                 self.flush(s);
                 pool.attend_chunk(g, v.index, table, *start, &heads, &opts, &inputs, &q, &kv[0], &kv[1], t)
             }
-            Rows::Decode { pool, tables } => {
+            Rows::Decode { pool, tables, .. } => {
                 self.flush(s);
                 pool.attend_decode(g, v.index, tables, &heads, &opts, &inputs, &q, &kv[0], &kv[1])
             }
@@ -799,18 +822,31 @@ impl Inkling2 {
 
         // The output gate: sigmoid(gate_attn x) * attention, then the output projection.
         let gate = self.proj(s, &lw.gate_attn, qh, t);
+        self.adapt(s, rows, layer, "gate_attn", &lw.gate_attn, qh, &gate, t);
         let n = t * a.q_dim();
         let sig = g.storage(u64::from(n));
         s.push(g.step(self.k.sigmoid, &[&gate, &sig], &[n], n));
         let gated = g.storage(u64::from(n));
         s.push(g.step(self.k.mul, &[&out, &sig, &gated], &[n], n));
-        Ok(self.proj(s, &lw.wo, &gated, t))
+        let o = self.proj(s, &lw.wo, &gated, t);
+        self.adapt(s, rows, layer, "wo_ud", &lw.wo, &gated, &o, t);
+        Ok(o)
+    }
+
+    /// The adapter bank's correction of the linear `leaf` of `layer` (`y [t, n] = x w^T`, corrected in place for the
+    /// rows whose sequence runs under an adapter): the trainer's sites ([`crate::train::sites`]) by their leaf names.
+    #[allow(clippy::too_many_arguments)]
+    fn adapt(&self, s: &mut Vec<Step>, rows: &Rows, layer: u32, leaf: &str, w: &Weight, x: &DeviceBuffer, y: &DeviceBuffer, t: u32) {
+        if let Some(bank) = rows.bank() {
+            bank.correct(self.g(), s, layer as usize, leaf, x, y, t, w.n(), 0);
+        }
     }
 
     /// The routed experts over `t` rows. `grouped`: the published banks multiply slots grouped by expert (one weight
     /// pass per expert, the prefill regime) instead of one gather per slot (decode); the arithmetic is the same.
+    /// `bank`: the served adapter bank, whose stacked expert pairs correct each routed product.
     #[allow(clippy::too_many_arguments)]
-    fn moe(&self, s: &mut Vec<Step>, v: &Visit, x: &DeviceBuffer, t: u32, grouped: bool, probe: &mut Option<&mut dyn Probe>, routes: Option<&mut Vec<DeviceBuffer>>) -> DeviceBuffer {
+    fn moe(&self, s: &mut Vec<Step>, v: &Visit, x: &DeviceBuffer, t: u32, grouped: bool, bank: Option<&AdapterBank>, probe: &mut Option<&mut dyn Probe>, routes: Option<&mut Vec<DeviceBuffer>>) -> DeviceBuffer {
         let (cfg, g, d) = (&self.cfg, self.g(), self.cfg.hidden);
         let lw = &self.w.layers[v.layer];
         let key = |name: &str| format!("visit{}.{name}", v.index);
@@ -881,6 +917,11 @@ impl Inkling2 {
                 } else {
                     s.push(w13.gather(g, x, &ids, &gate_up, slots, k).expect(REGISTERED));
                 }
+                // An adapter's stacked pairs correct each routed product after it, on the rows the product read.
+                let names = LayerNames::new(v.layer as u32);
+                if let Some(bank) = bank {
+                    bank.correct_experts(g, s, &names.w13(), x, k, &ids, &gate_up, slots);
+                }
                 s.push(glu_act_step(g, &self.k.glu, &spec, slots, ff, &gate_up, None, &h));
                 // The vendor's runtime multiplies each slot's activation by its routing weight BEFORE quantizing the
                 // down product's input, so under the declared tier the weight moves in front of the round trip (an
@@ -894,6 +935,9 @@ impl Inkling2 {
                     s.push(w2.grouped(g, h, &route.tab, &route.perm, &y, route.tiles(), 1, e).expect(REGISTERED));
                 } else {
                     s.push(w2.gather(g, h, &ids, &y, slots, 1).expect(REGISTERED));
+                }
+                if let Some(bank) = bank {
+                    bank.correct_experts(g, s, &names.w2(), h, 1, &ids, &y, slots);
                 }
                 let identity = g.storage(u64::from(slots));
                 g.write(&identity, &(0..slots).collect::<Vec<u32>>());
@@ -975,7 +1019,7 @@ impl Inkling2 {
                 g.submit(&[], &[short_conv_fwd(g, &self.k.conv, &shape.with_history(), x, dynamic, base, None, Some(&hist), &y), conv_state_tail_step(g, &self.k.conv, t, c, k, x, &hist, &tail)]);
                 pool.store_conv_rows(g, visit, state, &[table], &tail);
             }
-            Rows::Decode { pool, tables } => {
+            Rows::Decode { pool, tables, .. } => {
                 self.flush(s);
                 let hist = pool.conv_rows(g, visit, state, tables);
                 g.submit(&[], &[short_conv_step(g, &self.k.conv, &shape, x, dynamic, base, &hist, &y)]);

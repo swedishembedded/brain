@@ -53,7 +53,7 @@ fn f32_bytes(v: &[f32]) -> Vec<u8> {
 /// property is the engine against the forward, not the weights' meaning), under a `parameter_groups` declaration of
 /// the released shape: every other tensor a float32 cast, each layer's banks with the activation quantization the
 /// release requires.
-fn declared_release(tag: &str) -> Option<PathBuf> {
+pub(crate) fn declared_release(tag: &str) -> Option<PathBuf> {
     let tiny = brain_testutil::testdata_path("golden/inkling2/tiny/checkpoint");
     if !tiny.join("model.safetensors").is_file() {
         brain_testutil::skip("testdata/golden/inkling2/tiny absent (make testdata/fetch, or run tools/goldens/inkling2_dump_reference.py tiny)");
@@ -125,7 +125,7 @@ fn ops(choice: LinearActivations) -> model::ops::Ops {
 }
 
 fn options() -> EngineOptions {
-    EngineOptions { kv_tier: KvTier::F32, sizing: VisitPoolSizing { block_size: 8, num_blocks: 64, live_rows: 4, snapshot_rows: 4 }, max_seq_len: 128, prefill_chunk: 5 }
+    EngineOptions { kv_tier: KvTier::F32, sizing: VisitPoolSizing { block_size: 8, num_blocks: 64, live_rows: 4, snapshot_rows: 4, undo_rows: false }, max_seq_len: 128, prefill_chunk: 5 }
 }
 
 fn rel_err(got: &[f32], want: &[f32]) -> f32 {

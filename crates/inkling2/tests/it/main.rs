@@ -12,6 +12,7 @@ mod layout;
 mod real_lora;
 mod real_parity;
 mod serve;
+mod serve_adapters;
 mod serve_images;
 mod tiny_parity;
 mod training;

@@ -33,6 +33,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use gpu_core::{DeviceBuffer, Gpu};
+use model::adapter::bank::{AdapterBank, AdapterServing, BankedEngine};
+pub use model::adapter::bank::{AdapterBankConfig, AdapterError, AdapterInfo, UnloadStatus, VerifiedAdapter};
+use model::adapter::sites::{ExpertSite, LoraSites};
+use model::adapter::LinearSite;
 use model::kv_tier::KvTier;
 use model::ops::Ops;
 use model::paged::{BlockAllocator, BlockTable, KvNamespace, BASE_KV_NAMESPACE};
@@ -44,6 +48,7 @@ use model::snapshot_prefix::Prompt;
 
 use crate::config::{Inkling2Config, LayerKind};
 use crate::model::{Inkling2, Pool, Rows};
+use crate::train::sites::{expert_sites, lora_sites, SiteKind};
 
 /// Tokens before a prompt's end where its prefix entry is filed (knowledge #347).
 pub const CHECKPOINT_TAIL: usize = 16;
@@ -79,6 +84,29 @@ pub struct Engine {
     readout: ReadoutKernels,
     max_seq_len: usize,
     prefill_chunk: u32,
+    /// The adapters this engine serves beside the base ([`Engine::enable_adapters`]); `None` serves the base alone.
+    bank: Option<AdapterBank>,
+}
+
+/// The adapter sites the served engine corrects: the trainer's linear sites ([`crate::train::sites`], each product
+/// corrected after it) and its stacked expert sites (each routed bank product corrected after it). The merged sites
+/// (depth and message queries, message-gate factors) are matrices an operator reads whole, not products a row's
+/// adapter can correct, so an adapter that carries one is refused by name ([`Engine::load_adapter`]).
+pub struct ServedSites<'a>(pub &'a Inkling2Config);
+
+impl LoraSites for ServedSites<'_> {
+    fn lora_sites(&self) -> Vec<LinearSite> {
+        lora_sites(self.0).into_iter().filter(|(_, kind)| *kind == SiteKind::Linear).map(|(site, _)| site).collect()
+    }
+    fn expert_sites(&self) -> Vec<ExpertSite> {
+        expert_sites(self.0)
+    }
+}
+
+impl AdapterServing for ServedSites<'_> {
+    fn attention_leaves(&self) -> Vec<&'static str> {
+        vec!["wq_du", "wk_dv", "wv_dv", "wo_ud"]
+    }
 }
 
 fn namespace(adapter: Option<AdapterId>) -> KvNamespace {
@@ -125,7 +153,7 @@ impl Engine {
         let layout = Self::layout(cfg, opts.kv_tier)?;
         let pool = VisitPool::new(m.ops().gpu(), layout, opts.sizing)?;
         let readout = ReadoutKernels::resolve(m.ops().gpu())?;
-        Ok(Engine { m, pool, readout, max_seq_len: opts.max_seq_len, prefill_chunk: opts.prefill_chunk })
+        Ok(Engine { m, pool, readout, max_seq_len: opts.max_seq_len, prefill_chunk: opts.prefill_chunk, bank: None })
     }
 
     /// Load the checkpoint in `dir` onto `ops` and serve it at `opts`.
@@ -148,6 +176,66 @@ impl Engine {
 
     fn g(&self) -> &Gpu {
         self.m.ops().gpu()
+    }
+
+    /// Serve LoRA adapters beside the base, in the same batches, from the one resident copy of the weights: a bank over
+    /// [`ServedSites`] targeting `cfg.targets`, with room for the larger of a decode batch and a prefill chunk. Call once,
+    /// before serving. Expert targets need the published microscaled banks (a dense f32 bank has no served expert
+    /// product to correct). The engine registers the bank's kernels ([`crate::kernels`]).
+    pub fn enable_adapters(&mut self, cfg: AdapterBankConfig) -> Result<(), AdapterError> {
+        if self.bank.is_some() {
+            return Err(AdapterError::BadConfig("the adapter bank is already enabled".into()));
+        }
+        let sites = ServedSites(self.m.config());
+        let experts = sites.expert_sites();
+        if experts.iter().any(|e| cfg.targets.iter().any(|t| t == e.leaf)) && !self.m.experts_are_banked() {
+            return Err(AdapterError::BadConfig("inkling2: expert adapters are served over the published NVFP4/MXFP8 banks; this checkpoint stores its experts dense".into()));
+        }
+        let rows = (self.pool.max_batch() as u32).max(self.prefill_chunk);
+        self.bank = Some(AdapterBank::new_with_experts(self.g(), &sites.lora_sites(), &experts, cfg, rows, 0..self.m.config().n_layers as usize)?);
+        Ok(())
+    }
+
+    /// Register a verified adapter (host memory only; it reaches a slot when the scheduler first asks about it) and
+    /// return the id the scheduler addresses it by. A pair for a merged site is refused by name.
+    pub fn load_adapter(&mut self, adapter: VerifiedAdapter) -> Result<AdapterId, AdapterError> {
+        let merged: Vec<String> = lora_sites(self.m.config()).into_iter().filter(|(_, kind)| *kind == SiteKind::Merged).map(|(site, _)| site.name).collect();
+        if let Some(site) = adapter.adapter.sites.iter().find(|s| merged.contains(&s.base)) {
+            return Err(AdapterError::Incompatible(format!(
+                "{}: a merged site (a matrix the forward reads whole) is trained but not served; serve an adapter of the linear and expert sites",
+                site.base
+            )));
+        }
+        self.bank.as_mut().ok_or(AdapterError::NoBank)?.register(adapter)
+    }
+
+    /// Unload an adapter: free its slot and purge its cached prompts; while sequences still run under it, it only stops
+    /// admitting new ones.
+    pub fn unload_adapter(&mut self, id: AdapterId) -> Result<UnloadStatus, AdapterError> {
+        match self.bank.as_mut().ok_or(AdapterError::NoBank)?.unload(id)? {
+            Some(ns) => {
+                self.pool.evict_namespace(ns);
+                Ok(UnloadStatus::Unloaded)
+            }
+            None => Ok(UnloadStatus::Draining),
+        }
+    }
+
+    /// Every registered adapter, oldest first.
+    pub fn adapters(&self) -> Vec<AdapterInfo> {
+        self.bank.as_ref().map_or_else(Vec::new, AdapterBank::infos)
+    }
+
+    /// Write the bank's row slots for a pass over `tables` (`rows_each` rows per sequence) and return the bank, or
+    /// `None` without one (every sequence must then run under the base).
+    fn bank_for(&self, tables: &[&BlockTable], rows_each: usize) -> Option<&AdapterBank> {
+        let Some(bank) = &self.bank else {
+            assert!(tables.iter().all(|t| t.kv_namespace() == BASE_KV_NAMESPACE), "inkling2 serve: a sequence runs under an adapter but this engine has no adapter bank");
+            return None;
+        };
+        let slots: Vec<u32> = tables.iter().flat_map(|t| std::iter::repeat_n(bank.slot_of(t.kv_namespace()), rows_each)).collect();
+        bank.write_slots(self.g(), &slots);
+        Some(bank)
     }
 
     /// Where a prompt of `len` tokens is filed: short of its end by [`CHECKPOINT_TAIL`] when that leaves an entry
@@ -188,7 +276,8 @@ impl Engine {
         }
         let recording = table.routing_log_mut().is_some();
         let mut routes = recording.then(Vec::new);
-        let normed = self.m.trunk(&mut s, &Rows::Chunk { pool: &self.pool, table, start }, x, n as u32, &mut None, routes.as_mut()).expect("an admitted prompt runs");
+        let bank = self.bank_for(&[&*table], n);
+        let normed = self.m.trunk(&mut s, &Rows::Chunk { pool: &self.pool, table, start, bank }, x, n as u32, &mut None, routes.as_mut()).expect("an admitted prompt runs");
         self.m.flush(&mut s);
         if let Some(routes) = routes {
             self.record(&mut [table], &routes, |_| start, n);
@@ -237,7 +326,8 @@ impl Engine {
         let mut routes = recording.then(Vec::new);
         let logits = {
             let refs: Vec<&BlockTable> = tables.iter().map(|t| &**t).collect();
-            let normed = self.m.trunk(&mut s, &Rows::Decode { pool: &self.pool, tables: &refs }, x, b, &mut None, routes.as_mut()).expect("an admitted batch runs");
+            let bank = self.bank_for(&refs, 1);
+            let normed = self.m.trunk(&mut s, &Rows::Decode { pool: &self.pool, tables: &refs, bank }, x, b, &mut None, routes.as_mut()).expect("an admitted batch runs");
             self.m.head(&mut s, &normed, b)
         };
         self.m.flush(&mut s);
@@ -256,7 +346,32 @@ impl Engine {
     }
 }
 
+impl BankedEngine for Engine {
+    fn load_adapter(&mut self, adapter: VerifiedAdapter) -> Result<AdapterId, AdapterError> {
+        Engine::load_adapter(self, adapter)
+    }
+    fn unload_adapter(&mut self, id: AdapterId) -> Result<UnloadStatus, AdapterError> {
+        Engine::unload_adapter(self, id)
+    }
+}
+
 impl PagedDecoder for Engine {
+    fn adapter_availability(&mut self, adapter: AdapterId) -> model::serve::AdapterAvailability {
+        let Some(bank) = &mut self.bank else { return model::serve::AdapterAvailability::Unknown };
+        let answer = bank.availability(self.m.ops().gpu(), adapter);
+        for ns in bank.take_purge() {
+            self.pool.evict_namespace(ns);
+        }
+        answer
+    }
+    fn pin_adapter(&mut self, adapter: AdapterId) {
+        self.bank.as_mut().expect("pin_adapter on an engine without an adapter bank").pin(adapter);
+    }
+    fn unpin_adapter(&mut self, adapter: AdapterId) {
+        if let Some(ns) = self.bank.as_mut().and_then(|b| b.unpin(adapter)) {
+            self.pool.evict_namespace(ns);
+        }
+    }
     fn alloc_mut(&mut self) -> &mut BlockAllocator {
         self.pool.alloc_mut()
     }
