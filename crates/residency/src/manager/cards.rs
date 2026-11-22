@@ -19,11 +19,10 @@
 //! * a count no set of cards could ever hold (fewer cards whose budget holds one share than the count) is refused as
 //!   [`ClaimError::TooLarge`], so the job fails at once instead of queueing forever;
 //! * cards that hold a share now are taken first, the ones with the most room first;
-//! * the rest come from cards where evicting **idle** single-device residents makes room, the fewest victims first
-//!   (a pinned resident, one a job runs on, is never a victim);
+//! * the rest come one card at a time from the card where evicting **idle** residents makes room with the fewest
+//!   victims: single-device residents on that card, residents on several cards that span it (one victim frees all
+//!   of its cards, which the next card counts), or both. A pinned resident, one a job runs on, is never a victim;
 //! * when that is still short, nothing is evicted and the claim waits ([`ClaimError::NoCapacity`]).
-//!
-//! Idle multi-device residents are not made to give way to a cards claim; such a claim waits until they are gone.
 
 use std::cmp::Reverse;
 use std::collections::HashSet;
@@ -39,6 +38,8 @@ use crate::{Device, InstanceKey, ResidentModel};
 pub(super) struct CardsPlan {
     pub(super) devices: Vec<Device>,
     pub(super) victims: Vec<InstanceKey>,
+    /// The idle residents on several cards evicted to make room.
+    pub(super) spanning: Vec<InstanceKey>,
     /// What the claim charges, card by card (and on the host, for a process of its own).
     pub(super) cost: MultiDeviceCost,
 }
@@ -82,39 +83,31 @@ impl ResidencyManager {
         free.sort_by_key(|&d| (Reverse(self.budgets.free_on(d)), device_order(d)));
         let mut devices: Vec<Device> = free.into_iter().take(count).collect();
         let mut victims: Vec<InstanceKey> = Vec::new();
-        if devices.len() < count {
-            // A plan restricted to one card at a time names victims on that card only, so the plans of two cards
-            // never name the same resident and taken together they free exactly what each says.
-            let every: HashSet<Device> = self.budgets.devices().collect();
-            let mut evictable: Vec<(Device, Vec<InstanceKey>)> = class
+        let mut spanning: Vec<InstanceKey> = Vec::new();
+        // The rest, one card at a time, each from the card the fewest new victims free; a resident on several cards
+        // that gives way frees every one of them, which the next round counts.
+        while devices.len() < count {
+            let best = class
                 .iter()
                 .copied()
                 .filter(|&d| !exclude.contains(&d) && !devices.contains(&d) && self.budgets.usable_on(d) >= share(d))
-                .filter_map(|d| {
-                    let mut only = every.clone();
-                    only.remove(&d);
-                    plan_eviction_with(&*self.eviction, &synth_cost_for(d, share(d)), &self.budgets, &self.residents, &[], &only).map(|plan| (d, plan.victims))
-                })
-                .collect();
-            evictable.sort_by_key(|(d, victims)| (victims.len(), device_order(*d)));
-            let short = count - devices.len();
-            if evictable.len() < short {
+                .filter_map(|d| self.free_card(d, share(d), &spanning).map(|freeing| (d, freeing)))
+                .min_by_key(|(d, freeing)| (freeing.victims.len() + freeing.spanning.len(), freeing.spanning.len(), device_order(*d)));
+            let Some((d, freeing)) = best else {
                 return Err(ClaimError::NoCapacity(format!(
-                    "{key} runs on {count} cards with {mib} MiB on each; {} have room now and {} more can be freed by evicting idle instances",
-                    devices.len(),
-                    evictable.len()
+                    "{key} runs on {count} cards with {mib} MiB on each; {} have room now or can be freed by evicting idle instances",
+                    devices.len()
                 )));
-            }
-            for (d, on_d) in evictable.into_iter().take(short) {
-                devices.push(d);
-                victims.extend(on_d);
-            }
+            };
+            devices.push(d);
+            victims.extend(freeing.victims);
+            spanning.extend(freeing.spanning);
         }
         // In card order, whichever had the most room: rank r of the run goes to the r-th card, so the same set of
         // cards always gets the same ranks and a repeat reduces in the same order (the same bytes).
         devices.sort_by_key(|&d| device_order(d));
         let per_card: Vec<(Device, u64)> = devices.iter().map(|&d| (d, share(d))).collect();
-        Ok(CardsPlan { devices, victims, cost: MultiDeviceCost::new(per_card, process_host) })
+        Ok(CardsPlan { devices, victims, spanning, cost: MultiDeviceCost::new(per_card, process_host) })
     }
 
     /// Whether [`Self::claim_cards`] would place `key` now, or fail it for good (a refusal is let through, so the
@@ -140,6 +133,9 @@ impl ResidencyManager {
         for victim in &plan.victims {
             self.evict_entry(victim);
         }
+        for victim in &plan.spanning {
+            self.evict_multi(victim);
+        }
         for &d in &plan.devices {
             self.budgets.alloc(d, plan.cost.on(d));
         }
@@ -148,5 +144,53 @@ impl ResidencyManager {
         self.multi_residents.insert(key.clone(), MultiEntry { cost: plan.cost, devices: plan.devices.clone(), pinned: true, last_claimed: self.multi_claims });
         self.event(format!("promote {key} -> {:?} (building, {} cards)", plan.devices, plan.devices.len()));
         Ok((ClaimedMulti::Cards(m), plan.devices, key))
+    }
+}
+
+/// What freeing one card for a cards claim takes: idle single-device residents on it, and idle residents on several
+/// cards (each also freeing its other cards).
+struct Freeing {
+    victims: Vec<InstanceKey>,
+    spanning: Vec<InstanceKey>,
+}
+
+impl ResidencyManager {
+    /// How card `d` holds `need` bytes once `spanning` (idle residents on several cards already chosen to give way) are
+    /// gone: with nothing more, with idle single-device residents on `d` alone, with idle residents on several cards
+    /// that span `d` (the smallest share on `d` first), or with both; the way with the fewest victims, and the fewest
+    /// residents on several cards among those. `None` when even every idle resident on `d` is not enough. Reads only.
+    fn free_card(&self, d: Device, need: u64, spanning: &[InstanceKey]) -> Option<Freeing> {
+        let freed = |keys: &[InstanceKey]| keys.iter().filter_map(|k| self.multi_residents.get(k)).map(|e| e.cost.on(d)).sum::<u64>();
+        let free = self.budgets.free_on(d) + freed(spanning);
+        if free >= need {
+            return Some(Freeing { victims: Vec::new(), spanning: Vec::new() });
+        }
+        // Idle single-device residents on `d` alone, for what is still short after `extra` more bytes are freed.
+        let every: HashSet<Device> = self.budgets.devices().collect();
+        let mut only = every;
+        only.remove(&d);
+        let singles = |extra: u64| -> Option<Vec<InstanceKey>> {
+            let still = need.saturating_sub(free - self.budgets.free_on(d) + extra);
+            if self.budgets.fits_on(d, still) {
+                return Some(Vec::new());
+            }
+            plan_eviction_with(&*self.eviction, &synth_cost_for(d, still), &self.budgets, &self.residents, &[], &only).map(|plan| plan.victims)
+        };
+        let mut candidates: Vec<(&InstanceKey, u64)> =
+            self.multi_residents.iter().filter(|(k, e)| !e.pinned && e.devices.contains(&d) && !spanning.contains(k)).map(|(k, e)| (k, e.cost.on(d))).collect();
+        candidates.sort_by(|(a, x), (b, y)| x.cmp(y).then_with(|| a.to_string().cmp(&b.to_string())));
+        let mut options: Vec<Freeing> = Vec::new();
+        if let Some(victims) = singles(0) {
+            options.push(Freeing { victims, spanning: Vec::new() });
+        }
+        let (mut taken, mut extra) = (Vec::new(), 0u64);
+        for (k, bytes) in candidates {
+            taken.push(k.clone());
+            extra += bytes;
+            if let Some(victims) = singles(extra) {
+                options.push(Freeing { victims, spanning: taken.clone() });
+            }
+        }
+        options.into_iter().min_by_key(|f| (f.victims.len() + f.spanning.len(), f.spanning.len()))
     }
 }

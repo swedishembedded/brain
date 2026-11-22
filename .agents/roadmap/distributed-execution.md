@@ -832,8 +832,14 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         and a failed build; a count no set of cards can ever hold is refused
         at once (`TooLarge`), a count only busy residents block waits and
         evicts nothing. The estimate-driven `MultiDeviceResidentModel` path is
-        untouched. Idle multi-device residents do not give way to such a
-        claim. Test: `residency` `workload_cards`.
+        untouched. Idle residents on several cards give way too
+        (2026-11-22): the plan takes one card at a time from the card the
+        fewest idle victims free (single-device residents on it, residents
+        spanning it, or both; a spanning victim frees all its cards, which
+        the next card counts), still planned before anything is evicted and
+        all or nothing; a busy one is never a victim. Test: `residency`
+        `workload_cards` (an idle spanning model gives way, a busy one makes
+        the claim wait, a claim that cannot complete evicts nothing).
         Cross-node served training would take a job plan in the request (the
         plan, this server's rank range and the secret's digest) and the
         server's own sealed coordinator address.

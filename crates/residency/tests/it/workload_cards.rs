@@ -332,3 +332,82 @@ fn only_idle_residents_give_way_and_none_is_evicted_while_another_card_is_still_
     assert_all_returned(&rig.exec);
     assert!(rig.exec.stats().evictions >= 2, "both idle residents gave way");
 }
+
+/// A model that spans two cards at once ([`residency::MultiDeviceResidentModel`]), `bytes` on each of cards 0 and 1.
+struct Spanning {
+    bytes: u64,
+    gate: Gate,
+}
+
+impl ResidentModel for Spanning {
+    fn manifest(&self) -> Manifest {
+        Manifest::new("spanning", "a model on two cards", vec![ActionSpec::new("generate", "generate")])
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new("spanning", "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::new(0, 0)
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Err("a spanning model is built across its cards".to_string())
+    }
+}
+
+impl residency::MultiDeviceResidentModel for Spanning {
+    fn estimate_multi(&self, _k: &InstanceKey) -> residency::MultiDeviceCost {
+        residency::MultiDeviceCost::new(vec![(Device::Gpu(0), self.bytes), (Device::Gpu(1), self.bytes)], 0)
+    }
+    fn activate_multi(&self, _k: &InstanceKey, _devices: &[Device]) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(WorkloadRun { gate: self.gate.clone() }))
+    }
+}
+
+#[test]
+fn an_idle_resident_on_several_cards_gives_way_to_a_cards_claim_and_a_busy_one_is_never_evicted() {
+    let rig = rig(20 * GIB, false, gpus(2, 24 * GIB), Vec::new());
+    let (span_gate, release_span) = Gate::new();
+    rig.exec.register_multi(Arc::new(Spanning { bytes: 16 * GIB, gate: span_gate.clone() }));
+
+    // Busy on both cards: the claim waits and nothing is evicted.
+    let serving = submit(&rig.exec, "spanning", "generate", json!({"wait": "yes"}));
+    span_gate.wait_running();
+    let done = train(&rig.exec, json!({"cards": 2}));
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(done.try_recv().is_err(), "the run cannot start while the spanning model runs on its cards");
+    assert_eq!(rig.exec.residency().multi_placements.len(), 1, "a busy resident is never a victim");
+    assert!(rig.built.lock().unwrap().is_empty());
+
+    // Idle: it gives way, both cards are freed by one victim, and the run gets them.
+    release_span.send(()).unwrap();
+    answer(&serving).expect("served");
+    answer(&done).expect("the run starts once the idle spanning model gives way");
+    assert_eq!(rig.built.lock().unwrap()[0], vec![Device::Gpu(0), Device::Gpu(1)]);
+    assert_all_returned(&rig.exec);
+    assert!(rig.exec.stats().evictions >= 1, "the idle spanning model was evicted");
+}
+
+#[test]
+fn a_cards_claim_that_cannot_complete_evicts_no_idle_resident_on_several_cards() {
+    // Three cards; the spanning model is idle on cards 0 and 1, a busy served model fills card 2. A three-card run
+    // could free 0 and 1 but not 2: it waits, and the idle spanning model stays.
+    let (busy_gate, release_busy) = Gate::new();
+    let busy: Arc<dyn ResidentModel> = Arc::new(Served { name: "busy", bytes: 20 * GIB, gate: busy_gate.clone() });
+    let rig = rig(20 * GIB, false, gpus(3, 24 * GIB), vec![busy]);
+    let (span_gate, _keep) = Gate::new();
+    rig.exec.register_multi(Arc::new(Spanning { bytes: 16 * GIB, gate: span_gate }));
+    answer(&submit(&rig.exec, "spanning", "generate", json!({}))).expect("the spanning model is built");
+    let serving = submit(&rig.exec, "busy", "generate", json!({"wait": "yes"}));
+    busy_gate.wait_running();
+
+    let done = train(&rig.exec, json!({"cards": 3}));
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(done.try_recv().is_err(), "the run waits for the busy card");
+    assert_eq!(rig.exec.residency().multi_placements.len(), 1, "nothing is evicted for a claim that cannot complete yet");
+
+    release_busy.send(()).unwrap();
+    answer(&serving).expect("served");
+    answer(&done).expect("the run starts once every card can be freed");
+    assert_eq!(rig.built.lock().unwrap()[0], vec![Device::Gpu(0), Device::Gpu(1), Device::Gpu(2)]);
+    assert_all_returned(&rig.exec);
+}
