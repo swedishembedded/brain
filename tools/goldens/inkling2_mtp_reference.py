@@ -55,6 +55,9 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from golden_source import source_block  # noqa: E402
+
 torch.set_grad_enabled(False)
 
 
@@ -145,6 +148,21 @@ class Draft:
             tokens.append(prev)
             logits.append(lg)
         return tokens, torch.stack(logits)
+
+
+def draft_identity(cfg, vocab):
+    """The config fields that fix every tensor shape of a draft and its golden."""
+    return {
+        "hidden": cfg["hidden_size"],
+        "layers": cfg["num_hidden_layers"],
+        "heads": cfg["num_attention_heads"],
+        "kv_heads": cfg["num_key_value_heads"],
+        "head_dim": cfg["head_dim"],
+        "block_size": cfg["block_size"],
+        "markov_rank": cfg["markov_rank"],
+        "taps": len(cfg["target_layer_ids"]),
+        "vocab": vocab,
+    }
 
 
 def case(draft, feats, anchor, embed_row, head, cap, valid, prefix, out):
@@ -254,7 +272,7 @@ def run_tiny(args):
         json.dump({"mtp_config": cfg, "vocab_size": vocab, "final_logit_softcapping": TINY_CAP}, f, indent=1)
     save_file({k: v.float().contiguous() for k, v in out.items()}, os.path.join(args.out, "golden.safetensors"))
     with open(os.path.join(args.out, "manifest.json"), "w") as f:
-        json.dump({"kind": "tiny", "seed": seed, "cases": {"a": 14, "b": 17}, "softcap": TINY_CAP}, f, indent=1)
+        json.dump({"kind": "tiny", "seed": seed, "cases": {"a": 14, "b": 17}, "softcap": TINY_CAP, "source": source_block(draft_identity(cfg, vocab))}, f, indent=1)
 
 
 def run_tiny_target(args):
@@ -275,7 +293,7 @@ def run_tiny_target(args):
     with open(os.path.join(args.out, "config.json"), "w") as f:
         json.dump(dict(target, mtp_config=cfg), f, indent=1)
     with open(os.path.join(args.out, "manifest.json"), "w") as f:
-        json.dump({"kind": "tiny-target", "seed": seed, "target": os.path.basename(os.path.normpath(args.checkpoint)), "visits": visits}, f, indent=1)
+        json.dump({"kind": "tiny-target", "seed": seed, "target": os.path.basename(os.path.normpath(args.checkpoint)), "visits": visits, "source": source_block(draft_identity(cfg, text["vocab_size"]))}, f, indent=1)
 
 
 def run_real(args):
@@ -313,7 +331,9 @@ def run_real(args):
     os.makedirs(args.out, exist_ok=True)
     save_file({k: v.float().contiguous() for k, v in out.items()}, os.path.join(args.out, "golden.safetensors"))
     with open(os.path.join(args.out, "manifest.json"), "w") as f:
-        json.dump({"kind": "real", "features": os.path.basename(os.path.dirname(args.features)), "prompts": args.prompts, "softcap": cap, "valid_vocab": valid}, f, indent=1)
+        json.dump({"kind": "real", "features": os.path.basename(os.path.dirname(args.features)), "prompts": args.prompts, "softcap": cap, "valid_vocab": valid,
+                   "source": source_block(draft_identity(cfg, text["vocab_size"]), checkpoint="thinkingmachines/Inkling-2-Mini",
+                                          files=[os.path.join(ckpt, "mtp.safetensors")], hash_files=False)}, f, indent=1)
 
 
 def main():
