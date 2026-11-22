@@ -247,14 +247,10 @@ impl ArchDesc {
     /// "does this device have `dt`" answer (that answer is [`Self::holds`]
     /// itself, directly, for any FUTURE caller that wants it).
     ///
-    /// `f16_storage`/`bf16_storage` check the tier is EXACTLY `Storage`, not
-    /// `>= Storage`. No backend has ever reported both "this tier is
-    /// storage-only" and "this tier is native" at once for the same dtype -
-    /// `backend-vulkan`'s real `F16` tier is `Native` (a queried
-    /// `shaderFloat16` bit) while its `NumericSupport::f16_storage` has
-    /// always stayed `false` (nothing there ever set it); an exact-match
-    /// keeps reproducing that `false` instead of flipping it true the
-    /// moment `Native` also implies "and it can obviously be stored".
+    /// `f16_storage`/`bf16_storage` are [`Self::holds`]: a tier whose arithmetic executes natively holds its bytes
+    /// too. They once matched `Storage` exactly, to reproduce the `false` the native Vulkan backend reported for its
+    /// queried `shaderFloat16` tier; with that, `Ops::lands` widened every f16 weight to f32 on exactly the devices
+    /// with real f16 hardware (a GH200 through Vulkan), while the storage-tier `#w=f16` kernels run on every backend.
     ///
     /// `int8_dot` and `coop_matrix`, in contrast, ARE genuinely
     /// `executes(I8)` / `matrix.is_some()` - these two are the fields this
@@ -266,8 +262,8 @@ impl ArchDesc {
             int8_dot: self.executes(DType::I8),
             f16: self.is_fast(DType::F16),
             bf16: self.is_fast(DType::BF16),
-            f16_storage: self.tier(DType::F16).level == TierLevel::Storage,
-            bf16_storage: self.tier(DType::BF16).level == TierLevel::Storage,
+            f16_storage: self.holds(DType::F16),
+            bf16_storage: self.holds(DType::BF16),
             // Not one of this descriptor's modelled tiers (M8.6) - each
             // backend overrides it directly on top of this view where true.
             fp8_storage: false,
@@ -373,19 +369,18 @@ mod tests {
     }
 
     #[test]
-    fn f16_storage_view_is_exact_match_not_at_least_storage() {
-        let mut arch = ArchDesc::default();
-        arch.set_tier(DType::F16, TierSupport { level: TierLevel::Storage, ..Default::default() });
-        assert!(arch.numeric_view().f16_storage);
-
-        // A backend whose F16 tier is Native (arithmetic genuinely executes,
-        // established by a real query) does NOT get f16_storage flipped on
-        // by that fact alone - see `Self::numeric_view`'s doc for why this
-        // is deliberate, not an oversight.
-        let mut native = ArchDesc::default();
-        native.set_tier(DType::F16, TierSupport { level: TierLevel::Native, ..Default::default() });
-        assert!(!native.numeric_view().f16_storage);
-        assert!(native.holds(DType::F16), "holds() itself still says yes - only the legacy view is narrow");
+    fn a_tier_that_executes_natively_also_holds_its_bytes() {
+        for dt in [DType::F16, DType::BF16] {
+            for (level, held) in [(TierLevel::Absent, false), (TierLevel::Storage, true), (TierLevel::Native, true)] {
+                let mut arch = ArchDesc::default();
+                arch.set_tier(dt, TierSupport { level, ..Default::default() });
+                let view = arch.numeric_view();
+                let storage = if dt == DType::F16 { view.f16_storage } else { view.bf16_storage };
+                assert_eq!(storage, held, "{dt:?} at {level:?}");
+                // Holding the bytes is not fast arithmetic: that still takes a measurement.
+                assert!(!view.f16 && !view.bf16, "{dt:?} at {level:?} must not read as fast");
+            }
+        }
     }
 
     #[test]

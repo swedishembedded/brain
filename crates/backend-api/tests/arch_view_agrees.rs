@@ -62,7 +62,8 @@ fn cpu_arch() -> ArchDesc {
 fn vulkan_arch(dp4a: bool, f16: bool, matrix_shapes: usize) -> ArchDesc {
     let mut a = ArchDesc::default();
     a.set_tier(DType::I8, storage(if dp4a { TierLevel::Native } else { TierLevel::Emulated }));
-    a.set_tier(DType::F16, storage(if f16 { TierLevel::Native } else { TierLevel::Absent }));
+    a.set_tier(DType::F16, storage(if f16 { TierLevel::Native } else { TierLevel::Storage }));
+    a.set_tier(DType::BF16, storage(TierLevel::Storage));
     if matrix_shapes > 0 {
         let shapes = (0..matrix_shapes)
             .map(|_| MatShape { m: 16, n: 16, k: 16, a: DType::F16, b: DType::F16, accum: DType::F32, scope_width: None })
@@ -84,6 +85,12 @@ fn old_vulkan(dp4a: bool, coop_matrix: bool) -> NumericSupport {
     NumericSupport { int8_dot: dp4a, coop_matrix, ..NumericSupport::BASELINE }
 }
 
+/// [`old_vulkan`] with the storage tiers the backend now reports: the packed `#w=bf16`/`#w=f16` kernels run there as
+/// on wgpu (see `vulkan_holds_half_words_unlike_the_old_formula`).
+fn vulkan_view(dp4a: bool, coop_matrix: bool) -> NumericSupport {
+    NumericSupport { bf16_storage: true, f16_storage: true, ..old_vulkan(dp4a, coop_matrix) }
+}
+
 /// The table: `(case name, ArchDesc built the M8.1 way, NumericSupport the
 /// pre-M8.1 code would have produced for the same query outcome)`.
 fn cases() -> Vec<(&'static str, ArchDesc, NumericSupport)> {
@@ -98,12 +105,14 @@ fn cases() -> Vec<(&'static str, ArchDesc, NumericSupport)> {
         // `vulkan_no_dp4a_still_executes_i8_unlike_the_old_formula` below,
         // which pins that exact, intentional divergence on its own. Every
         // remaining row therefore fixes `dp4a: true` and sweeps `f16` and
-        // the coop-matrix shape count instead - the two axes that stayed
-        // faithful to the old formula.
-        ("vulkan: dp4a, no f16, no coop matrix (P40-shaped)", vulkan_arch(true, false, 0), old_vulkan(true, false)),
-        ("vulkan: dp4a, f16, no coop matrix", vulkan_arch(true, true, 0), old_vulkan(true, false)),
-        ("vulkan: dp4a, f16, one coop-matrix shape (Turing-shaped)", vulkan_arch(true, true, 1), old_vulkan(true, true)),
-        ("vulkan: dp4a, no f16, several coop-matrix shapes", vulkan_arch(true, false, 3), old_vulkan(true, true)),
+        // the coop-matrix shape count instead. The vulkan rows expect the old
+        // formula with the half-word storage tiers the backend reports since
+        // (`vulkan_view`, pinned by
+        // `vulkan_holds_half_words_unlike_the_old_formula`).
+        ("vulkan: dp4a, no f16, no coop matrix (P40-shaped)", vulkan_arch(true, false, 0), vulkan_view(true, false)),
+        ("vulkan: dp4a, f16, no coop matrix", vulkan_arch(true, true, 0), vulkan_view(true, false)),
+        ("vulkan: dp4a, f16, one coop-matrix shape (Turing-shaped)", vulkan_arch(true, true, 1), vulkan_view(true, true)),
+        ("vulkan: dp4a, no f16, several coop-matrix shapes", vulkan_arch(true, false, 3), vulkan_view(true, true)),
     ]
 }
 
@@ -130,4 +139,18 @@ fn vulkan_no_dp4a_still_executes_i8_unlike_the_old_formula() {
     assert_eq!(arch.tier(DType::I8).level, TierLevel::Emulated);
     assert!(arch.numeric_view().int8_dot, "the new formula must report the kernel as executing");
     assert!(!old_vulkan(false, false).int8_dot, "the old formula reported false here -- this is the fix");
+}
+
+/// Pinned separately as well: the old formula reported `bf16_storage` and `f16_storage` false on every Vulkan device,
+/// a queried `shaderFloat16` (a `Native` f16 tier) included, so `Ops::lands` widened bf16 and f16 weights to f32 there
+/// while the same storage-tier kernels ran on wgpu. A native tier holds its bytes ([`ArchDesc::holds`]); fast
+/// arithmetic (`f16`) still needs a measurement.
+#[test]
+fn vulkan_holds_half_words_unlike_the_old_formula() {
+    for f16 in [false, true] {
+        let view = vulkan_arch(true, f16, 0).numeric_view();
+        assert!(view.bf16_storage && view.f16_storage && !view.f16 && !view.bf16, "f16 tier native: {f16}");
+        let old = old_vulkan(true, false);
+        assert!(!old.bf16_storage && !old.f16_storage, "the old formula reported false here -- this is the fix");
+    }
 }

@@ -968,10 +968,15 @@ impl VulkanBackend {
                 ..Default::default()
             },
         );
+        // Storage-tier bf16/f16, as on `backend-wgpu`: the `#w=bf16`/`#w=f16` kernel variants decode packed words to
+        // f32 with core WGSL integer/bitcast arithmetic, which this backend compiles to SPIR-V like every other kernel,
+        // so they need no device feature. Reporting them absent made `Ops::lands` widen every bf16 weight to f32 here
+        // (twice the bytes, and not the tier a test or a model asked for) while the same kernels ran on wgpu.
+        arch.set_tier(DType::BF16, TierSupport { level: TierLevel::Storage, ..Default::default() });
         arch.set_tier(
             DType::F16,
             TierSupport {
-                level: if ctx.prec.f16 { TierLevel::Native } else { TierLevel::Absent },
+                level: if ctx.prec.f16 { TierLevel::Native } else { TierLevel::Storage },
                 ..Default::default()
             },
         );
