@@ -4,6 +4,7 @@
 //! The crate's integration tests, linked as one binary. A test here must not change process-wide state (the current
 //! directory, environment variables): the others run beside it.
 
+mod activation_tier;
 mod layout;
 mod real_parity;
 mod serve;

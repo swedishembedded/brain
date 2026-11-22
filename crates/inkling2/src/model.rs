@@ -27,11 +27,14 @@
 //! untied head with its soft cap over the valid vocabulary.
 //!
 //! Numerics are the reference's (I2.4): expert weights are read as published (NVFP4, MXFP8, or float) and multiplied
-//! with unquantised f32 activations; every other weight keeps its stored tier.
+//! with unquantised f32 activations; every other weight keeps its stored tier. On request
+//! ([`LinearActivations::Declared`], `--linear-activations declared`) the expert products take their activations as the
+//! release declares them (`required_activation_quantization`: NVFP4 per-token four-over-six on the NVFP4 layers, MXFP8
+//! on the MXFP8 ones), the numerics the model was trained with, through [`model::act_quant`].
 
 use std::path::Path;
 
-use checkpoint::packed::{BoundedWorkspace, CodecRegistry, MemoryBudget, PackedReader, PackedSource, PackedTensorReader, QuantEncoding, SlicedReader};
+use checkpoint::packed::{ActivationScheme, BoundedWorkspace, CodecRegistry, HfQuant, MemoryBudget, PackedReader, PackedSource, PackedTensorReader, QuantEncoding, SlicedReader};
 use checkpoint::TensorSource;
 use gpu_core::{f, DeviceBuffer, Dispatch, Gpu, Step};
 use model::depth_attn::{DepthAttn, DepthAttnIds};
@@ -43,6 +46,7 @@ use model::message_gate::{MessageGate, MessageGateIds, MessageGateWeights};
 use model::moe::{MoeIds, MoeShape};
 use model::ops::{upload_micro_bank, upload_preserved, MicroBank, MicroRoute, Ops, Weight};
 use model::paged::BlockTable;
+use model::policy::LinearActivations;
 use model::saved::RetainedStates;
 use model::serve::visit_state::VisitPool;
 use model::short_conv::{conv_state_tail_step, short_conv_fwd, short_conv_step, BaseLayout, DynTaps, ShortConvIds, ShortConvShape};
@@ -84,6 +88,7 @@ pub fn kernels() -> Vec<(&'static str, &'static str)> {
     more.extend_from_slice(model::saved::retained_kernels());
     more.extend_from_slice(model::message_gate::kernels());
     more.extend(model::ops::micro_bank_kernels());
+    more.extend(model::act_quant::KERNELS);
     more.extend(model::head_transform::KERNELS);
     // The served engine's: the visit-state pool and the device readout.
     more.extend(model::serve::visit_state::VisitPool::<Vec<f32>>::pipelines());
@@ -185,10 +190,11 @@ enum KvConv {
     Dynamic { taps: DeviceBuffer, proj: Weight },
 }
 
-/// A layer's routed experts: dense f32 banks, or the published microscaled banks read in place.
+/// A layer's routed experts: dense f32 banks, or the published microscaled banks read in place with the activation
+/// quantization the release declares for each product (taken only under [`LinearActivations::Declared`]).
 enum Experts {
     Dense { w13: DeviceBuffer, w2: DeviceBuffer },
-    Micro { w13: MicroBank, w2: MicroBank },
+    Micro { w13: MicroBank, w2: MicroBank, act: [Option<ActivationScheme>; 2] },
 }
 
 struct GateWeights {
@@ -242,6 +248,9 @@ pub struct Inkling2 {
     ops: Ops,
     k: Kernels,
     w: Weights,
+    /// The declared activation quantizations brain does not implement, by tensor: they refuse
+    /// [`LinearActivations::Declared`] and nothing else.
+    unsupported_activations: Vec<String>,
 }
 
 /// The visit plan of `cfg`: the looped core between its prelude and coda, or the whole stack visited once.
@@ -309,15 +318,38 @@ fn read_small(src: &dyn TensorSource, name: &str) -> Result<Vec<f32>, String> {
     Ok(out)
 }
 
+/// The activation quantization the release declares for each expert projection's product (`w13` reads the hidden rows,
+/// `w2` the expert activation), by tensor name, and the declarations brain does not implement (or whose block does not
+/// divide the product's input width), by name. A release without a per-tensor declaration declares none.
+fn declared_activations(declared: Option<&HfQuant>, cfg: &Inkling2Config) -> (std::collections::HashMap<String, ActivationScheme>, Vec<String>) {
+    let (mut schemes, mut unsupported) = (std::collections::HashMap::new(), Vec::new());
+    for l in 0..cfg.n_layers {
+        let n = LayerNames::new(l);
+        for (name, width) in [(n.w13(), cfg.hidden), (n.w2(), cfg.moe_ff)] {
+            let Some(act) = declared.and_then(|q| q.declaration(&name)).and_then(|d| d.activation.as_ref()) else { continue };
+            match act.scheme() {
+                Ok(scheme) if width.is_multiple_of(scheme.block()) => {
+                    schemes.insert(name, scheme);
+                }
+                Ok(scheme) => unsupported.push(format!("{name}: {scheme:?} activations need a multiple of {} values, the product reads {width}", scheme.block())),
+                Err(e) => unsupported.push(format!("{name}: {e}")),
+            }
+        }
+    }
+    (schemes, unsupported)
+}
+
 impl Inkling2 {
     /// Load the checkpoint directory `dir` (`config.json`, the safetensors and, when present, `hf_quant_config.json`)
     /// onto `ops`, whose `Gpu` registers [`kernels`]. The header is held to the name map first, so a file the config
     /// does not describe is refused by name before any weight is read. The vision tower's tensors are checked, not
-    /// loaded.
+    /// loaded. The activation operand `ops` is set to ([`Ops::set_linear_activations`]) is held to what this model can
+    /// run ([`Self::set_linear_activations`]).
     pub fn load(ops: Ops, dir: &Path) -> Result<Inkling2, String> {
         let cfg = Inkling2Config::from_dir(dir)?;
         let reader = PackedReader::open(dir)?;
         names::check(&cfg, &reader)?;
+        let (activations, unsupported_activations) = declared_activations(reader.declaration(), &cfg);
         let mut micro = Vec::new();
         for l in 0..cfg.n_layers {
             let n = LayerNames::new(l);
@@ -334,9 +366,34 @@ impl Inkling2 {
         }
         let src = PackedSource::identity(Box::new(sliced), CodecRegistry::reference())?;
         let k = Kernels::resolve(ops.gpu())?;
-        let w = Weights::load(&ops, &cfg, &src, &micro)?;
+        let w = Weights::load(&ops, &cfg, &src, &micro, &activations)?;
         let plan = visit_plan(&cfg)?;
-        Ok(Inkling2 { cfg, plan, ops, k, w })
+        let choice = ops.linear_activations();
+        let mut m = Inkling2 { cfg, plan, ops, k, w, unsupported_activations };
+        m.set_linear_activations(choice)?;
+        Ok(m)
+    }
+
+    /// Choose the activation operand of the expert products: [`LinearActivations::Auto`] keeps the reference numerics
+    /// (f32 activations), [`LinearActivations::Declared`] quantizes them as the release declares. `Declared` on a
+    /// checkpoint that declares no activation quantization of its experts, or one brain does not implement, is refused
+    /// by name, as are `bf16` and `e4m3`, which this model has no product for.
+    pub fn set_linear_activations(&mut self, choice: LinearActivations) -> Result<(), String> {
+        match choice {
+            LinearActivations::Auto => {}
+            LinearActivations::Declared => {
+                if let Some(first) = self.unsupported_activations.first() {
+                    return Err(format!("inkling2: --linear-activations declared: {first}"));
+                }
+                let declares = self.w.layers.iter().any(|l| matches!(&l.experts, Experts::Micro { act, .. } if act.iter().any(Option::is_some)));
+                if !declares {
+                    return Err("inkling2: --linear-activations declared: this checkpoint declares no activation quantization for its experts".into());
+                }
+            }
+            other => return Err(format!("inkling2: --linear-activations {other} is not supported: the expert products take f32 activations (auto) or the declared quantization (declared)")),
+        }
+        self.ops.set_linear_activations(choice);
+        Ok(())
     }
 
     pub fn config(&self) -> &Inkling2Config {
@@ -745,20 +802,34 @@ impl Inkling2 {
                     s.extend(expert_fwd_glu(g, &self.k.moe, &self.k.glu, &spec, &shape, x, &gate, &w, &scratch, &out, ex, ex > 0));
                 }
             }
-            Experts::Micro { w13, w2 } => {
+            Experts::Micro { w13, w2, act } => {
                 let ids = ids.expect("the slots' experts are chosen for a published bank");
+                // Under the declared tier each product reads its activation rows round-tripped through the declared
+                // format: the token rows once (every chosen expert reads the same quantized row), each slot's
+                // activation before the down product.
+                let declared = self.ops.linear_activations().is_declared();
+                let quantized = |s: &mut Vec<Step>, scheme: Option<ActivationScheme>, x: &DeviceBuffer, rows: u32, width: u32| -> Option<DeviceBuffer> {
+                    let scheme = scheme.filter(|_| declared)?;
+                    let q = g.storage(u64::from(rows * width));
+                    s.push(model::act_quant::qdq_step(g, scheme, x, &q, rows, width).expect("a declared scheme's block divides the width (checked at load)"));
+                    Some(q)
+                };
                 let (gate_up, h, y) = (g.storage(u64::from(slots * 2 * ff)), g.storage(u64::from(slots * ff)), g.storage(u64::from(slots * d)));
                 const REGISTERED: &str = "the bank's kernels are registered";
+                let xq = quantized(s, act[0], x, t, d);
+                let x = xq.as_ref().unwrap_or(x);
                 if grouped {
                     let route = MicroRoute::new(g, slots, e);
                     s.extend(route.steps(g, &ids).expect(REGISTERED));
                     s.push(w13.grouped(g, x, &route.tab, &route.perm, &gate_up, route.tiles(), k, e).expect(REGISTERED));
                     s.push(glu_act_step(g, &self.k.glu, &spec, slots, ff, &gate_up, None, &h));
-                    s.push(w2.grouped(g, &h, &route.tab, &route.perm, &y, route.tiles(), 1, e).expect(REGISTERED));
+                    let hq = quantized(s, act[1], &h, slots, ff);
+                    s.push(w2.grouped(g, hq.as_ref().unwrap_or(&h), &route.tab, &route.perm, &y, route.tiles(), 1, e).expect(REGISTERED));
                 } else {
                     s.push(w13.gather(g, x, &ids, &gate_up, slots, k).expect(REGISTERED));
                     s.push(glu_act_step(g, &self.k.glu, &spec, slots, ff, &gate_up, None, &h));
-                    s.push(w2.gather(g, &h, &ids, &y, slots, 1).expect(REGISTERED));
+                    let hq = quantized(s, act[1], &h, slots, ff);
+                    s.push(w2.gather(g, hq.as_ref().unwrap_or(&h), &ids, &y, slots, 1).expect(REGISTERED));
                 }
                 let identity = g.storage(u64::from(slots));
                 g.write(&identity, &(0..slots).collect::<Vec<u32>>());
@@ -856,7 +927,7 @@ impl Inkling2 {
 }
 
 impl Weights {
-    fn load(ops: &Ops, cfg: &Inkling2Config, src: &dyn TensorSource, micro: &[String]) -> Result<Weights, String> {
+    fn load(ops: &Ops, cfg: &Inkling2Config, src: &dyn TensorSource, micro: &[String], activations: &std::collections::HashMap<String, ActivationScheme>) -> Result<Weights, String> {
         let g = ops.gpu();
         let staging = BoundedWorkspace::new(MemoryBudget::new(STAGING_BYTES, 0));
         let host = |name: &str| upload_f32(g, src, name);
@@ -895,6 +966,7 @@ impl Weights {
                 Experts::Micro {
                     w13: upload_micro_bank(ops, src, &names(n.w13()), 2 * cfg.moe_ff as usize, d as usize, &staging)?,
                     w2: upload_micro_bank(ops, src, &names(n.w2()), d as usize, cfg.moe_ff as usize, &staging)?,
+                    act: [activations.get(&n.w13()).copied(), activations.get(&n.w2()).copied()],
                 }
             } else {
                 Experts::Dense { w13: host(&n.w13())?, w2: host(&n.w2())? }

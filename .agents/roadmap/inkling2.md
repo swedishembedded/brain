@@ -547,8 +547,43 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
   Precision is a metric, so the low-precision fast path is opt-in.
   - Done (2026-11-22): the default is the reference numerics - expert banks read as published (NVFP4, MXFP8),
     activations unquantized f32 - and it is gated against the f32 reference (I2.3).
-  - Left: the vendor's activation-quantized tier (NVFP4 per-token "four over six", MXFP8 activations) is not built;
-    it is a later opt-in item, measured as KL and top-1 against the bf16 reference.
+  - Done (2026-11-22): the vendor's activation-quantized tier, opt-in and generic. `--linear-activations declared`
+    (`LinearActivations::Declared`, never the default or `auto`) makes each expert product read its activation rows
+    round-tripped through the format `hf_quant_config.json` declares for it (`ActivationQuant::scheme` in
+    `checkpoint::packed::hfquant`, every field checked, anything else refused by name): `model::act_quant::qdq_step`
+    over `act_qdq_nvfp4_mxfp8.wgsl`, host reference `model::hostmath::{nvfp4_four_over_six_qdq, mxfp8_qdq}`, bit for
+    bit on the CPU backend (`model` test `act_quant`, mutation-checked on the E2M1 tie and the strict four-vs-six rule).
+    `Inkling2` applies it to the token rows before `w13` (once per token) and to each slot's activation before `w2`,
+    and refuses `declared` on a checkpoint declaring none and `bf16`/`e4m3` (no such product here).
+    Spec (source: vLLM main 8c17e469 `vllm/models/inkling2/nvidia/ops/{nvfp4,mxfp8,activation,moe}.py`, the vendor's
+    runtime; "four over six" is arXiv 2512.02010, `mit-han-lab/fouroversix` `ScaleRule.mae`; copies and a torch
+    transliteration in the reference store `inkling2-actq/`, which agrees with the host reference on 147,456 of
+    147,456 values):
+    - NVFP4 (layers 0-19): per row `amax = max|x|`, `enc = 1536/amax` (1536 = 6 x 256, not 6 x 448: the six-based
+      block scale tops out at 256 so its 1.5x four-based twin fits E4M3), `dec = 1/enc`, `outer = amax * (1/1536)`.
+      Per 16-block: `s6 = e4m3_rne(min(bmax * (enc * (1/6)), 448))`, `s4 = e4m3_rne(min(bmax * (enc * 0.25), 448))`;
+      each candidate `r = (e2m1_rne_sat(x * (1/(s * dec))) * s) * outer`; error = pairwise-tree sum of `|r - x|`;
+      the four-based scale only when strictly smaller. Dequant = `r` (the GEMM's row scale folds `outer` with the
+      weight's `amax/denominator`).
+    - MXFP8 (layers 20-23): per 32-block `raw = bmax * (1/448)`, E8M0 exponent = `raw` rounded UP to a power of two
+      (`(bits + 0x7FFFFF) & 0x7F800000`), values `e4m3_rne(clamp(x/scale, +-448))`.
+    - Deviations, stated: brain quantizes its f32 rows (the vendor's are bf16); the vendor multiplies the routing weight
+      into the activation before quantizing `w2`'s input, brain after the product (NVFP4 is invariant to a per-row
+      scale up to f32 rounding; MXFP8's power-of-two grid is not, so layers 20-23 round on a shifted grid); a row with
+      amax below 2^-100 or an MXFP8 block whose `raw` is subnormal reads as zero. The round trip feeding f32 products is
+      the quantized product up to accumulation order; a packed W4A4/W8A8 product is a speed item with this as oracle.
+    - Measured (CPU backend, the released checkpoint, the three golden prompts, 76 positions; `inkling2` test
+      `activation_tier`), with the prompt's expert products grouped by expert: against brain's reference numerics mean
+      KL 0.085 nats, top-1 0.934; against the f32 reference's full rows (last 1/2/4, 9 rows) KL 0.029 nats where the
+      reference's own bf16 run is 0.006 and brain's reference numerics 2.7e-11; greedy agreement with the f32 run 0.934
+      (reference numerics 1.000). With the products gathered per slot instead (same tier, another f32 summation
+      order) the same measurement gave 0.118 nats, top-1 0.882 and 0.032 nats: a rounding boundary crossed by a last-bit
+      difference flips a code, so the tier is not smooth in its inputs and a 76-position estimate resolves its KL to
+      about +-0.03 nats. The reference numerics moved by 1e-11 between the two orders. The per-product round trip's
+      relative L2 error is 8.0% (NVFP4) and 2.7% (MXFP8) on heavy-tailed rows.
+  - Left: the tier on CUDA/Vulkan (the CUDA bit-exactness test exists and skips without a selected card; not run);
+    the serving engine taking `--linear-activations` (its `PolicySupport` row); a split of the KL between the NVFP4 and
+    MXFP8 layers; the routing-weight-before-quantization order if the MXFP8 layers' share matters.
 
 ### Phase 3: serving
 

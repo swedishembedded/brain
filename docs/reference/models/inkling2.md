@@ -74,3 +74,19 @@ image is refused rather than answered without it), adapters, and the optional
 The example `samples/python/llm/inkling2/inkling2.py` asks one question at a low
 and a high reasoning effort over D-Bus, OpenAI-compatible or Anthropic-compatible
 HTTP.
+
+## Numerics
+
+By default the experts multiply their published NVFP4 and MXFP8 weights with
+f32 activations: the reference implementation's numerics, which brain is
+parity-gated against. The release also declares the activation quantization
+its own runtime applies to each expert product (`required_activation_quantization`
+in `hf_quant_config.json`: NVFP4 with a per-token scale and the "four over six"
+block-scale rule on layers 0-19, MXFP8 on 20-23). In the library,
+`Inkling2::set_linear_activations(LinearActivations::Declared)` runs those
+numerics (the served model does not take `--linear-activations` yet); it is
+lower precision, so it is never the default. On the released checkpoint it moves the next-token
+distribution by a mean KL of about 0.1 nats from the reference numerics, with
+about 90% top-1 agreement (CPU, three chat prompts; the estimate moves by a few
+hundredths of a nat with the products' summation order, since the rounding
+is not smooth).
