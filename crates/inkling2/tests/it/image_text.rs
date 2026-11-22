@@ -7,7 +7,8 @@
 
 //! Spec: image-text training. The tiny looped decoder with a tiny tower spliced in: adapters on both lower the loss of
 //! a fixed image-text row, and the tower's adapters receive the decoder's gradient exactly (central differences of the
-//! whole image-text loss, the decoder's routing pinned so a step cannot flip a top-k selection).
+//! whole image-text loss, the decoder's routing and L2-clip branches pinned so a step cannot flip a top-k selection or
+//! carry a vector across a clip threshold).
 
 use std::collections::HashMap;
 
@@ -74,7 +75,19 @@ fn fixture(seed: u64) -> Fixture {
 
 #[test]
 fn image_text_adapters_lower_the_loss_and_the_tower_receives_the_decoders_gradient() {
-    let seed = random_seed();
+    adapters_learn_and_receive_the_decoders_gradient(random_seed());
+}
+
+/// A seed at which the check compared `proj_out.lora_b[10]`'s central difference (7.14) with a gradient read after the
+/// previous tensor's differences had run (5.70: the gradient at that tensor's last perturbed point, `lora_a`'s entry
+/// off by 1e-3, whose cross term with `lora_b` is bilinear), on CPU and CUDA alike; at the unperturbed point it is 7.14.
+#[test]
+fn the_tower_gradient_is_read_at_the_point_it_is_checked_at() {
+    // seed: regression - the seed whose check read a gradient left by the previous tensor's finite differences
+    adapters_learn_and_receive_the_decoders_gradient(17823462077274058773);
+}
+
+fn adapters_learn_and_receive_the_decoders_gradient(seed: u64) {
     eprintln!("seed {seed}");
     let f = fixture(seed);
     let t = &f.trainer;
@@ -87,17 +100,24 @@ fn image_text_adapters_lower_the_loss_and_the_tower_receives_the_decoders_gradie
         }
     }
 
-    // The gradient reaching the tower: central differences of the image-text loss, with the decoder's routing pinned.
+    // The gradient reaching the tower: central differences of the image-text loss, with the decoder's routing and clip
+    // branches pinned (knowledge #572).
     t.zero_grads();
     t.step(&f.tokens, &f.targets, &f.images, IMAGE).unwrap();
     let pinned = std::sync::Arc::new(t.decoder().taken_routing().unwrap());
     model::training::TokenObjectives::set_routing_replay(t.decoder(), Some(pinned)).unwrap();
+    t.decoder().pin_clip_branches(true);
     t.zero_grads();
     t.step(&f.tokens, &f.targets, &f.images, IMAGE).unwrap();
     let g = t.decoder().gpu();
+    // Every analytic gradient is read at the unperturbed point before any difference is taken: a finite difference
+    // runs steps, after which the gradient buffers hold the gradient at the last perturbed point.
+    let checked_names: Vec<(String, Vec<f32>)> = lora.params.iter().map(|(n, _)| n.clone()).filter(|n| n.contains("proj_out") || n.contains("layers.1.mlp.c_fc")).map(|n| {
+        let grad = lora.read_grad(g, &n);
+        (n, grad)
+    }).collect();
     let mut checked = 0;
-    for name in lora.params.iter().map(|(n, _)| n.clone()).filter(|n| n.contains("proj_out") || n.contains("layers.1.mlp.c_fc")) {
-        let analytic = lora.read_grad(g, &name);
+    for (name, analytic) in checked_names {
         let w0 = lora.read_weight(g, &name);
         let i = (0..w0.len()).max_by(|&a, &b| analytic[a].abs().total_cmp(&analytic[b].abs())).unwrap();
         assert!(analytic[i] != 0.0, "{name}: no gradient reached the tower's adapter");
@@ -117,7 +137,8 @@ fn image_text_adapters_lower_the_loss_and_the_tower_receives_the_decoders_gradie
     assert!(checked >= 4, "only {checked} tower adapter tensors checked");
 
     // A few steps of both adapters lower the loss (the routing stays pinned: a flipped selection is another function,
-    // and a loss that jumps between functions says nothing about learning).
+    // and a loss that jumps between functions says nothing about learning; the clips are continuous and train free).
+    t.decoder().pin_clip_branches(false);
     let mut first = None;
     let mut last = 0.0;
     for step in 1..=30 {

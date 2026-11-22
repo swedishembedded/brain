@@ -956,6 +956,12 @@ The first trainable target needs no streaming: the base is about 19.5 GB.
   - Left (fix2): the full fine-tune's directional check fails about one seed in ten (seen at 1832604347,
     `layers.0.mlp.experts.w13_weight`): smooth, the step's truncation error along a ±1 direction of a whole bank
     (knowledge #572 Evidence); the step or the estimate (Richardson) needs choosing per tensor.
+  - Done (2026-11-22, fix2): `image_text`'s failure (about one seed in thirteen, CPU and CUDA alike: 3 of 40 CUDA runs,
+    and the three failing seeds fail on CPU) was the test reading each tensor's analytic gradient after the previous
+    tensor's finite differences had run steps, so it compared a central difference with the gradient at a perturbed
+    point (`proj_out.lora_b[10]`: 5.70 read, 7.14 at the point, whose loss is smooth there). Every gradient is now read
+    at the unperturbed point first; the decoder's clip branches are pinned beside its routing; regression test at seed
+    17823462077274058773.
 - **I4.4** `model::train` + `data`: packed rows with document-boundary resets of
   attention, every conv state and the relative-position origin. Gate: no supervision or
   state crosses a boundary.
