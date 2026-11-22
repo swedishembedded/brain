@@ -182,6 +182,7 @@ pub use model::IGNORE as IGNORE_TARGET;
 #[cfg(feature = "study")]
 pub use model::TrainPrecision;
 /// The plan every rank of a distributed job shares, and the secret that proves a rank belongs to it ([`JobRanks`]).
+#[cfg(feature = "study")]
 pub use model::{JobPlan, JobSecret};
 #[cfg(feature = "study")]
 /// Native sparse attention training for a fine-tune: [`NativeSparse`] and the [`LsaConfig`] it carries.
