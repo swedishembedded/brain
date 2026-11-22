@@ -376,6 +376,13 @@ let chat = brain::ChatPipeline::from(
   adapter exported is the evaluation's with the lowest monitoring loss, not
   the last step's; `outcome.selected_step` and `outcome.selection` say which
   and why, as do the training record and the adapter card's hyperparameters.
+- `outcome.parallel` (a `brain::ParallelReport`, also under `parallel` in
+  `outcome.report()`) records how the run was spread, as it ran: the group's
+  `world_size`, the `ranks` this process ran, the `devices` each one trained
+  on, the `collective` that summed the gradients (`nccl` or `host`), the host
+  `transport` (`in_process` or `tcp`), NCCL's `network` (`null` for now: NCCL
+  does not report it) and the `sharding`. `ChatFullFineTuneOutcome` carries the
+  same, and its `report()` is what the served job returns for a full fine-tune.
   A selection made on the held-out set biases the held-out score it is then
   measured by, so a caller that decides anything on that score gives the run
   a monitoring set of its own.

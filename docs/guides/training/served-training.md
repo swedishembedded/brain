@@ -318,6 +318,21 @@ step's statistics, is published to the artifact store beside the adapter
 (`record_digest`), and returned as the blob `record` when the call sets
 `return_adapter` or the server has no store.
 
+Every chat fine-tune report, adapter or full (`objective` `full_sft`), and the
+`report.json` `brain finetune --out` writes, has a `parallel` object that
+records how the run was spread, as it ran. Fields that were not observed are
+`null`:
+
+| Field | Meaning |
+|---|---|
+| `world_size` | ranks in the whole group, across every server (1 for a run that is not data-parallel) |
+| `ranks` | `[first, end)`: the ranks this server ran |
+| `devices` | one `{rank, device, name}` per rank this server ran: `device` is `gpu<N>` or `cpu`, `name` is the card's name as its driver reports it |
+| `collective` | what summed the gradients: `nccl` on the cards, or `host` through the host transport; `null` without a group |
+| `transport` | how the ranks reached each other on the host side: `in_process` (threads of one server) or `tcp` (sealed TCP between processes or servers) |
+| `network` | the network NCCL picked between nodes; always `null` for now, because NCCL does not report which transport a communicator chose |
+| `sharding` | what the group sharded: `replicated`, `optimizer`, `gradients` or `parameters`; `null` without a group |
+
 ## Scheduling
 
 The run is a workload of the serving executor, so it takes devices from serving

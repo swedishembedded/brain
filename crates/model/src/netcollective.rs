@@ -407,6 +407,11 @@ impl Collective for NetworkCollective {
         self.world
     }
 
+    /// Ranks on other processes or machines, summing through the coordinator over sealed TCP.
+    fn transport(&self) -> crate::collective::TransportReport {
+        crate::collective::TransportReport { reductions: Some("host"), host: Some("tcp"), network: None }
+    }
+
     /// Tell the peers this rank reaches why it stops (the coordinator relays a worker's reason to every other rank
     /// at its next op), then shut every connection, so a thread of this rank blocked reading one, and every peer
     /// waiting on this rank, fails at once.

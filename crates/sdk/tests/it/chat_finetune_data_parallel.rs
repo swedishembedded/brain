@@ -9,7 +9,8 @@
 //! A chat fine-tune run as data-parallel ranks through the SDK: threads of one
 //! process, each a rank of [`brain::DataParallel::in_process`]. Each rank
 //! trains on its own shard of the records, so without the reduction the ranks
-//! would end with different adapters; with it they end byte-identical.
+//! would end with different adapters; with it they end byte-identical, and the
+//! run's report records the group it ran as.
 
 #![cfg(all(feature = "study", feature = "text"))]
 
@@ -31,7 +32,7 @@ fn in_process_ranks_train_one_adapter_byte_for_byte() {
     let model = chat_model_dir("data-parallel");
     let train = write_chat_dataset(&model, &TRAIN);
     let ranks = DataParallel::in_process(2).expect("a two-rank group");
-    let adapters: Vec<Vec<u8>> = std::thread::scope(|scope| {
+    let runs: Vec<(Vec<u8>, serde_json::Value)> = std::thread::scope(|scope| {
         let handles: Vec<_> = ranks
             .into_iter()
             .map(|rank| {
@@ -41,17 +42,32 @@ fn in_process_ranks_train_one_adapter_byte_for_byte() {
                     let outcome = tune(model, train, &out).data_parallel(rank).run().expect("the rank trains");
                     assert_eq!(outcome.status, FineTuneStatus::Completed);
                     assert_eq!(outcome.steps_completed, 4);
-                    std::fs::read(outcome.adapter.expect("an adapter")).unwrap()
+                    let report = outcome.report();
+                    (std::fs::read(outcome.adapter.expect("an adapter")).unwrap(), report)
                 })
             })
             .collect();
         handles.into_iter().map(|h| h.join().expect("a rank's thread")).collect()
     });
+    let adapters: Vec<&Vec<u8>> = runs.iter().map(|(adapter, _)| adapter).collect();
     assert_eq!(adapters[0], adapters[1], "the ranks' adapters must be byte-identical");
+
+    // Each rank's report says how the run was spread, as it ran: both ranks of the group in this process, each on
+    // the CPU it was placed on, the gradients summed through host memory between threads, nothing sharded. NCCL's
+    // network is not observable, so it is null.
+    let cpu_rank = |rank: usize| serde_json::json!({"rank": rank, "device": "cpu", "name": null});
+    for (_, report) in &runs {
+        assert_eq!(
+            report["parallel"],
+            serde_json::json!({"world_size": 2, "ranks": [0, 2], "devices": [cpu_rank(0), cpu_rank(1)], "collective": "host", "transport": "in_process", "network": null, "sharding": "replicated"}),
+            "{report:#}"
+        );
+    }
 
     // One process over the whole stream trains a different adapter: the ranks really trained on shards.
     let single = tune(&model, &train, &model.join("single")).run().expect("one process trains");
-    assert_ne!(std::fs::read(single.adapter.unwrap()).unwrap(), adapters[0]);
+    assert_eq!(single.report()["parallel"], serde_json::json!({"world_size": 1, "ranks": [0, 1], "devices": [cpu_rank(0)], "collective": null, "transport": null, "network": null, "sharding": null}));
+    assert_ne!(&std::fs::read(single.adapter.unwrap()).unwrap(), adapters[0]);
 }
 
 #[test]
@@ -138,4 +154,46 @@ fn a_rank_that_fails_breaks_the_group_and_the_others_fail_instead_of_waiting() {
     let why = results[0].as_ref().expect_err("rank 0 cannot train without its peer");
     assert!(why.contains("rank 1 failed: its dataset could not be read"), "{why}");
     assert!(started.elapsed() < std::time::Duration::from_secs(60));
+}
+
+/// A full fine-tune's report records the group it ran as, the same way: two ranks of this process on the CPU, summing
+/// through host memory, each rank's report naming both.
+#[test]
+fn a_full_fine_tune_reports_the_group_it_ran_as() {
+    let model = chat_model_dir("data-parallel-full");
+    let train = write_chat_dataset(&model, &TRAIN);
+    let reports: Vec<serde_json::Value> = std::thread::scope(|scope| {
+        let handles: Vec<_> = DataParallel::in_process(2)
+            .expect("a two-rank group")
+            .into_iter()
+            .map(|rank| {
+                let (model, train) = (&model, &train);
+                scope.spawn(move || {
+                    let out = model.join(format!("full{}", rank.rank()));
+                    let outcome = brain::ChatFullFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap())
+                        .dataset(train)
+                        .out_dir(&out)
+                        .steps(2)
+                        .lr(1e-2)
+                        .seed(11)
+                        .device(cpu())
+                        .data_parallel(rank)
+                        .run()
+                        .expect("the rank trains");
+                    assert_eq!(outcome.status, FineTuneStatus::Completed);
+                    outcome.report()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().expect("a rank's thread")).collect()
+    });
+    let cpu_rank = |rank: usize| serde_json::json!({"rank": rank, "device": "cpu", "name": null});
+    for report in &reports {
+        assert_eq!(report["objective"], "full_sft");
+        assert_eq!(
+            report["parallel"],
+            serde_json::json!({"world_size": 2, "ranks": [0, 2], "devices": [cpu_rank(0), cpu_rank(1)], "collective": "host", "transport": "in_process", "network": null, "sharding": "replicated"}),
+            "{report:#}"
+        );
+    }
 }

@@ -155,10 +155,30 @@ pub type CollectiveResult<T> = Result<T, CollectiveError>;
 /// module doc for why this is hand-boxed rather than a native `async fn`.
 pub type CollectiveFuture<'a, T> = Pin<Box<dyn Future<Output = CollectiveResult<T>> + Send + 'a>>;
 
+/// What carries a group's traffic, as the transport itself observed it: a field the transport cannot see (or has not
+/// decided yet) is `None`, never a value copied from the request that formed the group.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TransportReport {
+    /// Who sums the gradients: a device library (`"nccl"`), or `"host"` when they go through the host transport.
+    /// `None` before the group's first device reduction decided it.
+    pub reductions: Option<&'static str>,
+    /// How the ranks reach each other on the host side: `"in_process"` (threads of one process) or `"tcp"` (sealed
+    /// TCP to the coordinator).
+    pub host: Option<&'static str>,
+    /// The network the device library chose between nodes (a NCCL net plugin or P2P). `None` today: NCCL exposes
+    /// its configured parameters but not the transport a communicator selected.
+    pub network: Option<&'static str>,
+}
+
 /// A group of ranks that exchange tensors. `Send + Sync` so one instance is
 /// shared across the per-rank threads (or, later, lives per process).
 pub trait Collective: Send + Sync {
     fn world_size(&self) -> usize;
+
+    /// What carries this group's traffic ([`TransportReport`]). The default observed nothing.
+    fn transport(&self) -> TransportReport {
+        TransportReport::default()
+    }
 
     /// Element-wise **sum** of every rank's `local`; all ranks receive the total.
     /// All `local` must have equal length and the same [`Payload::dtype`].
@@ -231,6 +251,9 @@ pub trait Collective: Send + Sync {
 impl<T: Collective + ?Sized> Collective for std::sync::Arc<T> {
     fn world_size(&self) -> usize {
         (**self).world_size()
+    }
+    fn transport(&self) -> TransportReport {
+        (**self).transport()
     }
     fn all_reduce<'a>(&'a self, rank: usize, local: Payload) -> CollectiveFuture<'a, Payload> {
         (**self).all_reduce(rank, local)
@@ -422,6 +445,11 @@ impl HostCollective {
 impl Collective for HostCollective {
     fn world_size(&self) -> usize {
         self.world
+    }
+
+    /// Ranks that are threads of this process, summing through host memory.
+    fn transport(&self) -> TransportReport {
+        TransportReport { reductions: Some("host"), host: Some("in_process"), network: None }
     }
 
     fn all_reduce<'a>(&'a self, rank: usize, local: Payload) -> CollectiveFuture<'a, Payload> {
@@ -751,6 +779,9 @@ impl Collective for TimedCollective<'_> {
     fn world_size(&self) -> usize {
         self.inner.world_size()
     }
+    fn transport(&self) -> TransportReport {
+        self.inner.transport()
+    }
 
     fn all_reduce<'a>(&'a self, rank: usize, local: Payload) -> CollectiveFuture<'a, Payload> {
         Box::pin(async move {
@@ -946,6 +977,9 @@ impl<'a> ShapedCollective<'a> {
 impl Collective for ShapedCollective<'_> {
     fn world_size(&self) -> usize {
         self.inner.world_size()
+    }
+    fn transport(&self) -> TransportReport {
+        self.inner.transport()
     }
 
     fn all_reduce<'a>(&'a self, rank: usize, local: Payload) -> CollectiveFuture<'a, Payload> {

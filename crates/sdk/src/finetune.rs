@@ -1282,6 +1282,11 @@ impl ChatFineTune {
         } else {
             crate::device::resolve(&self.device)?.gpus
         };
+        // Where this rank trains, as resolved: what the run's report says it ran on.
+        let ran_on = crate::data_parallel::RankDevice::resolved(self.parallel.as_ref().map_or(0, crate::DataParallel::rank), &selected_gpus);
+        if let Some(parallel) = &self.parallel {
+            parallel.ran_on(ran_on.clone());
+        }
         let explicit = self.bf16_base || self.int8_base || self.nf4_base || self.f32_base || self.base_format.is_some();
         let (family, base_tier_reason) = if explicit {
             (family, "asked for".to_string())
@@ -1456,6 +1461,7 @@ impl ChatFineTune {
             policy_gradient,
             held_out_repeats,
             held_out_text_repeats,
+            parallel: crate::data_parallel::ParallelReport::of(self.parallel.as_ref(), ran_on),
         };
         if report.interrupted {
             outcome.status = FineTuneStatus::Cancelled;
@@ -1642,6 +1648,8 @@ pub struct ChatFineTuneOutcome {
     /// How a [`ChatFineTune::policy_gradient`] run was trained and what each step measured; `None` for a
     /// supervised run.
     pub policy_gradient: Option<PolicyGradientOutcome>,
+    /// How the run was spread over ranks, cards and servers, as it ran ([`crate::ParallelReport`]).
+    pub parallel: crate::ParallelReport,
 }
 
 /// A [`ChatFineTune::policy_gradient`] run: its settings and the statistics of every optimiser step it took.
@@ -1776,6 +1784,7 @@ impl ChatFineTuneOutcome {
             "selection": self.selection,
             "stopped_early": self.stopped_early,
             "policy_gradient": policy_gradient,
+            "parallel": self.parallel,
         })
     }
 

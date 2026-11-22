@@ -324,6 +324,12 @@ impl<C: Collective> Collective for JobCollective<C> {
         self.host.world_size()
     }
 
+    /// The host transport's, with the device reductions as this group settled them ([`Self::device_provider`]):
+    /// `None` until the first device reduction decided where gradients are summed.
+    fn transport(&self) -> crate::collective::TransportReport {
+        crate::collective::TransportReport { reductions: self.device_provider(), ..self.host.transport() }
+    }
+
     /// Aborts the device group, when one was formed, without waiting for the thread inside one of its operations
     /// (the operation then ends with `why`), and breaks the host transport.
     fn abort(&self, why: &str) {

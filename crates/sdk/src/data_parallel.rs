@@ -37,6 +37,80 @@ pub struct DataParallel {
     sharding: model::zero::Sharding,
     /// What the ranks of an in-process group share ([`Self::in_process`]).
     local: Option<Arc<LocalGroup>>,
+    /// The ranks this process runs of the group, and the device each one recorded running on ([`Self::ran_on`]).
+    here: Arc<LocalRanks>,
+}
+
+/// The ranks of a group that this process runs, and where each one ran.
+struct LocalRanks {
+    ranks: std::ops::Range<usize>,
+    devices: Mutex<std::collections::BTreeMap<usize, RankDevice>>,
+}
+
+impl LocalRanks {
+    fn new(ranks: std::ops::Range<usize>) -> Arc<LocalRanks> {
+        Arc::new(LocalRanks { ranks, devices: Mutex::new(Default::default()) })
+    }
+}
+
+/// The device one rank of a run trained on, as the run resolved it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct RankDevice {
+    /// The rank's place in the group (0 for a run that is not data-parallel).
+    pub rank: usize,
+    /// `"gpu<N>"` (the card's index in this process's device list) or `"cpu"`.
+    pub device: String,
+    /// The card's name as its driver reports it; `None` for the CPU or a card that reports none.
+    pub name: Option<String>,
+}
+
+impl RankDevice {
+    /// Where a run whose selection resolved to the cards `gpus` (none: the CPU) trains, as rank `rank`. A run is
+    /// placed on one card: the first.
+    pub(crate) fn resolved(rank: usize, gpus: &[u32]) -> RankDevice {
+        match gpus.first() {
+            Some(&index) => RankDevice {
+                rank,
+                device: format!("gpu{index}"),
+                name: gpu_core::devices::gpus().iter().find(|d| d.index == index).map(|d| d.identity.name.clone()).filter(|n| !n.is_empty()),
+            },
+            None => RankDevice { rank, device: "cpu".to_string(), name: None },
+        }
+    }
+}
+
+/// How a training run was spread, as it ran: what a record needs to show that a run used the ranks, cards and
+/// servers it was meant to. A field that was not observed is `None`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ParallelReport {
+    /// Ranks of the whole group, every server's (1 for a run that is not data-parallel).
+    pub world_size: usize,
+    /// The ranks this server ran, `[first, end)`.
+    pub ranks: [usize; 2],
+    /// Where each of this server's ranks trained, in rank order (a rank that never recorded one is missing).
+    pub devices: Vec<RankDevice>,
+    /// Who summed the gradients: `"nccl"` on the cards, `"host"` through the host transport; `None` for a run with
+    /// no group, or one whose ranks never reduced.
+    pub collective: Option<String>,
+    /// How the ranks reached each other on the host side: `"in_process"` or `"tcp"`.
+    pub transport: Option<String>,
+    /// The network the device library chose between nodes; `None` while the library does not expose it.
+    pub network: Option<String>,
+    /// What the group sharded across its ranks (`"replicated"`, `"optimizer"`, `"gradients"`, `"parameters"`);
+    /// `None` for a run with no group.
+    pub sharding: Option<String>,
+}
+
+impl ParallelReport {
+    /// A run that was not data-parallel: one rank, on `device`.
+    pub(crate) fn single(device: RankDevice) -> ParallelReport {
+        ParallelReport { world_size: 1, ranks: [0, 1], devices: vec![device], collective: None, transport: None, network: None, sharding: None }
+    }
+
+    /// The report of a run trained as `parallel`'s rank (if it was) on `device`.
+    pub(crate) fn of(parallel: Option<&DataParallel>, device: RankDevice) -> ParallelReport {
+        parallel.map_or_else(|| ParallelReport::single(device), DataParallel::report)
+    }
 }
 
 /// What the ranks that are threads of this process share: each one's collective (so a rank that fails can break the
@@ -104,6 +178,7 @@ pub struct JobRanks {
     secret: crate::JobSecret,
     ranks: std::ops::Range<usize>,
     local: Arc<LocalGroup>,
+    here: Arc<LocalRanks>,
 }
 
 impl std::fmt::Debug for JobRanks {
@@ -128,7 +203,7 @@ impl JobRanks {
         let context = JobContext::new(self.plan.clone(), self.secret.clone(), rank).map_err(Error::MissingArgument)?;
         let group: Arc<dyn Collective> = Arc::new(context.job_collective().map_err(|e| Error::Backend(format!("joining the job: {e}")))?);
         self.local.admit(&group)?;
-        Ok(DataParallel { group, rank, job: Some((self.plan.job.clone(), self.plan.identity())), sharding: self.plan.sharding, local: Some(Arc::clone(&self.local)) })
+        Ok(DataParallel { group, rank, job: Some((self.plan.job.clone(), self.plan.identity())), sharding: self.plan.sharding, local: Some(Arc::clone(&self.local)), here: Arc::clone(&self.here) })
     }
 
     /// Break the ranks of this process, joined or still joining, because `rank` failed (before it could join, say):
@@ -224,7 +299,7 @@ impl DataParallel {
         let context = JobContext::from_plan_file(plan, rank, secret).map_err(Error::MissingArgument)?;
         let group = context.job_collective().map_err(|e| Error::Backend(format!("joining the job: {e}")))?;
         let job = Some((context.plan().job.clone(), context.plan().identity()));
-        Ok(DataParallel { group: Arc::new(group), rank, job, sharding: context.plan().sharding, local: None })
+        Ok(DataParallel { group: Arc::new(group), rank, job, sharding: context.plan().sharding, local: None, here: LocalRanks::new(rank..rank + 1) })
     }
 
     /// The ranks `ranks` of the job `plan`, run as threads of this process, one per card, beside the job's other ranks
@@ -236,7 +311,7 @@ impl DataParallel {
         if ranks.is_empty() || ranks.end > plan.world_size {
             return Err(Error::InvalidRequest(format!("ranks {ranks:?} are not a range of job {:?}'s {} ranks", plan.job, plan.world_size)));
         }
-        Ok(JobRanks { plan, secret, ranks, local: LocalGroup::new(&[]) })
+        Ok(JobRanks { plan, secret, here: LocalRanks::new(ranks.clone()), ranks, local: LocalGroup::new(&[]) })
     }
 
     /// `world` ranks that are threads of this process, one per card: hand rank `r` to the trainer that runs on card
@@ -250,7 +325,12 @@ impl DataParallel {
             .map(|_| Arc::new(JobCollective::new(Arc::clone(&host), CollectivePath::Auto, IN_PROCESS_JOIN, IN_PROCESS_OP).with_bucket_bytes(u64::from(model::job::DEFAULT_BUCKET_MIB) << 20)) as Arc<dyn Collective>)
             .collect();
         let local = LocalGroup::new(&members);
-        Ok(members.into_iter().enumerate().map(|(rank, group)| DataParallel { group, rank, job: None, sharding: model::zero::Sharding::Replicated, local: Some(Arc::clone(&local)) }).collect())
+        let here = LocalRanks::new(0..world);
+        Ok(members
+            .into_iter()
+            .enumerate()
+            .map(|(rank, group)| DataParallel { group, rank, job: None, sharding: model::zero::Sharding::Replicated, local: Some(Arc::clone(&local)), here: Arc::clone(&here) })
+            .collect())
     }
 
     /// Break an in-process group because this rank failed and will not take part again: every other rank waiting in
@@ -315,6 +395,27 @@ impl DataParallel {
     /// How many ranks the group has.
     pub fn world(&self) -> usize {
         self.group.world_size()
+    }
+
+    /// Record the device this rank trains on, for the run's report ([`Self::report`]).
+    pub(crate) fn ran_on(&self, device: RankDevice) {
+        self.here.devices.lock().unwrap_or_else(|e| e.into_inner()).insert(self.rank, device);
+    }
+
+    /// How the group ran, as this process saw it: its size, the ranks this process ran and the device each recorded,
+    /// and what the transport observed carrying the reductions ([`model::Collective::transport`]).
+    pub fn report(&self) -> ParallelReport {
+        let transport = self.group.transport();
+        let devices = self.here.devices.lock().unwrap_or_else(|e| e.into_inner()).values().cloned().collect();
+        ParallelReport {
+            world_size: self.world(),
+            ranks: [self.here.ranks.start, self.here.ranks.end],
+            devices,
+            collective: transport.reductions.map(str::to_string),
+            transport: transport.host.map(str::to_string),
+            network: transport.network.map(str::to_string),
+            sharding: serde_json::to_value(self.sharding).ok().and_then(|v| v.as_str().map(str::to_string)),
+        }
     }
 
     /// Rank 0's `words` on every rank of the group (what the other ranks pass is ignored): how a result one rank

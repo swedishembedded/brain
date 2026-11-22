@@ -1223,7 +1223,15 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
       plan, p50/p99, algbw/busbw from the slowest rank, the network and
       channel paths NCCL logged per rank, CXI NIC octets per host, verdict;
       unobserved fields null). `--expect-network` fails a run on another
-      network or, across nodes, without a channel over it. Remaining: the
+      network or, across nodes, without a channel over it. Training records
+      (2026-11-22): every chat fine-tune report (adapter and full, the served
+      `train` job's and `brain finetune`'s `report.json`) has `parallel`:
+      `world_size`, this server's `ranks`, each local rank's `devices`, the
+      observed `collective` (`nccl`/`host`, `model::Collective::transport`),
+      host `transport` (`in_process`/`tcp`), `sharding`, and `network`, which
+      is still null: the trainer does not read NCCL's log the way
+      `--nccl-log` does for the bench (open). Test: sdk
+      `chat_finetune_data_parallel`, two in-process ranks on CPU. Remaining: the
       cross-node trace, the scaling and overlap gates. One machine-readable result per
       run (hardware, every library version, configuration, p50/p99, algorithm
       and bus bandwidth, NIC octets from CXI telemetry, correctness verdict;

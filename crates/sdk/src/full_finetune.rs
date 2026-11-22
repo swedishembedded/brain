@@ -459,6 +459,11 @@ impl ChatFullFineTune {
         } else {
             crate::device::resolve(&self.device)?
         };
+        // Where this rank trains, as resolved: what the run's report says it ran on.
+        let ran_on = crate::data_parallel::RankDevice::resolved(self.parallel.as_ref().map_or(0, crate::DataParallel::rank), &set.gpus);
+        if let Some(parallel) = &self.parallel {
+            parallel.ran_on(ran_on.clone());
+        }
         // The fp32 plan below prices every weight and gradient on the cards; a resident build holds its linears in
         // their own encoding (streamed through a window, sharded over a group) and its planner checks that build
         // before anything is allocated.
@@ -508,6 +513,7 @@ impl ChatFullFineTune {
             block,
             lr: self.lr,
             exit_entropy,
+            parallel: crate::data_parallel::ParallelReport::of(self.parallel.as_ref(), ran_on),
         };
         if trained.status != FineTuneStatus::Completed {
             return Ok(outcome);
@@ -678,9 +684,34 @@ pub struct ChatFullFineTuneOutcome {
     pub lr: f32,
     /// The exit-entropy weight the run trained with (0 for a family without exit gates).
     pub exit_entropy: f32,
+    /// How the run was spread over ranks, cards and servers, as it ran ([`crate::ParallelReport`]).
+    pub parallel: crate::ParallelReport,
 }
 
 impl ChatFullFineTuneOutcome {
+    /// The run's report: the document the served `train` job answers with for a full fine-tune (`objective`
+    /// `full_sft`) and `brain finetune` writes as `report.json`.
+    pub fn report(&self) -> serde_json::Value {
+        serde_json::json!({
+            "status": match self.status { FineTuneStatus::Completed => "completed", FineTuneStatus::Cancelled => "cancelled" },
+            "objective": "full_sft",
+            "weights_sha256": self.weights_digest,
+            "base_digest": self.base_digest,
+            "records": self.train_records,
+            "replay_records": self.replay_records,
+            "block": self.block,
+            "seed": self.seed,
+            "steps": self.steps,
+            "steps_completed": self.steps_completed,
+            "lr": self.lr,
+            "exit_entropy": self.exit_entropy,
+            "resumed_at": self.resumed_at,
+            "initial_loss": self.initial_loss,
+            "final_loss": self.final_loss,
+            "parallel": self.parallel,
+        })
+    }
+
     fn record_json(&self, base_id: &str) -> serde_json::Value {
         serde_json::json!({
             "base": base_id,

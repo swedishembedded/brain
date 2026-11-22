@@ -464,23 +464,7 @@ pub fn run_full(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progres
         return Err("cancelled".into());
     }
     let checkpoint = outcome.checkpoint.clone().ok_or("train: the run completed with no checkpoint")?;
-    let report = json!({
-        "status": "completed",
-        "objective": "full_sft",
-        "weights_sha256": outcome.weights_digest,
-        "base_digest": outcome.base_digest,
-        "records": outcome.train_records,
-        "replay_records": outcome.replay_records,
-        "block": outcome.block,
-        "seed": outcome.seed,
-        "steps": outcome.steps,
-        "steps_completed": outcome.steps_completed,
-        "lr": outcome.lr,
-        "exit_entropy": outcome.exit_entropy,
-        "resumed_at": outcome.resumed_at,
-        "initial_loss": outcome.initial_loss,
-        "final_loss": outcome.final_loss,
-    });
+    let report = outcome.report();
     work.ensure_within_quota()?;
     let resumed_at = outcome.resumed_at;
     let mut result = checkpoint_outcome_of(env, &checkpoint, p.install_as.as_deref(), report, run.map(|r| (r, resumed_at)))?;

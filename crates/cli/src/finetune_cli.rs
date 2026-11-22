@@ -589,6 +589,13 @@ pub fn run_finetune(argv: &[String]) -> ! {
                 if let Some(p) = &o.checkpoint {
                     println!("checkpoint: {}", p.display());
                 }
+                // The run's report, as for an adapter run; one writer per job.
+                if let (Some(out), true, brain::FineTuneStatus::Completed) = (&args.out, args.job_rank.unwrap_or(0) == 0, o.status) {
+                    let path = std::path::Path::new(out).join("report.json");
+                    if let Err(e) = std::fs::write(&path, serde_json::to_vec_pretty(&o.report()).unwrap_or_default()) {
+                        eprintln!("brain finetune: writing {}: {e}", path.display());
+                    }
+                }
                 0
             }
             Err(e @ brain::Error::JobFailed(_)) => {
