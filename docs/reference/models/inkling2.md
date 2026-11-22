@@ -192,8 +192,9 @@ brain finetune thinkingmachines/Inkling-2-Mini --lora 16 --objective policy-grad
   a window the release is refused by name. The state is about 300 GB of host
   memory; the library can keep it in a file instead
   (`ResidentFtConfig::state_dir`).
-- A trained adapter is not served yet (the engine holds no adapter bank, and the
-  expert pairs cannot be folded into the quantized banks).
+- A trained adapter is served beside its base as a model of its own (see
+  Adapters); its expert pairs are applied on the routed rows, never folded into
+  the quantized banks.
 
 The example `samples/python/llm/inkling2/inkling2.py` asks one question at a low
 and a high reasoning effort over D-Bus, OpenAI-compatible or Anthropic-compatible
