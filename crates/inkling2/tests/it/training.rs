@@ -255,3 +255,13 @@ fn the_serving_engine_serves_what_the_trainer_trains() {
     let refused = inkling2::finetune::Inkling2Trainer::serving_engine(&ckpt, &tiers, Some(adapter), 8).expect("the family serves").err().expect("an adapter is refused");
     assert_eq!(refused.kind(), std::io::ErrorKind::Unsupported, "{refused}");
 }
+
+/// The backward recomputes every visit from its saved input: it accepts recompute and refuses keeping every visit by
+/// name.
+#[test]
+fn the_backward_always_recomputes_each_visit() {
+    let tc = tiny_config();
+    let init = init_weights(&tc.cfg, data::rng::random_seed());
+    let mut m = Inkling2Train::new(tc, 1, 4, &init);
+    model::saved::check_always_recomputes("inkling2", &mut m).unwrap();
+}

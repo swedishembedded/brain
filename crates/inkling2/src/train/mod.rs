@@ -825,6 +825,13 @@ impl model::Model for Inkling2Train {
         true
     }
 
+    /// The backward always recomputes each visit from its saved f32 input partial (the retained block states are
+    /// f32 too): [`model::saved::SavedPolicy::Recompute`] is what it does; keeping every visit and narrow boundaries
+    /// are refused by name.
+    fn set_saved_policy(&mut self, policy: model::saved::SavedPolicy) -> Result<(), String> {
+        model::saved::recompute_only("inkling2", policy)
+    }
+
     fn token_objectives(&self) -> Option<&dyn model::training::TokenObjectives> {
         Some(self)
     }
