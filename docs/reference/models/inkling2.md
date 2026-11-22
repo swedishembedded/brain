@@ -47,7 +47,11 @@ visits keep keys and values in a paged pool (one block table covers all of them)
 the 40 sliding visits a ring of exactly their 1024-token window, and every visit
 the inputs its four short convolutions read next. A sequence therefore costs
 64 KiB per token (f32 keys and values of the 8 full visits) plus a fixed state
-row of about 340 MB (the rings and the convolution states), whatever its length. `brain serve --ctx N` caps one
+row of about 340 MB (the rings and the convolution states), whatever its length.
+`brain serve --kv-cache bf16` keeps every key and value row (the paged planes
+and the rings) in bf16 instead: half the bytes per token, at a measured cost
+in precision against f32 (the default, the reference numerics); `int8` and
+`fp8` are refused by name. `brain serve --ctx N` caps one
 sequence (default 16384 tokens; the model's positions reach 1M) and
 `--max-batch N` is how many run at once; the pool holds that many contexts and
 as many state rows again for cached prompts.
@@ -66,10 +70,30 @@ message before the answer too, so it never stops one. `reasoning_effort` is the
 template's own variable (`low`, `medium`, `high` or a number from 0 to 1); any
 other value is refused by name.
 
-Not served yet: images (the vision tower and the engine's prompt splice exist;
-the request path from image parts to them does not, so a request carrying an
-image is refused rather than answered without it), adapters, and the optional
-`mtp.safetensors` drafter.
+## Images
+
+The vision tower is loaded onto the decoder's card and reads the images of a
+chat request: an OpenAI `image_url` part or an Anthropic `image` block with an
+inline `data:` URL (PNG, JPEG or PPM; no URL is fetched), or over D-Bus the
+blobs `image`, `image1`, ... in the order of the messages' image parts. Each
+image part becomes the template's placeholder, expanded to one token per
+40x40-pixel region of its image (the image is padded, never resized), and the
+tower's rows stand at those tokens. An image may be at most 4096 pixels a side,
+a request carries at most 8, and all of them together must need fewer tokens
+than the context holds; an image part without its image (or the reverse), an
+image in a raw prompt (`chat: false`) or in a system or assistant message is
+refused as the client's error. Transparency does not reach the model: the HTTP
+surfaces decode images to RGB.
+
+```bash
+curl -s localhost:8788/v1/chat/completions -H "Authorization: Bearer $KEY" -d '{
+  "model": "thinkingmachines/Inkling-2-Mini",
+  "messages": [{"role": "user", "content": [
+    {"type": "image_url", "image_url": {"url": "data:image/png;base64,'"$(base64 -w0 photo.png)"'"}},
+    {"type": "text", "text": "What is in this picture?"}]}]}'
+```
+
+Not served yet: adapters and the optional `mtp.safetensors` drafter.
 
 ## Training
 

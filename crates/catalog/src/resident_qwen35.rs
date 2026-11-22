@@ -115,11 +115,14 @@ pub struct Qwen35Sizing {
     /// The serving policy cannot be honoured by this resident (the reason is
     /// [`Qwen35ServeConfig::fp32_refused`]): it is not built.
     pub refused: bool,
+    /// The K/V tier asked for (`--kv-cache`); `None` keeps each resident's own default. A model-dir resident that
+    /// offers a K/V choice (Inkling 2: f32 or bf16) serves it and refuses any other by name.
+    pub kv_cache: Option<model::kv_tier::KvTier>,
 }
 
 impl Default for Qwen35Sizing {
     fn default() -> Self {
-        Qwen35Sizing { ctx: 4096, ctx_explicit: false, max_batch: 4, exact_decode: false, refused: false }
+        Qwen35Sizing { ctx: 4096, ctx_explicit: false, max_batch: 4, exact_decode: false, refused: false, kv_cache: None }
     }
 }
 
@@ -127,7 +130,7 @@ impl Qwen35Sizing {
     /// Clamp both knobs to their 1 floor - what the old env readers did to
     /// any parsed value, now applied to the parsed struct once, here.
     pub fn sanitized(self) -> Qwen35Sizing {
-        Qwen35Sizing { ctx: self.ctx.max(1), ctx_explicit: self.ctx_explicit, max_batch: self.max_batch.max(1), exact_decode: self.exact_decode, refused: self.refused }
+        Qwen35Sizing { ctx: self.ctx.max(1), max_batch: self.max_batch.max(1), ..self }
     }
 }
 
@@ -416,18 +419,22 @@ impl Qwen35ServeConfig {
         let gguf = self.gguf.apply_policy(p);
         // A choice the MoE engine cannot honour leaves that resident out (it records why); its notes join the others.
         let moe = self.moe.apply_policy(p);
+        // The sizing also sizes the model-dir residents built from a published directory (EdgeRock, Inkling 2, the
+        // looped decoders), so the context, batch and K/V choice reach it even when the brain-checkpoint resident
+        // itself cannot honour the policy.
+        if let Some(c) = p.limits.ctx {
+            self.fp32.ctx = c;
+            self.fp32.ctx_explicit = true;
+        }
+        if let Some(b) = p.limits.max_batch {
+            self.fp32.max_batch = b;
+        }
+        self.fp32.kv_cache = p.kv_cache;
         let fp32 = QWEN35_FP32_POLICY.check(p);
         if let Err(e) = &fp32 {
             self.fp32_refused = Some(e.clone());
             self.fp32.refused = true;
         } else {
-            if let Some(c) = p.limits.ctx {
-                self.fp32.ctx = c;
-                self.fp32.ctx_explicit = true;
-            }
-            if let Some(b) = p.limits.max_batch {
-                self.fp32.max_batch = b;
-            }
             self.fp32.exact_decode = p.exact_decode;
         }
         match (gguf, moe, fp32) {
@@ -997,6 +1004,8 @@ mod tests {
         assert_eq!(cfg.gguf.prefix_slots, None, "left to the hardware's rules, which follow the concurrency where it fits");
         assert!(cfg.gguf.refused.is_none() && cfg.fp32.refused, "the fp32 resident cannot honour q4/fp8");
         assert!(cfg.fp32_refused.as_deref().unwrap().contains("brain checkpoint"));
+        let sizing = cfg.fp32;
+        assert_eq!((sizing.ctx, sizing.ctx_explicit, sizing.max_batch, sizing.kv_cache), (8192, true, 6, Some(model::kv_tier::KvTier::FP8)), "the model-dir residents sized by it get the context, batch and K/V choice all the same");
 
         let mut p = model::policy::ServePolicy::default();
         p.set("--gemm", "fp32").unwrap();
@@ -1104,7 +1113,7 @@ mod tests {
     fn sizing_defaults_and_sanitization() {
         let d = Qwen35Sizing::default();
         assert_eq!((d.ctx, d.max_batch), (4096, 4));
-        let s = Qwen35Sizing { ctx: 0, ctx_explicit: false, max_batch: u32::MAX, exact_decode: false, refused: false }.sanitized();
+        let s = Qwen35Sizing { ctx: 0, max_batch: u32::MAX, ..Qwen35Sizing::default() }.sanitized();
         assert_eq!((s.ctx, s.max_batch), (1, u32::MAX));
     }
 

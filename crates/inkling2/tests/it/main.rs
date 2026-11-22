@@ -6,10 +6,12 @@
 
 mod activation_tier;
 mod image_text;
+mod kv_precision;
 mod layout;
 mod real_lora;
 mod real_parity;
 mod serve;
+mod serve_images;
 mod tiny_parity;
 mod training;
 mod vision;

@@ -195,6 +195,13 @@ impl VisionWeights {
         Ok(VisionWeights { tensors })
     }
 
+    /// [`Self::load`] from the release directory `dir` (its safetensors, read as declared).
+    pub fn open(dir: &std::path::Path, cfg: &VisionConfig) -> Result<VisionWeights, String> {
+        let reader = checkpoint::packed::PackedReader::open(dir)?;
+        let src = PackedSource::identity_lenient(Box::new(reader), checkpoint::packed::CodecRegistry::reference());
+        Self::load(&src, cfg)
+    }
+
     /// Weights from tensors already in memory, held to the same name map as [`Self::load`]: every tensor of `cfg`
     /// present at its element count and finite, nothing else.
     pub fn from_tensors(cfg: &VisionConfig, tensors: HashMap<String, Vec<f32>>) -> Result<VisionWeights, String> {

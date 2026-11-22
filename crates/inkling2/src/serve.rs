@@ -137,6 +137,11 @@ impl Engine {
         &self.m
     }
 
+    /// The model back, the pool freed: an engine at other options can be built over the same uploaded weights.
+    pub fn into_model(self) -> Inkling2 {
+        self.m
+    }
+
     pub fn pool(&self) -> &Pool {
         &self.pool
     }
@@ -179,10 +184,7 @@ impl Engine {
         let mut s = Vec::new();
         let x = self.m.embed(&mut s, tokens);
         if let Some(e) = embeds {
-            self.m.flush(&mut s);
-            for (pos, row) in e.rows_in(start, start + n as u32) {
-                g.write_f32_at(&x, (pos - start) as u64 * d as u64, row);
-            }
+            self.m.splice(&mut s, &x, e, start, n as u32);
         }
         let recording = table.routing_log_mut().is_some();
         let mut routes = recording.then(Vec::new);

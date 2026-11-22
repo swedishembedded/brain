@@ -49,6 +49,7 @@ use model::paged::BlockTable;
 use model::policy::LinearActivations;
 use model::saved::RetainedStates;
 use model::serve::visit_state::VisitPool;
+use model::serve::PromptEmbeds;
 use model::short_conv::{conv_state_tail_step, short_conv_fwd, short_conv_step, BaseLayout, DynTaps, ShortConvIds, ShortConvShape};
 
 use crate::config::{Inkling2Config, LayerKind};
@@ -441,12 +442,21 @@ impl Inkling2 {
     /// The logits of every position of `tokens` (one sequence, from position 0), row-major `[tokens, valid_vocab]`,
     /// soft-capped as the head declares.
     pub fn forward(&self, tokens: &[u32]) -> Result<Vec<f32>, String> {
-        self.run(tokens, None)
+        self.run(tokens, None, None)
     }
 
     /// [`Self::forward`], handing every intermediate the reference golden records to `probe`.
     pub fn forward_probed(&self, tokens: &[u32], probe: &mut dyn Probe) -> Result<Vec<f32>, String> {
-        self.run(tokens, Some(probe))
+        self.run(tokens, None, Some(probe))
+    }
+
+    /// [`Self::forward`] with `embeds`' rows (image features) standing at their positions after the embedding norm, as
+    /// the reference splices them into `inputs_embeds` and as the served engine splices a request's rows.
+    pub fn forward_embedded(&self, tokens: &[u32], embeds: &PromptEmbeds) -> Result<Vec<f32>, String> {
+        if let Some(why) = embeds.refusal(tokens.len(), Some(self.cfg.hidden as usize)) {
+            return Err(format!("inkling2: {why}"));
+        }
+        self.run(tokens, Some(embeds), None)
     }
 
     fn g(&self) -> &Gpu {
@@ -484,11 +494,14 @@ impl Inkling2 {
         Ok(t)
     }
 
-    fn run(&self, tokens: &[u32], mut probe: Option<&mut dyn Probe>) -> Result<Vec<f32>, String> {
+    fn run(&self, tokens: &[u32], embeds: Option<&PromptEmbeds>, mut probe: Option<&mut dyn Probe>) -> Result<Vec<f32>, String> {
         let t = self.check_tokens(tokens)?;
         let (cfg, d) = (&self.cfg, self.cfg.hidden);
         let mut s = Vec::new();
         let x = self.embed(&mut s, tokens);
+        if let Some(e) = embeds {
+            self.splice(&mut s, &x, e, 0, t);
+        }
         self.tap(&mut s, &mut probe, "embed", &x, t * d);
         let normed = self.trunk(&mut s, &Rows::Whole, x, t, &mut probe, None)?;
         let vocab = cfg.vocab;
@@ -511,6 +524,15 @@ impl Inkling2 {
         let raw = g.storage(u64::from(t * d));
         self.ops.embed(s, &self.w.embed, &tok, t, &raw);
         self.rms(s, &raw, &self.w.embed_norm, t)
+    }
+
+    /// Overwrite the rows of `x` (normalised embeddings of positions `start..start + n`) that `embeds` holds a row for.
+    pub(crate) fn splice(&self, s: &mut Vec<Step>, x: &DeviceBuffer, embeds: &PromptEmbeds, start: u32, n: u32) {
+        let d = u64::from(self.cfg.hidden);
+        self.flush(s);
+        for (pos, row) in embeds.rows_in(start, start + n) {
+            self.g().write_f32_at(x, u64::from(pos - start) * d, row);
+        }
     }
 
     /// The head over `t` final normalised rows: logits `[t, vocab]` (the stored rows), soft-capped, the padding rows

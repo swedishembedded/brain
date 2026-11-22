@@ -415,7 +415,7 @@ SERVING POLICY  (one model-agnostic policy for every model that serves it.
                          model's own (int8 for the Qwen3 engine; for the
                          released Qwen3.8 GGUFs the fastest that fits the
                          cards, int8 first; for Ripple bf16, or int8 with
-                         --sparse-attention).
+                         --sparse-attention; for Inkling 2 f32, or bf16).
   --draft-model DIR      speculative decoding with the draft model in DIR (a
                          directory, or the <vendor>/<repo> of a pulled one),
                          for the models whose engine retains the hidden states
