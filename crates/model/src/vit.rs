@@ -293,6 +293,13 @@ fn linear_step(
     steps.push(gemm_step(g, k, reg, x, w, out, m, kdim, n));
 }
 
+/// One large linear outside a block (a patch embedding), `out = x . W^T` for `x [m, kdim]` and `W [n, kdim]`, on the
+/// same selection as the block linears: the register-tiled GEMM where the handle registers `matmul_reg3` and the
+/// output is a whole tile, else the row-blocked reference.
+pub fn linear_rows_step(g: &Gpu, k: &VitKernelIds, x: &DeviceBuffer, w: &DeviceBuffer, out: &DeviceBuffer, (m, kdim, n): (u32, u32, u32)) -> Step {
+    gemm_step(g, k, g.kernel_index("matmul_reg3"), x, w, out, m, kdim, n)
+}
+
 /// [`gemm_step`] for [`vit_block_fwd_cached`], whose reference kernel is
 /// `matmul` rather than `matmul_rows`.
 ///
@@ -330,6 +337,38 @@ fn gemm_step_cached(
 pub fn attn_chunk_for(sh: &VitShape, max_span: u32, budget_bytes: u64) -> u32 {
     let per_row = sh.heads as u64 * max_span as u64 * 4;
     ((budget_bytes / per_row.max(1)) as u32).clamp(64, 4096)
+}
+
+/// Ceiling on ONE of the two `[heads, chunk, span]` attention score slabs.
+///
+/// The tower attends the WHOLE image as a single span, so the slab grows with
+/// the square of the patch count: at the captioning pixel budget that is over
+/// two gigabytes, past what a card will BIND, never mind hold two of. Queries
+/// are therefore dispatched in chunks under this budget - which splits the
+/// query rows only, never the keys, so every row still softmaxes over the
+/// whole image in the same order and the result is bit-identical to one
+/// unchunked dispatch.
+///
+/// 256 MiB rather than as much as the card will bind: the tower shares its
+/// card with a decoder whose fp32 weights are most of it, and a chunk this
+/// wide still keeps tens of thousands of score rows in flight, so the extra
+/// dispatches cost nothing measurable while the gigabyte saved is a gigabyte
+/// the decoder needs.
+const ATTN_SLAB_BUDGET: u64 = 256 * 1024 * 1024;
+
+/// Query-chunk width for a tower whose longest attention span is `max_span` rows (a whole image): as many rows
+/// as [`ATTN_SLAB_BUDGET`] holds, and never more than this device will bind.
+///
+/// A device taking the fused path never reads the score slab, so the chunk
+/// only has to be legal, not large - `attn_chunk_for`'s own floor is what
+/// makes the scratch a rounding error there instead of half a gigabyte the
+/// tower would allocate beside a decoder that needs it.
+pub fn attn_chunk_for_device(g: &Gpu, sh: &VitShape, max_span: u32) -> u32 {
+    if flash_ids(g).is_some() {
+        return attn_chunk_for(sh, max_span, 0).min(max_span);
+    }
+    let budget = ATTN_SLAB_BUDGET.min(g.memory_limits().working_set_bytes);
+    attn_chunk_for(sh, max_span, budget).min(max_span)
 }
 
 /// Span + chunked self-attention over the fused qkv buffer: for each span

@@ -18,7 +18,7 @@
 use std::collections::HashMap;
 
 use gpu_core::{f, DeviceBuffer, Gpu, Step};
-use model::vit::{attn_chunk_for, vit_block_bwd, vit_block_fwd, vit_block_fwd_cached, RopeTables, VitBlockCache, VitBlockGrads, VitBlockWeights, VitBwdIds, VitBwdScratch, VitKernelIds, VitScratch, VitShape};
+use model::vit::{vit_block_bwd, vit_block_fwd, vit_block_fwd_cached, RopeTables, VitBlockCache, VitBlockGrads, VitBlockWeights, VitBwdIds, VitBwdScratch, VitKernelIds, VitScratch, VitShape};
 
 use crate::config::VisionConfig;
 use crate::vision::{pos_embed_bilinear, vision_position_ids, vision_rope_tables};
@@ -27,23 +27,6 @@ use crate::vision::{pos_embed_bilinear, vision_position_ids, vision_rope_tables}
 const VISION_ROPE_THETA: f32 = 10000.0;
 /// LayerNorm eps in the ViT (matches the text side; HF vision uses 1e-6).
 const VISION_EPS: f32 = 1e-6;
-
-/// Ceiling on ONE of the two `[heads, chunk, span]` attention score slabs.
-///
-/// The tower attends the WHOLE image as a single span, so the slab grows with
-/// the square of the patch count: at the captioning pixel budget that is over
-/// two gigabytes, past what a card will BIND, never mind hold two of. Queries
-/// are therefore dispatched in chunks under this budget - which splits the
-/// query rows only, never the keys, so every row still softmaxes over the
-/// whole image in the same order and the result is bit-identical to one
-/// unchunked dispatch.
-///
-/// 256 MiB rather than as much as the card will bind: the tower shares its
-/// card with a decoder whose fp32 weights are most of it, and a chunk this
-/// wide still keeps tens of thousands of score rows in flight, so the extra
-/// dispatches cost nothing measurable while the gigabyte saved is a gigabyte
-/// the decoder needs.
-const ATTN_SLAB_BUDGET: u64 = 256 * 1024 * 1024;
 
 /// The kernels the ViT dispatches, in the order [`vision_pipelines`] lists them.
 /// gelu slot carries the **tanh** GELU (Qwen3-VL vision act = gelu_pytorch_tanh).
@@ -147,21 +130,6 @@ fn patch_embed_step(g: &Gpu, naive: usize, x: &DeviceBuffer, w: &DeviceBuffer, o
         Some(i) if n >= 128 && c >= 128 => g.dispatch(i, &[x, w, out], &[n, pv, c], gpu_core::Dispatch::Workgroups(n.div_ceil(128) * c.div_ceil(128))),
         _ => g.step(naive, &[x, w, out], &[n, pv, c], n * c),
     }
-}
-
-/// Query-chunk width for one image's full-image attention span: as many rows
-/// as [`ATTN_SLAB_BUDGET`] holds, and never more than this device will bind.
-///
-/// A device taking the fused path never reads the score slab, so the chunk
-/// only has to be legal, not large - `attn_chunk_for`'s own floor is what
-/// makes the scratch a rounding error there instead of half a gigabyte the
-/// tower would allocate beside a decoder that needs it.
-fn attn_chunk(g: &Gpu, sh: &VitShape, n: u32) -> u32 {
-    if model::vit::flash_ids(g).is_some() {
-        return attn_chunk_for(sh, n, 0).min(n);
-    }
-    let budget = ATTN_SLAB_BUDGET.min(g.memory_limits().working_set_bytes);
-    attn_chunk_for(sh, n, budget).min(n)
 }
 
 fn vit_ids() -> VitKernelIds {
@@ -280,7 +248,7 @@ impl VisionEncoder {
 
         // One image -> one whole-image span, queries chunked under the slab
         // budget (and under whatever this device will actually bind).
-        let chunk = attn_chunk(g, &sh, n);
+        let chunk = model::vit::attn_chunk_for_device(g, &sh, n);
         let scr = VitScratch::new(g, &sh, n, chunk, n);
 
         let mut steps: Vec<Step> = Vec::new();
