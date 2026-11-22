@@ -1099,8 +1099,12 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         apart from a one-record run, byte-identical ranks, `parallel`),
         `rl` `stream` (disjoint shards, resume position), `trainjob` `cards`
         (both objectives on two cards: held, streamed once, reported,
-        repeatable; feedback refused). Open: `brain finetune --job-plan`
-        still refuses the paired objectives.
+        repeatable; feedback refused). On cards (2026-11-22, n442 gpu0-1,
+        test binary of d1300edaa, toy qwen3 base): the `cards` preference and
+        distill test passes with the gradients reduced over NCCL (2 ranks,
+        11.3 s), as do the two-card resume tests of `train` (6.7 s) and
+        `full_train` (replicated and ZeRO-2, 13.0 s). Open: `brain finetune
+        --job-plan` still refuses the paired objectives.
       - [x] One served job over several servers (2026-11-22): a `train`
         request's `job` document (the plan, `first_rank`, the secret's
         SHA-256; at most 4 KiB, data-parallel replicated plans of at most
