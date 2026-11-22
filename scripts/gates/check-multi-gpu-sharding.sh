@@ -68,6 +68,7 @@ flux2	default_ref black-forest-labs/FLUX.2-klein-4B - the shipped Klein distilla
 gemma4	LTX-2.5's own text encoder component, run inside ltxv's pipeline (which already uses model::shard for its own DiT) - not an independently sharded model in its own right.
 genieredux	ST-transformer world model, forecasting/world-model scale, not LLM-scale - single GPU by design.
 glmdsa	MoE decoder (MLA + sigmoid noaux_tc MoE + DSA), large by architecture family - not yet migrated onto model::shard; backlog.
+inkling2	Inkling 2 Mini (26B-parameter looped MoE decoder): one engine and one visit-state pool per card, the host tier for what exceeds it; no placement across cards yet, not migrated onto model::shard; backlog.
 instantid	SDXL + IP-Adapter-FaceID identity conditioning, adapter-scale on top of a host backbone - single GPU by design.
 horizon	Timeline model whose default width is d_model 64 (crates/horizon/src/config.rs), forecasting-scale, not LLM-scale - single GPU by design.
 januspro	Janus-Pro 7B (7.4B): reuses deepseekvl's Placement for the tower/decoder split (januspro::model::load_understanding_placed) - placement, not model::shard's Shard/Shardable; backlog.
