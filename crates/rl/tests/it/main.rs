@@ -28,6 +28,7 @@ mod pg_conformance;
 mod pg_learning;
 mod policy_gradient_stability;
 mod lazy_scoring;
+mod onpolicy_distill;
 mod onpolicy_distill_gradcheck;
 mod self_distill;
 #[cfg(feature = "qwen3")]

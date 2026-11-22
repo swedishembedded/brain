@@ -60,6 +60,18 @@
 //! dominate a step: the sequence's advantages are scaled down together), and the k3 KL to the reference stays.
 //! The teacher's rendering must fit the row and supervise exactly the student's tokens.
 //!
+//! ## On-policy distillation from a teacher model
+//!
+//! A record may instead carry another model's scores of the student's sampled answers
+//! ([`super::onpolicy_distill`], [`data::chat_rollout`]). Per-token scores (`teacher_logprobs`) give every supervised
+//! token the same dense advantage `A_t = log q_teacher(y_t | context) - old_t`, read from the record instead of scored
+//! here, through the same guards; they are admitted only when the run's [`PolicyGradientConfig::teacher_tokenizer`]
+//! says the teacher's tokenizer is the student's, and refused with a typed
+//! [`super::onpolicy_distill::DistillRefusal`] otherwise. Per-answer scores (`teacher_logprob`) are the sequence-level
+//! estimator, for any teacher: each rollout's `log q(text) - log p(text)` against the leave-one-out mean of the
+//! rollouts of its group is added to its scalar advantage (after the reward advantage's floor). It is the
+//! higher-variance path; a group's rollouts carry it all or none, at least two of them.
+//!
 //! The row of a record with images is read through the model's shared vision path (`Batch::LmExamples`), so images
 //! train as they do in supervised fine-tuning: the tower is frozen and the loss covers the action tokens only.
 
@@ -79,6 +91,7 @@ use super::advantage::{group_advantages_with, AdvantageFloor, AdvantageNorm};
 use super::grpo::LossAgg;
 use super::grpo_stats::{NonFiniteSteps, MAX_CONSECUTIVE_NONFINITE};
 use super::grpo_term::ClipBand;
+use super::onpolicy_distill::{sequence_advantages, token_advantage, DistillEstimator};
 use super::numerics::{NumericsAccumulator, NumericsBounds, NumericsReport};
 use super::pg_batch::{adapters_are_zero, adapters_can_be_disabled, backward_weighted_lp, weigh, with_adapters_disabled, AdapterState, BatchTerms, PgBatch, PgSpec};
 use super::score_cache::{ExampleScores, ScoreCache, TokenAdvantages};
@@ -263,6 +276,27 @@ fn advantages(split: &data::chat_rollout::SplitRollouts, norm: AdvantageNorm, fl
         let rewards: Vec<f64> = members.iter().map(|&(_, r)| r).collect();
         by_member.extend(members.iter().map(|&(m, _)| m).zip(floor.apply(group_advantages_with(norm, &rewards))));
     }
+    // The sequence-level distillation signal: each rollout's log-ratio against the others of its group.
+    let ratio: HashMap<u32, f64> = graded.iter().filter_map(|(_, g)| g.teacher_log_ratio.map(|r| (g.member, r))).collect();
+    let baseline_only: HashSet<u32> = split.baselines.iter().map(|g| g.member).collect();
+    for (group, members) in &groups {
+        let completions: Vec<u32> = members.iter().map(|&(m, _)| m).filter(|m| !baseline_only.contains(m)).collect();
+        let scored: Vec<f64> = completions.iter().filter_map(|m| ratio.get(m).copied()).collect();
+        if scored.is_empty() {
+            continue;
+        }
+        let rule = RecordRule::TeacherScores.name();
+        let name = &split.groups[*group as usize];
+        if scored.len() != completions.len() {
+            return Err(format!("{rule}: group {name:?} holds {} rollouts with a teacher's per-answer score (\"teacher_logprob\") and {} without; the sequence-level baseline compares the completions of one prompt, so they carry it all or none", scored.len(), completions.len() - scored.len()));
+        }
+        if scored.len() < 2 {
+            return Err(format!("{rule}: group {name:?} holds one rollout with a teacher's per-answer score; the sequence-level estimator's baseline is the other completions of the prompt, so it needs at least two"));
+        }
+        for (m, a) in completions.iter().zip(sequence_advantages(&scored)) {
+            *by_member.get_mut(m).expect("every completion of a group has its reward advantage") += a;
+        }
+    }
     if let Some(a) = by_member.values().find(|a| !(**a as f32).is_finite()) {
         return Err(format!("a group's rewards give the advantage {a}, which is not a finite f32; rescale the rewards"));
     }
@@ -351,11 +385,16 @@ pub struct PolicyGradientConfig {
     /// What a rollout marked `"truncated": true` does: [`TruncatedRollouts::Mask`] (the default) never trains and takes
     /// no part in its group (DAPO's overlong filtering); [`TruncatedRollouts::Keep`] trains with its reward counted.
     pub truncated: TruncatedRollouts,
+    /// How the tokenizer of the teacher model whose scores the records carry compares with the student's
+    /// ([`data::tokenizer_identity::TokenizerIdentity::check`]): records with per-token teacher scores
+    /// (`teacher_logprobs`) are trained only when it says they are identical ([`super::onpolicy_distill`]). `None`: no
+    /// teacher model was named, and such records are refused.
+    pub teacher_tokenizer: Option<data::tokenizer_identity::TokenizerIdentity>,
 }
 
 impl Default for PolicyGradientConfig {
     fn default() -> PolicyGradientConfig {
-        PolicyGradientConfig { clip_eps: 0.2, clip_eps_high: None, dual_clip: Some(DEFAULT_DUAL_CLIP), importance: ImportanceCorrection::None, max_step_kl: None, max_step_grad_norm: None, numerics: None, kv_roundtrip: None, kl_beta: 0.02, reference: ReferencePolicy::Base, behaviour: BehaviourSource::Recorded, loss_agg: LossAgg::SeqMean, temperature: 1.0, log_kl: true, teacher: ReferencePolicy::Base, advantage_bound: None, sequence_advantage_cap: None, advantage_norm: AdvantageNorm::MeanCentered, advantage_floor: AdvantageFloor::None, truncated: TruncatedRollouts::Mask }
+        PolicyGradientConfig { clip_eps: 0.2, clip_eps_high: None, dual_clip: Some(DEFAULT_DUAL_CLIP), importance: ImportanceCorrection::None, max_step_kl: None, max_step_grad_norm: None, numerics: None, kv_roundtrip: None, kl_beta: 0.02, reference: ReferencePolicy::Base, behaviour: BehaviourSource::Recorded, loss_agg: LossAgg::SeqMean, temperature: 1.0, log_kl: true, teacher: ReferencePolicy::Base, advantage_bound: None, sequence_advantage_cap: None, advantage_norm: AdvantageNorm::MeanCentered, advantage_floor: AdvantageFloor::None, truncated: TruncatedRollouts::Mask, teacher_tokenizer: None }
     }
 }
 
@@ -572,9 +611,14 @@ pub struct PolicyGradientStats {
     /// Supervised tokens whose behaviour log-probability was recorded, and those that took the start-of-run value.
     pub tokens_recorded_behavior: usize,
     pub tokens_start_of_run_behavior: usize,
-    /// Sequences with a teacher context, and of those the ones whose summed advantage the cap scaled down.
+    /// Sequences with a teacher context, and of those (and of those with per-token teacher scores) the ones whose
+    /// summed advantage the cap scaled down.
     pub sequences_with_teacher: usize,
     pub sequences_capped: usize,
+    /// Sequences that carry a teacher model's per-token scores (token-level distillation) and a per-answer score
+    /// (sequence-level distillation, [`super::onpolicy_distill`]).
+    pub sequences_with_teacher_logprobs: usize,
+    pub sequences_with_teacher_logprob: usize,
     /// Examples a step drew and the run therefore scored, by what was measured: the behaviour proxy under the start-of-run
     /// policy, the reference, and the teacher. An example no step draws is in none of them, and one drawn again is not
     /// scored again.
@@ -623,6 +667,9 @@ struct Rows {
     behavior: Vec<f32>,
     /// The teacher's renderings, when any example has one.
     teacher: Option<TeacherStream>,
+    /// A teacher model's log-probability of each token of the stream (NaN where none was recorded), when any example
+    /// carries them.
+    teacher_logprobs: Option<Vec<f32>>,
 }
 
 /// The policy the run started from, which the behaviour proxy (and, when so configured, the reference and the teacher)
@@ -644,6 +691,23 @@ impl Anchors {
     fn start_is_base(&self) -> bool {
         matches!(self.start, StartPolicy::Base)
     }
+}
+
+/// How many examples carry a teacher model's per-token scores (`lps`, per token of the stream, NaN where none),
+/// refusing one that leaves a supervised token without a score: the record contract puts them on every answer, so a
+/// gap is a dataset that was not prepared from such records.
+fn check_teacher_logprobs(lps: &[f32], starts: &[usize], ends: &[usize], mask: &[bool]) -> Result<usize, String> {
+    let mut scored = 0;
+    for e in 0..starts.len() {
+        if (starts[e]..ends[e]).all(|t| lps[t].is_nan()) {
+            continue;
+        }
+        if let Some(t) = (starts[e]..ends[e]).find(|&t| mask[t] && lps[t].is_nan()) {
+            return Err(format!("example {e}: supervised token {} carries no teacher log-probability and others of the example do; prepare the dataset again from its records", t - starts[e]));
+        }
+        scored += 1;
+    }
+    Ok(scored)
 }
 
 /// Refuse a teacher rendering that cannot be scored against its student: longer than a row, or supervising a different
@@ -795,7 +859,23 @@ impl ExternalPolicyGradient {
         if let Some(teacher) = &teacher {
             check_teacher(teacher, &starts, &ends, &mask, batch_cfg.block_size).map_err(invalid)?;
         }
-        let mut stats = PolicyGradientStats { sequences_truncated: truncated.iter().filter(|t| **t).count(), sequences_with_teacher: teacher.as_ref().map_or(0, |t| (0..starts.len()).filter(|&e| t.example(e).is_some()).count()), ..Default::default() };
+        let teacher_logprobs = data::chat_rollout::read_teacher_logprobs(dir, "train", tokens.len())?;
+        let scored_examples = match &teacher_logprobs {
+            Some(lps) => check_teacher_logprobs(lps, &starts, &ends, &mask).map_err(|why| invalid(format!("{}: {why}", dir.display())))?,
+            None => 0,
+        };
+        if teacher_logprobs.is_some() {
+            if let Err(refusal) = DistillEstimator::TokenLevel.admit(cfg.teacher_tokenizer.as_ref()) {
+                return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, refusal));
+            }
+        }
+        let mut stats = PolicyGradientStats {
+            sequences_truncated: truncated.iter().filter(|t| **t).count(),
+            sequences_with_teacher: teacher.as_ref().map_or(0, |t| (0..starts.len()).filter(|&e| t.example(e).is_some()).count()),
+            sequences_with_teacher_logprobs: scored_examples,
+            sequences_with_teacher_logprob: recorded.examples.iter().filter(|r| r.and_then(|r| r.graded).is_some_and(|g| g.teacher_log_ratio.is_some())).count(),
+            ..Default::default()
+        };
         for (e, &a) in advantage.iter().enumerate() {
             if !cfg.truncated.counts(truncated[e]) {
                 continue;
@@ -835,7 +915,7 @@ impl ExternalPolicyGradient {
             eprintln!("policy gradient: {note}");
         }
         let tag_examples = ["train", "val"].iter().any(|split| dir.join(format!("{split}.img.bin")).exists());
-        let rows = Rows { starts, ends, advantage, eligible, behavior, teacher };
+        let rows = Rows { starts, ends, advantage, eligible, behavior, teacher, teacher_logprobs };
         let cache = ScoreCache::create(dir, rows.starts.len())?;
         let max_token = tokens.iter().copied().chain(rows.teacher.iter().flat_map(|t| (0..rows.starts.len()).filter_map(|e| t.example(e)).flat_map(|(ids, _)| ids.iter().copied()))).max().unwrap_or(0);
         Ok(ExternalPolicyGradient { cfg, train, batch_cfg, rows, mask, tag_examples, order: None, cache, max_token, anchors: None, weights_moved: false, work: None, scoring_seconds: 0.0, accumulating: StepAccumulator::default(), stats, consecutive_nonfinite: 0, consecutive_guard: 0, gate: NumericsAccumulator::default(), serve_gap: NumericsAccumulator::default(), serve_gap_seen: HashSet::new(), verdict: None })
@@ -926,7 +1006,7 @@ impl ExternalPolicyGradient {
     /// policy stands in for it, and something reads it: the policy loss of an example with an advantage, or the
     /// teacher's advantage.
     fn needs_start_behavior(&self, e: usize) -> bool {
-        let reads = self.is_policy_example(e) || self.rows.teacher.as_ref().is_some_and(|t| t.example(e).is_some());
+        let reads = self.is_policy_example(e) || self.rows.teacher.as_ref().is_some_and(|t| t.example(e).is_some()) || self.recorded_teacher(e).is_some();
         let corrected = self.cfg.importance.is_on() && self.is_policy_example(e);
         let mut supervised = ((self.rows.starts[e] + 1)..self.rows.ends[e]).filter(|&token| self.mask[token]);
         reads && supervised.any(|token| corrected || self.rows.behavior[token].is_nan())
@@ -985,7 +1065,7 @@ impl ExternalPolicyGradient {
         let supervised = (0..bl.min(len)).filter(|&t| t + 1 < len && self.mask_at(e, t + 1));
         let (mut value, mut clipped) = (vec![f32::NAN; bl], vec![false; bl]);
         for (t, q) in supervised.zip(lps) {
-            let raw = q - self.old_logprob(e, t, start);
+            let raw = token_advantage(*q, self.old_logprob(e, t, start));
             value[t] = match self.cfg.advantage_bound {
                 Some(c) if raw.abs() > c => {
                     clipped[t] = true;
@@ -1000,6 +1080,15 @@ impl ExternalPolicyGradient {
             *capped += 1;
         }
         TokenAdvantages { value, clipped }
+    }
+
+    /// A teacher model's recorded log-probability of every supervised token of example `e`, in row order, when the
+    /// example carries them.
+    fn recorded_teacher(&self, e: usize) -> Option<Vec<f32>> {
+        let lps = self.rows.teacher_logprobs.as_ref()?;
+        let (start, len) = (self.rows.starts[e], self.rows.ends[e] - self.rows.starts[e]);
+        let supervised: Vec<f32> = (0..self.batch_cfg.block_size.min(len)).filter(|&t| t + 1 < len && self.mask_at(e, t + 1)).map(|t| lps[start + 1 + t]).collect();
+        (!supervised.is_empty() && supervised.iter().all(|v| !v.is_nan())).then_some(supervised)
     }
 
     /// Whether the token at offset `i` of example `e` is supervised.
@@ -1067,6 +1156,8 @@ impl ExternalPolicyGradient {
                 teacher_lp = with_teacher.into_iter().zip(lps).collect();
             }
         }
+        // A teacher model's scores were recorded with the rollout: read, not scored.
+        teacher_lp.extend(todo.iter().filter_map(|&e| self.recorded_teacher(e).map(|lps| (e, lps))));
         let mut capped = 0;
         let scores = todo
             .iter()
@@ -1415,7 +1506,7 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
     fn step_log(&self) -> Option<String> {
         let last = self.stats.steps.last()?;
         let kl = last.kl.map(|kl| format!("kl {kl:.4}  ")).unwrap_or_default();
-        let teacher = if self.stats.sequences_with_teacher > 0 { format!("  adv mean {:+.3} max {:.3} clipped {:.3}", last.token_advantage_mean, last.token_advantage_max, last.token_advantage_clip_fraction) } else { String::new() };
+        let teacher = if self.stats.sequences_with_teacher + self.stats.sequences_with_teacher_logprobs > 0 { format!("  adv mean {:+.3} max {:.3} clipped {:.3}", last.token_advantage_mean, last.token_advantage_max, last.token_advantage_clip_fraction) } else { String::new() };
         let scoring = if last.scoring_seconds > 0.0 { format!("  scoring {:.1}s", last.scoring_seconds) } else { String::new() };
         let skipped = if last.skipped.is_some() { "  SKIPPED" } else { "" };
         Some(format!("{kl}clip {:.3} (hi {:.3} lo {:.3} dual {:.3})  ratio {:.3}  entropy~{:.3}  len {:.0}  gnorm {:.3}{teacher}{scoring}{skipped}", last.clip_fraction, last.clip_fraction_high, last.clip_fraction_low, last.clip_fraction_dual, last.ratio_mean, last.entropy_estimate, last.mean_response_tokens, last.grad_norm))
@@ -1427,7 +1518,7 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
         if let Some(kl) = last.kl {
             m.push(("pg_kl", kl));
         }
-        if self.stats.sequences_with_teacher > 0 {
+        if self.stats.sequences_with_teacher + self.stats.sequences_with_teacher_logprobs > 0 {
             m.extend([("pg_token_advantage_mean", last.token_advantage_mean), ("pg_token_advantage_max", last.token_advantage_max), ("pg_token_advantage_clip_fraction", last.token_advantage_clip_fraction)]);
         }
         m
