@@ -16,6 +16,7 @@ mod act_quant;
 mod adapter_basics;
 mod adapter_contract;
 mod adapter_dropout;
+mod adapter_merged;
 mod adapter_expert_sites;
 mod adapter_grad_kernels;
 mod adapter_lora_fa;
