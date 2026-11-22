@@ -455,3 +455,31 @@ fn a_restored_layer_streamed_run_with_a_table_continues_exactly() {
     assert_eq!(all_masters(&ops, &mut a), all_masters(&ops, &mut b));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Spec: a narrower stored value read as f32 (`ResidentSpec::read_as_f32`, for a model whose kernels read f32 weights)
+/// trains what the stored encoding's own products train: each slot holds the stored bf16 value widened (the master's
+/// bf16 rounding, after every update), and five layer-streamed steps take the losses of a resident bf16 build (the
+/// masters are not compared element by element: the two products round differently, and AdamW normalizes the
+/// rounding noise of a near-zero gradient into a full step).
+#[test]
+fn a_bf16_value_read_as_f32_trains_what_the_bf16_weights_do() {
+    let ops = ops();
+    let task = task();
+    let widened: Vec<ResidentSpec> = specs().into_iter().map(ResidentSpec::read_as_f32).collect();
+    let mut read = ResidentFullFt::new(&ops, config(ResidentValue::Bf16, Some(1), ClipPass::TwoPass), widened, &task.init, &roomy()).unwrap();
+    let mut held = build(&ops, config(ResidentValue::Bf16, None, ClipPass::TwoPass), &task);
+    let round = |v: f32| f32::from_bits((v.to_bits() + 0x7FFF + ((v.to_bits() >> 16) & 1)) & 0xFFFF_0000);
+    for step in 0..5 {
+        let (a, _) = streamed_step(&ops, &mut read, &task, None, ClipPass::TwoPass);
+        let b = resident_step(&ops, &mut held, &task, None);
+        // The first step's loss is the same function; later ones carry the two products' rounding through AdamW.
+        assert!((a - b).abs() <= 1e-4 * b.abs().max(1.0), "step {step}: loss {a} read as f32, {b} over bf16 weights");
+    }
+    read.load_layer(&ops, 0).unwrap();
+    for i in read.layer_tensors(0).to_vec() {
+        let Weight::F32 { w, .. } = read.weight(i) else { panic!("a widened slot is f32") };
+        let slot = ops.gpu().read(w, D * D);
+        let master = read.read_master(&ops, i).unwrap();
+        assert!(slot.iter().zip(&master).all(|(s, m)| s.to_bits() == round(*m).to_bits()), "tensor {i}: the slot is not the master's bf16 rounding");
+    }
+}

@@ -135,11 +135,84 @@ impl PackedTensorReader for SlicedReader {
     }
 }
 
+/// A [`crate::TensorSource`] over another whose stacked tensors are readable only as their per-slab views (what
+/// [`SlicedReader::with_slab_views`] exposes for a scaled stack: each view carries its slab's own level, so the stack
+/// itself has no single encoding to decode it by): each named stack is served whole again, range by range, from the
+/// views `{stack}.{slab}` it is cut into. Every other tensor is the inner source's.
+pub struct SlabStacks<'a> {
+    src: &'a dyn crate::TensorSource,
+    /// Stack name -> (slabs, elements per slab).
+    stacks: HashMap<String, (usize, usize)>,
+}
+
+impl<'a> SlabStacks<'a> {
+    /// `stacks`: `(name, slabs, elements per slab)` of each stack `src` serves as views `{name}.{slab}`.
+    pub fn new(src: &'a dyn crate::TensorSource, stacks: impl IntoIterator<Item = (String, usize, usize)>) -> SlabStacks<'a> {
+        SlabStacks { src, stacks: stacks.into_iter().map(|(name, slabs, slab)| (name, (slabs, slab))).collect() }
+    }
+}
+
+impl crate::TensorSource for SlabStacks<'_> {
+    fn with_tensor(&self, name: &str, f: &mut dyn FnMut(&[f32])) -> bool {
+        match self.stacks.get(name) {
+            Some(&(slabs, slab)) => self.with_tensor_range(name, 0, slabs * slab, f),
+            None => self.src.with_tensor(name, f),
+        }
+    }
+
+    /// Only the views the range covers are read, each over its own part of the range.
+    fn with_tensor_range(&self, name: &str, start: usize, len: usize, f: &mut dyn FnMut(&[f32])) -> bool {
+        let Some(&(slabs, slab)) = self.stacks.get(name) else { return self.src.with_tensor_range(name, start, len, f) };
+        if start + len > slabs * slab {
+            return false;
+        }
+        let mut out = vec![0f32; len];
+        let mut at = start;
+        while at < start + len {
+            let (index, within) = (at / slab, at % slab);
+            let n = (slab - within).min(start + len - at);
+            let dst = &mut out[at - start..at - start + n];
+            if !self.src.with_tensor_range(&format!("{name}.{index}"), within, n, &mut |v| dst.copy_from_slice(v)) {
+                return false;
+            }
+            at += n;
+        }
+        f(&out);
+        true
+    }
+
+    fn numel(&self, name: &str) -> Option<usize> {
+        match self.stacks.get(name) {
+            Some(&(slabs, slab)) => Some(slabs * slab),
+            None => self.src.numel(name),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::packed::testfix::{bf16_bytes, bytes, write_safetensors, RawTensor, TmpDir};
     use crate::packed::{PackedReader, QuantEncoding};
+
+    /// A stack readable only as its slab views reads back whole and by any range across slabs; other names pass
+    /// through, and a range past the stack is refused.
+    #[test]
+    fn a_stack_of_slab_views_reads_as_one_tensor() {
+        let slabs: std::collections::HashMap<String, Vec<f32>> = (0..3).map(|e| (format!("s.{e}"), (0..4).map(|i| (10 * e + i) as f32).collect())).chain([("other".to_string(), vec![7.0])]).collect();
+        let stacked = SlabStacks::new(&slabs, [("s".to_string(), 3, 4)]);
+        let whole: Vec<f32> = (0..3).flat_map(|e| (0..4).map(move |i| (10 * e + i) as f32)).collect();
+        let src: &dyn crate::TensorSource = &stacked;
+        assert_eq!(src.numel("s"), Some(12));
+        let mut got = Vec::new();
+        assert!(src.with_tensor("s", &mut |v| got = v.to_vec()));
+        assert_eq!(got, whole);
+        let mut part = vec![0f32; 7];
+        assert!(crate::read_range_into(src, "s", 2, &mut part));
+        assert_eq!(part, whole[2..9]);
+        assert!(src.with_tensor("other", &mut |v| assert_eq!(v, [7.0])));
+        assert!(!crate::read_range_into(src, "s", 10, &mut [0f32; 4]));
+    }
 
     #[test]
     fn views_of_a_fused_tensor_read_their_own_bytes_in_place() {

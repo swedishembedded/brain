@@ -12,9 +12,12 @@
 //!   0-19) and MXFP8 (20-23) encoding, read in place and never dequantized (QLoRA); the dense linears are held at the
 //!   run's base tier, bf16 as published or f32. The adapter covers every site of [`crate::train::sites`] (attention,
 //!   relative states, sinks, depth and message queries, message gates, stacked experts).
-//! - Full fine-tuning ([`ChatTrainer::train_full`]) for a checkpoint whose experts are stored as floats (a small
-//!   configuration, or one trained from scratch): every tensor in f32 with f32 moments on the device. The released
-//!   26B is refused by name: its full fine-tune needs a streamed window, ZeRO sharding or an expert-parallel layout.
+//! - Full fine-tuning ([`ChatTrainer::train_full`]): every tensor in f32 with f32 moments on the device, for a
+//!   checkpoint whose experts are stored as floats. With a window (`weights=f32,window=N`, or through
+//!   [`ChatTrainer::train_full_resident`] `weights=bf16,window=N`) the expert banks stream instead
+//!   ([`crate::train`]'s layer-streamed full fine-tune): built straight into the window from the stored banks, the
+//!   published NVFP4/MXFP8 banks of the released 26B included (dequantized once at load into bf16 values under an f32
+//!   master), so a model larger than the device trains. Without a window the released 26B is refused by name.
 //!
 //! A checkpoint is a Hugging Face directory in the published names (`config.json`, the safetensors and, for a
 //! quantized release, `hf_quant_config.json`); a full fine-tune saves that same layout ([`ChatTrainer::export_checkpoint`]
@@ -50,8 +53,9 @@ impl ChatTrainer for Inkling2Trainer {
     /// widens them. The expert banks are always held as published - NVFP4 and MXFP8 banks read in place, never
     /// dequantized - whatever the tier (the tier set has no name for a mixed NVFP4/MXFP8 bank).
     const LORA_BASES: model::policy::TrainBases = model::policy::TrainBases { model: "inkling2", bases: &[Dtype::BF16, Dtype::F32] };
-    /// f32 weights and f32 moments on the device; no resident or streamed state.
-    const TRAIN_PRECISION: model::TrainPrecisionSupport = model::TrainPrecisionSupport { model: "inkling2", state: model::StateSupport::Fp32, resident: false, layer_streamed: false, f32_streamed: false };
+    /// f32 weights and f32 moments on the device, or the expert banks streamed through a window (f32 or bf16 values
+    /// under an f32 master, their state on the host).
+    const TRAIN_PRECISION: model::TrainPrecisionSupport = model::TrainPrecisionSupport { model: "inkling2", state: model::StateSupport::Fp32, resident: true, layer_streamed: true, f32_streamed: true };
     /// The model carries [`model::training::TokenObjectives`] (with routing replay).
     const POLICY_GRADIENT: bool = true;
 
@@ -72,13 +76,25 @@ impl ChatTrainer for Inkling2Trainer {
         if state != OptimizerState::Device {
             return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "inkling2: the optimizer state lives on the device (no host offload)"));
         }
-        let m = Inkling2Train::from_dir(base, opts.batch_size, opts.block_size).map_err(|e| {
-            if e.contains("microscaled") {
-                std::io::Error::new(std::io::ErrorKind::Unsupported, e)
-            } else {
-                invalid(base, e)
-            }
-        })?;
+        // A run streaming its layers builds the banks straight into the window: the release never loads whole.
+        let m = match opts.resident_config().map_err(std::io::Error::other)? {
+            Some(resident) => Inkling2Train::from_dir_resident(base, opts.batch_size, opts.block_size, &resident).map_err(|e| invalid(base, e))?,
+            None => Inkling2Train::from_dir(base, opts.batch_size, opts.block_size).map_err(|e| {
+                if e.contains("microscaled") {
+                    std::io::Error::new(std::io::ErrorKind::Unsupported, e)
+                } else {
+                    invalid(base, e)
+                }
+            })?,
+        };
+        fit.fit(m)
+    }
+
+    /// The expert banks stream through a window of f32 slots with a narrower stored value (`weights=bf16,window=N`)
+    /// under an f32 master; see [`Inkling2Train::from_dir_resident`]. A request without a window is refused by name.
+    fn train_full_resident(base: &Path, opts: &FitOpts, resident: &model::resident_ft::ResidentFtConfig, fit: &mut impl ModelFit) -> std::io::Result<(FitReport, Inkling2Train)> {
+        Self::TRAIN_PRECISION.check(&opts.precision).map_err(|why| std::io::Error::new(std::io::ErrorKind::Unsupported, why))?;
+        let m = Inkling2Train::from_dir_resident(base, opts.batch_size, opts.block_size, resident).map_err(|e| invalid(base, e))?;
         fit.fit(m)
     }
 
@@ -169,7 +185,7 @@ mod tests {
     #[test]
     fn a_train_precision_it_does_not_run_is_refused_by_name_before_anything_is_opened() {
         let nowhere = Path::new("/nonexistent/inkling2-base");
-        for spec in ["weights=bf16", "state=int8"] {
+        for spec in ["state=bf16", "state=int8"] {
             let opts = FitOpts { precision: model::TrainPrecision::parse(spec).unwrap(), ..FitOpts::default() };
             let e = model::finetune::fit_full::<Inkling2Trainer>(nowhere, nowhere, &opts, nowhere, OptimizerState::Device, model::FitControl::default()).expect_err(spec);
             assert_eq!(e.kind(), std::io::ErrorKind::Unsupported, "{spec}: {e}");

@@ -139,6 +139,8 @@ impl Backing for MemBacking {
 pub struct FileBacking {
     file: File,
     len: u64,
+    /// The range written last, whose write-back was started but not waited for ([`Self::release_written`]).
+    pending: Option<(u64, usize)>,
 }
 
 impl FileBacking {
@@ -146,31 +148,99 @@ impl FileBacking {
     pub fn create(path: &Path, len: u64) -> io::Result<FileBacking> {
         let file = OpenOptions::new().read(true).write(true).create_new(true).open(path)?;
         file.set_len(len)?;
-        Ok(FileBacking { file, len })
+        Ok(FileBacking { file, len, pending: None })
     }
 
     /// Open an existing state file read/write.
     pub fn open(path: &Path) -> io::Result<FileBacking> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
         let len = file.metadata()?.len();
-        Ok(FileBacking { file, len })
+        Ok(FileBacking { file, len, pending: None })
+    }
+}
+
+/// Keeping a state file's pages out of the page cache.
+///
+/// A state file is streamed through tile by tile and not read again before the next step, so its pages are no cache:
+/// they are charged to the process's memory cgroup, and dirty ones cannot be reclaimed faster than the disk takes
+/// them. A full fine-tune whose state file is several times the process's own memory was OOM-killed by its cgroup that
+/// way while its resident set was a fifth of the limit (knowledge #566). A read range is dropped once read; a written
+/// range has its write-back started, and is waited for and dropped when the next range is written (so the disk
+/// writes one range while the update computes the next, and at most two are dirty). Best effort: hints the kernel may
+/// ignore.
+#[cfg(target_os = "linux")]
+impl FileBacking {
+    fn range_hint(&self, off: u64, len: usize, flags: Option<libc::c_uint>) {
+        use std::os::fd::AsRawFd;
+        let (fd, off, len) = (self.file.as_raw_fd(), off as libc::off64_t, len as libc::off64_t);
+        // SAFETY: plain syscalls on a file descriptor this backing owns, over a range of it; no memory is passed.
+        unsafe {
+            match flags {
+                Some(flags) => {
+                    libc::sync_file_range(fd, off, len, flags);
+                }
+                None => {
+                    libc::posix_fadvise(fd, off, len, libc::POSIX_FADV_DONTNEED);
+                }
+            }
+        }
+    }
+
+    fn release_read(&self, off: u64, len: usize) {
+        self.range_hint(off, len, None);
+    }
+
+    fn release_written(&mut self, off: u64, len: usize) {
+        self.range_hint(off, len, Some(libc::SYNC_FILE_RANGE_WRITE));
+        if let Some((p_off, p_len)) = self.pending.replace((off, len)) {
+            self.finish(p_off, p_len);
+        }
+    }
+
+    fn finish(&self, off: u64, len: usize) {
+        self.range_hint(off, len, Some(libc::SYNC_FILE_RANGE_WAIT_BEFORE | libc::SYNC_FILE_RANGE_WRITE | libc::SYNC_FILE_RANGE_WAIT_AFTER));
+        self.range_hint(off, len, None);
+    }
+
+    fn finish_pending(&mut self) {
+        if let Some((off, len)) = self.pending.take() {
+            self.finish(off, len);
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+impl FileBacking {
+    fn release_read(&self, _off: u64, _len: usize) {}
+    fn release_written(&mut self, _off: u64, _len: usize) {}
+    fn finish_pending(&mut self) {}
+}
+
+impl Drop for FileBacking {
+    fn drop(&mut self) {
+        self.finish_pending();
     }
 }
 
 impl Backing for FileBacking {
     fn read_at(&mut self, off: u64, buf: &mut [u8]) -> io::Result<()> {
-        self.file.read_exact_at(buf, off)
+        self.file.read_exact_at(buf, off)?;
+        self.release_read(off, buf.len());
+        Ok(())
     }
     fn write_at(&mut self, off: u64, buf: &[u8]) -> io::Result<()> {
         if off + buf.len() as u64 > self.len {
             return Err(invalid(format!("write past end: {} > {}", off + buf.len() as u64, self.len)));
         }
-        self.file.write_all_at(buf, off)
+        self.file.write_all_at(buf, off)?;
+        self.release_written(off, buf.len());
+        Ok(())
     }
     fn len(&self) -> u64 {
         self.len
     }
     fn sync(&mut self) -> io::Result<()> {
+        self.finish_pending();
         self.file.sync_all()
     }
 }

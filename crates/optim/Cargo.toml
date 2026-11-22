@@ -24,6 +24,8 @@ serde_json.workspace = true
 # The workspace's one rayon seam: the host update of a tile (state decode and encode, the rule, copies) runs on the
 # CPU scheduler's pool instead of threads spawned per call.
 brain-backend-cpu.workspace = true
+# The file-backed optimizer state releases its pages from the page cache as it streams (`storage::FileBacking`).
+libc.workspace = true
 wgpu.workspace = true
 pollster.workspace = true
 

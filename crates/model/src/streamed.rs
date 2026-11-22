@@ -47,6 +47,14 @@ pub trait LayeredPass {
     fn revisits(&self) -> bool {
         false
     }
+
+    /// How many times the backward runs `layer`'s part, for a pass that does not [`Self::revisits`] every layer: a
+    /// layer visited more than once has its gradients carried between visits and is finished once the backward is
+    /// complete, every other layer as its single visit ends (a looped model whose prelude and coda run once and whose
+    /// core runs every pass). The default visits each layer once.
+    fn visits(&self, _layer: usize) -> u32 {
+        1
+    }
 }
 
 impl LayeredPass for SegmentedPass {
@@ -93,7 +101,8 @@ impl TensorSource for StoreValues<'_> {
 
 impl StreamedStore {
     /// Move every trained tensor of `ps` that `layer_of` places in a layer into a resident state under `cfg` (f32
-    /// values; a narrower value would need the model's kernels to read it), alias the store's entries to the state's
+    /// values, or a narrower stored value such as bf16 under an f32 master, widened into f32 window slots as each layer
+    /// loads: the model's kernels read f32 weights either way), alias the store's entries to the state's
     /// slots and lanes, and withdraw those tensors from the store's optimizer: the caller must re-record its
     /// optimizer (`optim::Optim::invalidate`) and any pass that bound the store's buffers. `gpu` must have registered
     /// [`crate::ops::store_device_kernels`]. The planner refuses a window that does not fit the device's free memory
@@ -127,14 +136,18 @@ impl StreamedStore {
 
     /// The resident state of `tensors` (`(name, elements, layer)`), initial values from `src`.
     fn state(gpu: &Gpu, cfg: ResidentFtConfig, tensors: &[(String, usize, u32)], src: &dyn TensorSource) -> Result<ResidentFullFt, String> {
-        if cfg.value != ResidentValue::F32 {
-            return Err(format!("this model's kernels read f32 weights; its layers stream as weights=f32, not {:?}", cfg.value));
+        // The model's kernels read f32 weights: a narrower stored value is widened into an f32 slot as its layer
+        // loads, which needs a window (the slots are rewritten from the host copy on every load).
+        let narrow = cfg.value != ResidentValue::F32;
+        if narrow && cfg.window.is_none() {
+            return Err(format!("this model's kernels read f32 weights; {:?} values stream through a window of f32 slots (window=), or train as weights=f32", cfg.value));
         }
         let mut specs: Vec<ResidentSpec> = tensors
             .iter()
             .map(|(name, numel, layer)| {
                 let k = u32::try_from(*numel).map_err(|_| format!("{name}: {numel} elements exceed one resident tensor"))?;
-                Ok(ResidentSpec::linear(name.clone(), 1, k, *layer))
+                let spec = ResidentSpec::linear(name.clone(), 1, k, *layer);
+                Ok(if narrow { spec.read_as_f32() } else { spec })
             })
             .collect::<Result<_, String>>()?;
         specs.sort_by(|a, b| (a.layer(), &a.name).cmp(&(b.layer(), &b.name)));
@@ -183,6 +196,21 @@ impl StreamedStore {
         self.ft.borrow().device_weight_bytes()
     }
 
+    /// Load `layer`'s weights into its window slots, for a model whose forward is not a recorded [`LayeredPass`] (one
+    /// that submits its layers one at a time): call it before the layer's work is recorded, after the work recorded on
+    /// the model's handle so far has been sent to the device.
+    pub fn load_layer(&self, gpu: &Gpu, layer: usize) -> io::Result<()> {
+        self.ft.borrow_mut().load_layer(&device(gpu)?, layer)
+    }
+
+    /// Write the model as one safetensors checkpoint at `path`: the streamed tensors at the tier they train in, shaped
+    /// as `shape_of` names them (the store knows only their element counts), then `rest` (name, shape) in f32 read with
+    /// `read_rest` ([`ResidentFullFt::save_checkpoint_shaped`]).
+    #[allow(clippy::too_many_arguments)] // the file's two parts, their shapes and its header
+    pub fn save_checkpoint(&self, gpu: &Gpu, path: &std::path::Path, shape_of: &dyn Fn(&str) -> Option<Vec<u64>>, rest: &[(String, Vec<u64>)], read_rest: &dyn Fn(&str) -> Vec<f32>, config: &serde_json::Value, card: Option<&checkpoint::st::ModelCard>) -> Result<(), String> {
+        self.ft.borrow_mut().save_checkpoint_shaped(&device(gpu).map_err(|e| e.to_string())?, path, shape_of, rest, read_rest, config, card)
+    }
+
     /// Submit the forward `pass`, loading each layer's weights into its slot before its part.
     pub fn forward(&self, gpu: &Gpu, pass: &dyn LayeredPass) -> io::Result<()> {
         let dev = device(gpu)?;
@@ -202,6 +230,7 @@ impl StreamedStore {
         let mut failed: Option<io::Error> = None;
         let mut head_done = false;
         let revisits = pass.revisits();
+        let mut carried = false;
         let mut report = |event: LayerEvent, failed: &mut Option<io::Error>| {
             if failed.is_none() {
                 *failed = on(event).err();
@@ -214,14 +243,17 @@ impl StreamedStore {
                 }
                 report(LayerEvent::BeforeBackward(layer), &mut failed);
             }
-            SegmentEdge::After { layer: Some(layer), .. } if revisits => report(LayerEvent::AfterVisit(layer), &mut failed),
+            SegmentEdge::After { layer: Some(layer), .. } if revisits || pass.visits(layer) > 1 => {
+                carried = true;
+                report(LayerEvent::AfterVisit(layer), &mut failed)
+            }
             SegmentEdge::After { layer: Some(layer), .. } => report(LayerEvent::AfterBackward(layer), &mut failed),
             _ => {}
         });
         if !head_done {
             report(LayerEvent::AfterHead, &mut failed);
         }
-        if revisits {
+        if revisits || carried {
             report(LayerEvent::AfterVisits, &mut failed);
         }
         failed.map_or(Ok(()), Err)

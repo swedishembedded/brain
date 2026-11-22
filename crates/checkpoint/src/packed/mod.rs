@@ -33,5 +33,5 @@ pub use reader::{quant_sidecars, PackedReader, PackedTensorReader, PACKED_METADA
 pub use file_sink::SafetensorsSink;
 pub use hfquant::{ActivationQuant, ActivationScheme, DeclaredWeight, HfQuant, Nvfp4Global, TensorDeclaration};
 pub use sink::{MemorySink, TensorSink};
-pub use slice::SlicedReader;
+pub use slice::{SlabStacks, SlicedReader};
 pub use source::{stored_source, Binding, PackedSource};

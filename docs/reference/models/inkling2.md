@@ -184,8 +184,14 @@ brain finetune thinkingmachines/Inkling-2-Mini --lora 16 --objective policy-grad
   features spliced at the image placeholders, the tower frozen or adapted) train
   too.
 - A full fine-tune trains every weight in f32 for a checkpoint whose experts are
-  stored as floats; the released 26B is refused for it by name (it would need a
-  streamed, sharded or expert-parallel full fine-tune).
+  stored as floats. The released 26B trains with its expert banks streamed
+  through a window on the card (`--train-precision weights=bf16,window=1`): the
+  NVFP4/MXFP8 banks are dequantized once into bf16 values with an f32 master and
+  AdamW state on the host, every other weight trains in f32 on the card, and the
+  trained model is saved with bf16 banks, which the server holds as bf16. Without
+  a window the release is refused by name. The state is about 300 GB of host
+  memory; the library can keep it in a file instead
+  (`ResidentFtConfig::state_dir`).
 - A trained adapter is not served yet (the engine holds no adapter bank, and the
   expert pairs cannot be folded into the quantized banks).
 

@@ -215,6 +215,19 @@ pub struct ResidentSpec {
     pub n: u32,
     pub k: u32,
     pub role: ResidentRole,
+    /// How the device copy is read: in the stored encoding, or widened to f32 ([`Self::read_as_f32`]).
+    pub read: DeviceRead,
+}
+
+/// How the device holds a tensor's stored value for the model's kernels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceRead {
+    /// In its stored encoding ([`ResidentFtConfig::value`]): the model's products read that [`Weight`] tier.
+    Stored,
+    /// Widened to f32 as its layer loads: for a model whose kernels read f32 weights while the stored value, its host
+    /// copy and its transfers stay in the narrower encoding. The weight the forward reads is the stored value exactly
+    /// (bf16 widens without rounding), the gradient taken there updates the master as for any narrower value.
+    F32,
 }
 
 /// What a resident tensor is to the model, which decides its encoding and when a layer-streamed build holds it.
@@ -233,11 +246,18 @@ pub enum ResidentRole {
 
 impl ResidentSpec {
     pub fn linear(name: impl Into<String>, n: u32, k: u32, layer: u32) -> ResidentSpec {
-        ResidentSpec { name: name.into(), n, k, role: ResidentRole::Linear { layer } }
+        ResidentSpec { name: name.into(), n, k, role: ResidentRole::Linear { layer }, read: DeviceRead::Stored }
     }
 
     pub fn table(name: impl Into<String>, rows: u32, width: u32) -> ResidentSpec {
-        ResidentSpec { name: name.into(), n: rows, k: width, role: ResidentRole::Table }
+        ResidentSpec { name: name.into(), n: rows, k: width, role: ResidentRole::Table, read: DeviceRead::Stored }
+    }
+
+    /// This tensor's device copy widened to f32 ([`DeviceRead::F32`]). Only a layer-streamed linear takes it: its slot
+    /// is rewritten from the stored value every time the layer loads.
+    pub fn read_as_f32(mut self) -> ResidentSpec {
+        self.read = DeviceRead::F32;
+        self
     }
 
     /// The layer of a linear; `None` for a table.
@@ -266,7 +286,10 @@ impl ResidentSpec {
     }
 
     fn device_bytes(&self, cfg: &ResidentFtConfig) -> u64 {
-        self.value(cfg).device_bytes(self.n as u64, self.k as u64)
+        match self.read {
+            DeviceRead::Stored => self.value(cfg).device_bytes(self.n as u64, self.k as u64),
+            DeviceRead::F32 => 4 * self.n as u64 * self.k as u64,
+        }
     }
 }
 
@@ -304,14 +327,15 @@ fn plan_pools(specs: &[ResidentSpec], window: u32) -> Pools {
         slots: Vec<usize>,
         layers: usize,
     }
-    let mut pools: BTreeMap<(u32, u32, usize), Pool> = BTreeMap::new();
+    let mut pools: BTreeMap<(u32, u32, bool, usize), Pool> = BTreeMap::new();
     let mut out = Pools { slot_of: vec![0; specs.len()], slot_rep: Vec::new(), lane_of: vec![0; specs.len()], lane_rep: Vec::new() };
     for tensors in by_layer.values() {
-        let mut seen: BTreeMap<(u32, u32), usize> = BTreeMap::new();
+        let mut seen: BTreeMap<(u32, u32, bool), usize> = BTreeMap::new();
         for &i in tensors {
-            let shape = (specs[i].n, specs[i].k);
+            // A widened copy and a stored one never share a slot.
+            let shape = (specs[i].n, specs[i].k, specs[i].read == DeviceRead::F32);
             let j = seen.entry(shape).or_insert(0);
-            let pool = pools.entry((shape.0, shape.1, *j)).or_insert_with(|| {
+            let pool = pools.entry((shape.0, shape.1, shape.2, *j)).or_insert_with(|| {
                 out.lane_rep.push(i);
                 Pool { lane: out.lane_rep.len() - 1, slots: Vec::new(), layers: 0 }
             });
@@ -741,6 +765,15 @@ impl ResidentFullFt {
         }
         for s in &specs {
             let value = s.value(&cfg);
+            if s.read == DeviceRead::F32 {
+                if s.is_table() || cfg.window.is_none() {
+                    return Err(format!("{}: a device copy widened to f32 is a layer-streamed linear's (it is rewritten as its layer loads); a table or a build without a window holds its stored encoding", s.name));
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                if cfg.shard.is_some() {
+                    return Err(format!("{}: a parameter-sharded build gathers its slots in the stored encoding; a device copy widened to f32 is not sharded", s.name));
+                }
+            }
             if !s.k.is_multiple_of(value.k_multiple()) {
                 return Err(format!("{}: K = {} must be a multiple of {} for {:?} weights", s.name, s.k, value.k_multiple(), value));
             }
@@ -834,7 +867,15 @@ impl ResidentFullFt {
                         host.write(ti, start, &values[..n]).map_err(|e| e.to_string())?;
                     }
                 }
-                let slot_weights = pools.slot_rep.iter().map(|&ti| upload(ti, None)).collect::<Result<Vec<_>, _>>()?;
+                // A widened slot is plain f32 storage, written as each layer loads.
+                let slot_weights = pools
+                    .slot_rep
+                    .iter()
+                    .map(|&ti| match specs[ti].read {
+                        DeviceRead::Stored => upload(ti, None),
+                        DeviceRead::F32 => Ok(Weight::dense_f32(gpu.storage(specs[ti].numel() as u64), specs[ti].n, specs[ti].k)),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 let lane_buffers: Vec<DeviceBuffer> = pools.lane_rep.iter().map(|&ti| gpu.storage(grad_words(&specs[ti]))).collect();
                 let weights = pools.slot_of.iter().map(|&s| slot_weights[s].clone()).collect();
                 let grads = pools.lane_of.iter().map(|&l| lane_buffers[l].clone()).collect::<Vec<DeviceBuffer>>();
@@ -1166,11 +1207,24 @@ impl ResidentFullFt {
             let d = &self.descs[ti];
             let numel = d.numel() as usize;
             let t0 = std::time::Instant::now();
-            for start in (0..numel).step_by(self.tile) {
-                let n = self.tile.min(numel - start);
-                w.host.read_encoded(ti, start, n, &mut buf)?;
-                let tile = Tile { elems: start as u64..(start + n) as u64, payload: &buf.payload, scales: buf.scales.iter().map(|s| s.as_slice()).collect() };
-                rewrite_tile(ops, &w.slot_weights[slot], d, &tile).map_err(invalid)?;
+            match self.specs[ti].read {
+                DeviceRead::Stored => {
+                    for start in (0..numel).step_by(self.tile) {
+                        let n = self.tile.min(numel - start);
+                        w.host.read_encoded(ti, start, n, &mut buf)?;
+                        let tile = Tile { elems: start as u64..(start + n) as u64, payload: &buf.payload, scales: buf.scales.iter().map(|s| s.as_slice()).collect() };
+                        rewrite_tile(ops, &w.slot_weights[slot], d, &tile).map_err(invalid)?;
+                    }
+                }
+                DeviceRead::F32 => {
+                    let Weight::F32 { w: dst, .. } = &w.slot_weights[slot] else { unreachable!("a widened slot is f32 storage") };
+                    let mut values = vec![0f32; self.tile.min(numel)];
+                    for start in (0..numel).step_by(self.tile) {
+                        let n = self.tile.min(numel - start);
+                        w.host.read(ti, start, &mut values[..n])?;
+                        ops.upload_gpu().write_f32_at(dst, start as u64, &values[..n]);
+                    }
+                }
             }
             self.times.value_write += t0.elapsed();
             w.slot_holds[slot] = Some((ti, w.versions[ti]));
@@ -1178,12 +1232,20 @@ impl ResidentFullFt {
         Ok(())
     }
 
-    /// [`Self::load_layer`] for the backward of `layer`, and clear the gradient lanes its tensors accumulate into.
+    /// [`Self::load_layer`] for the backward of `layer`, and prepare the gradient lanes its tensors accumulate into:
+    /// cleared, or holding the gradient carried from the layer's earlier visits of this pass ([`Self::carry_layer`]),
+    /// so the visit's kernels add into exactly the sum a build holding every layer would hold at that point.
     pub fn begin_layer_backward(&mut self, ops: &dyn DeviceIo, layer: usize) -> io::Result<()> {
         self.load_layer(ops, layer)?;
         if let Some(w) = &self.window {
-            let lanes: Vec<&DeviceBuffer> = w.by_layer.get(&(layer as u32)).into_iter().flatten().map(|&ti| &self.grads[ti]).collect();
+            let tensors: Vec<usize> = w.by_layer.get(&(layer as u32)).cloned().unwrap_or_default();
+            let lanes: Vec<&DeviceBuffer> = tensors.iter().filter(|&&ti| self.carry[ti].is_none()).map(|&ti| &self.grads[ti]).collect();
             ops.gpu().submit(&lanes, &[]);
+            for &ti in &tensors {
+                if let Some(carried) = &self.carry[ti] {
+                    ops.gpu().write_f32(&self.grads[ti], carried);
+                }
+            }
             ops.gpu().flush();
         }
         Ok(())
@@ -1208,8 +1270,9 @@ impl ResidentFullFt {
     }
 
     /// One visit of `layer`'s backward is complete but the pass visits the layer again (a recurrent-depth model runs
-    /// one layer in every step of its recurrence): add the visit's gradients to the layer's host carry, so the next
-    /// visit can reuse the lane. The layer is finished by [`Self::finish_carried`] once the backward is complete.
+    /// one layer in every step of its recurrence): take the lane, which holds the gradient of every visit so far (the
+    /// next visit starts from it, [`Self::begin_layer_backward`]), into the layer's host carry, so other layers can
+    /// reuse the lane meanwhile. The layer is finished by [`Self::finish_carried`] once the backward is complete.
     /// Carried gradients are f32.
     pub fn carry_layer(&mut self, ops: &dyn DeviceIo, layer: usize) -> io::Result<()> {
         if self.parameter_sharded() {
@@ -1222,10 +1285,9 @@ impl ResidentFullFt {
         let tensors = w.by_layer.get(&(layer as u32)).cloned().unwrap_or_default();
         for ti in tensors {
             let numel = self.specs[ti].n as usize * self.specs[ti].k as usize;
-            let visit = ops.read_range(&self.grads[ti], 0, numel);
             match &mut self.carry[ti] {
-                Some(c) => c.iter_mut().zip(&visit).for_each(|(a, b)| *a += b),
-                slot @ None => *slot = Some(visit),
+                Some(c) => ops.read_range_into(&self.grads[ti], 0, c),
+                slot @ None => *slot = Some(ops.read_range(&self.grads[ti], 0, numel)),
             }
         }
         Ok(())
@@ -1548,19 +1610,58 @@ impl ResidentFullFt {
     /// other parameters (`rest`, held whole: the norms) are f32 from `read_rest`. The file carries `config` and `card`.
     pub fn save_checkpoint(&mut self, ops: &dyn DeviceIo, path: Option<&std::path::Path>, rest: &[(String, usize)], read_rest: &dyn Fn(&str) -> Vec<f32>, config: &serde_json::Value, card: Option<&checkpoint::st::ModelCard>) -> Result<(), String> {
         ops.gpu().flush();
-        let tier = if self.cfg.value == ResidentValue::F32 { ResidentValue::F32 } else { ResidentValue::Bf16 };
-        let encodings = vec![tier.encoding(); self.specs.len()];
+        let encodings = vec![self.saved_tier().encoding(); self.specs.len()];
         let Some(path) = path else {
             return self.export_collective(ops, &encodings, None).map_err(|e| e.to_string());
         };
-        let linear = self.export_descriptors(&encodings).map_err(|e| e.to_string())?;
-        let rest: Vec<TensorDescriptor> = rest.iter().map(|(n, numel)| TensorDescriptor::new(n.clone(), vec![*numel as u64], QuantEncoding::f32())).collect();
+        let rest: Vec<(String, Vec<u64>)> = rest.iter().map(|(n, numel)| (n.clone(), vec![*numel as u64])).collect();
+        self.save_file(ops, path, &encodings, &|_| None, &rest, read_rest, config, card)
+    }
+
+    /// [`Self::save_checkpoint`] on the rank that writes, with this state's tensors shaped as `shape_of` names them
+    /// (`None`: the state's `[n, k]`; a model that streams whole stacked tensors as `[1, numel]` rows gives their
+    /// published shapes back) and the other tensors `rest` as `(name, shape)`.
+    #[allow(clippy::too_many_arguments)] // the file's two parts, their shapes and its header
+    pub fn save_checkpoint_shaped(&mut self, ops: &dyn DeviceIo, path: &std::path::Path, shape_of: &dyn Fn(&str) -> Option<Vec<u64>>, rest: &[(String, Vec<u64>)], read_rest: &dyn Fn(&str) -> Vec<f32>, config: &serde_json::Value, card: Option<&checkpoint::st::ModelCard>) -> Result<(), String> {
+        ops.gpu().flush();
+        let encodings = vec![self.saved_tier().encoding(); self.specs.len()];
+        self.save_file(ops, path, &encodings, shape_of, rest, read_rest, config, card)
+    }
+
+    /// The tier a save writes this state's tensors at: f32 for an f32 build, bf16 for every narrower one.
+    fn saved_tier(&self) -> ResidentValue {
+        if self.cfg.value == ResidentValue::F32 {
+            ResidentValue::F32
+        } else {
+            ResidentValue::Bf16
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn save_file(&mut self, ops: &dyn DeviceIo, path: &std::path::Path, encodings: &[QuantEncoding], shape_of: &dyn Fn(&str) -> Option<Vec<u64>>, rest: &[(String, Vec<u64>)], read_rest: &dyn Fn(&str) -> Vec<f32>, config: &serde_json::Value, card: Option<&checkpoint::st::ModelCard>) -> Result<(), String> {
+        let mut linear = self.export_descriptors(encodings).map_err(|e| e.to_string())?;
+        for d in &mut linear {
+            if let Some(shape) = shape_of(&d.name) {
+                if shape.iter().product::<u64>() != d.numel() {
+                    return Err(format!("{}: shape {shape:?} holds {} elements, the state {}", d.name, shape.iter().product::<u64>(), d.numel()));
+                }
+                d.shape = shape;
+            }
+        }
+        let rest: Vec<TensorDescriptor> = rest.iter().map(|(n, shape)| TensorDescriptor::new(n.clone(), shape.clone(), QuantEncoding::f32())).collect();
         let all: Vec<TensorDescriptor> = linear.iter().chain(&rest).cloned().collect();
         let shown = path.display();
         let mut sink = checkpoint::packed::SafetensorsSink::create_carded(path, &all, config, card).map_err(|e| format!("{shown}: {e}"))?;
-        self.export_collective(ops, &encodings, Some(&mut sink)).map_err(|e| e.to_string())?;
+        if self.parameter_sharded() {
+            self.export_collective(ops, encodings, Some(&mut sink)).map_err(|e| e.to_string())?;
+        } else {
+            self.export(ops, encodings, &mut sink).map_err(|e| e.to_string())?;
+        }
         for d in &rest {
             let bytes: Vec<u8> = read_rest(&d.name).iter().flat_map(|v| v.to_le_bytes()).collect();
+            if bytes.len() as u64 != 4 * d.numel() {
+                return Err(format!("{}: {} values read, its shape holds {}", d.name, bytes.len() / 4, d.numel()));
+            }
             let elems = 0..bytes.len() as u64 / 4;
             sink.begin(d)?;
             sink.write_tile(d, &Tile { elems, payload: &bytes, scales: Vec::new() })?;

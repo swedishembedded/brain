@@ -30,6 +30,7 @@ use model::looped::{Segment, Visit};
 use model::message_gate::{MessageGate, MessageGateActs, MessageGateIds, MessageGateWeights};
 use model::moe::{ExpertAdapterGrads, ExpertAdapters, ExpertBank, ExpertLora, ExpertLoraGrads, ExpertSet, MoeActs, MoeIds, MoeIdsBwd, MoeShape, RouterBwdIds, RouterGrad, RouterKind, RouterOverride};
 use model::saved::RetainedStates;
+use model::segmented::SegmentEdge;
 use model::short_conv::{short_conv_bwd, short_conv_fwd, BaseLayout, DynTaps, ShortConvIds, ShortConvShape};
 
 use super::{BankRef, HostBatch, Inkling2Train};
@@ -466,6 +467,11 @@ impl Inkling2Train {
         let mut bufs = vec![x0];
         for v in self.plan.visits() {
             let i = v.index;
+            if let Some(stream) = &self.streamed {
+                // The visit's banks into the window, once the work reading the slot's previous layer is sent.
+                self.flush(&mut s);
+                stream.load_layer(g, v.layer).map_err(|e| format!("inkling2: loading layer {}: {e}", v.layer))?;
+            }
             let x = bufs[sched.src[i]].clone();
             let acts = self.visit_fwd(&mut s, &rows, &sched, &store, &bufs, &mq, v, &x, true)?;
             bufs.push(acts.out);
@@ -763,13 +769,22 @@ impl Inkling2Train {
 
     /// Differentiate the last forward: every parameter's (or adapter's) gradient is added.
     pub(super) fn backward_from(&self, fwd: &Saved) -> Result<(), String> {
+        self.backward_hooked(fwd, &mut |_| {})
+    }
+
+    /// [`Self::backward_from`], reporting each visit's recompute and backward between [`SegmentEdge::Before`] and
+    /// [`SegmentEdge::After`] of its layer (once the work before it has been sent to the device): what a layer-streamed
+    /// update loads, carries and finishes the expert banks by.
+    pub(super) fn backward_hooked(&self, fwd: &Saved, edge: &mut dyn FnMut(SegmentEdge)) -> Result<(), String> {
         let cfg = &self.tc.cfg;
         let (g, d) = (self.g(), cfg.hidden);
         let r = &fwd.rows;
         let n = r.n();
         let nn = n * d;
         let mut s = Vec::new();
-        let clears: Vec<&DeviceBuffer> = self.merged.values().map(|m| m.d_eff()).collect();
+        // The retained states' gradients too: a layer-streamed step may run the backward of one forward twice (a
+        // measuring pass, then the update), and every pass starts from nothing.
+        let clears: Vec<&DeviceBuffer> = self.merged.values().map(|m| m.d_eff()).chain(fwd.store.grads()).collect();
         if !clears.is_empty() {
             g.submit(&clears, &[]);
         }
@@ -801,10 +816,12 @@ impl Inkling2Train {
 
         for v in self.plan.visits().iter().rev() {
             let i = v.index;
+            edge(SegmentEdge::Before { index: i, layer: Some(v.layer) });
             let x = fwd.bufs[fwd.sched.src[i]].clone();
             let acts = self.visit_fwd(&mut s, r, &fwd.sched, &fwd.store, &fwd.bufs, &fwd.mq, v, &x, false)?;
             self.visit_bwd(&mut s, r, fwd, &acts, v, &x, &db, &dmq)?;
             self.flush(&mut s);
+            edge(SegmentEdge::After { index: i, layer: Some(v.layer) });
         }
 
         // Spliced rows: their gradient is the tower's, and the token embedding at those positions gets none.

@@ -305,10 +305,20 @@ pass runs it twice. A model that runs each layer in every step of its recurrence
 (ouro, huginn's recurrent core) has a layer's gradient complete only after the
 last visit: its backward
 pass declares that it revisits layers (`streamed::LayeredPass::revisits`,
-`RevisitingPass`), each visit's gradient is carried on the host
-(`ResidentFullFt::carry_layer`) and the layers are finished once the backward is
-complete (`finish_carried`), through the same device norm and update as a
-single visit. A chat full fine-tune (`finetune::fit_full`) takes `weights=f32`
+`RevisitingPass`), or names the layers it visits more than once
+(`LayeredPass::visits`: inkling2's looped core, while its prelude and coda are
+finished as their single visit ends); a revisited layer's gradient is carried on
+the host between visits (`ResidentFullFt::carry_layer`), its next visit starts
+from the carried sum, so the device accumulates exactly what a build holding
+every layer would, and the layers are finished once the backward is complete
+(`finish_carried`), through the same device norm and update as a single visit.
+A model whose kernels read f32 weights can still keep a narrower stored value:
+under `weights=bf16` with a window, `StreamedStore` gives every streamed tensor
+an f32 slot (`ResidentSpec::read_as_f32`) that is rewritten from the bf16 host
+copy as its layer loads, under an f32 master; without a window that request is
+refused by name. A file-backed optimizer state (`ResidentFtConfig::state_dir`)
+drops its pages from the page cache as it streams, so a state file several
+times the process's memory is not charged to its memory cgroup. A chat full fine-tune (`finetune::fit_full`) takes `weights=f32`
 through the family's plain build, whose fit loop streams it, when the family
 declares `TrainPrecisionSupport::f32_streamed` (qwen35moe); qwen3 and qwen35
 keep their own narrow resident state and refuse `weights=f32` by name. The conversion happens after the model is
@@ -322,7 +332,8 @@ state, so they never all reach the device. `check_streamed_construction` holds
 such a model to a construction peak below the plain build and to the bits of
 the build streamed after construction. Every model with a layer-streamed full
 fine-tune builds this way (gpt2, lfm2, spectrallm, deepseek2, glmdsa, qwen35moe,
-horizon's set encoder, ouro, huginn, toymoe, toyseq2seq, toypid).
+horizon's set encoder, ouro, huginn, toymoe, toyseq2seq, toypid, inkling2's
+expert banks).
 
 The run asks for it with one model-agnostic value (the SDK's
 `train_precision`, the CLI's `--train-precision`):

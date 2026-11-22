@@ -838,6 +838,16 @@ impl Weight {
         matches!(self, Weight::F32 { .. } | Weight::BF16 { .. } | Weight::F16 { .. } | Weight::FP8 { .. } | Weight::NF4 { .. } | Weight::Micro { .. } | Weight::Cq { .. })
     }
 
+    /// The buffer of a float weight (f32, bf16 or f16, the 16-bit tiers two values to a word), which a kernel taking that
+    /// storage reads as a plain `[n, k]` matrix (`moe_linear_gated` and its `#w=bf16` / `#w=f16` twins); `None` for
+    /// every quantized tier.
+    pub fn float_buffer(&self) -> Option<&DeviceBuffer> {
+        match self {
+            Weight::F32 { w, .. } | Weight::BF16 { w, .. } | Weight::F16 { w, .. } => Some(w),
+            _ => None,
+        }
+    }
+
     /// The buffer of an fp32 weight, which a kernel reads as a plain dense
     /// `[n, k]` matrix; `None` for every packed tier.
     pub fn dense_buffer(&self) -> Option<&DeviceBuffer> {

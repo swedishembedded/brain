@@ -1089,6 +1089,35 @@ The first trainable target needs no streaming: the base is about 19.5 GB.
 - **I6.2** `model::streamed`: a non-f32 window plus `RevisitingPass` for a model whose
   frozen layers stay quantized.
 - **I6.3** Expert-parallel training layout (`memplan`, `distributed`).
+- Done (2026-11-22, I6.1 + I6.2; I6.3 not needed): a layer-streamed full fine-tune of the released 26B on ONE card,
+  by generic means. Design (the smallest that fits one GH200 and a 440 GB job cgroup shared with other lanes):
+  - the expert banks (24.46B of the 26.4B parameters) stream through `model::streamed::StreamedStore`
+    (`weights=bf16,window=1`): built straight into the resident state from the release (`Model::new_resident` /
+    `Inkling2Train::from_dir_resident`, `paramstore::Role::Streamed`; the NVFP4/MXFP8 banks read through their
+    per-expert views by the new `checkpoint::packed::SlabStacks`, dequantized once at load), bf16 stored values on the host (49 GB), the f32
+    master and f32 AdamW moments in a state file on the node's local disk (`ResidentFtConfig::state_dir`, 294 GB),
+    a one-layer window of f32 slots on the card;
+  - I6.2 in `model::resident_ft`: a narrower stored value read as f32 (`ResidentSpec::read_as_f32`,
+    `DeviceRead::F32`: the slot is rewritten from the bf16 host copy, widened exactly, as its layer loads), which
+    `StreamedStore` now gives every tensor of a model whose kernels read f32 weights under `weights=bf16` (without a
+    window: refused by name); `LayeredPass::visits(layer)` names the layers the backward visits more than once, so
+    only the looped core's banks are carried across its three passes (host f32, at most 12 layers: 49 GB) while the
+    prelude's and coda's are updated as their single visit ends; a carried layer's next visit now starts its lane
+    from the carried sum (bit-identical to a build holding every layer, which the host-side add was not);
+  - everything else (attention, depth/message queries, gates, embedding, head: 1.9B) trains in f32 with AdamW on
+    the card; `Model::save` writes the banks in their stored encoding (bf16, published shapes,
+    `ResidentFullFt::save_checkpoint`) and the rest in f32; the served engine holds float banks as stored (a bf16
+    bank as bf16 under `moe_linear_gated#w=bf16`), so the export serves on one card;
+  - ZeRO across cards (`resident_shard`) is not used: it keeps master and moments on the cards (14 B an element,
+    114 GB a card for 3 cards) and refuses carried (revisited) layers and widened slots by name; expert parallelism
+    is not needed at one card.
+  Gates: `inkling2/tests/it/streamed_full_ft.rs` (the shared `check_layer_streaming` / `check_streamed_construction`
+  contracts with `weights=f32,window=1`; bf16 banks: the forward reads the master's bf16 rounding bit for bit, steps
+  lower the loss, the save holds bf16 banks equal to that rounding, reloads to the trained logits bit for bit, is
+  served by the engine within 5e-5, exact resume through the fit loop's `check_exact_resume`) on CPU and CUDA;
+  `model/tests/it/layer_streamed_ft.rs::a_bf16_value_read_as_f32_trains_what_the_bf16_weights_do`; ouro, huginn,
+  deepseek2, gpt2, toyseq2seq, qwen3, qwen35 streaming suites unchanged. Real run:
+  `inkling2/tests/it/real_full_ft.rs` (ignored; command below).
 
 ### Phase 7: throughput
 

@@ -226,10 +226,12 @@ enum KvConv {
     Dynamic { taps: DeviceBuffer, proj: Weight },
 }
 
-/// A layer's routed experts: dense f32 banks, or the published microscaled banks read in place with the activation
+/// A layer's routed experts: dense float banks held as stored (f32, or bf16 - a full fine-tune's export of the 26B holds
+/// its banks at half the size of an f32 copy), or the published microscaled banks read in place with the activation
 /// quantization the release declares for each product (taken only under [`LinearActivations::Declared`]).
 enum Experts {
-    Dense { w13: DeviceBuffer, w2: DeviceBuffer },
+    /// `linear_gated`: the gated expert product for the banks' storage (`moe_linear_gated`, or its bf16 twin).
+    Dense { w13: DeviceBuffer, w2: DeviceBuffer, linear_gated: usize },
     Micro { w13: MicroBank, w2: MicroBank, act: [Option<ActivationScheme>; 2] },
 }
 
@@ -941,12 +943,13 @@ impl Inkling2 {
             routes.push(ids.clone());
         }
         match &lw.experts {
-            Experts::Dense { w13, w2 } => {
+            Experts::Dense { w13, w2, linear_gated } => {
+                let ids = MoeIds { linear_gated: *linear_gated, ..self.k.moe };
                 let (gate_up, h, expert_out) = (g.storage(u64::from(t * 2 * ff)), g.storage(u64::from(t * ff)), g.storage(u64::from(t * d)));
                 let scratch = GluScratch { gate_up: &gate_up, up: None, h: &h, expert_out: &expert_out };
                 for ex in 0..e {
                     let w = GluWeights { gate_w: w13, up_w: None, down_w: w2, gate_off: ex * 2 * ff * d, down_off: ex * d * ff };
-                    s.extend(expert_fwd_glu(g, &self.k.moe, &self.k.glu, &spec, &shape, x, &gate, &w, &scratch, &out, ex, ex > 0));
+                    s.extend(expert_fwd_glu(g, &ids, &self.k.glu, &spec, &shape, x, &gate, &w, &scratch, &out, ex, ex > 0));
                 }
             }
             Experts::Micro { w13, w2, act } => {
@@ -1162,6 +1165,8 @@ impl Weights {
         let g = ops.gpu();
         let staging = BoundedWorkspace::new(MemoryBudget::new(STAGING_BYTES, 0));
         let host = |name: &str| upload_f32(g, src, name);
+        let gated = |name: &str| g.kernel_index(name).ok_or_else(|| format!("inkling2: kernel {name} is not registered"));
+        let (kernels_f32, kernels_bf16) = (gated("moe_linear_gated")?, gated("moe_linear_gated#w=bf16")?);
         let dense = |name: &str| -> Result<Weight, String> {
             let desc = src.packed_descriptor(name).ok_or_else(|| format!("inkling2: no packed view of {name}"))?;
             upload_preserved(ops, src, name, desc.shape[0] as usize, desc.shape[1] as usize, &staging)
@@ -1193,7 +1198,25 @@ impl Weights {
                     act: [activations.get(&n.w13()).copied(), activations.get(&n.w2()).copied()],
                 }
             } else {
-                Experts::Dense { w13: host(&n.w13())?, w2: host(&n.w2())? }
+                // Held as stored: an f32 bank as f32, a bf16 bank as bf16 under the gated product's bf16 twin.
+                let bank = |name: &str| -> Result<(DeviceBuffer, gpu_core::select::Dtype), String> {
+                    let desc = src.packed_descriptor(name).ok_or_else(|| format!("inkling2: no packed view of {name}"))?;
+                    if desc.encoding != QuantEncoding::bf16() {
+                        return Ok((host(name)?, gpu_core::select::Dtype::F32));
+                    }
+                    // The bf16 values decode exactly; packed back into bf16 they are the stored bits.
+                    let values = read_small(src, name)?;
+                    let k = *desc.shape.last().ok_or_else(|| format!("inkling2: {name} has no shape"))? as usize;
+                    let held = Weight::upload(ops, &values, values.len() / k.max(1), k, gpu_core::select::Dtype::BF16);
+                    let buf = held.float_buffer().ok_or_else(|| format!("inkling2: {name} uploaded as {:?}, not a float bank", held.dtype()))?.clone();
+                    Ok((buf, gpu_core::select::Dtype::BF16))
+                };
+                let ((w13, t13), (w2, t2)) = (bank(&n.w13())?, bank(&n.w2())?);
+                if t13 != t2 {
+                    return Err(format!("inkling2: layer {l}'s gate/up bank is {t13:?}, its down bank {t2:?}; both are held as one float type"));
+                }
+                let linear_gated = if t13 == gpu_core::select::Dtype::BF16 { kernels_bf16 } else { kernels_f32 };
+                Experts::Dense { w13, w2, linear_gated }
             };
             let gates = if cfg.is_core(l) {
                 Some(

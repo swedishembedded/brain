@@ -11,9 +11,15 @@
 //!
 //! - **Full fine-tuning** ([`model::Model::new`], [`Inkling2Train::from_dir`] without an adapter): every parameter is
 //!   an f32 tensor of the [`ParamStore`], under its published name, and trains (the router's selection bias excepted:
-//!   it is a load-balancing heuristic with no gradient). The expert banks must be stored as floats; a microscaled
-//!   release is refused by name (the real 26B needs a streamed or sharded full fine-tune, which this crate does not
-//!   offer).
+//!   it is a load-balancing heuristic with no gradient). The expert banks must be stored as floats.
+//! - **Layer-streamed full fine-tuning** ([`model::Model::set_resident`], [`model::Model::new_resident`],
+//!   [`Inkling2Train::from_dir_resident`]): the expert banks (93 % of the released 26B's parameters) leave the device
+//!   for [`model::streamed::StreamedStore`]: their stored value on the host (bf16 under `weights=bf16`, the published
+//!   NVFP4/MXFP8 banks dequantized once at load), the f32 master and AdamW state there or in a state file, and a
+//!   window of f32 slots on the device that each visit loads its layer's banks into. Every other tensor trains in f32
+//!   on the device. The core's banks are visited once per pass: their gradients are carried across the passes and
+//!   updated once the backward is complete ([`model::streamed::LayeredPass::visits`]), every other layer's as its
+//!   only visit ends. A trained build saves the banks in their stored encoding ([`model::Model::save`]).
 //! - **LoRA** (a [`LoraCfg`]): the base stays frozen as published - every linear at the run's tier (bf16 as stored, or
 //!   f32), the expert banks in their NVFP4/MXFP8 encoding read in place ([`MicroBank`]) - and only adapters train:
 //!   linear sites through [`AdapterRuntime`], stacked expert sites per expert on their routed rows
@@ -52,6 +58,9 @@ use model::head_transform::HeadTransform;
 use model::looped::VisitPlan;
 use model::ops::{upload_micro_bank, upload_preserved, MicroBank, Ops, TierPolicy, Weight};
 use model::routing::RoutingReplay;
+use model::resident_ft::ResidentFtConfig;
+use model::segmented::SegmentEdge;
+use model::streamed::{LayeredPass, StreamedStore};
 use model::{Adam, Batch, ModelConfig};
 use optim::Optim;
 use paramstore::{ParamStore, Role};
@@ -107,6 +116,8 @@ pub fn kernels() -> Vec<(&'static str, &'static str)> {
     all.extend_from_slice(model::moe::EXPERT_LORA_KERNELS);
     all.extend_from_slice(model::head_ce::kernels());
     all.extend_from_slice(model::adapter::merged::KERNELS);
+    // A layer-streamed full fine-tune reads and writes its window and measures its gradients through these.
+    all.extend_from_slice(model::ops::store_device_kernels());
     // The vision tower trains on the decoder's device ([`image_text`]).
     all.extend_from_slice(crate::vision::train_pipelines());
     model::ops::extend_kernel_list(&mut list, &all);
@@ -285,6 +296,35 @@ pub struct Inkling2Train {
     /// Per visit, the experts every row of the last forward selected (`[rows, top_k]`).
     taken: RefCell<Vec<Vec<u32>>>,
     detach_router: Cell<bool>,
+    /// A layer-streamed full fine-tune: the expert banks' state and window ([`StreamedStore`]).
+    streamed: Option<StreamedStore>,
+    /// The forward a layer-streamed backward differentiates inside [`model::Model::adamw_step`].
+    pending: RefCell<Option<recipe::Saved>>,
+}
+
+/// The layer whose expert bank `name` is: the tensors a layer-streamed full fine-tune streams.
+fn bank_layer(cfg: &Inkling2Config, name: &str) -> Option<u32> {
+    (0..cfg.n_layers).find(|&l| {
+        let n = LayerNames::new(l);
+        name == n.w13() || name == n.w2()
+    })
+}
+
+/// The backward of one forward as a [`LayeredPass`]: each visit's recompute and backward between the edges of its
+/// layer, which the streamed update loads before and finishes (or carries, for the core) after.
+struct VisitBackward<'a> {
+    m: &'a Inkling2Train,
+    fwd: &'a recipe::Saved,
+}
+
+impl LayeredPass for VisitBackward<'_> {
+    fn submit_hooked(&self, _gpu: &Gpu, edge: &mut dyn FnMut(SegmentEdge)) {
+        self.m.backward_hooked(self.fwd, edge).unwrap_or_else(|e| panic!("inkling2 backward: {e}"));
+    }
+
+    fn visits(&self, layer: usize) -> u32 {
+        self.m.plan.visits().iter().filter(|v| v.layer == layer).count() as u32
+    }
 }
 
 /// How a training build is made.
@@ -321,11 +361,45 @@ impl Inkling2Train {
         let (_, src, micro, _) = open_checkpoint(dir)?;
         if !micro.is_empty() {
             return Err(format!(
-                "inkling2: a full fine-tune trains every expert in f32, but {} expert banks are stored microscaled (NVFP4/MXFP8); the released 26B needs a streamed, sharded or expert-parallel full fine-tune this crate does not offer - train a LoRA adapter over the published banks instead",
+                "inkling2: a full fine-tune holding every expert in f32 on the device, but {} expert banks are stored microscaled (NVFP4/MXFP8) - the released 26B; stream its banks through a window (`weights=bf16,window=1`, Inkling2Train::from_dir_resident) or train a LoRA adapter over the published banks",
                 micro.len()
             ));
         }
         Inkling2Train::build(tc, &src, &[], b, t, None, GemmPrecision::Auto)
+    }
+
+    /// A layer-streamed full fine-tune over the checkpoint directory `dir` ([`model::streamed`]): the expert banks are
+    /// built straight into the resident state under `resident` (decoded once from the stored encoding, the published
+    /// NVFP4/MXFP8 banks included, into the state's stored value and f32 master) and never all reach the device; every
+    /// other tensor trains in f32 on the device. A release larger than the device trains so.
+    pub fn from_dir_resident(dir: &Path, b: u32, t: u32, resident: &ResidentFtConfig) -> Result<Inkling2Train, String> {
+        let tc = TrainConfig::from_dir(dir)?;
+        let (_, src, micro, _) = open_checkpoint(dir)?;
+        // The microscaled banks are readable as their per-expert views (each with its expert's global scale).
+        let (d, ff, experts) = (tc.cfg.hidden as usize, tc.cfg.moe_ff as usize, tc.cfg.experts as usize);
+        let stacks = (0..tc.cfg.n_layers)
+            .flat_map(|l| {
+                let n = LayerNames::new(l);
+                [(n.w13(), 2 * ff * d), (n.w2(), d * ff)]
+            })
+            .filter(|(name, _)| micro.contains(name))
+            .map(|(name, slab)| (name, experts, slab));
+        let banks = checkpoint::packed::SlabStacks::new(&src, stacks);
+        Inkling2Train::build_resident(tc, &banks, b, t, resident, GemmPrecision::Auto)
+    }
+
+    /// A full fine-tune whose banks are built as [`Role::Streamed`] and attached to a [`StreamedStore`] under
+    /// `resident`, their initial values read from `src`.
+    fn build_resident(tc: TrainConfig, src: &dyn TensorSource, b: u32, t: u32, resident: &ResidentFtConfig, gemm: GemmPrecision) -> Result<Inkling2Train, String> {
+        if tc.lora.is_some() {
+            return Err("inkling2: a layer-streamed build is a full fine-tune; an adapter trains over the frozen base".into());
+        }
+        let mut m = Inkling2Train::build_with(tc, src, src, &[], b, t, None, gemm, true)?;
+        let cfg = m.tc.cfg.clone();
+        let gpu = m.ops.gpu().share();
+        let stream = StreamedStore::attach(&gpu, &mut m.ps, resident.clone(), src, &|n| bank_layer(&cfg, n)).map_err(|e| format!("inkling2: {e}"))?;
+        m.streamed = Some(stream);
+        Ok(m)
     }
 
     /// A LoRA build over the checkpoint directory `dir`: the base frozen as published (`opts.base` names the linears'
@@ -352,7 +426,7 @@ impl Inkling2Train {
             Some(map) => map,
             None => &src,
         };
-        Inkling2Train::build_with(tc, &src, init, &micro, opts.batch, opts.seq, Some((opts.base, opts.seed)), GemmPrecision::Auto)
+        Inkling2Train::build_with(tc, &src, init, &micro, opts.batch, opts.seq, Some((opts.base, opts.seed)), GemmPrecision::Auto, false)
     }
 
     /// A build over in-memory f32 tensors in the published names (`init`): a full fine-tune, or a LoRA build when
@@ -386,7 +460,7 @@ impl Inkling2Train {
     }
 
     fn build(tc: TrainConfig, src: &dyn TensorSource, micro: &[String], b: u32, t: u32, lora: Option<(&TierPolicy, u64)>, gemm: GemmPrecision) -> Result<Inkling2Train, String> {
-        Inkling2Train::build_with(tc, src, src, micro, b, t, lora, gemm)
+        Inkling2Train::build_with(tc, src, src, micro, b, t, lora, gemm, false)
     }
 
     /// [`Self::build`] with the adapter's starting tensors read from `adapter_src` (where it holds them).
@@ -394,8 +468,10 @@ impl Inkling2Train {
     /// `gemm` is the arithmetic of the dense products: a build over in-memory tensors (the tiny configurations the
     /// gradient checks, conformance and parity tests train) pins the exact fp32 reference tier those checks are stated
     /// against, a build over a checkpoint directory takes the device's tensor cores ([`GemmPrecision::Auto`]).
+    /// `stream_banks` builds a full fine-tune's expert banks as [`Role::Streamed`] (no device buffer: the caller
+    /// attaches them to a [`StreamedStore`]).
     #[allow(clippy::too_many_arguments)]
-    fn build_with(tc: TrainConfig, src: &dyn TensorSource, adapter_src: &dyn TensorSource, micro: &[String], b: u32, t: u32, lora: Option<(&TierPolicy, u64)>, gemm: GemmPrecision) -> Result<Inkling2Train, String> {
+    fn build_with(tc: TrainConfig, src: &dyn TensorSource, adapter_src: &dyn TensorSource, micro: &[String], b: u32, t: u32, lora: Option<(&TierPolicy, u64)>, gemm: GemmPrecision, stream_banks: bool) -> Result<Inkling2Train, String> {
         let cfg = tc.cfg.clone();
         if b == 0 || t == 0 {
             return Err("inkling2: a training batch needs rows and tokens".into());
@@ -428,7 +504,13 @@ impl Inkling2Train {
                 let roles: Vec<(String, usize, Role)> = names::text_manifest(&cfg)
                     .into_iter()
                     .map(|e| {
-                        let role = if (0..cfg.n_layers).any(|l| LayerNames::new(l).router_bias() == e.name) { Role::Frozen } else { Role::Trainable };
+                        let role = if (0..cfg.n_layers).any(|l| LayerNames::new(l).router_bias() == e.name) {
+                            Role::Frozen
+                        } else if stream_banks && bank_layer(&cfg, &e.name).is_some() {
+                            Role::Streamed
+                        } else {
+                            Role::Trainable
+                        };
                         (e.name, e.shape.iter().product::<u64>() as usize, role)
                     })
                     .collect();
@@ -508,11 +590,20 @@ impl Inkling2Train {
             image_grads: RefCell::new(None),
             host_base: None,
             detach_router: Cell::new(false),
+            streamed: None,
+            pending: RefCell::new(None),
         })
     }
 
     pub fn config(&self) -> &Inkling2Config {
         &self.tc.cfg
+    }
+
+    /// Choose the arithmetic of the dense products ([`model::ops::Ops::set_gemm_precision`]): a build over a checkpoint
+    /// directory starts at [`GemmPrecision::Auto`], one over in-memory tensors at the fp32 reference tier.
+    pub fn set_gemm_precision(&mut self, precision: GemmPrecision) {
+        self.ops.set_gemm_precision(precision);
+        *self.saved.borrow_mut() = None;
     }
 
     pub fn train_config(&self) -> &TrainConfig {
@@ -860,6 +951,13 @@ impl model::Model for Inkling2Train {
 
     fn backward(&self) {
         let fwd = self.saved.borrow_mut().take().expect("inkling2: backward without a forward of the current batch");
+        if self.streamed.as_ref().is_some_and(StreamedStore::is_layer_streamed) {
+            // The banks are not all on the device: the backward runs visit by visit inside `adamw_step`, where the
+            // layers it loads are the ones it updates.
+            let earlier = self.pending.borrow_mut().replace(fwd);
+            assert!(earlier.is_none(), "inkling2 layer-streamed full fine-tune: a second backward before the update (gradient accumulation) is not supported; every micro-batch is its own step");
+            return;
+        }
         self.backward_from(&fwd).unwrap_or_else(|e| panic!("inkling2 backward: {e}"));
     }
 
@@ -868,7 +966,21 @@ impl model::Model for Inkling2Train {
     }
 
     fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: Adam, clip: Option<f32>, extra_scale: f32) {
-        self.opt.step(self.g(), &self.ps, t, lr, wd, adam, clip, extra_scale);
+        let Some(stream) = &self.streamed else {
+            self.opt.step(self.g(), &self.ps, t, lr, wd, adam, clip, extra_scale);
+            return;
+        };
+        let args = model::resident_ft::StepArgs { step: t, lr, wd, adam, clip, extra_scale };
+        let pending = self.pending.borrow_mut().take();
+        if stream.is_layer_streamed() && pending.is_none() {
+            panic!("inkling2 layer-streamed full fine-tune: adamw_step without a backward");
+        }
+        // A build holding every bank ran its backward already; the pass is then never submitted.
+        match &pending {
+            Some(fwd) => stream.adamw_step(self.g(), &self.ps, &self.opt, &VisitBackward { m: self, fwd }, &args),
+            None => stream.adamw_step(self.g(), &self.ps, &self.opt, &NoPass, &args),
+        }
+        .unwrap_or_else(|e| panic!("inkling2 layer-streamed update: {e}"));
     }
 
     fn last_grad_norm(&self) -> Option<f32> {
@@ -877,6 +989,31 @@ impl model::Model for Inkling2Train {
 
     fn poll_wait(&self) {
         self.g().poll_wait();
+    }
+
+    fn off_device_state(&self) -> Option<&dyn model::OffDeviceState> {
+        self.streamed.as_ref().map(|_| self as &dyn model::OffDeviceState)
+    }
+
+    /// Stream the expert banks through a device window under `cfg` ([`model::streamed`]); see the module doc.
+    fn set_resident(&mut self, cfg: &ResidentFtConfig) -> Result<(), String> {
+        if self.tc.lora.is_some() {
+            return Err("inkling2: a layer-streamed build is a full fine-tune; an adapter trains over the frozen base".into());
+        }
+        if self.streamed.is_some() {
+            return Err("inkling2: the expert banks already stream".into());
+        }
+        let tc = self.tc.cfg.clone();
+        let gpu = self.ops.gpu().share();
+        let stream = StreamedStore::convert(&gpu, &mut self.ps, cfg.clone(), &|n| bank_layer(&tc, n)).map_err(|e| format!("inkling2: {e}"))?;
+        self.opt.invalidate();
+        self.streamed = Some(stream);
+        *self.saved.borrow_mut() = None;
+        Ok(())
+    }
+
+    fn new_resident(cfg: TrainConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, resident: &ResidentFtConfig) -> Result<Self, String> {
+        Inkling2Train::build_resident(cfg, init, b, t, resident, GemmPrecision::Fp32Reference)
     }
 
     fn optimizer_state(&mut self) -> Option<model::OptimizerState<'_>> {
@@ -889,7 +1026,8 @@ impl model::Model for Inkling2Train {
 
     /// The trained tensors: every parameter but the routers' selection biases (full), the adapter (LoRA).
     fn param_names(&self) -> Vec<String> {
-        self.ps.opt_params().iter().map(|(n, _)| n.clone()).collect()
+        let streamed = self.streamed.iter().flat_map(|s| s.names().map(str::to_string));
+        self.ps.opt_params().iter().map(|(n, _)| n.clone()).chain(streamed).collect()
     }
 
     fn frozen_adapter_param_names(&self) -> Vec<String> {
@@ -905,6 +1043,10 @@ impl model::Model for Inkling2Train {
     }
 
     fn read_weight(&self, name: &str) -> Vec<f32> {
+        if let Some(stream) = self.streamed.as_ref().filter(|s| s.holds(name)) {
+            self.g().flush();
+            return stream.read_weight(self.g(), name).unwrap_or_else(|e| panic!("inkling2: reading {name}: {e}"));
+        }
         let v = self.ps.read_weight(self.g(), name);
         match tap_rows(&self.tc.cfg, name) {
             Some((h, taps, w)) => reorder_tap_rows(&v, h, taps, w, false),
@@ -913,6 +1055,12 @@ impl model::Model for Inkling2Train {
     }
 
     fn write_weight(&self, name: &str, data: &[f32]) {
+        if let Some(stream) = self.streamed.as_ref().filter(|s| s.holds(name)) {
+            self.g().flush();
+            stream.write_weight(self.g(), name, data).unwrap_or_else(|e| panic!("inkling2: writing {name}: {e}"));
+            *self.saved.borrow_mut() = None;
+            return;
+        }
         match tap_rows(&self.tc.cfg, name) {
             Some((h, taps, w)) => self.g().write_f32(self.ps.w(name), &reorder_tap_rows(data, h, taps, w, true)),
             None => self.g().write_f32(self.ps.w(name), data),
@@ -921,6 +1069,7 @@ impl model::Model for Inkling2Train {
     }
 
     fn read_grad(&self, name: &str) -> Vec<f32> {
+        assert!(!self.streamed.as_ref().is_some_and(|s| s.holds(name) && s.is_layer_streamed()), "inkling2: {name} streams through a layer window; no gradient outlives its layer");
         let v = self.ps.read_grad(self.g(), name);
         match tap_rows(&self.tc.cfg, name) {
             Some((h, taps, w)) => reorder_tap_rows(&v, h, taps, w, false),
@@ -946,6 +1095,15 @@ impl model::Model for Inkling2Train {
     /// build from in-memory tensors writes its base and adapter, which [`Inkling2Train::load`] rebuilds.
     fn save(&self, path: &str) {
         let card = checkpoint::st::ModelCard::new("brain/inkling2", FAMILY);
+        if let Some(stream) = &self.streamed {
+            // The banks in their stored encoding (the values the forward read), everything else in f32.
+            let rest: Vec<(String, Vec<u64>)> = names::text_manifest(&self.tc.cfg).into_iter().filter(|e| !stream.holds(&e.name)).map(|e| (e.name, e.shape)).collect();
+            self.g().flush();
+            stream
+                .save_checkpoint(self.g(), Path::new(path), &|n| self.shapes.get(n).cloned(), &rest, &|n| self.read_weight(n), &self.tc.json, Some(&card))
+                .unwrap_or_else(|e| panic!("inkling2: saving {path}: {e}"));
+            return;
+        }
         let Some(lora) = &self.tc.lora else {
             let tensors: Vec<(String, Vec<u64>, Vec<f32>)> = names::text_manifest(&self.tc.cfg).into_iter().map(|e| { let v = self.read_weight(&e.name); (e.name, e.shape, v) }).collect();
             checkpoint::save_carded(path, self.tc.json.clone(), &tensors, &card);
@@ -964,6 +1122,29 @@ impl model::Model for Inkling2Train {
         let config = serde_json::json!({ SAVED_CONFIG_KEY: self.tc.json.clone(), SAVED_LORA_KEY: lora.to_json() });
         checkpoint::save_carded(path, config, &tensors, &card);
     }
+}
+
+impl model::OffDeviceState for Inkling2Train {
+    fn commit(&self, dir: &Path, step: u32) -> std::io::Result<()> {
+        let stream = self.streamed.as_ref().ok_or_else(|| std::io::Error::other("inkling2: no streamed state to commit"))?;
+        self.g().flush();
+        stream.commit(self.g(), dir, step)
+    }
+
+    fn restore(&self, dir: &Path, step: u32) -> std::io::Result<()> {
+        let stream = self.streamed.as_ref().ok_or_else(|| std::io::Error::other("inkling2: no streamed state to restore"))?;
+        self.g().flush();
+        stream.restore(self.g(), dir, step)?;
+        *self.saved.borrow_mut() = None;
+        Ok(())
+    }
+}
+
+/// The pass of a streamed build that holds every bank: its backward already ran, nothing is submitted.
+struct NoPass;
+
+impl LayeredPass for NoPass {
+    fn submit_hooked(&self, _gpu: &Gpu, _edge: &mut dyn FnMut(SegmentEdge)) {}
 }
 
 /// Fresh weights of `cfg` drawn from `seed`, in the published names: small Gaussian-scale matrices, unit norm gains,
