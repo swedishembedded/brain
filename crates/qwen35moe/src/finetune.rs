@@ -121,9 +121,9 @@ impl model::finetune::ChatTrainer for Qwen35MoeTrainer {
         fit.fit(m)
     }
 
-    /// The paged serving engine at `tiers` over the brain checkpoint at `base` (an adapter folded into the base
-    /// tensors), read one tensor at a time as the file stores it, with an fp32 KV cache.
-    fn serving_engine(base: &Path, tiers: &model::ops::TierPolicy, adapter: Option<&Path>, max_seq_len: u32) -> Option<std::io::Result<Box<dyn model::serve::PagedDecoder>>> {
+    /// The paged serving engine at `tiers` and `gemm` over the brain checkpoint at `base` (an adapter folded into the
+    /// base tensors), read one tensor at a time as the file stores it, with an fp32 KV cache.
+    fn serving_engine(base: &Path, tiers: &model::ops::TierPolicy, gemm: gpu_core::provider::library::GemmPrecision, adapter: Option<&Path>, max_seq_len: u32) -> Option<std::io::Result<Box<dyn model::serve::PagedDecoder>>> {
         Some((|| {
             let name = path_str(base)?;
             let reader = checkpoint::weightio::WeightReader::open(name).map_err(|e| std::io::Error::other(format!("open {name}: {e}")))?;
@@ -133,7 +133,7 @@ impl model::finetune::ChatTrainer for Qwen35MoeTrainer {
                 Some(a) => Box::new(model::lora::device_adapter::FoldedSource::open(src, path_str(a)?).map_err(std::io::Error::other)?),
                 None => src,
             };
-            let engine = crate::serve::Engine::from_source(cfg, &*src, crate::serve::EngineOptions::new(max_seq_len.max(1), 1).with_tier(tiers.clone()));
+            let engine = crate::serve::Engine::from_source(cfg, &*src, crate::serve::EngineOptions::new(max_seq_len.max(1), 1).with_tier(tiers.clone()).with_gemm_precision(gemm));
             Ok(Box::new(engine) as Box<dyn model::serve::PagedDecoder>)
         })())
     }

@@ -962,6 +962,13 @@ The first trainable target needs no streaming: the base is about 19.5 GB.
     point (`proj_out.lora_b[10]`: 5.70 read, 7.14 at the point, whose loss is smooth there). Every gradient is now read
     at the unperturbed point first; the decoder's clip branches are pinned beside its routing; regression test at seed
     17823462077274058773.
+  - Done (2026-11-22, fix2): the served path takes the run's declared product precision.
+    `ChatTrainer::serving_engine(base, tiers, gemm, adapter, max_seq_len)`: `served_loss` passes
+    `FitOpts::gemm_precision`, and the families' engines run it (qwen3, qwen35 - new `Engine::set_gemm_precision` -,
+    qwen35moe, inkling2); `Inkling2Trainer`'s full, resident and LoRA builds honour `FitOpts::gemm_precision` too (they
+    ran the device default whatever the run asked). `the_serving_engine_serves_what_the_trainer_trains` declares the
+    exact products on both sides and passes on CUDA (it was 5.0e-3 off: trainer and engine at the default TF32/bf16
+    tensor-core tiers round two recipes differently).
 - **I4.4** `model::train` + `data`: packed rows with document-boundary resets of
   attention, every conv state and the relative-position origin. Gate: no supervision or
   state crosses a boundary.

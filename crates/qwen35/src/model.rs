@@ -1796,6 +1796,12 @@ fn memory_gemv_groups_bindable(n_in: u32, n_out: u32) -> bool {
 }
 
 impl Qwen35 {
+    /// The arithmetic of the fp32-weight products ([`model::ops::Ops::set_gemm_precision`]): what a training build takes
+    /// from [`TrainOpts::gemm_precision`], set here on a model built for serving.
+    pub fn set_gemm_precision(&mut self, precision: gpu_core::provider::library::GemmPrecision) {
+        self.ops.set_gemm_precision(precision);
+    }
+
     pub fn new_on(gpu: Gpu, cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen35 {
         let shard = Shard::whole(cfg.n_layers as usize);
         Qwen35::new_impl_on(gpu, cfg, b, t, init, &TierPolicy::uniform(Dtype::F32), None, shard)

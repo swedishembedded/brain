@@ -260,12 +260,14 @@ fn the_serving_engine_serves_what_the_trainer_trains() {
     let ckpt = dir.join("checkpoint");
     let tokens: Vec<u32> = vec![3, 17, 5, 40, 9, 22, 61, 8, 12];
     let mut trainer = Inkling2Train::from_dir(&ckpt, 1, tokens.len() as u32).unwrap();
-    // Both sides at the exact products: the device's default arithmetic rounds the two recipes' products differently.
-    trainer.set_gemm_precision(gpu_core::provider::library::GemmPrecision::Fp32Reference);
+    // Both sides at the exact products, the trainer's set on it and the engine's declared to the family's hook: the
+    // device's default arithmetic rounds the two recipes' products differently (5e-3 on CUDA).
+    let exact = gpu_core::provider::library::GemmPrecision::Fp32Reference;
+    trainer.set_gemm_precision(exact);
     let want = trainer.logits(&tokens).unwrap();
     let valid = trainer.config().valid_vocab as usize;
     let tiers = model::ops::TierPolicy::uniform(gpu_core::select::Dtype::F32);
-    let served = inkling2::finetune::Inkling2Trainer::serving_engine(&ckpt, &tiers, None, tokens.len() as u32).expect("the family serves");
+    let served = inkling2::finetune::Inkling2Trainer::serving_engine(&ckpt, &tiers, exact, None, tokens.len() as u32).expect("the family serves");
     assert!(served.is_ok(), "the family's serving engine opens the checkpoint");
     drop(served);
     let sizing = model::serve::visit_state::VisitPoolSizing { block_size: 16, num_blocks: tokens.len().div_ceil(16) as u32 + 1, live_rows: 1, snapshot_rows: 0, undo_rows: false };
@@ -285,13 +287,14 @@ fn the_serving_engine_serves_what_the_trainer_trains() {
     let lora = model::adapter::device::LoraCfg::new(2, 4.0, inkling2::train::targets(false));
     let base_tier = model::ops::TierPolicy::uniform(gpu_core::select::Dtype::F32);
     // seed: any factors; the engine reads the file the trainer saves.
-    let adapted = Inkling2Train::from_dir_lora(&ckpt, lora, &inkling2::train::BuildOptions { batch: 1, seq: tokens.len() as u32, base: &base_tier, seed: 3, continue_from: None }).unwrap();
+    let mut adapted = Inkling2Train::from_dir_lora(&ckpt, lora, &inkling2::train::BuildOptions { batch: 1, seq: tokens.len() as u32, base: &base_tier, seed: 3, continue_from: None }).unwrap();
+    adapted.set_gemm_precision(exact);
     random_adapters(&adapted, 3);
     let scratch = brain_testutil::Scratch::dir("inkling2-scoring-adapter");
     let path = scratch.path().join("adapter.safetensors");
     inkling2::finetune::save_adapter_file(&adapted, &path).unwrap();
     let want_adapted = adapted.logits(&tokens).unwrap();
-    let mut engine = inkling2::finetune::Inkling2Trainer::serving_engine(&ckpt, &tiers, Some(&path), tokens.len() as u32).expect("the family serves").expect("an adapter is served");
+    let mut engine = inkling2::finetune::Inkling2Trainer::serving_engine(&ckpt, &tiers, exact, Some(&path), tokens.len() as u32).expect("the family serves").expect("an adapter is served");
     for (p, hidden) in engine.hidden_at(&tokens, &positions).into_iter().enumerate() {
         let got = engine.logits(&hidden);
         let row = &want_adapted[p * valid..(p + 1) * valid];

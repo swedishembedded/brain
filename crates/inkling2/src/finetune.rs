@@ -25,6 +25,7 @@
 
 use std::path::{Path, PathBuf};
 
+use gpu_core::provider::library::GemmPrecision;
 use gpu_core::select::Dtype;
 use model::finetune::{AdapterLineage, ChatTrainer, LoraRequest, ModelFit, OptimizerState};
 use model::{FitOpts, FitReport};
@@ -106,7 +107,7 @@ impl ChatTrainer for Inkling2Trainer {
             return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "inkling2: the optimizer state lives on the device (no host offload)"));
         }
         // A run streaming its layers builds the banks straight into the window: the release never loads whole.
-        let m = match opts.resident_config().map_err(std::io::Error::other)? {
+        let mut m = match opts.resident_config().map_err(std::io::Error::other)? {
             Some(resident) => Inkling2Train::from_dir_resident(base, opts.batch_size, opts.block_size, &resident).map_err(|e| invalid(base, e))?,
             None => Inkling2Train::from_dir(base, opts.batch_size, opts.block_size).map_err(|e| {
                 if e.contains("microscaled") {
@@ -116,6 +117,7 @@ impl ChatTrainer for Inkling2Trainer {
                 }
             })?,
         };
+        m.set_gemm_precision(opts.gemm_precision);
         fit.fit(m)
     }
 
@@ -123,7 +125,8 @@ impl ChatTrainer for Inkling2Trainer {
     /// under an f32 master; see [`Inkling2Train::from_dir_resident`]. A request without a window is refused by name.
     fn train_full_resident(base: &Path, opts: &FitOpts, resident: &model::resident_ft::ResidentFtConfig, fit: &mut impl ModelFit) -> std::io::Result<(FitReport, Inkling2Train)> {
         Self::TRAIN_PRECISION.check(&opts.precision).map_err(|why| std::io::Error::new(std::io::ErrorKind::Unsupported, why))?;
-        let m = Inkling2Train::from_dir_resident(base, opts.batch_size, opts.block_size, resident).map_err(|e| invalid(base, e))?;
+        let mut m = Inkling2Train::from_dir_resident(base, opts.batch_size, opts.block_size, resident).map_err(|e| invalid(base, e))?;
+        m.set_gemm_precision(opts.gemm_precision);
         fit.fit(m)
     }
 
@@ -137,21 +140,24 @@ impl ChatTrainer for Inkling2Trainer {
         let micro = crate::model::open_checkpoint(base).map_err(|e| invalid(base, e))?.2;
         let targets = crate::train::targets(!micro.is_empty());
         let build = BuildOptions { batch: opts.batch_size, seq: opts.block_size, base: tiers, seed: opts.seed, continue_from: lora.continue_from };
-        let m = Inkling2Train::from_dir_lora(base, model::adapter::device::LoraCfg::new(lora.rank, lora.alpha, targets), &build).map_err(|e| invalid(base, e))?;
+        let mut m = Inkling2Train::from_dir_lora(base, model::adapter::device::LoraCfg::new(lora.rank, lora.alpha, targets), &build).map_err(|e| invalid(base, e))?;
+        m.set_gemm_precision(opts.gemm_precision);
         fit.fit(m)
     }
 
     /// The served engine over the release at `base` (as published, whatever `tiers` names: the engine holds the
-    /// linears as stored and the expert banks in their encoding), f32 K/V, sized for one sequence of `max_seq_len`
+    /// linears as stored and the expert banks in their encoding), its products at `gemm` (the arithmetic a training
+    /// build of this family runs at, [`FitOpts::gemm_precision`]), f32 K/V, sized for one sequence of `max_seq_len`
     /// tokens. An `adapter` (a file this trainer saved) is not folded (its expert pairs correct quantized banks): the
     /// engine serves it from an adapter bank of its own rank and sites, and runs every sequence under it.
-    fn serving_engine(base: &Path, _tiers: &model::ops::TierPolicy, adapter: Option<&Path>, max_seq_len: u32) -> Option<std::io::Result<Box<dyn model::serve::PagedDecoder>>> {
+    fn serving_engine(base: &Path, _tiers: &model::ops::TierPolicy, gemm: GemmPrecision, adapter: Option<&Path>, max_seq_len: u32) -> Option<std::io::Result<Box<dyn model::serve::PagedDecoder>>> {
         Some((|| {
             const BLOCK: u32 = 16;
             let tokens = max_seq_len.max(1);
             let sizing = model::serve::visit_state::VisitPoolSizing { block_size: BLOCK, num_blocks: tokens.div_ceil(BLOCK) + 1, live_rows: 1, snapshot_rows: 0, undo_rows: false };
             let opts = crate::serve::EngineOptions { kv_tier: model::kv_tier::KvTier::F32, sizing, max_seq_len: tokens as usize, prefill_chunk: tokens.min(256) };
-            let ops = crate::serve::device_ops().map_err(std::io::Error::other)?;
+            let mut ops = crate::serve::device_ops().map_err(std::io::Error::other)?;
+            ops.set_gemm_precision(gemm);
             let mut engine = crate::serve::Engine::open(ops, base, opts).map_err(|e| invalid(base, e))?;
             if let Some(path) = adapter {
                 let name = path.to_str().ok_or_else(|| invalid(path, "not a UTF-8 path"))?;

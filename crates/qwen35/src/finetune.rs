@@ -501,16 +501,17 @@ impl model::finetune::ChatTrainer for Qwen35Trainer {
         fit.fit(m)
     }
 
-    /// The paged serving engine at `tiers` over the base as `open_base` reads it (an adapter folded into the base
-    /// tensors), with an fp32 KV cache so the measurement is the weights' alone.
-    fn serving_engine(base: &Path, tiers: &TierPolicy, adapter: Option<&Path>, max_seq_len: u32) -> Option<std::io::Result<Box<dyn model::serve::PagedDecoder>>> {
+    /// The paged serving engine at `tiers` and `gemm` over the base as `open_base` reads it (an adapter folded into the
+    /// base tensors), with an fp32 KV cache so the measurement is the weights' alone.
+    fn serving_engine(base: &Path, tiers: &TierPolicy, gemm: gpu_core::provider::library::GemmPrecision, adapter: Option<&Path>, max_seq_len: u32) -> Option<std::io::Result<Box<dyn model::serve::PagedDecoder>>> {
         Some((|| {
             let BaseCheckpoint { cfg, src } = open_base(base).map_err(std::io::Error::other)?;
             let src: Box<dyn checkpoint::TensorSource> = match adapter {
                 Some(a) => Box::new(model::lora::device_adapter::FoldedSource::open(src, a.to_str().ok_or_else(|| std::io::Error::other("adapter path is not UTF-8"))?).map_err(std::io::Error::other)?),
                 None => src,
             };
-            let engine = crate::serve::Engine::from_source_tier(cfg, &*src, max_seq_len.max(1), 1, model::kv_tier::KvTier::F32, tiers);
+            let mut engine = crate::serve::Engine::from_source_tier(cfg, &*src, max_seq_len.max(1), 1, model::kv_tier::KvTier::F32, tiers);
+            engine.set_gemm_precision(gemm);
             Ok(Box::new(engine) as Box<dyn model::serve::PagedDecoder>)
         })())
     }

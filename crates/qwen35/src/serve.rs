@@ -252,6 +252,11 @@ fn uniform_f32() -> model::ops::TierPolicy {
 }
 
 impl Engine {
+    /// The arithmetic of the fp32-weight products ([`Qwen35::set_gemm_precision`]); call before the first request.
+    pub fn set_gemm_precision(&mut self, precision: gpu_core::provider::library::GemmPrecision) {
+        self.model.set_gemm_precision(precision);
+    }
+
     /// Build from an in-memory weight map. `max_seq_len` is the hard cap on
     /// `prompt + max_new` for any ONE sequence (this engine's `block_size`,
     /// see module doc); `max_concurrent` is how many sequences may be

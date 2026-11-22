@@ -324,10 +324,14 @@ pub trait ChatTrainer {
     }
 
     /// The family's serving engine over the base at `base` with each linear
-    /// at the tier `tiers` names (an `adapter` folded in when given), sized for
-    /// one sequence of `max_seq_len` tokens: what [`served_loss`] scores
-    /// through. `None` when the family has no paged serving engine.
-    fn serving_engine(_base: &Path, _tiers: &TierPolicy, _adapter: Option<&Path>, _max_seq_len: u32) -> Option<std::io::Result<Box<dyn crate::serve::PagedDecoder>>> {
+    /// at the tier `tiers` names (an `adapter` folded in when given), its
+    /// fp32-weight products at `gemm` (the arithmetic the run trained at,
+    /// [`FitOpts::gemm_precision`], so a served measurement differs from the
+    /// trainer's by the tier and the kernels, not by a product precision the
+    /// run never declared), sized for one sequence of `max_seq_len` tokens:
+    /// what [`served_loss`] scores through. `None` when the family has no
+    /// paged serving engine.
+    fn serving_engine(_base: &Path, _tiers: &TierPolicy, _gemm: gpu_core::provider::library::GemmPrecision, _adapter: Option<&Path>, _max_seq_len: u32) -> Option<std::io::Result<Box<dyn crate::serve::PagedDecoder>>> {
         None
     }
 
@@ -415,7 +419,7 @@ pub fn export_brain_checkpoint(family: &str, trained: &Path, tokenizer_dir: &Pat
 }
 
 /// The held-out loss of the base at `base` with each linear at `tiers` (and
-/// `adapter` applied), scored through the family's serving engine
+/// `adapter` applied, the products at `opts.gemm_precision`), scored through the family's serving engine
 /// ([`ChatTrainer::serving_engine`]) over the validation split of the prepared
 /// dataset at `dir`: what serving the policy computes, kernels and activation
 /// quantization included. `None` when the family has no serving engine.
@@ -425,7 +429,7 @@ pub fn served_loss<T: ChatTrainer>(base: &Path, tiers: &TierPolicy, adapter: Opt
         Err(e) => return Some(Err(e)),
     };
     let longest = rows.iter().map(|(x, _)| x.len()).max().unwrap_or(1) as u32;
-    let mut engine = match T::serving_engine(base, tiers, adapter, longest)? {
+    let mut engine = match T::serving_engine(base, tiers, opts.gemm_precision, adapter, longest)? {
         Ok(engine) => engine,
         Err(e) => return Some(Err(e)),
     };
