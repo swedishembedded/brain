@@ -123,8 +123,7 @@ in `hf_quant_config.json`: NVFP4 with a per-token scale and the "four over six"
 block-scale rule on layers 0-19, MXFP8 on 20-23). In the library,
 `Inkling2::set_linear_activations(LinearActivations::Declared)` runs those
 numerics (the served model does not take `--linear-activations` yet); it is
-lower precision, so it is never the default. On the released checkpoint it moves the next-token
-distribution by a mean KL of about 0.1 nats from the reference numerics, with
-about 90% top-1 agreement (CPU, three chat prompts; the estimate moves by a few
-hundredths of a nat with the products' summation order, since the rounding
-is not smooth).
+lower precision, so it is never the default. How far it moves the next-token
+distribution from the reference numerics (KL and top-1 agreement on the released
+checkpoint) is measured by the `activation_tier` test of `crates/inkling2`;
+measure it on your own prompts before relying on it.

@@ -715,7 +715,7 @@ fn e2m1_magnitude(a: f32) -> f32 {
 /// a W4A4 product. The reference of `act_qdq_nvfp4_mxfp8.wgsl` (scheme 0), bit for bit; the arithmetic is the vendor
 /// runtime's quantizer:
 /// - per row, `amax = max |x|`, `enc = 1536 / amax`, `dec = 1 / enc`, `outer = amax * (1/1536)` (1536 = 6 * 256: the
-///   six-based block scale tops out at 256 so its 1.5x four-based twin still fits E4M3's 448); a row whose amax is
+///   six-based block scale tops out at 256 so its four-based twin (6/4 of it) still fits E4M3's 448); a row whose amax is
 ///   below 2^-100 is all zero;
 /// - per 16-block with `bmax = max |x|`: `s6 = e4m3(min(bmax * (enc * (1/6)), 448))`, `s4 = e4m3(min(bmax * (enc *
 ///   0.25), 448))`; each candidate reconstructs `(e2m1(x * (1 / (s * dec))) * s) * outer` (zero for a zero scale), its

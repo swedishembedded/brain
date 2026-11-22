@@ -22,7 +22,7 @@
 // scheme 0, NVFP4 with per-token amax and the four-over-six MAE block-scale rule (16-element blocks, E4M3 block scales):
 //   amax = max |x| over the row; a row with amax < 2^-100 (all zero in practice) is all zero.
 //   enc = 1536 / amax; dec = 1 / enc; outer = amax * (1/1536)      (1536 = 6 * 256: the E4M3 ceiling of a 6-based
-//                                                                   scale is 256 so its 1.5x four-based twin fits 448)
+//                                                                   scale is 256 so its four-based twin (6/4 of it) fits 448)
 //   per block, bmax = max |x|:  s6 = e4m3(min(bmax * (enc * (1/6)), 448)), s4 = e4m3(min(bmax * (enc * 0.25), 448))
 //   candidate c: v = e2m1(x * (1 / (s_c * dec))) (nearest, ties to even, saturating at 6), r = (v * s_c) * outer
 //   (a zero s_c reconstructs zero); err_c = sum |r - x| as a pairwise tree over the 16 lanes;
