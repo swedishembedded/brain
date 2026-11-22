@@ -557,6 +557,12 @@ pub struct PolicyGradientStats {
     pub steps_skipped_guard: usize,
     /// The numerics gate's measurements and verdict, for a run that was one ([`PolicyGradientConfig::numerics`]).
     pub numerics: Option<NumericsReport>,
+    /// The serve-vs-train gap of every run, gate or not: each policy sequence's recorded behaviour log-probabilities
+    /// against the trainer's under the start-of-run weights, over its tokens that have a recorded value, each sequence
+    /// once (the first time a step draws it and the start-of-run value is known: from the start-of-run scoring, or from
+    /// the step's own forward while no update has moved the weights). `None` until a sequence was measured. The
+    /// records carry no routing, so this is the gap without routing replay.
+    pub serve_train_gap: Option<NumericsReport>,
     /// Truncated rollouts of the dataset (`"truncated": true` on the record): never drawn, scored or trained on when
     /// the run masks them, trained like the others when it keeps them ([`PolicyGradientConfig::truncated`]).
     pub sequences_truncated: usize,
@@ -699,6 +705,8 @@ struct Laid {
     has_ref: bool,
     /// The teacher advantages of the rows that have them, for the step's statistics.
     teacher: Vec<TokenAdvantages>,
+    /// Per batch row, the example's log-probabilities under the start-of-run policy when the run scored them.
+    start_lp: Vec<Option<Vec<f32>>>,
 }
 
 /// The step being accumulated.
@@ -741,6 +749,9 @@ pub struct ExternalPolicyGradient {
     consecutive_nonfinite: u32,
     consecutive_guard: u32,
     gate: NumericsAccumulator,
+    /// The serve-vs-train gap every run reports ([`PolicyGradientStats::serve_train_gap`]), and the examples measured.
+    serve_gap: NumericsAccumulator,
+    serve_gap_seen: HashSet<usize>,
     verdict: Option<StepVerdict>,
 }
 
@@ -827,7 +838,7 @@ impl ExternalPolicyGradient {
         let rows = Rows { starts, ends, advantage, eligible, behavior, teacher };
         let cache = ScoreCache::create(dir, rows.starts.len())?;
         let max_token = tokens.iter().copied().chain(rows.teacher.iter().flat_map(|t| (0..rows.starts.len()).filter_map(|e| t.example(e)).flat_map(|(ids, _)| ids.iter().copied()))).max().unwrap_or(0);
-        Ok(ExternalPolicyGradient { cfg, train, batch_cfg, rows, mask, tag_examples, order: None, cache, max_token, anchors: None, weights_moved: false, work: None, scoring_seconds: 0.0, accumulating: StepAccumulator::default(), stats, consecutive_nonfinite: 0, consecutive_guard: 0, gate: NumericsAccumulator::default(), verdict: None })
+        Ok(ExternalPolicyGradient { cfg, train, batch_cfg, rows, mask, tag_examples, order: None, cache, max_token, anchors: None, weights_moved: false, work: None, scoring_seconds: 0.0, accumulating: StepAccumulator::default(), stats, consecutive_nonfinite: 0, consecutive_guard: 0, gate: NumericsAccumulator::default(), serve_gap: NumericsAccumulator::default(), serve_gap_seen: HashSet::new(), verdict: None })
     }
 
     /// The scalar advantage example `example` of the training split trains with: its rollout's, computed from the
@@ -872,7 +883,7 @@ impl ExternalPolicyGradient {
         let (bs, bl) = (self.batch_cfg.batch_size, self.batch_cfg.block_size);
         let has_ref = self.anchors.as_ref().is_some_and(|a| a.wants_reference);
         let corrected = self.cfg.importance.is_on();
-        let mut laid = Laid { tokens: x, targets, picks: picks.to_vec(), old_lp: vec![0.0; bs * bl], ref_lp: vec![0.0; bs * bl], advantage: vec![f32::NAN; bs * bl], is_weight: corrected.then(|| vec![1.0; bs * bl]), has_ref, teacher: Vec::new() };
+        let mut laid = Laid { tokens: x, targets, picks: picks.to_vec(), old_lp: vec![0.0; bs * bl], ref_lp: vec![0.0; bs * bl], advantage: vec![f32::NAN; bs * bl], is_weight: corrected.then(|| vec![1.0; bs * bl]), has_ref, teacher: Vec::new(), start_lp: vec![None; picks.len()] };
         for (b, pick) in picks.iter().enumerate() {
             let Some(e) = *pick else { continue };
             let scores = self.cache.get(e).unwrap_or_else(|err| panic!("policy-gradient score cache, example {e}: {err}"));
@@ -894,6 +905,7 @@ impl ExternalPolicyGradient {
                 }
             }
             laid.teacher.extend(scores.teacher);
+            laid.start_lp[b] = scores.behavior;
         }
         laid
     }
@@ -1148,6 +1160,40 @@ impl ExternalPolicyGradient {
         }
     }
 
+    /// Feed the per-run serve-vs-train gap with the policy sequences of one micro-batch not measured before: the
+    /// recorded behaviour log-probabilities against the start-of-run trainer's, over the tokens with a recorded value.
+    /// The start-of-run value is the run's scoring of the example when it has one, else the forward `new_lp` while
+    /// the weights are still the start-of-run ones; a sequence with neither waits for a later draw.
+    fn measure_serve_gap(&mut self, laid: &Laid, new_lp: &[f32], band: ClipBand) {
+        let bl = self.batch_cfg.block_size;
+        for (b, pick) in laid.picks.iter().enumerate() {
+            let Some(e) = *pick else { continue };
+            if !self.is_policy_example(e) || self.serve_gap_seen.contains(&e) {
+                continue;
+            }
+            let start = laid.start_lp[b].as_deref();
+            if start.is_none() && self.weights_moved {
+                continue;
+            }
+            let (mut old, mut new) = (Vec::new(), Vec::new());
+            for t in (0..bl).filter(|&t| laid.targets[b * bl + t] != IGNORE) {
+                let recorded = self.rows.behavior[self.rows.starts[e] + 1 + t];
+                if recorded.is_nan() {
+                    continue;
+                }
+                let trainer = start.map_or(new_lp[b * bl + t], |lp| lp[t]);
+                // A non-finite value is the step's own finding (it skips the step); the gap is over measured tokens.
+                if trainer.is_finite() {
+                    old.push(recorded);
+                    new.push(trainer);
+                }
+            }
+            self.serve_gap.add_sequence(&old, &new, band);
+            self.serve_gap_seen.insert(e);
+        }
+        self.stats.serve_train_gap = self.serve_gap.gap_report();
+    }
+
     /// The verdict on the step just closed: a non-finite loss or gradient skips it (the run aborts after
     /// [`MAX_CONSECUTIVE_NONFINITE`] in a row), and so does a KL or gradient norm over the configured bound, logged
     /// with the values and counted (the run aborts after [`MAX_CONSECUTIVE_GUARD_SKIPS`] in a row: a bound that
@@ -1237,7 +1283,9 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
     /// The record order is the loop's ([`Self::begin`]); what a resume needs from the objective is the history it
     /// reports, so a resumed run's statistics are the whole run's and its step numbers continue.
     fn cursor(&self) -> Option<serde_json::Value> {
-        Some(serde_json::json!({ "steps": self.stats.steps, "steps_skipped_nonfinite": self.stats.steps_skipped_nonfinite, "steps_skipped_guard": self.stats.steps_skipped_guard }))
+        let mut seen: Vec<usize> = self.serve_gap_seen.iter().copied().collect();
+        seen.sort_unstable();
+        Some(serde_json::json!({ "steps": self.stats.steps, "steps_skipped_nonfinite": self.stats.steps_skipped_nonfinite, "steps_skipped_guard": self.stats.steps_skipped_guard, "serve_gap": self.serve_gap, "serve_gap_seen": seen }))
     }
 
     fn restore_cursor(&mut self, cursor: &serde_json::Value) -> Result<(), std::io::Error> {
@@ -1247,6 +1295,10 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
             steps: Vec<PolicyGradientStep>,
             steps_skipped_nonfinite: usize,
             steps_skipped_guard: usize,
+            #[serde(default)]
+            serve_gap: NumericsAccumulator,
+            #[serde(default)]
+            serve_gap_seen: Vec<usize>,
         }
         let history: History = serde_json::from_value(cursor.clone()).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("the policy-gradient history of the saved state: {e}")))?;
         if history.steps.iter().enumerate().any(|(i, s)| s.step != i + 1) {
@@ -1255,6 +1307,12 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
         self.stats.steps = history.steps;
         self.stats.steps_skipped_nonfinite = history.steps_skipped_nonfinite;
         self.stats.steps_skipped_guard = history.steps_skipped_guard;
+        if let Some(&e) = history.serve_gap_seen.iter().find(|&&e| e >= self.rows.advantage.len()) {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("the serve/train gap of the saved state measured example {e}, which this dataset does not hold")));
+        }
+        self.serve_gap = history.serve_gap;
+        self.serve_gap_seen = history.serve_gap_seen.into_iter().collect();
+        self.stats.serve_train_gap = self.serve_gap.gap_report();
         Ok(())
     }
 
@@ -1300,6 +1358,7 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
             if self.cfg.numerics.is_some() {
                 self.measure_numerics(l, &new_lp, spec.band);
             }
+            self.measure_serve_gap(l, &new_lp, spec.band);
             finite &= terms.finite;
             loss += terms.normalised_loss(denominator);
             for e in l.picks.iter().flatten() {

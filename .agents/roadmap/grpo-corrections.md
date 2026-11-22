@@ -83,6 +83,19 @@ its definition, the on-policy first step and the supervised parity of a record w
       knowledge #446. Qwen3.8-27B-FP8 (2026-11-18, GH200, bf16 trainer base): mean |gap| 0.019 at the default int8 K/V and
       0.018 at f32 (the K/V tier is not the gap there), mismatch KL 0.001, 1% outside the band, sequence ESS 0.4-0.6;
       the served trace differs from the decode-time log-probabilities by as much (#446), which is open as a kernel task.
+- [x] The serve-vs-train gap of every run, not only the gate (2026-11-22): an external policy-gradient run reports
+      `PolicyGradientStats::serve_train_gap` (the numerics statistics of each policy sequence's recorded behaviour
+      log-probabilities against the start-of-run trainer's, each sequence once: from the start-of-run scoring when the
+      run has one, else from the step's forward while no update has moved the weights; in `report.json` and printed by
+      `brain finetune`); GRPO reports `GrpoStats::serve_gap` (sampler against trainer when a group is packed, rows drawn
+      from the whole tempered distribution) and `serve_gap_replayed` (the same with the routing the rollout recorded
+      replayed in every MoE call, `model::routing`), with `grpo_serve_gap_*` metrics; both survive a resume.
+      `GrpoOptions::routing_replay` trains and scores with the recorded routing. Gated on the CPU:
+      `rl/tests/it/policy_gradient_stability.rs::every_policy_gradient_run_reports_its_serve_train_gap`,
+      `rl/tests/grpo_fixes.rs::{every_run_reports_the_serve_train_gap_of_its_rollouts,
+      a_replaying_trainer_gets_each_rows_recorded_routing_around_its_forwards,
+      routing_replay_on_a_model_that_cannot_replay_is_refused_by_name}`, the resumed-run counters in
+      `objective_cursor.rs`. No model trainer replays routing yet (the MoE gate is in `model/tests/it/routing_replay_rollout.rs`).
 - [ ] A real-weight check on Qwen3.8-27B-FP8 (the Qwen3-4B part of it ran, #446), which has not run: as a bf16 base with a rank-16 adapter, the
       records of a few rollout groups with and without images and with the sampler's log-probabilities. It should
       (1) confirm that the first step's ratios are 1 within bf16 noise when no log-probabilities were recorded and that

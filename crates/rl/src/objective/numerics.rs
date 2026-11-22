@@ -66,7 +66,7 @@ impl NumericsBounds {
 }
 
 /// What the gate measured, and which bounds it broke.
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NumericsReport {
     pub sequences: usize,
     pub tokens: usize,
@@ -106,7 +106,7 @@ impl NumericsReport {
 }
 
 /// The token with the largest `|new - old|` of a run.
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WorstGap {
     pub sequence: usize,
     pub offset: usize,
@@ -114,8 +114,9 @@ pub struct WorstGap {
     pub trainer: f32,
 }
 
-/// The sums a [`NumericsReport`] is made of.
-#[derive(Clone, Debug, Default)]
+/// The sums a [`NumericsReport`] is made of. Serializable, so a resumed run continues the sums of the run it resumes.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NumericsAccumulator {
     tokens: usize,
     abs_gap_sum: f64,
@@ -162,6 +163,17 @@ impl NumericsAccumulator {
             self.outside += usize::from(ratio < 1.0 - f64::from(band.low) || ratio > 1.0 + f64::from(band.high));
         }
         self.sequence_log_weights.push(log_weight);
+    }
+
+    /// Tokens measured so far.
+    pub fn tokens(&self) -> usize {
+        self.tokens
+    }
+
+    /// The gap statistics measured so far with no bound enforced, `None` before the first token: what a run that is
+    /// not a gate reports ([`NumericsReport`]'s gradient fields stay empty unless norms were added).
+    pub fn gap_report(&self) -> Option<NumericsReport> {
+        (self.tokens > 0).then(|| self.report(&NumericsBounds::default()))
     }
 
     /// Add the gradient norm of one batch (`None`: not finite).

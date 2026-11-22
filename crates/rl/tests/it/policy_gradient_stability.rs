@@ -294,6 +294,40 @@ fn the_numerics_gate_measures_the_serve_train_gap_takes_no_step_and_names_the_bo
     assert!(!off.passed() && off.violations.iter().any(|v| v.contains("mean |log-prob gap|")) && off.violations.iter().any(|v| v.contains("mismatch KL")), "{:?}", off.violations);
 }
 
+/// Every run, gate or not, reports the serve-vs-train gap: recorded values a fixed shift below the trainer's give that
+/// gap over each policy sequence once, measured under the start-of-run weights. Without a start-of-run scoring only
+/// the sequences drawn before the first update can be measured; an importance-corrected run scores every example under
+/// the start policy, so it measures the sequences drawn after the weights moved too.
+#[test]
+fn every_policy_gradient_run_reports_its_serve_train_gap() {
+    let run = |cfg: PolicyGradientConfig| {
+        let mut m = lora_model(37);
+        let other = [2u32, 3, 4, 5, 6, 7];
+        let other_now = answer_logprobs(&m, &Row::new(&other, 3, None));
+        let rows = [shifted(&m, 1.0, 0.3), Row { behavior: Some(other_now.iter().map(|lp| (lp - 0.3).min(0.0)).collect()), ..Row::new(&other, 3, Some(-1.0)) }];
+        let (mut obj, _dir) = started(&rows, cfg, &mut m);
+        let before = m.read_weight(&m.param_names()[0]);
+        for step in 1..=4u32 {
+            one_step(&mut obj, &m);
+            m.adamw_step(step, 5e-2, 0.0, Default::default(), Some(1.0), 1.0);
+            Objective::<Qwen35>::updates_applied(&mut obj, 1);
+        }
+        assert_ne!(m.read_weight(&m.param_names()[0]), before, "the run trained");
+        obj.stats().serve_train_gap.clone().expect("every run reports its serve/train gap")
+    };
+    let plain = run(PolicyGradientConfig { behaviour: BehaviourSource::Recorded, kl_beta: 0.0, log_kl: false, ..Default::default() });
+    assert_eq!(plain.sequences, 1, "only the sequence drawn before the first update was under the start-of-run weights");
+    assert!((plain.gap_mean - 0.3).abs() < 1e-3 && (plain.gap_mean_abs - 0.3).abs() < 1e-3, "{plain:?}");
+    assert!(plain.violations.is_empty(), "nothing is enforced outside the gate: {:?}", plain.violations);
+
+    let corrected = run(PolicyGradientConfig { behaviour: BehaviourSource::Recorded, importance: ImportanceCorrection::Truncate { cap: 2.0 }, kl_beta: 0.0, log_kl: false, ..Default::default() });
+    // The dataset holds the two rows and a group partner of each (the same tokens and record, the opposite reward).
+    assert_eq!(corrected.sequences, 4, "the start-of-run scoring measures every sequence once");
+    assert!((corrected.gap_mean - 0.3).abs() < 1e-3, "{corrected:?}");
+    let kl = 0.3f32.exp() - 1.0 - 0.3;
+    assert!((corrected.mismatch_kl - kl).abs() < 1e-3, "{corrected:?}");
+}
+
 #[test]
 fn the_numerics_gate_refuses_what_would_make_it_meaningless() {
     use rl::objective::numerics::NumericsBounds;

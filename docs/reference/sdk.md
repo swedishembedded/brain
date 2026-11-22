@@ -793,6 +793,11 @@ brain-sampled GRPO run and an external-rollout run cannot drift apart.
   broken, naming it on stderr; a non-finite gradient or no measured token fails whatever the bounds. Set the bounds before
   the run, from the clip band and the policy's tolerance (a mean gap of 0.02 or a sequence ESS under 0.5 means the band is
   spent on the engine before the first update).
+- **Serve/train gap of every run.** A run that is not a gate reports the same gap statistics, without bounds, in
+  `stats.serve_train_gap` (`report.json`, and one line on the CLI): each policy record's recorded behaviour
+  log-probabilities against the trainer's under the start-of-run weights, each record once. Without a start-of-run
+  scoring (no importance correction and every token recorded) only the records drawn before the first update are
+  measured.
 - **Reference policy.** `Base` (the adapter disabled) or `StartOfRun` (the adapter being continued); the same for a
   fresh adapter. Measured by a forward pass over each record the first time a step draws it (a second pass when a
   continued adapter is compared with the base).

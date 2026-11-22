@@ -719,6 +719,32 @@ The first trainable target needs no streaming: the base is about 19.5 GB.
   - an inkling2 rollout engine over the serving engine;
   - the serve-vs-train log-prob gap measured before any reward is read.
 
+  Done (2026-11-22): routing replay as generic infrastructure. Kernel `router_gate_replay` +
+  `model::moe::{RouterOverride, router_fwd_replay, ROUTER_REPLAY_KERNEL}`: dispatched after `router_fwd_kind` on the
+  same gate, it forces a recorded top-k selection per row with the router's own weights over the current logits
+  (softmax or sigmoid, renormalised `+1e-9` floor / `+1e-20` added, times the routed scale), leaves rows whose ids are
+  `model::routing::UNRECORDED` as routed, and sums the selected scores in the router's greedy order, so replaying the
+  router's own selection is bit-identical to it; `router_bwd` / `router_bwd_sigmoid` read the selection as the gate's
+  nonzero pattern and differentiate it unchanged (spec `crates/model/tests/it/router_replay.rs`: bit identity,
+  formula against f64, unrecorded rows, device-forward finite differences and an f64 reference of the backward).
+  `model::routing`: `RouterCallShape`, `RoutingRecord { policy_version, positions, recorded, calls: [RoutedCall {
+  top_k, experts }] }` keyed by MoE call in forward order (one call per visit of a looped layer), `validate` naming
+  the field (serde `deny_unknown_fields`), `RoutingLog` (engine side), `RoutingReplay` (a batch's records laid out per
+  call). Recording: `PagedDecoder::routing_calls` (default `None`), `BlockTable::routing_log_mut` written by the
+  engine for every position it computes (prefix-cache hits stay unrecorded, the log survives preemption),
+  `Scheduler::record_routing`, `SchedulerRollout::record_routing` -> `Completion::routing`. Trainer:
+  `TokenObjectives::{routing_calls, set_routing_replay}` (refusal by default, `Capability::RoutingReplay`). Gate
+  `crates/model/tests/it/routing_replay_rollout.rs`: a tiny MoE served through the scheduler with its router summed in
+  the other order flips a near-tie; without replay the trainer's log-probability is off by > 0.05, with replay it
+  equals the served one (< 1e-3, the rounding of a cancelling router), softmax and sigmoid. GRPO:
+  `GrpoOptions::routing_replay` trains and scores rows with their recorded routing (refused by name on a model that
+  cannot replay); every GRPO run reports `GrpoStats::{serve_gap, serve_gap_replayed}` and every external
+  policy-gradient run `PolicyGradientStats::serve_train_gap` (grpo-corrections.md). CPU backend verified; CUDA not
+  exercised. Left: no engine or trainer implements the seam yet: the inkling2 engine records into the block table's
+  log per (visit, layer) call and its `ChatTrainer` passes `RoutingReplay::upload_call(g, call, top_k)` to
+  `router_fwd_replay` after each router; external policy-gradient records carry no routing (no record format for it);
+  `PipelineModel` does not forward the replay to its stages.
+
 ### Phase 5: vision
 
 - **I5.1** `inkling2` over `model::vit`:

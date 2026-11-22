@@ -41,6 +41,8 @@ pub enum BehaviourRefusal {
     InvalidCount { field: &'static str, got: usize, least: usize },
     /// A verifier returned a reward that is not a number (`NaN` or infinite): every advantage of its group would be.
     NonFiniteReward { value: f32 },
+    /// A completion's recorded MoE routing does not fit the trained model (`why` names the field).
+    RoutingRecord { why: String },
     /// A token id (of a task's prompt or a sampled completion) the model has no embedding row for.
     TokenOutOfRange { id: u32, vocab: u32 },
     /// A task's prompt of `len` tokens does not leave room for a completion in rows of `seq_len` (or is empty).
@@ -64,6 +66,7 @@ impl fmt::Display for BehaviourRefusal {
             BehaviourRefusal::TokenOutOfRange { id, vocab } => write!(f, "token id {id} is outside the model's vocabulary of {vocab}"),
             BehaviourRefusal::PromptLength { len, seq_len } => write!(f, "a prompt of {len} tokens leaves no room for a completion in rows of {seq_len} (it must be between 1 and {} tokens)", seq_len.saturating_sub(1)),
             BehaviourRefusal::SamplingMismatch { declared, expected } => write!(f, "the rollout engine samples from {declared}, but the objective's ratio assumes {expected}"),
+            BehaviourRefusal::RoutingRecord { why } => write!(f, "the rollout's recorded MoE routing does not fit the trained model: {why}"),
         }
     }
 }
@@ -135,6 +138,19 @@ pub struct GrpoStats {
     pub clipped_high: usize,
     #[serde(default)]
     pub clipped_low: usize,
+    /// The serve-vs-train gap of the sampled rows: the sampler's log-probability of every trained token against the
+    /// trainer's when the group was packed (the same weights), over rows whose sampler drew from the whole tempered
+    /// distribution. `serve_gap` is the trainer routing every MoE call itself; `serve_gap_replayed` replays the routing
+    /// the rollout recorded ([`model::rollout::Completion::routing`]), measured where a completion carries one and the
+    /// model can replay it. `None` until a row was measured. A resumed run continues the sums of the run it resumes.
+    #[serde(default)]
+    pub serve_gap: Option<super::numerics::NumericsReport>,
+    #[serde(default)]
+    pub serve_gap_replayed: Option<super::numerics::NumericsReport>,
+    /// Rows trained with the routing their rollout recorded forced in every MoE call
+    /// ([`super::grpo::GrpoOptions::routing_replay`]); the other trained rows routed themselves.
+    #[serde(default)]
+    pub rows_routing_replayed: usize,
 }
 
 impl GrpoStats {
@@ -207,6 +223,12 @@ impl GrpoStats {
             ("grpo_completions_truncated", self.completions_truncated as f32),
             ("grpo_sampler_gap", self.max_sampler_gap),
         ];
+        if let Some(g) = &self.serve_gap {
+            m.extend([("grpo_serve_gap_mean_abs", g.gap_mean_abs), ("grpo_serve_gap_max_abs", g.gap_max_abs), ("grpo_serve_mismatch_kl", g.mismatch_kl)]);
+        }
+        if let Some(g) = &self.serve_gap_replayed {
+            m.extend([("grpo_serve_gap_replayed_mean_abs", g.gap_mean_abs), ("grpo_serve_gap_replayed_max_abs", g.gap_max_abs), ("grpo_serve_replayed_mismatch_kl", g.mismatch_kl)]);
+        }
         if let Some(kl) = self.mean_kl() {
             m.push(("grpo_kl_ref", kl));
         }

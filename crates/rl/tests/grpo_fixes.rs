@@ -605,3 +605,186 @@ fn a_non_finite_reward_or_an_out_of_vocabulary_token_aborts_the_step() {
     let refusal = abort_reason(judge, vec![completion(&[4, 23]), completion(&[5, 5])], &mut m, 23);
     assert_eq!(refusal, BehaviourRefusal::TokenOutOfRange { id: 23, vocab: 23 });
 }
+
+/// Every run reports the serve-vs-train gap of what it sampled: the sampler's log-probability of each trained token
+/// against the trainer's under the same weights, here scripted at `-1` so the gap is the trainer's own value plus one.
+#[test]
+fn every_run_reports_the_serve_train_gap_of_its_rollouts() {
+    let s = seed();
+    let (mut m, _, _) = lora_model(s);
+    let (judge, _) = Judge::new(first_wins);
+    let group = vec![completion(&[4, 5, 6]), completion(&[6, 6, 5, 4])];
+    let mut obj = scripted(Env { variable: always_variable }, judge, config(2, 1.0, GrpoOptions { log_kl: false, ..GrpoOptions::default() }), group.clone());
+    obj.prepare(&mut m).unwrap();
+    // The weights before the step are the ones the rows were scored under.
+    let mut gaps = Vec::new();
+    for c in &group {
+        let row: Vec<u32> = grpo_common::PROMPT.iter().chain(c.tokens.iter()).copied().collect();
+        let targets: Vec<u32> = (0..row.len()).map(|i| if i + 1 >= grpo_common::PROMPT.len() && i + 1 < row.len() { row[i + 1] } else { IGNORE }).collect();
+        let lp = model::logprobs::token_logprobs(&m, &row, &targets).expect("logits");
+        gaps.extend((0..c.tokens.len()).map(|k| f64::from(lp[grpo_common::PROMPT.len() - 1 + k]) + 1.0));
+    }
+    obj.micro_steps(&m, &mut Rng::new(s), 2);
+    let gap = obj.stats().serve_gap.clone().expect("a run that sampled reports its serve/train gap");
+    assert_eq!(gap.tokens, gaps.len());
+    let mean = gaps.iter().sum::<f64>() / gaps.len() as f64;
+    let max = gaps.iter().fold(0.0f64, |m, g| m.max(g.abs()));
+    assert!((f64::from(gap.gap_mean) - mean).abs() < 1e-4, "bias {} vs {mean}", gap.gap_mean);
+    assert!((f64::from(gap.gap_max_abs) - max).abs() < 1e-4, "max {} vs {max}", gap.gap_max_abs);
+    assert!(gap.mismatch_kl > 0.0);
+    assert_eq!(obj.stats().serve_gap_replayed, None, "nothing recorded routing, so nothing was replayed");
+    let logged: std::collections::HashMap<_, _> = Objective::<Qwen>::metrics(&obj).into_iter().collect();
+    assert_eq!(logged.get("grpo_serve_gap_mean_abs"), Some(&gap.gap_mean_abs));
+}
+
+/// A run asked to replay routing on a model whose trainer cannot is refused by name when it is prepared.
+#[test]
+fn routing_replay_on_a_model_that_cannot_replay_is_refused_by_name() {
+    let s = seed();
+    let (mut m, _, _) = lora_model(s);
+    let (judge, _) = Judge::new(first_wins);
+    let mut obj = scripted(Env { variable: always_variable }, judge, config(2, 1.0, GrpoOptions { routing_replay: true, ..GrpoOptions::default() }), vec![completion(&[4, 5])]);
+    let refusal = obj.prepare(&mut m).unwrap_err();
+    assert_eq!(refusal.capability, model::training::Capability::RoutingReplay);
+    assert!(refusal.to_string().contains("routing replay"), "{refusal}");
+}
+
+/// A trainer that declares its MoE calls (here none: the plumbing is what is under test) is handed each row's
+/// recorded routing around every forward that scores or trains the row, laid out over the row, and released after.
+mod replaying {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use model::routing::{RouterCallShape, RoutingReplay};
+    use model::training::TokenObjectives;
+    use model::{Adam, Batch, Model};
+    use qwen3::{Qwen, QwenConfig};
+
+    /// [`Qwen`] whose trainer declares zero MoE calls and logs every routing replay it is handed.
+    pub struct Replaying {
+        pub inner: Qwen,
+        pub log: RefCell<Vec<Option<Arc<RoutingReplay>>>>,
+    }
+
+    impl TokenObjectives for Replaying {
+        fn enable_weighted_loss(&mut self) {
+            model::training::require_token_objectives(&mut self.inner).unwrap().enable_weighted_loss()
+        }
+        fn batch_token_logprobs(&self) -> Vec<f32> {
+            model::training::objectives(&self.inner).batch_token_logprobs()
+        }
+        fn set_loss_weights(&self, weights: &[f32]) {
+            model::training::objectives(&self.inner).set_loss_weights(weights)
+        }
+        fn set_loss_denominator(&self, tokens: f32) {
+            model::training::objectives(&self.inner).set_loss_denominator(tokens)
+        }
+        fn set_logit_scale(&mut self, scale: f32) {
+            model::training::require_token_objectives(&mut self.inner).unwrap().set_logit_scale(scale)
+        }
+        fn routing_calls(&self) -> Option<Vec<RouterCallShape>> {
+            Some(Vec::new())
+        }
+        fn set_routing_replay(&self, replay: Option<Arc<RoutingReplay>>) -> Result<(), String> {
+            self.log.borrow_mut().push(replay);
+            Ok(())
+        }
+    }
+
+    impl Model for Replaying {
+        type Config = QwenConfig;
+        fn new(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
+            Replaying { inner: Qwen::new(cfg, b, t, init), log: RefCell::new(Vec::new()) }
+        }
+        fn init_weights(cfg: &QwenConfig, seed: u64) -> HashMap<String, Vec<f32>> {
+            qwen3::init_weights(cfg, seed)
+        }
+        fn config(&self) -> &QwenConfig {
+            Model::config(&self.inner)
+        }
+        fn set_batch(&self, batch: Batch) {
+            Model::set_batch(&self.inner, batch)
+        }
+        fn forward(&self) -> f32 {
+            Model::forward(&self.inner)
+        }
+        fn backward(&self) {
+            Model::backward(&self.inner)
+        }
+        fn zero_grads(&self) {
+            Model::zero_grads(&self.inner)
+        }
+        fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: Adam, clip: Option<f32>, extra_scale: f32) {
+            Model::adamw_step(&self.inner, t, lr, wd, adam, clip, extra_scale)
+        }
+        fn poll_wait(&self) {
+            Model::poll_wait(&self.inner)
+        }
+        fn param_names(&self) -> Vec<String> {
+            Model::param_names(&self.inner)
+        }
+        fn read_weight(&self, name: &str) -> Vec<f32> {
+            Model::read_weight(&self.inner, name)
+        }
+        fn write_weight(&self, name: &str, data: &[f32]) {
+            Model::write_weight(&self.inner, name, data)
+        }
+        fn read_grad(&self, name: &str) -> Vec<f32> {
+            Model::read_grad(&self.inner, name)
+        }
+        fn logits_all(&self, tokens: &[u32]) -> Option<Vec<f32>> {
+            Model::logits_all(&self.inner, tokens)
+        }
+        fn save(&self, path: &str) {
+            Model::save(&self.inner, path)
+        }
+        fn config_json(&self) -> serde_json::Value {
+            Model::config_json(&self.inner)
+        }
+        fn optimized_params(&self) -> Option<Vec<String>> {
+            Model::optimized_params(&self.inner)
+        }
+        fn token_objectives(&self) -> Option<&dyn TokenObjectives> {
+            Some(self)
+        }
+        fn token_objectives_mut(&mut self) -> Option<&mut dyn TokenObjectives> {
+            Some(self)
+        }
+    }
+}
+
+#[test]
+fn a_replaying_trainer_gets_each_rows_recorded_routing_around_its_forwards() {
+    use model::routing::{RoutingLog, RoutingRecord};
+    use std::sync::Arc;
+    let s = seed();
+    let (inner, _, _) = lora_model(s);
+    let mut m = replaying::Replaying { inner, log: std::cell::RefCell::new(Vec::new()) };
+    let recorded = |tokens: &[u32]| -> Completion {
+        let positions = (grpo_common::PROMPT.len() + tokens.len()) as u32;
+        Completion { routing: Some(RoutingLog::new(&[]).into_record(positions, 0)), ..completion(tokens) }
+    };
+    let group = vec![recorded(&[4, 5, 6]), recorded(&[6, 6, 5, 4])];
+    let (judge, _) = Judge::new(first_wins);
+    let options = GrpoOptions { routing_replay: true, log_kl: false, ..GrpoOptions::default() };
+    let mut obj = Grpo::try_new(Env { variable: always_variable }, judge, config(2, 1.0, options)).expect("a valid GRPO configuration").with_rollout(Box::new(Scripted { group: group.clone() }), 1);
+    obj.prepare(&mut m).unwrap();
+    obj.micro_steps(&m, &mut Rng::new(s), 2);
+    let st = obj.stats().clone();
+    assert_eq!(st.rows_routing_replayed, st.rows_trained, "every trained row carried a record");
+    let (own, replayed) = (st.serve_gap.expect("measured"), st.serve_gap_replayed.expect("measured with replay"));
+    assert_eq!(own.gap_mean, replayed.gap_mean, "a trainer with no MoE call scores the same with and without replay");
+
+    let log = m.log.borrow();
+    // per packed row: set + release while scoring with replay; per trained row: set + release around the step
+    assert_eq!(log.len(), 2 * group.len() + 2 * st.rows_trained, "{} replay calls", log.len());
+    for pair in log.as_chunks::<2>().0 {
+        let set = pair[0].as_ref().expect("a replay is set before the forward");
+        assert!(pair[1].is_none(), "and released after it");
+        assert_eq!((set.batch, set.seq), (1, grpo_common::T as u32), "laid out over the one trained row");
+        let (record, start): &(Arc<RoutingRecord>, u32) = set.rows[0].as_ref().expect("the row's record");
+        assert_eq!(*start, 0);
+        assert!(group.iter().any(|c| c.routing.as_ref() == Some(&**record)), "the record is a completion's own");
+    }
+}

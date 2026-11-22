@@ -557,6 +557,9 @@ pub fn run_finetune(argv: &[String]) -> ! {
                 }
                 if let Some(pg) = &o.policy_gradient {
                     println!("policy gradient: {} steps ({} skipped by the guard), mean loss {:?}, mean clip fraction {:?}, mean kl {:?}", pg.stats.steps.len(), pg.stats.steps_skipped_guard, pg.stats.mean_loss(), pg.stats.mean_clip_fraction(), pg.stats.mean_kl());
+                    if let Some(g) = &pg.stats.serve_train_gap {
+                        println!("serve/train gap: mean |gap| {:.5}, max |gap| {:.5}, bias {:.5}, mismatch KL {:.6} over {} tokens of {} sequences", g.gap_mean_abs, g.gap_max_abs, g.gap_mean, g.mismatch_kl, g.tokens, g.sequences);
+                    }
                 }
                 if let Some(p) = &o.adapter {
                     println!("adapter: {}", p.display());

@@ -41,13 +41,17 @@
 //! how far it was from the trainer's ([`GrpoStats::max_sampler_gap`]).
 
 use data::rng::Rng;
+use std::sync::Arc;
+
 use model::rollout::{Completion, ModelRollout, Rollout, RolloutParams, StopReason};
-use model::training::{self, Unsupported};
+use model::routing::{RoutingRecord, RoutingReplay};
+use model::training::{self, Capability, Unsupported};
 use model::{Batch, Model, ModelConfig, Objective, StepVerdict, IGNORE};
 
 pub use super::advantage::{group_advantages_with, AdvantageNorm};
 pub use super::grpo_stats::{BehaviourRefusal, CycleLog, GrpoStats, NonFiniteSteps, RowRefusal, MAX_CONSECUTIVE_NONFINITE};
 pub use super::grpo_term::{k3_kl, near_clip_boundary, token_term, token_term_banded, ClipBand, TokenTerm, MAX_LOG_RATIO};
+use super::numerics::NumericsAccumulator;
 use super::pg_batch::{backward_weighted, with_adapters_disabled, PgBatch, PgSpec};
 use crate::env::{Environment, Task, Verifier};
 
@@ -168,11 +172,17 @@ pub struct GrpoOptions {
     /// Compute and log the KL to the adapter-disabled reference even when
     /// `kl_beta` is zero (needs a model with LoRA tensors or `with_reference`).
     pub log_kl: bool,
+    /// Train every row whose completion carries the routing its rollout recorded
+    /// ([`model::rollout::Completion::routing`]) with that routing forced in each MoE call, and score its behaviour
+    /// log-probabilities the same way, so a near-tie the engine and the trainer break differently no longer moves the
+    /// ratio. A model that cannot replay is refused by name when the run is prepared; a row without a record routes
+    /// itself ([`GrpoStats::rows_routing_replayed`] counts the ones that did not).
+    pub routing_replay: bool,
 }
 
 impl Default for GrpoOptions {
     fn default() -> GrpoOptions {
-        GrpoOptions { advantage: AdvantageNorm::default(), loss_agg: LossAgg::default(), clip_eps_high: 0.28, resample_factor: 3, staleness_bound: 1, ratio_basis: RatioBasis::Trainer, log_kl: true }
+        GrpoOptions { advantage: AdvantageNorm::default(), loss_agg: LossAgg::default(), clip_eps_high: 0.28, resample_factor: 3, staleness_bound: 1, ratio_basis: RatioBasis::Trainer, log_kl: true, routing_replay: false }
     }
 }
 
@@ -296,6 +306,10 @@ struct PackedRow {
     /// Optimiser steps taken when this row's behaviour policy was current.
     version: u64,
     supervised: usize,
+    /// The routing the rollout recorded for the row's tokens (position `p` of the row is position `p` of the record),
+    /// kept when the run replays it ([`GrpoOptions::routing_replay`]).
+    #[serde(default)]
+    routing: Option<model::routing::RoutingRecord>,
 }
 
 /// A float vector as the bits of each value: exact, and NaN-safe where JSON numbers are not.
@@ -331,14 +345,24 @@ struct Drawn {
     eos_targets: usize,
     truncated_sampling_rows: usize,
     sampler_gap: f32,
+    /// Per measured row: the sampler's log-probabilities of its trained tokens, the trainer's, and the trainer's
+    /// with the recorded routing replayed (where there was a record the model could replay).
+    gaps: Vec<SequenceGap>,
     /// Set when the group cannot be trained on; its rows are dropped.
     refusal: Option<BehaviourRefusal>,
+}
+
+/// One row's serve-vs-train comparison ([`GrpoStats::serve_gap`]).
+struct SequenceGap {
+    sampler: Vec<f32>,
+    trainer: Vec<f32>,
+    replayed: Option<Vec<f32>>,
 }
 
 impl Drawn {
     /// A group that cannot be trained on, with the reason.
     fn refused(refusal: BehaviourRefusal) -> Drawn {
-        Drawn { rows: Vec::new(), spans: Vec::new(), rewards: Vec::new(), attempts: 0, zero_variance: false, truncated: 0, eos_targets: 0, truncated_sampling_rows: 0, sampler_gap: 0.0, refusal: Some(refusal) }
+        Drawn { rows: Vec::new(), spans: Vec::new(), rewards: Vec::new(), attempts: 0, zero_variance: false, truncated: 0, eos_targets: 0, truncated_sampling_rows: 0, sampler_gap: 0.0, gaps: Vec::new(), refusal: Some(refusal) }
     }
 }
 
@@ -364,6 +388,9 @@ pub struct Grpo<E: Environment, V: Verifier> {
     refusal: Option<BehaviourRefusal>,
     /// The model's vocabulary, known once [`Objective::check_data`] ran: ids past it are refused.
     vocab: Option<u32>,
+    /// The serve-vs-train gap of the rows sampled so far, without and with routing replay ([`GrpoStats::serve_gap`]).
+    serve_gap: NumericsAccumulator,
+    serve_gap_replayed: NumericsAccumulator,
 }
 
 impl<E: Environment, V: Verifier> Grpo<E, V> {
@@ -387,6 +414,8 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
             consecutive_nonfinite: 0,
             refusal: None,
             vocab: None,
+            serve_gap: NumericsAccumulator::default(),
+            serve_gap_replayed: NumericsAccumulator::default(),
         })
     }
 
@@ -528,6 +557,7 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
         let mut rows = Vec::new();
         let mut eos_targets = 0usize;
         let mut sampler_lps: Vec<Vec<f32>> = Vec::new();
+        let mut row_completions: Vec<&Completion> = Vec::new();
         for (c, &a) in kept.iter().zip(&advs).filter(|(_, &a)| a != 0.0) {
             let stop_target = eos.filter(|_| c.stop == StopReason::Eos && c.tokens.len() < fit);
             let mut trained = c.tokens.clone();
@@ -542,25 +572,48 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
             }
             rows.push(self.pack(&task.prompt, c, &trained, &lps, a));
             sampler_lps.push(lps);
+            row_completions.push(c);
         }
-        // The behaviour policy is the training forward's: record how far the sampler was from it.
+        // The behaviour policy is the training forward's: record how far the sampler was from it, with the trainer
+        // routing every MoE call itself and, where the completion recorded its routing, replaying that routing.
         let truncated_sampling = own && self.truncating_sampler();
+        let comparable = !self.cfg.rollout.sample.is_greedy() && if own { !truncated_sampling } else { self.cfg.rollout.sample.draws_from_whole_distribution() };
+        let replay_calls = training::objectives(model).routing_calls();
         let mut sampler_gap = 0.0f32;
-        for (row, sampler) in rows.iter_mut().zip(&sampler_lps) {
+        let mut gaps = Vec::new();
+        for ((row, sampler), c) in rows.iter_mut().zip(&sampler_lps).zip(row_completions) {
             let trainer = trainer_logprobs(model, row);
+            let record = match (&c.routing, &replay_calls) {
+                (Some(record), Some(calls)) => match record.validate(calls, Some(c.policy_version)) {
+                    Ok(()) => Some(record),
+                    Err(e) => return Drawn::refused(BehaviourRefusal::RoutingRecord { why: e.to_string() }),
+                },
+                _ => None,
+            };
+            let replayed = record.map(|r| replayed_logprobs(model, row, r));
             let positions: Vec<usize> = (0..row.targets.len()).filter(|&i| row.targets[i] != IGNORE).collect();
             for (&i, &s) in positions.iter().zip(sampler) {
                 if own && !truncated_sampling && !self.cfg.rollout.sample.is_greedy() {
                     sampler_gap = sampler_gap.max((trainer[i] - s).abs());
                 }
             }
+            if comparable && trainer.iter().chain(replayed.iter().flatten()).all(|v| v.is_finite()) {
+                let pick = |lp: &[f32]| positions.iter().take(sampler.len()).map(|&i| lp[i]).collect::<Vec<f32>>();
+                gaps.push(SequenceGap { sampler: sampler[..positions.len().min(sampler.len())].to_vec(), trainer: pick(&trainer), replayed: replayed.as_deref().map(pick) });
+            }
+            if self.cfg.options.routing_replay {
+                row.routing = record.cloned();
+            }
             if self.cfg.options.ratio_basis == RatioBasis::Trainer {
-                row.old_lp = trainer;
+                row.old_lp = match (self.cfg.options.routing_replay, replayed) {
+                    (true, Some(replayed)) => replayed,
+                    _ => trainer,
+                };
             }
         }
         let refusal = self.attach_references(model, task, &kept, &advs, &mut rows).err();
         let truncated_sampling_rows = if truncated_sampling { rows.len() } else { 0 };
-        Drawn { rows, spans, rewards, attempts, zero_variance, truncated, eos_targets, truncated_sampling_rows, sampler_gap, refusal }
+        Drawn { rows, spans, rewards, attempts, zero_variance, truncated, eos_targets, truncated_sampling_rows, sampler_gap, gaps, refusal }
     }
 
     /// The first token id of `ids` the model has no embedding row for, once the model's vocabulary is known.
@@ -584,6 +637,7 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
             completion: c.tokens.clone(),
             version: self.version,
             supervised: 0,
+            routing: None,
         };
         pack_row(&mut row.tokens, &mut row.targets, &mut row.old_lp, &mut row.advantage, n, prompt, trained, logprobs, adv);
         row.supervised = row.targets.iter().filter(|&&t| t != IGNORE).count();
@@ -675,6 +729,15 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
         self.last_mean_reward = drawn.rewards.iter().sum::<f32>() / drawn.rewards.len().max(1) as f32;
         self.last_kept_frac = if drawn.zero_variance { 0.0 } else { 1.0 };
         self.stats.record_group(drawn.attempts, drawn.zero_variance, drawn.truncated, drawn.eos_targets, drawn.truncated_sampling_rows, drawn.sampler_gap);
+        let band = self.band();
+        for g in &drawn.gaps {
+            self.serve_gap.add_sequence(&g.sampler, &g.trainer, band);
+            if let Some(replayed) = &g.replayed {
+                self.serve_gap_replayed.add_sequence(&g.sampler, replayed, band);
+            }
+        }
+        self.stats.serve_gap = self.serve_gap.gap_report();
+        self.stats.serve_gap_replayed = self.serve_gap_replayed.gap_report();
         self.pending.extend(drawn.rows);
     }
 
@@ -756,11 +819,19 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
     /// the loss and whether everything it computed was finite (a row with a
     /// non-finite log-probability is not differentiated).
     fn train_row<M: Model>(&mut self, model: &M, row: &PackedRow, denominator: Option<f32>) -> (f32, bool) {
+        let replay = row.routing.as_ref().filter(|_| self.cfg.options.routing_replay);
+        if let Some(record) = replay {
+            set_replay(model, Some(row_replay(record, row.tokens.len())));
+            self.stats.rows_routing_replayed += 1;
+        }
         model.set_batch(Batch::Lm { tokens: &row.tokens, targets: &row.targets });
         let _ = model.forward();
         let batch = PgBatch { targets: &row.targets, old_lp: &row.old_lp, ref_lp: row.has_ref.then_some(&row.ref_lp[..]), advantage: &row.advantage, is_weight: None };
         let spec = PgSpec { band: self.band(), kl_beta: self.cfg.kl_beta };
         let terms = backward_weighted(model, &batch, &spec, denominator);
+        if replay.is_some() {
+            set_replay(model, None);
+        }
         let ratio_dev = if row.version == self.version { terms.max_ratio_dev } else { 0.0 };
         self.stats.record_row(ratio_dev, row.has_ref.then_some((terms.kl_sum, row.supervised)));
         self.stats.record_clipping(&terms);
@@ -799,6 +870,27 @@ fn trainer_logprobs<M: Model>(model: &M, row: &PackedRow) -> Vec<f32> {
     training::objectives(model).batch_token_logprobs()
 }
 
+/// The replay of `record` over a one-row batch of `len` positions, the row's position `p` the record's position `p`
+/// (record positions past the row, of a completion cut to fit it, are not read; row positions past the record, the
+/// padding, route themselves).
+fn row_replay(record: &RoutingRecord, len: usize) -> Arc<RoutingReplay> {
+    Arc::new(RoutingReplay { batch: 1, seq: len as u32, rows: vec![Some((Arc::new(record.clone()), 0))] })
+}
+
+/// Force (`Some`) or release (`None`) the model's routing. A model that declares [`training::TokenObjectives::routing_calls`]
+/// takes a replay that validated against them; refusing one then is a broken contract.
+fn set_replay<M: Model>(model: &M, replay: Option<Arc<RoutingReplay>>) {
+    training::objectives(model).set_routing_replay(replay).unwrap_or_else(|why| panic!("Grpo: the model declared its MoE calls but refused their replay: {why}"));
+}
+
+/// [`trainer_logprobs`] with `record`'s routing replayed.
+fn replayed_logprobs<M: Model>(model: &M, row: &PackedRow, record: &RoutingRecord) -> Vec<f32> {
+    set_replay(model, Some(row_replay(record, row.tokens.len())));
+    let lp = trainer_logprobs(model, row);
+    set_replay(model, None);
+    lp
+}
+
 /// The rows' per-position log-probabilities with every LoRA adapter disabled, or `None` for a model without adapters.
 fn adapter_off_logprobs<M: Model>(model: &M, rows: &[PackedRow]) -> Option<Vec<Vec<f32>>> {
     with_adapters_disabled(model, || rows.iter().map(|r| trainer_logprobs(model, r)).collect())
@@ -816,6 +908,9 @@ impl<M: Model, E: Environment, V: Verifier> Objective<M> for Grpo<E, V> {
 
     fn prepare(&mut self, model: &mut M) -> Result<(), Unsupported> {
         let objectives = training::require_token_objectives(model)?;
+        if self.cfg.options.routing_replay && objectives.routing_calls().is_none() {
+            return Err(Unsupported::of::<M>(Capability::RoutingReplay));
+        }
         objectives.enable_weighted_loss();
         objectives.set_logit_scale(self.logit_scale());
         Ok(())
@@ -850,7 +945,7 @@ impl<M: Model, E: Environment, V: Verifier> Objective<M> for Grpo<E, V> {
     /// The rest of the stream is the loop's generator, which the resume state carries. The counters
     /// come along, so a resumed run reports the whole run.
     fn cursor(&self) -> Option<serde_json::Value> {
-        Some(serde_json::json!({ "pending": self.pending, "stats": self.stats }))
+        Some(serde_json::json!({ "pending": self.pending, "stats": self.stats, "serve_gap": self.serve_gap, "serve_gap_replayed": self.serve_gap_replayed }))
     }
 
     fn restore_cursor(&mut self, cursor: &serde_json::Value) -> Result<(), std::io::Error> {
@@ -859,6 +954,10 @@ impl<M: Model, E: Environment, V: Verifier> Objective<M> for Grpo<E, V> {
         struct Queue {
             pending: std::collections::VecDeque<PackedRow>,
             stats: GrpoStats,
+            #[serde(default)]
+            serve_gap: NumericsAccumulator,
+            #[serde(default)]
+            serve_gap_replayed: NumericsAccumulator,
         }
         let queue: Queue = serde_json::from_value(cursor.clone()).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("the GRPO queue of the saved state: {e}")))?;
         let n = self.cfg.seq_len;
@@ -867,6 +966,8 @@ impl<M: Model, E: Environment, V: Verifier> Objective<M> for Grpo<E, V> {
         }
         self.pending = queue.pending;
         self.stats = queue.stats;
+        self.serve_gap = queue.serve_gap;
+        self.serve_gap_replayed = queue.serve_gap_replayed;
         Ok(())
     }
 
