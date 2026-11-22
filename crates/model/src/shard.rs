@@ -1433,6 +1433,7 @@ fn clone_batch<'a>(b: &crate::Batch<'a>) -> crate::Batch<'a> {
         }
         LmWeighted { tokens, targets, weights } => LmWeighted { tokens, targets, weights },
         LmExamples { split, tokens, targets, examples } => LmExamples { split, tokens, targets, examples },
+        LmPacked { tokens, targets, segments } => LmPacked { tokens, targets, segments },
     }
 }
 

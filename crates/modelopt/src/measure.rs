@@ -15,7 +15,7 @@ use crate::{Assignment, Site};
 fn weight(batch: &Batch) -> f64 {
     let supervised = |targets: &[u32]| targets.iter().filter(|&&t| t != IGNORE).count() as f64;
     match batch {
-        Batch::Lm { targets, .. } | Batch::LmWeighted { targets, .. } | Batch::LmExamples { targets, .. } | Batch::Multimodal { targets, .. } => supervised(targets),
+        Batch::Lm { targets, .. } | Batch::LmWeighted { targets, .. } | Batch::LmExamples { targets, .. } | Batch::LmPacked { targets, .. } | Batch::Multimodal { targets, .. } => supervised(targets),
         Batch::Seq2Seq { labels, .. } => supervised(labels),
         Batch::Tensor { .. } => 1.0,
     }

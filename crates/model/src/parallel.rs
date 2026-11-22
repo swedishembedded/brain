@@ -271,6 +271,7 @@ fn clone_batch<'a>(b: &Batch<'a>) -> Batch<'a> {
         }
         Batch::LmWeighted { tokens, targets, weights } => Batch::LmWeighted { tokens, targets, weights },
         Batch::LmExamples { split, tokens, targets, examples } => Batch::LmExamples { split, tokens, targets, examples },
+        Batch::LmPacked { tokens, targets, segments } => Batch::LmPacked { tokens, targets, segments },
     }
 }
 

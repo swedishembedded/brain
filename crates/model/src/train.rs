@@ -20,6 +20,8 @@ use std::path::Path;
 use data::binio::{self, Meta};
 #[cfg(not(target_arch = "wasm32"))]
 use data::loader::{BatchConfig, TokenDataset};
+#[cfg(not(target_arch = "wasm32"))]
+use data::packing::RowPacker;
 
 /// Cross-entropy ignore index (masked target positions). The data loader emits
 /// `-1` as `i32`; reinterpreted as `u32` that is exactly this value. Mirrors
@@ -703,6 +705,9 @@ struct CausalLm {
     tag_examples: bool,
     /// The dataset carries per-token loss weights: every batch is uploaded with its weights.
     weighted: bool,
+    /// Pack several whole examples into each row and send [`Batch::LmPacked`] ([`causal_lm_packed`]); the packer
+    /// holds the example that did not fit the last row.
+    packer: Option<RowPacker>,
 }
 
 /// One drawn training batch: its rows, their targets, and how many of the rows'
@@ -717,6 +722,21 @@ struct Drawn {
     picks: Vec<Option<usize>>,
     /// The loss weight of each position, aligned with `y`, when the run trains a weighted loss.
     weights: Option<Vec<f32>>,
+    /// Each token's document id when the rows are packed ([`Batch::LmPacked`]).
+    segments: Option<Vec<u32>>,
+}
+
+/// An example's length in tokens, of a dataset a packed run already checked holds examples.
+#[cfg(not(target_arch = "wasm32"))]
+fn example_len(ds: &TokenDataset, example: usize) -> usize {
+    ds.example_len(example).unwrap_or_else(|| panic!("example {example} is not in the dataset the packer draws from"))
+}
+
+/// The packed batch of `rows` (examples the packer laid out, so they fit).
+#[cfg(not(target_arch = "wasm32"))]
+fn packed_drawn(ds: &TokenDataset, cfg: &BatchConfig, rows: &[Vec<usize>]) -> Drawn {
+    let batch = ds.packed_batch(cfg, rows).unwrap_or_else(|e| panic!("the packer laid out rows the dataset refuses: {e}"));
+    Drawn { x: batch.tokens, y: batch.targets, useful_tokens: batch.useful_tokens, picks: vec![None; rows.len()], weights: None, segments: Some(batch.segments) }
 }
 
 /// The token half of a micro-step's [`StepWork`]: what the drawn batch holds.
@@ -806,6 +826,23 @@ pub fn causal_lm_examples<M: Model>(
     CausalLm { tag_examples: true, ..CausalLm::new(train, val, batch_cfg, itos) }
 }
 
+/// [`causal_lm`] over PACKED rows: each row lays out several whole examples one after another (greedily, in the
+/// epoch order, never splitting or dropping one: [`data::packing::RowPacker`]), each a document, and is sent as
+/// [`Batch::LmPacked`] with every token's document id; no target crosses a document boundary. Held-out batches are
+/// packed the same way. The model must read packed rows ([`Model::reads_packed_rows`]), or the run is refused before
+/// its first step ([`crate::training::Capability::PackedRows`]). Refused for a plain token stream (it has no
+/// documents) and for a dataset with per-token loss weights; a packed run cannot be sharded yet.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn causal_lm_packed<M: Model>(train: TokenDataset, val: TokenDataset, batch_cfg: BatchConfig, itos: Option<Vec<char>>) -> std::io::Result<impl Objective<M>> {
+    if train.example_count().is_none() || val.example_count().is_none() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, data::packing::PackingError::NoExamples.to_string()));
+    }
+    if train.has_weights() || val.has_weights() {
+        return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "packed rows do not carry per-token loss weights yet; train this weighted dataset unpacked"));
+    }
+    Ok(CausalLm { packer: Some(RowPacker::new()), ..CausalLm::new(train, val, batch_cfg, itos) })
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 impl<M: Model> Objective<M> for CausalLm {
     fn regime(&self) -> &'static str {
@@ -815,6 +852,9 @@ impl<M: Model> Objective<M> for CausalLm {
     /// A weighted dataset needs the model's per-token weighted loss; a model without it is refused here, before a
     /// step, rather than trained on the plain loss.
     fn prepare(&mut self, model: &mut M) -> Result<(), crate::training::Unsupported> {
+        if self.packer.is_some() && !model.reads_packed_rows() {
+            return Err(crate::training::Unsupported::of::<M>(crate::training::Capability::PackedRows));
+        }
         if self.weighted {
             crate::training::require_token_objectives(model)?.enable_weighted_loss();
         }
@@ -826,7 +866,8 @@ impl<M: Model> Objective<M> for CausalLm {
         // position. A resume restores the exact count from the cursor; without one (a state saved before the cursor
         // existed) the count is rebuilt from the step, `world` records for each of this rank's.
         let world = self.shard.map_or(1, |(_, world)| world as u64);
-        if self.drawn_records == 0 {
+        // A packed run counts the examples it drew (a row holds a varying number), restored from its cursor.
+        if self.drawn_records == 0 && self.packer.is_none() {
             self.drawn_records = draws_done * world;
         }
         self.order = self.train.example_count().filter(|&n| n > 0).map(|n| EpochOrder::new(seed, n, self.drawn_records));
@@ -835,12 +876,26 @@ impl<M: Model> Objective<M> for CausalLm {
     /// A sharded stream's position, the records consumed: a token stream draws a batch for every record, kept or
     /// not, so only the exact count resumes it on the uninterrupted run's batches. An unsharded stream is positioned
     /// by the loop's step count and keeps none.
+    /// A packed stream's position is the examples drawn from the epoch order and the example the packer holds.
     fn cursor(&self) -> Option<serde_json::Value> {
+        if let Some(packer) = &self.packer {
+            return Some(serde_json::json!({ "drawn_records": self.drawn_records, "pending": packer.pending() }));
+        }
         self.shard.map(|_| serde_json::json!({ "drawn_records": self.drawn_records }))
     }
 
     fn restore_cursor(&mut self, cursor: &serde_json::Value) -> std::io::Result<()> {
         let records = cursor.get("drawn_records").and_then(serde_json::Value::as_u64).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "the stream position names no drawn_records"))?;
+        if let Some(packer) = self.packer.as_mut() {
+            let pending = match cursor.get("pending") {
+                Some(serde_json::Value::Null) => None,
+                Some(v) => Some(v.as_u64().and_then(|p| usize::try_from(p).ok()).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("a packed stream position holds pending example {v}, not an index")))?),
+                None => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "a packed run's stream position names no pending example")),
+            };
+            *packer = RowPacker::resuming(pending);
+            self.drawn_records = records;
+            return Ok(());
+        }
         if self.shard.is_none() {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "a sharded run's stream position cannot resume an unsharded run"));
         }
@@ -869,6 +924,9 @@ impl<M: Model> Objective<M> for CausalLm {
         if world == 0 || rank >= world {
             return Err(std::io::Error::other(format!("rank {rank} is not one of a world of {world}")));
         }
+        if self.packer.is_some() && world > 1 {
+            return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "packed rows cannot be sharded yet: each rank would pack a different number of records per step"));
+        }
         self.shard = Some((rank, world));
         Ok(())
     }
@@ -877,7 +935,7 @@ impl<M: Model> Objective<M> for CausalLm {
         let clock = std::time::Instant::now();
         let drawn = self.draw(rng);
         let targets = targets_to_u32(&drawn.y);
-        self.upload(model, Split::Train, &drawn.x, &targets, &drawn.picks, drawn.weights.as_deref());
+        self.upload(model, Split::Train, &drawn, &targets);
         let mut work = work_of(&drawn, &targets);
         work.prepare_secs = clock.elapsed().as_secs_f64();
         let pass = std::time::Instant::now();
@@ -907,7 +965,7 @@ impl<M: Model> Objective<M> for CausalLm {
         let mut work = StepWork { useful_tokens: drawn.iter().map(|d| d.useful_tokens).sum(), supervised_positions: targets.iter().flatten().filter(|&&t| t != IGNORE).count() as u64, ..StepWork::default() };
         let mean_supervised = work.supervised_positions as f32 / k.max(1) as f32;
         let denominator = (mean_supervised > 0.0 && model.token_objectives().is_some()).then_some(mean_supervised);
-        if k > 1 && !self.tag_examples {
+        if k > 1 && !self.tag_examples && self.packer.is_none() {
             let batches: Vec<Batch> = drawn
                 .iter()
                 .zip(&targets)
@@ -932,7 +990,7 @@ impl<M: Model> Objective<M> for CausalLm {
         let mut total = 0.0;
         for (drawn, targets) in drawn.iter().zip(&targets) {
             let pass = std::time::Instant::now();
-            self.upload(model, Split::Train, &drawn.x, targets, &drawn.picks, drawn.weights.as_deref());
+            self.upload(model, Split::Train, drawn, targets);
             if let (Some(tokens), Some(objectives)) = (denominator, model.token_objectives()) {
                 objectives.set_loss_denominator(tokens);
             }
@@ -954,10 +1012,9 @@ impl<M: Model> Objective<M> for CausalLm {
     }
 
     fn loss_probe(&mut self, model: &M, rng: &mut Rng) -> f32 {
-        let (x, y, picks, weights) = self.train.get_batch_examples_weighted(&self.batch_cfg, rng);
-        let targets = targets_to_u32(&y);
-        let weights = self.run_weights(weights, x.len());
-        self.upload(model, Split::Train, &x, &targets, &picks, weights.as_deref());
+        let drawn = self.sample(Split::Train, rng);
+        let targets = targets_to_u32(&drawn.y);
+        self.upload(model, Split::Train, &drawn, &targets);
         model.forward()
     }
 
@@ -973,10 +1030,9 @@ impl<M: Model> Objective<M> for CausalLm {
         }
         let mut total = 0.0;
         for _ in 0..batches.max(1) {
-            let (x, y, picks, weights) = self.val.get_batch_examples_weighted(&self.batch_cfg, rng);
-            let targets = targets_to_u32(&y);
-            let weights = self.run_weights(weights, x.len());
-            self.upload(model, Split::Val, &x, &targets, &picks, weights.as_deref());
+            let drawn = self.sample(Split::Val, rng);
+            let targets = targets_to_u32(&drawn.y);
+            self.upload(model, Split::Val, &drawn, &targets);
             total += model.forward();
         }
         Some(total / batches.max(1) as f32)
@@ -991,7 +1047,7 @@ impl<M: Model> Objective<M> for CausalLm {
 impl CausalLm {
     fn new(train: TokenDataset, val: TokenDataset, batch_cfg: BatchConfig, itos: Option<Vec<char>>) -> CausalLm {
         let weighted = train.has_weights() || val.has_weights();
-        CausalLm { train, val, batch_cfg, itos, order: None, shard: None, drawn_records: 0, work: None, tag_examples: false, weighted }
+        CausalLm { train, val, batch_cfg, itos, order: None, shard: None, drawn_records: 0, work: None, tag_examples: false, weighted, packer: None }
     }
 
     /// The weights a batch is uploaded with: `None` for an unweighted run, else the batch's own (1.0 everywhere for
@@ -1004,6 +1060,10 @@ impl CausalLm {
     /// belong to its shard, or the next whole batch when the run is not
     /// sharded.
     fn draw(&mut self, rng: &mut Rng) -> Drawn {
+        if self.packer.is_some() {
+            // A packed run is never sharded across more than one rank (`shard` refuses it).
+            return self.draw_packed(rng);
+        }
         let Some((rank, world)) = self.shard else {
             return self.draw_next(rng);
         };
@@ -1039,10 +1099,16 @@ impl CausalLm {
         kept.expect("one record of every round of `world` belongs to each rank")
     }
 
-    /// Load a drawn batch into `model`: as [`Batch::LmExamples`] when the run names the examples, else [`Batch::Lm`],
-    /// or [`Batch::LmWeighted`] when it carries `weights` (a named batch takes them after it is set).
-    fn upload<M: Model>(&self, model: &M, split: Split, tokens: &[u32], targets: &[u32], picks: &[Option<usize>], weights: Option<&[f32]>) {
-        match (self.tag_examples, weights) {
+    /// Load a drawn batch into `model`: as [`Batch::LmPacked`] when its rows are packed, as [`Batch::LmExamples`] when
+    /// the run names the examples, else [`Batch::Lm`], or [`Batch::LmWeighted`] when it carries weights (a named batch
+    /// takes them after it is set).
+    fn upload<M: Model>(&self, model: &M, split: Split, drawn: &Drawn, targets: &[u32]) {
+        let (tokens, picks) = (&drawn.x[..], &drawn.picks[..]);
+        if let Some(segments) = &drawn.segments {
+            model.set_batch(Batch::LmPacked { tokens, targets, segments });
+            return;
+        }
+        match (self.tag_examples, drawn.weights.as_deref()) {
             (true, weights) => {
                 model.set_batch(Batch::LmExamples { split, tokens, targets, examples: picks });
                 if let Some(weights) = weights {
@@ -1052,6 +1118,38 @@ impl CausalLm {
             (false, Some(weights)) => model.set_batch(Batch::LmWeighted { tokens, targets, weights }),
             (false, None) => model.set_batch(Batch::Lm { tokens, targets }),
         }
+    }
+
+    /// A random batch of `split` (the loss probe's and a sampled evaluation's): random windows or examples with the
+    /// run's weights, or for a packed run rows packed with randomly drawn examples.
+    fn sample(&self, split: Split, rng: &mut Rng) -> Drawn {
+        let ds = match split {
+            Split::Train => &self.train,
+            Split::Val => &self.val,
+        };
+        if self.packer.is_some() {
+            let count = ds.example_count().expect("a packed run holds examples") as i64;
+            let rows = RowPacker::new().fill(self.batch_cfg.batch_size, self.batch_cfg.block_size, |e| example_len(ds, e), || Some(rng.gen_range_inclusive(0, count - 1) as usize));
+            return packed_drawn(ds, &self.batch_cfg, &rows);
+        }
+        let (x, y, picks, weights) = ds.get_batch_examples_weighted(&self.batch_cfg, rng);
+        let weights = self.run_weights(weights, x.len());
+        Drawn { useful_tokens: x.len() as u64, x, y, picks, weights, segments: None }
+    }
+
+    /// The next packed batch of the epoch order (a random one before the run has begun).
+    fn draw_packed(&mut self, rng: &mut Rng) -> Drawn {
+        let (Some(order), Some(packer)) = (self.order.as_mut(), self.packer.as_mut()) else {
+            return self.sample(Split::Train, rng);
+        };
+        let train = &self.train;
+        let mut drawn = 0u64;
+        let rows = packer.fill(self.batch_cfg.batch_size, self.batch_cfg.block_size, |e| example_len(train, e), || {
+            drawn += 1;
+            Some(order.next())
+        });
+        self.drawn_records += drawn;
+        packed_drawn(train, &self.batch_cfg, &rows)
     }
 
     /// The next batch of the whole (unsharded) stream: the next examples of
@@ -1068,7 +1166,7 @@ impl CausalLm {
         let weights = self.run_weights(weights, x.len());
         // A window drawn from a token stream is all real tokens: the stream has
         // no record boundary to pad at.
-        Drawn { useful_tokens: x.len() as u64, x, y, picks, weights }
+        Drawn { useful_tokens: x.len() as u64, x, y, picks, weights, segments: None }
     }
 
     /// The example batch `picks` names, with the number of its rows' own tokens.
@@ -1077,7 +1175,7 @@ impl CausalLm {
         let (x, y) = self.train.example_batch(&self.batch_cfg, picks)?;
         let useful_tokens = self.train.example_lengths(picks)?.iter().sum::<usize>() as u64;
         let weights = self.run_weights(self.train.example_weights(&self.batch_cfg, picks), x.len());
-        Some(Drawn { x, y, useful_tokens, picks: picks.to_vec(), weights })
+        Some(Drawn { x, y, useful_tokens, picks: picks.to_vec(), weights, segments: None })
     }
 
     /// The mean per-position loss over every supervised position of the
@@ -1088,6 +1186,25 @@ impl CausalLm {
     fn eval_every_example<M: Model>(&self, model: &M, count: usize) -> Option<f32> {
         let rows = self.batch_cfg.batch_size.max(1);
         let (mut sum, mut positions) = (0.0f64, 0usize);
+        if self.packer.is_some() {
+            // Every example once, in order, packed as the training rows are.
+            let (mut packer, mut order) = (RowPacker::new(), 0..count);
+            loop {
+                let picked = packer.fill(rows, self.batch_cfg.block_size, |e| example_len(&self.val, e), || order.next());
+                if picked.iter().all(Vec::is_empty) {
+                    break;
+                }
+                let drawn = packed_drawn(&self.val, &self.batch_cfg, &picked);
+                let supervised = drawn.y.iter().filter(|&&t| t != data::loader::IGNORE).count();
+                if supervised > 0 {
+                    let targets = targets_to_u32(&drawn.y);
+                    self.upload(model, Split::Val, &drawn, &targets);
+                    sum += f64::from(model.forward()) * supervised as f64;
+                    positions += supervised;
+                }
+            }
+            return (positions > 0).then(|| (sum / positions as f64) as f32);
+        }
         let mut first = 0;
         while first < count {
             let (x, y) = self.val.example_rows(&self.batch_cfg, first)?;
@@ -1096,7 +1213,8 @@ impl CausalLm {
                 let targets = targets_to_u32(&y);
                 let picks: Vec<Option<usize>> = (first..first + rows).map(Some).collect();
                 let weights = self.run_weights(self.val.example_weights(&self.batch_cfg, &picks), x.len());
-                self.upload(model, Split::Val, &x, &targets, &picks, weights.as_deref());
+                let drawn = Drawn { useful_tokens: 0, x, y, picks, weights, segments: None };
+                self.upload(model, Split::Val, &drawn, &targets);
                 sum += f64::from(model.forward()) * supervised as f64;
                 positions += supervised;
             }
@@ -2873,10 +2991,16 @@ mod tests {
         /// What `read_grad` reports for its one weight, and the norm the last update measured.
         grad: std::rc::Rc<std::cell::Cell<f32>>,
         norm: std::rc::Rc<std::cell::Cell<Option<f32>>>,
+        /// Whether it declares it reads packed rows, and the targets and segment ids of every packed batch set.
+        reads_packed: std::cell::Cell<bool>,
+        packed: std::rc::Rc<std::cell::RefCell<Vec<PackedRecord>>>,
     }
 
     /// A batch that named its examples: the split and the example in each row.
     type NamedBatch = (Split, Vec<Option<usize>>);
+
+    /// A packed batch's targets and segment ids.
+    type PackedRecord = (Vec<u32>, Vec<u32>);
 
     #[derive(Clone)]
     struct RecorderCfg;
@@ -2904,7 +3028,7 @@ mod tests {
     impl Model for Recorder {
         type Config = RecorderCfg;
         fn new(_cfg: RecorderCfg, _b: u32, _t: u32, _init: &HashMap<String, Vec<f32>>) -> Self {
-            Recorder { w: std::cell::RefCell::new(vec![0.0]), moments: std::cell::RefCell::new((vec![0.0], vec![0.0])), targets: Default::default(), saves: Default::default(), adams: Default::default(), denominators: Default::default(), drawn: Default::default(), named: Default::default(), lrs: Default::default(), indices: Default::default(), grad: Default::default(), norm: Default::default() }
+            Recorder { w: std::cell::RefCell::new(vec![0.0]), moments: std::cell::RefCell::new((vec![0.0], vec![0.0])), targets: Default::default(), saves: Default::default(), adams: Default::default(), denominators: Default::default(), drawn: Default::default(), named: Default::default(), lrs: Default::default(), indices: Default::default(), grad: Default::default(), norm: Default::default(), reads_packed: Default::default(), packed: Default::default() }
         }
         fn init_weights(_cfg: &RecorderCfg, _seed: u64) -> HashMap<String, Vec<f32>> {
             HashMap::new()
@@ -2919,8 +3043,16 @@ mod tests {
                     *self.targets.borrow_mut() = targets.to_vec();
                     self.named.borrow_mut().push((split, examples.to_vec()));
                 }
+                Batch::LmPacked { targets, segments, .. } => {
+                    assert!(self.reads_packed.get(), "the recorder was sent packed rows it does not read");
+                    *self.targets.borrow_mut() = targets.to_vec();
+                    self.packed.borrow_mut().push((targets.to_vec(), segments.to_vec()));
+                }
                 _ => {}
             }
+        }
+        fn reads_packed_rows(&self) -> bool {
+            self.reads_packed.get()
         }
         fn token_objectives(&self) -> Option<&dyn TokenObjectives> {
             Some(self)
@@ -3949,6 +4081,105 @@ mod tests {
         let mut weighted = CausalLm::new(weighted.train.with_weights(vec![0.3; 8]), weighted.val, weighted.batch_cfg, None);
         let refused = Objective::<Recorder>::prepare(&mut weighted, &mut model).expect_err("a weighted run on a model without the weighted loss");
         assert_eq!(refused.capability, crate::training::Capability::TokenObjectives, "{refused}");
+    }
+
+    /// [`examples_objective_batched`] packing its rows ([`causal_lm_packed`]).
+    fn packed_objective(lengths: &[usize], block: usize, batch_size: usize) -> CausalLm {
+        CausalLm { packer: Some(RowPacker::new()), ..examples_objective_batched(lengths, block, batch_size) }
+    }
+
+    fn packed_recorder(batch: usize, block: usize) -> Recorder {
+        let model = Recorder::new(RecorderCfg, batch as u32, block as u32, &HashMap::new());
+        model.reads_packed.set(true);
+        model
+    }
+
+    /// The documents of a packed batch, in layout order: for each segment, the example it holds (its tokens and
+    /// supervised targets are `10 + example`), `None` for padding. Asserts each document holds one example, whole:
+    /// every target but its last is the example's id and the last is IGNORE.
+    fn documents_of(targets: &[u32], segments: &[u32], block: usize, lengths: &[usize]) -> Vec<Option<usize>> {
+        data::packing::document_positions(segments, block).expect("valid packed segments");
+        let mut docs = Vec::new();
+        let mut i = 0;
+        while i < segments.len() {
+            let end = (i..segments.len()).find(|&j| segments[j] != segments[i] || (j > i && j % block == 0)).unwrap_or(segments.len());
+            let ids: Vec<u32> = targets[i..end].iter().copied().filter(|&t| t != IGNORE).collect();
+            let example = ids.first().map(|&t| (t - 10) as usize);
+            if let Some(e) = example {
+                assert!(ids.iter().all(|&t| t == 10 + e as u32), "a document holds one example: {ids:?}");
+                assert_eq!(end - i, lengths[e], "example {e} is laid out whole");
+                assert_eq!(targets[end - 1], IGNORE, "example {e}: no target crosses into the next document");
+            } else {
+                assert!(targets[i..end].iter().all(|&t| t == IGNORE), "padding is never supervised");
+            }
+            docs.push(example);
+            i = end;
+        }
+        docs
+    }
+
+    /// A packed run lays whole examples into rows, several per row, in the epoch order (every example once before any
+    /// is taken again), each its own segment with no target crossing into the next.
+    #[test]
+    fn a_packed_run_lays_whole_examples_into_rows_in_epoch_order() {
+        let lengths = [3usize, 5, 2, 7, 4, 2, 6, 3, 2];
+        let (block, batch) = (8usize, 2usize);
+        let mut obj = packed_objective(&lengths, block, batch);
+        let mut model = packed_recorder(batch, block);
+        Objective::<Recorder>::prepare(&mut obj, &mut model).expect("a model that reads packed rows");
+        Objective::<Recorder>::begin(&mut obj, data::rng::random_seed(), 0);
+        let mut rng = Rng::random();
+        let mut order = Vec::new();
+        while order.len() < 2 * lengths.len() {
+            Objective::<Recorder>::micro_step(&mut obj, &model, &mut rng);
+            let (targets, segments) = model.packed.borrow().last().cloned().expect("a packed batch");
+            order.extend(documents_of(&targets, &segments, block, &lengths).into_iter().flatten());
+        }
+        for epoch in order[..2 * lengths.len()].chunks(lengths.len()) {
+            let mut sorted = epoch.to_vec();
+            sorted.sort_unstable();
+            assert_eq!(sorted, (0..lengths.len()).collect::<Vec<_>>(), "every example once per epoch: {order:?}");
+        }
+        assert!(model.packed.borrow().iter().any(|(_, seg)| seg[..block].windows(2).any(|w| w[0] != w[1])), "rows hold several documents");
+    }
+
+    /// The packed stream resumes exactly: a run restored from the cursor saved after its first step draws the
+    /// uninterrupted run's second batch.
+    #[test]
+    fn a_resumed_packed_run_draws_what_the_uninterrupted_run_does() {
+        let lengths = [3usize, 5, 2, 7, 4, 2, 6, 3, 2];
+        let seed = data::rng::random_seed();
+        let mut straight = packed_objective(&lengths, 8, 2);
+        let model = packed_recorder(2, 8);
+        Objective::<Recorder>::begin(&mut straight, seed, 0);
+        let mut rng = Rng::random();
+        Objective::<Recorder>::micro_step(&mut straight, &model, &mut rng);
+        let cursor = Objective::<Recorder>::cursor(&straight).expect("a packed run keeps its stream position");
+        Objective::<Recorder>::micro_step(&mut straight, &model, &mut rng);
+        let mut resumed = packed_objective(&lengths, 8, 2);
+        Objective::<Recorder>::restore_cursor(&mut resumed, &cursor).expect("restores");
+        Objective::<Recorder>::begin(&mut resumed, seed, 1);
+        let again = packed_recorder(2, 8);
+        Objective::<Recorder>::micro_step(&mut resumed, &again, &mut rng);
+        assert_eq!(again.packed.borrow()[0], model.packed.borrow()[1], "the resumed run draws the uninterrupted second batch");
+    }
+
+    /// A packed run refuses, before any step, a model that does not read packed rows, a sharded stream, a plain token
+    /// stream (no documents) and a dataset with per-token loss weights.
+    #[test]
+    fn a_packed_run_refuses_what_it_cannot_train_by_name() {
+        let mut obj = packed_objective(&[3, 4], 8, 1);
+        let mut model = Recorder::new(RecorderCfg, 1, 8, &HashMap::new());
+        let refused = Objective::<Recorder>::prepare(&mut obj, &mut model).expect_err("the recorder does not read packed rows");
+        assert_eq!(refused.capability, crate::training::Capability::PackedRows);
+        let err = Objective::<Recorder>::shard(&mut obj, 0, 2).expect_err("packed rows do not shard yet");
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        let cfg = BatchConfig { batch_size: 1, block_size: 8, ..Default::default() };
+        let stream = || TokenDataset::new((0..64).collect(), &cfg);
+        assert!(causal_lm_packed::<Recorder>(stream(), stream(), cfg.clone(), None).is_err(), "a token stream has no documents to pack");
+        let weighted = examples_objective_batched(&[3, 4], 8, 1);
+        let refused = causal_lm_packed::<Recorder>(weighted.train.with_weights(vec![0.5; 7]), weighted.val, weighted.batch_cfg, None).err().expect("packed rows carry no loss weights yet");
+        assert_eq!(refused.kind(), std::io::ErrorKind::Unsupported);
     }
 
     /// A pass over the data takes every example once before any is taken

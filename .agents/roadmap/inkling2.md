@@ -646,6 +646,21 @@ The first trainable target needs no streaming: the base is about 19.5 GB.
 - **I4.4** `model::train` + `data`: packed rows with document-boundary resets of
   attention, every conv state and the relative-position origin. Gate: no supervision or
   state crosses a boundary.
+  Done (2026-11-22): `model::flash_ext` takes declared packed documents on the contiguous layout
+  (`AttnOptions::documents`, `AttnInputs::doc_pos` = each row's in-document position from
+  `data::packing::document_positions`): forward and every gradient (dQ, dK/dV, d-sink, d-rel, d-bank) see only
+  same-document pairs at in-document positions (window, bias distance, tau); paged forward unchanged and refuses it.
+  `model::short_conv`'s existing `seg` input is the conv-state reset (reused, not duplicated). Data: `data::packing`
+  (`RowPacker` greedy whole-example packing, `PackedBatch`, `PackingError`), `TokenDataset::packed_batch` /
+  `example_len` (IGNORE on each document's last token, padding its own segment). Plumbing: `Batch::LmPacked { tokens,
+  targets, segments }`, `Model::reads_packed_rows` (default false), `training::Capability::PackedRows`,
+  `model::causal_lm_packed` (epoch order, exact resume through its cursor, held-out batches packed too; refuses a
+  model that does not read packed rows, a token stream and a sharded run). Specs: `model/tests/it/flash_ext.rs`
+  (packed oracle + finite differences, each packed document == alone with every option on), `short_conv.rs`
+  (packed == alone, bit for bit), `packed_rows.rs` (conv + attention + CE: packed loss and gradients == documents
+  run alone), `data/tests/it/packed_rows.rs`, `model::train` unit tests. CPU backend verified; CUDA not exercised.
+  Left: no model reads packed rows yet (inkling2 opts in: `reads_packed_rows`, `LmPacked` in `set_batch`); packed
+  runs are not sharded; the training-capability matrix gets a row once a model declares it.
 - **I4.5** `rl` + `model::rollout`:
   - routing replay (rollout expert ids recorded per logical visit and forced in the
     trainer);

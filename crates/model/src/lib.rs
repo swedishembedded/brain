@@ -195,7 +195,7 @@ pub use trainprec::{apply_train_precision, OptimizerParts, OptimizerState, Resid
 pub use score::{example_rows, score_base, score_dataset, score_tuned, supervised_positions, ScoredSet};
 pub use train::{cosine_lr, generate, FitOpts, LrSchedule, NativeSparse, IGNORE};
 #[cfg(not(target_arch = "wasm32"))]
-pub use train::{build_or_warm_start, StartKind, causal_lm, causal_lm_examples, fit, fit_controlled, fit_controlled_sharded, fit_controlled_sync, fit_distributed, fit_from, fit_with, load_dataset, load_dataset_with_images, load_dataset_with_itos, load_rollout_dataset, AdapterSnapshots, CheckpointIdentity, FitControl, FitReport, GradSync, StepReport, StepWork};
+pub use train::{build_or_warm_start, StartKind, causal_lm, causal_lm_examples, causal_lm_packed, fit, fit_controlled, fit_controlled_sharded, fit_controlled_sync, fit_distributed, fit_from, fit_with, load_dataset, load_dataset_with_images, load_dataset_with_itos, load_rollout_dataset, AdapterSnapshots, CheckpointIdentity, FitControl, FitReport, GradSync, StepReport, StepWork};
 
 /// What a batch looks like for a given model. Decoder-LM and seq2seq differ in
 /// whether there is a separate source sequence; this enum keeps `set_batch`
@@ -259,6 +259,16 @@ pub enum Batch<'a> {
     /// padding). The trainer sends this variant only when the run asks for it
     /// ([`train::causal_lm_examples`]); a model that reads such inputs looks them up by `(split, example)`.
     LmExamples { split: Split, tokens: &'a [u32], targets: &'a [u32], examples: &'a [Option<usize>] },
+    /// [`Batch::Lm`] whose rows each pack several documents ([`data::packing`]): `segments[i]` is token `i`'s document
+    /// id, never decreasing within a row, a new document starting wherever it changes and at every row start
+    /// ([`data::packing::document_positions`] validates it and gives each token's position inside its document).
+    /// `targets` already carry IGNORE where a target would cross into the next document. A model that reads it
+    /// ([`Model::reads_packed_rows`]) resets everything carried along the sequence at each document start -
+    /// attention reaches only the query's own document, every convolution or recurrent state restarts, positions
+    /// count from 0 - so each document trains exactly as it would alone. Sent only by a run that asks for packing
+    /// ([`train::causal_lm_packed`]), which refuses a model that does not read it; a model that does not must
+    /// refuse this variant by name, never train on it as plain rows.
+    LmPacked { tokens: &'a [u32], targets: &'a [u32], segments: &'a [u32] },
 }
 
 /// The part of a prepared dataset a batch is drawn from.
@@ -376,6 +386,14 @@ pub trait Model {
     /// [`Model::forward`] and [`Model::backward`].
     fn accumulate_overlapped(&self, _batches: &[Batch], _loss_denominator: Option<f32>) -> Option<f32> {
         None
+    }
+
+    /// Whether [`Model::set_batch`] reads [`Batch::LmPacked`]: rows packed with several documents, attention, every
+    /// state carried along the sequence and the positions reset at each document start. `false` (the default): a
+    /// packing run ([`train::causal_lm_packed`]) refuses the model with [`training::Unsupported`] naming
+    /// [`training::Capability::PackedRows`] before any step.
+    fn reads_packed_rows(&self) -> bool {
+        false
     }
 
     /// The per-token objective capability ([`training::TokenObjectives`]):

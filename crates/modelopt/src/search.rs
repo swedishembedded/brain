@@ -285,7 +285,7 @@ pub fn search_weights<M: Model>(m: &M, req: &SearchRequest, on_progress: &mut dy
 fn same_batch(a: &Batch, b: &Batch) -> bool {
     let tokens = |batch: &Batch<'_>| -> Option<Vec<u32>> {
         match batch {
-            Batch::Lm { tokens, .. } | Batch::LmWeighted { tokens, .. } | Batch::LmExamples { tokens, .. } | Batch::Multimodal { tokens, .. } => Some(tokens.to_vec()),
+            Batch::Lm { tokens, .. } | Batch::LmWeighted { tokens, .. } | Batch::LmExamples { tokens, .. } | Batch::LmPacked { tokens, .. } | Batch::Multimodal { tokens, .. } => Some(tokens.to_vec()),
             Batch::Seq2Seq { src, .. } => Some(src.to_vec()),
             Batch::Tensor { .. } => None,
         }

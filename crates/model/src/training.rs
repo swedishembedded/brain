@@ -41,6 +41,9 @@ pub enum Capability {
     /// A trainer whose attention can read its keys and values through an int8 or fp8 KV cache's encoding
     /// ([`TokenObjectives::set_kv_roundtrip`]).
     KvRoundtrip,
+    /// A trainer that reads rows packed with several documents ([`crate::Batch::LmPacked`],
+    /// [`crate::Model::reads_packed_rows`]).
+    PackedRows,
 }
 
 impl Capability {
@@ -51,6 +54,7 @@ impl Capability {
             Capability::ChatFineTune => "chat fine-tuning",
             Capability::ChatLoraFineTune => "chat LoRA fine-tuning",
             Capability::KvRoundtrip => "a KV-cache round trip in its attention",
+            Capability::PackedRows => "training on packed rows (several documents per row)",
         }
     }
 }

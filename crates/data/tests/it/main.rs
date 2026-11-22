@@ -25,6 +25,7 @@ mod imageset_pairs;
 mod inkling2_chat_render;
 mod inkling2_tokenizer_parity;
 mod llama_bpe_parity;
+mod packed_rows;
 mod t5xxl_precompiled_parity;
 mod umt5_tokenizer_parity;
 mod wordpiece_parity;

@@ -320,6 +320,58 @@ impl TokenDataset {
         self.weights.is_some()
     }
 
+    /// The length in tokens of each example (the document a packed row lays out whole), `None` for a plain token
+    /// stream.
+    pub fn example_len(&self, example: usize) -> Option<usize> {
+        self.examples.as_ref()?.bounds.get(example).map(|&(a, e)| e - a)
+    }
+
+    /// The packed batch whose row `r` lays out the examples `rows[r]` one after another (several documents per row,
+    /// [`crate::packing`]), each laid out as [`TokenDataset::example_batch`] lays out one: its tokens, its targets
+    /// under the supervision mask, and IGNORE on its last token, so no target crosses into the next document. The rest
+    /// of a row is padding with IGNORE targets. Refused for a plain token stream, an unknown example, a row whose
+    /// examples overflow it, or a number of rows other than `cfg.batch_size`.
+    pub fn packed_batch(&self, cfg: &BatchConfig, rows: &[Vec<usize>]) -> Result<crate::packing::PackedBatch, crate::packing::PackingError> {
+        use crate::packing::{PackedBatch, PackingError};
+        let ex = self.examples.as_ref().ok_or(PackingError::NoExamples)?;
+        let (bs, bl) = (cfg.batch_size, cfg.block_size);
+        if rows.len() != bs {
+            return Err(PackingError::RowCount { rows: rows.len(), batch_size: bs });
+        }
+        let mut x = vec![ex.pad; bs * bl];
+        let mut y = vec![IGNORE; bs * bl];
+        let mut segments = vec![0u32; bs * bl];
+        let (mut document, mut useful) = (0u32, 0u64);
+        for (r, picks) in rows.iter().enumerate() {
+            let bounds: Vec<(usize, usize)> = picks.iter().map(|&pick| ex.bounds.get(pick).copied().ok_or(PackingError::UnknownExample { row: r, example: pick, examples: ex.bounds.len() })).collect::<Result<_, _>>()?;
+            let tokens: usize = bounds.iter().map(|&(a, e)| e - a).sum();
+            if tokens > bl {
+                return Err(PackingError::RowOverflow { row: r, tokens, row_len: bl });
+            }
+            let mut at = 0usize;
+            for (a, e) in bounds {
+                for t in 0..e - a {
+                    let i = r * bl + at + t;
+                    let target = a + 1 + t;
+                    x[i] = self.data[a + t];
+                    segments[i] = document;
+                    if target < e && self.mask.as_ref().is_none_or(|m| m[target]) {
+                        y[i] = self.data[target] as i32;
+                    }
+                }
+                at += e - a;
+                document += 1;
+            }
+            useful += tokens as u64;
+            // The padding that ends the row is a document of its own.
+            if at < bl {
+                segments[r * bl + at..(r + 1) * bl].fill(document);
+                document += 1;
+            }
+        }
+        Ok(PackedBatch { tokens: x, targets: y, segments, rows: rows.to_vec(), useful_tokens: useful })
+    }
+
     /// Wrap a token array with an explicit per-token reward/advantage weight
     /// (see [`TokenDataset::weights`]). `weights.len()` must equal
     /// `data.len()`. Composable with [`TokenDataset::new_with_mask`]'s

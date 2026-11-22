@@ -116,6 +116,7 @@ mod ops_act_rows;
 mod ops_int8_without_packed_dot;
 mod ops_two_level_act;
 mod ops_upload_from;
+mod packed_rows;
 mod pos_taps;
 mod probe_gemm;
 mod projector;
