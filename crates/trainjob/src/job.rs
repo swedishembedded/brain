@@ -847,7 +847,7 @@ fn train_ranks(request: &Request, env: &JobEnv, inputs: &Inputs<'_>, files: &Run
 pub fn run(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], progress: &mut dyn FnMut(Progress)) -> ActionResult {
     let request = Request::from_invocation(inv)?;
     let p = &request.params;
-    let run = match crate::consolidate::open_run(env, ACTION, p.resume_key.as_deref(), inv, p.seed)? {
+    let run = match crate::consolidate::open_run(env, ACTION, p.resume_key.as_deref(), inv, p.seed, &request.spread.layout(Some(brain::Sharding::Replicated)))? {
         Some(crate::runs::Opened::Completed(mut outputs)) => {
             outputs["resume"] = crate::runs::completed_report(p.resume_key.as_deref().unwrap_or_default());
             return recorded(env, &request, outputs);
@@ -887,6 +887,10 @@ pub fn run(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], progre
     // A server that runs none of a job's rank 0 answers for its ranks only: the server of rank 0 publishes the run.
     if let Some(mut answer) = request.spread.answer_for_ranks(p.objective.name()) {
         answer["adapter_sha256"] = json!(trained.adapter_sha256);
+        // Its part of the job is done: a resubmission answers this without joining the job again.
+        if let Some(run) = run {
+            run.finish(&mut answer, trained.resumed_at)?;
+        }
         let mut result = Outcome::new();
         result.outputs = answer;
         return Ok(result);
@@ -921,9 +925,8 @@ pub fn run(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], progre
         fields.insert("evaluations".into(), json!(evaluations));
     }
     if let Some(run) = run {
-        outputs["resume"] = run.report(trained.resumed_at);
         // Everything the result names is published: the run is complete, and a resubmission answers with this.
-        run.complete(&outputs)?;
+        run.finish(&mut outputs, trained.resumed_at)?;
     }
     result.outputs = outputs;
     if p.return_adapter {

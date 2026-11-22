@@ -110,7 +110,7 @@ fn spec_without_defaults() -> ActionSpec {
         .param(ParamSpec::new("strict_updates", ParamType::Bool, "abort at the first optimiser step whose loss or gradient is not finite (off: such a step is skipped, and the run aborts on the third in a row); the adapter is never updated with a non-finite value").default(json!(false)))
         .param(ParamSpec::new("seed", ParamType::Int, "seed of a fresh adapter's initialisation and the batch order (random when omitted; the report carries the one used)").min(0.0))
         .param(crate::parallel::cards_param("the run's whole footprint", "every objective but feedback"))
-        .param(crate::parallel::job_param("sharding replicated", "an objective other than feedback, "))
+        .param(crate::parallel::job_param("sharding replicated", " and an objective other than feedback"))
         .param(ParamSpec::new("max_block", ParamType::Int, "the longest training row in tokens: the memory reserved for the run is sized to it, and a record longer than it is refused by name").default(json!(8192)).min(64.0).max(1_048_576.0).step(1.0))
         .param(ParamSpec::new("thinking", ParamType::Bool, "train the model to reason before it answers (off: trained for no-think mode); sft and policy_gradient only").default(json!(true)))
         .param(ParamSpec::new("pack_answers", ParamType::Bool, "train a record that supervises several turns as one sequence; sft and policy_gradient only").default(json!(false)))
@@ -498,7 +498,7 @@ impl Request {
                 return refused(&format!("adapter_id {id:?} does not name an adapter: an adapter card is named <vendor>/<repo>:<owner>:<name>:<tag>, as a server offers it"));
             }
         }
-        let spread = crate::parallel::Spread::parse(ACTION, params.cards, params.job.as_deref(), params.seed, params.resume_key.as_deref(), false)?;
+        let spread = crate::parallel::Spread::parse(ACTION, params.cards, params.job.as_deref(), params.seed, false)?;
         if spread.job.is_some() && params.objective == Objective::Feedback {
             return refused(&format!("job trains data-parallel across servers, and the feedback objective trains on one card: {FEEDBACK_ON_ONE_CARD}"));
         }

@@ -80,11 +80,11 @@ pub(crate) fn check_resume(action: &str, key: Option<&str>, every: Option<u32>) 
 }
 
 /// The run of a request's `resume_key`, opened (or `None` without a key): what `inv`'s job resumes, or the result a
-/// completed run recorded.
-pub(crate) fn open_run(env: &JobEnv, action: &str, key: Option<&str>, inv: &Invocation, seed: Option<u64>) -> Result<Option<crate::runs::Opened>, String> {
+/// completed run recorded. `layout` is how the request spreads the run, which a resumed run must keep.
+pub(crate) fn open_run(env: &JobEnv, action: &str, key: Option<&str>, inv: &Invocation, seed: Option<u64>, layout: &crate::runs::Layout) -> Result<Option<crate::runs::Opened>, String> {
     let Some(key) = key else { return Ok(None) };
     let store = env.store.as_ref().ok_or_else(|| format!("{action}: resume_key keeps the run's record in the artifact store, and this server has none (--artifact-store)"))?;
-    crate::runs::open(store, action, key, &crate::runs::identity(action, inv), seed).map(Some).map_err(|e| format!("{action}: {e}"))
+    crate::runs::open(store, action, key, &crate::runs::identity(action, inv), seed, layout).map(Some).map_err(|e| format!("{action}: {e}"))
 }
 
 fn install_param() -> ParamSpec {
@@ -107,7 +107,7 @@ pub fn full_spec() -> ActionSpec {
         .param(ParamSpec::new("grad_accum", ParamType::Int, "records averaged into one optimiser step").default(json!(1)).min(1.0).max(4096.0).step(1.0))
         .param(ParamSpec::new("strict_updates", ParamType::Bool, "abort at the first optimiser step whose loss or gradient is not finite (off: such a step is skipped)").default(json!(false)))
         .param(ParamSpec::new("seed", ParamType::Int, "seed of the batch order (random when omitted; the report carries the one used)").min(0.0))
-        .param(crate::parallel::cards_param("one rank of the run, sharded as `sharding` says", "without resume_key"))
+        .param(crate::parallel::cards_param("one rank of the run, sharded as `sharding` says", "every full fine-tune; a resumable run resumes on the cards and sharding it began on"))
         .param(crate::parallel::job_param("its sharding is the run's", ""))
         .param(ParamSpec::new("sharding", ParamType::Str, "what the ranks of a run on several cards (or a job) shard among themselves: `replicated` (each holds everything), `optimizer` (ZeRO-1: the master copy and AdamW moments), `gradients` (ZeRO-2: those and the reduced gradients) or `parameters` (ZeRO-3: the weights too, gathered layer by layer; needs a resident train_precision with a layer window, such as weights=bf16,grad=bf16,window=2). Omitted, the run takes the first of replicated, gradients and parameters whose rank fits the server's largest card; with a job, the plan's sharding, which a named one must equal"))
         .param(ParamSpec::new("max_block", ParamType::Int, "the longest training row in tokens: the memory reserved for the run is sized to it, and a longer record is refused by name").default(json!(8192)).min(64.0).max(1_048_576.0).step(1.0))
@@ -203,10 +203,7 @@ impl FullRequest {
             brain::TrainPrecision::parse(spec).map_err(|e| format!("full_train: train_precision: {e}"))?;
         }
         check_resume(FULL_ACTION, params.resume_key.as_deref(), params.checkpoint_every)?;
-        let spread = crate::parallel::Spread::parse(FULL_ACTION, params.cards, params.job.as_deref(), params.seed, params.resume_key.as_deref(), true)?;
-        if spread.cards > 1 && params.resume_key.is_some() {
-            return Err(format!("full_train: resume_key: a full fine-tune on {} cards does not resume; run it on one card, or without resume_key", spread.cards));
-        }
+        let spread = crate::parallel::Spread::parse(FULL_ACTION, params.cards, params.job.as_deref(), params.seed, true)?;
         let named = params.sharding.as_deref().map(|name| serde_json::from_value::<brain::Sharding>(json!(name)).map_err(|_| format!("full_train: sharding {name:?} is none of replicated, optimizer, gradients, parameters"))).transpose()?;
         let sharding = match (&spread.job, named) {
             (Some(job), Some(named)) if named != job.plan.sharding => {
@@ -464,7 +461,7 @@ pub fn run_full(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], p
         outcome.outputs = validation_report(p, &checked, &sharded);
         return Ok(outcome);
     }
-    let run = match open_run(env, FULL_ACTION, p.resume_key.as_deref(), inv, p.seed)? {
+    let run = match open_run(env, FULL_ACTION, p.resume_key.as_deref(), inv, p.seed, &request.spread.layout(request.sharding))? {
         Some(crate::runs::Opened::Completed(mut result)) => {
             result["resume"] = crate::runs::completed_report(p.resume_key.as_deref().unwrap_or_default());
             let mut outcome = Outcome::new();
@@ -502,9 +499,11 @@ pub fn run_full(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], p
     let began = Instant::now();
     let frame = |step: &brain::FineTuneProgress| Progress::event(step.step, step.steps, job::step_frame(step, began.elapsed().as_secs_f64()));
     let outcome = if request.spread.ranked() {
-        // Every rank draws the same batch order: the request's seed, or one drawn here for all of them. Rank 0 of the
-        // group writes where the run does; this server's other ranks each in a directory of their own.
-        let seed = p.seed.unwrap_or_else(brain::random_seed);
+        // Every rank draws the same batch order: the resumable run's seed, the request's, or one drawn here for all of
+        // them. Rank 0 of the group writes where the run does; this server's other ranks each in a directory of their
+        // own. A resumable run's state path is the run's for every rank: the trainer keeps each rank's state apart
+        // beside it, in numbered generations the ranks agree on.
+        let seed = run.as_ref().map(crate::runs::Run::seed).or(p.seed).unwrap_or_else(brain::random_seed);
         let rank = |i: usize, rank: brain::DataParallel, frames: Option<std::sync::mpsc::Sender<Progress>>| {
             let dir = if i == 0 { out_dir.clone() } else { work.path().join(format!("rank-{i}")) };
             let outcome = ft.clone().out_dir(dir).seed(seed).data_parallel(rank).run_with(&inv.cancel, |step| {
@@ -524,7 +523,11 @@ pub fn run_full(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], p
     }
     work.ensure_within_quota()?;
     // A server that runs none of a job's rank 0 answers for its ranks only: the server of rank 0 publishes the run.
-    if let Some(answer) = request.spread.answer_for_ranks("full_sft") {
+    if let Some(mut answer) = request.spread.answer_for_ranks("full_sft") {
+        // Its part of the job is done: a resubmission answers this without joining the job again.
+        if let Some(run) = run {
+            run.finish(&mut answer, outcome.resumed_at)?;
+        }
         let mut result = Outcome::new();
         result.outputs = answer;
         return Ok(result);

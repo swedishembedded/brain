@@ -158,7 +158,7 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
     inv.cancel.check()?;
     let request = Request::from_invocation(inv)?;
     // An initialization has no training state: a resumable one is idempotent, its recorded result answered again.
-    let run = match open_run(env, ACTION, request.params.resume_key.as_deref(), inv, request.params.seed)? {
+    let run = match open_run(env, ACTION, request.params.resume_key.as_deref(), inv, request.params.seed, &crate::runs::Layout::single())? {
         Some(crate::runs::Opened::Completed(mut result)) => {
             result["resume"] = crate::runs::completed_report(request.params.resume_key.as_deref().unwrap_or_default());
             let mut outcome = capability::Outcome::new();

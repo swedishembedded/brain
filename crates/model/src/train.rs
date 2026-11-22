@@ -1895,6 +1895,23 @@ struct SavedState {
 }
 
 /// Restore the state [`save_train_state`] wrote into `model` and describe the rest of it.
+/// The settings in which a saved training-options fingerprint differs from this run's, as `name saved X, this run Y`.
+fn differences(saved: Option<&serde_json::Value>, now: &serde_json::Value) -> String {
+    let empty = serde_json::Map::new();
+    let saved = saved.and_then(serde_json::Value::as_object).unwrap_or(&empty);
+    let now = now.as_object().unwrap_or(&empty);
+    let mut names: Vec<&String> = saved.keys().chain(now.keys()).collect();
+    names.sort();
+    names.dedup();
+    let null = serde_json::Value::Null;
+    let differing: Vec<String> = names.into_iter().filter(|n| saved.get(*n) != now.get(*n)).map(|n| format!("{n} saved {}, this run {}", saved.get(n).unwrap_or(&null), now.get(n).unwrap_or(&null))).collect();
+    if differing.is_empty() {
+        "the saved options cannot be read".to_string()
+    } else {
+        differing.join("; ")
+    }
+}
+
 fn load_train_state<M: Model>(model: &M, path: &Path, opts: &FitOpts, identity: &serde_json::Value, zero: Option<(&mut crate::zero::ZeroOptimizer, &dyn crate::Collective)>) -> std::io::Result<SavedState> {
     let invalid = |why: String| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{}: {why}", path.display()));
     let path_str = path.to_str().ok_or_else(|| invalid("not a UTF-8 path".to_string()))?;
@@ -1903,10 +1920,16 @@ fn load_train_state<M: Model>(model: &M, path: &Path, opts: &FitOpts, identity: 
     if header.get("format").and_then(|f| f.as_str()) != Some(TRAIN_STATE_FORMAT) {
         return Err(invalid(format!("not a {TRAIN_STATE_FORMAT} training state")));
     }
-    if header.get("opts") != Some(&schedule_fingerprint(opts)) {
-        return Err(invalid("saved by a run with different training options; resuming it would not continue that run".to_string()));
+    let fingerprint = schedule_fingerprint(opts);
+    if header.get("opts") != Some(&fingerprint) {
+        return Err(invalid(format!("saved by a run with different training options ({}); resuming it would not continue that run", differences(header.get("opts"), &fingerprint))));
     }
     if header.get("identity") != Some(identity) {
+        let world = |v: Option<&serde_json::Value>| v.and_then(|v| v.get("world_size")).cloned().unwrap_or(serde_json::Value::Null);
+        let (saved, now) = (world(header.get("identity")), world(Some(identity)));
+        if saved != now {
+            return Err(invalid(format!("saved by a data-parallel group of {saved} rank(s), and this run's group has {now}: a state resumes only on the layout it was saved by")));
+        }
         return Err(invalid("saved by a run over different data or a different starting point; resuming it would not continue that run".to_string()));
     }
     let step = header.get("step").and_then(|s| s.as_u64()).and_then(|s| u32::try_from(s).ok()).ok_or_else(|| invalid("no step count".to_string()))?;
@@ -4546,7 +4569,7 @@ mod tests {
         // A state written by a two-rank job is not resumed by a one-rank one: rank 0's committed generations name
         // a world of two.
         let err = run(1, 4).expect_err("a different world must be refused");
-        assert!(err.contains("different data or a different starting point") || err.contains("world"), "{err}");
+        assert!(err.contains("over 2 ranks") && err.contains("over 1"), "the refusal names both worlds: {err}");
         // A caller that names a world size must name the group's.
         let coll = crate::HostCollective::new(1);
         let sync = GradSync { collective: &*coll, rank: 0, checkpoint: None, observer: None };

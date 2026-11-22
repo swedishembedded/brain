@@ -25,7 +25,9 @@
 //! **Identity.** The run's identity is the blake3 digest of its action, every param but `resume_key` and
 //! `checkpoint_every` (digests of artifact inputs included) and the blake3 digest of every attached input blob. A
 //! key whose record names another identity is refused: one key is one run. An omitted `seed` is drawn once and kept
-//! in the record, so a resubmission continues with the same seed.
+//! in the record, so a resubmission continues with the same seed. The record also keeps the run's [`Layout`] (its
+//! ranks and sharding), so a resubmission on another layout is refused with both layouts' numbers: each rank's state
+//! is its own shard of the stream and of the optimizer, and resumes only on the layout that saved it.
 //!
 //! **Resubmitting** a key: a `completed` record answers with the result it recorded (`resume.state: "completed"`)
 //! once every artifact it names is verified to be in the store, and recomputes nothing; a `running` record continues
@@ -83,6 +85,31 @@ pub enum Status {
     Completed,
 }
 
+/// How a run is spread over ranks: what a resumed run must keep (see the module doc).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Layout {
+    /// Ranks of the whole group, every server's (1 for a run on one card).
+    pub world_size: usize,
+    /// The ranks this server runs, `[first, end)`.
+    pub ranks: [usize; 2],
+    /// What the ranks shard, as the request names it (or its job plan does); `None` where the server chooses.
+    pub sharding: Option<String>,
+}
+
+impl Layout {
+    /// A run on one card, not data-parallel.
+    pub fn single() -> Layout {
+        Layout { world_size: 1, ranks: [0, 1], sharding: None }
+    }
+}
+
+impl std::fmt::Display for Layout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} rank(s), ranks {}..{} on this server, sharding {}", self.world_size, self.ranks[0], self.ranks[1], self.sharding.as_deref().unwrap_or("chosen by the server"))
+    }
+}
+
 /// `run.json`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -94,6 +121,9 @@ pub struct Record {
     pub seed: Option<u64>,
     pub status: Status,
     pub result: Option<Value>,
+    /// The layout the run began on; absent from a record written before layouts were kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<Layout>,
 }
 
 /// A run of a key this job holds the lock of.
@@ -143,8 +173,9 @@ fn lock_exclusive(_file: &File) -> bool {
     true
 }
 
-/// Opens the run of `key` for the request whose identity is `identity`, creating its record when there is none.
-pub fn open(store: &ArtifactStore, action: &str, key: &str, identity: &Digest, seed: Option<u64>) -> Result<Opened, String> {
+/// Opens the run of `key` for the request whose identity is `identity`, laid out as `layout`, creating its record
+/// when there is none.
+pub fn open(store: &ArtifactStore, action: &str, key: &str, identity: &Digest, seed: Option<u64>, layout: &Layout) -> Result<Opened, String> {
     check_key(key)?;
     let dir = store.root().join(RUNS_DIR).join(digest_of(key.as_bytes()).hex());
     std::fs::create_dir_all(&dir).map_err(|e| refuse(key, format!("cannot make its run directory: {e}")))?;
@@ -163,6 +194,9 @@ pub fn open(store: &ArtifactStore, action: &str, key: &str, identity: &Digest, s
             if record.format != RECORD_FORMAT || record.key != key {
                 return Err(refuse(key, "its run record is not one this server wrote for the key; choose a new key"));
             }
+            if let Some(began) = record.layout.as_ref().filter(|began| record.action == action && *began != layout) {
+                return Err(refuse(key, format!("its run began on {began}, and this request asks {layout}: a run resumes only on the layout it began on (each rank's saved state is its own shard); submit it on that layout, or under a new key")));
+            }
             if record.action != action || record.identity != identity.hex() {
                 return Err(refuse(key, format!("names another run (a {} job with other inputs or settings); one key is one run", record.action)));
             }
@@ -174,7 +208,7 @@ pub fn open(store: &ArtifactStore, action: &str, key: &str, identity: &Digest, s
             Ok(Opened::Run(Run { dir, record, _lock: lock, resumed: true }))
         }
         None => {
-            let record = Record { format: RECORD_FORMAT.to_string(), key: key.to_string(), action: action.to_string(), identity: identity.hex(), seed: seed.or_else(|| Some(brain::random_seed())), status: Status::Running, result: None };
+            let record = Record { format: RECORD_FORMAT.to_string(), key: key.to_string(), action: action.to_string(), identity: identity.hex(), seed: seed.or_else(|| Some(brain::random_seed())), status: Status::Running, result: None, layout: Some(layout.clone()) };
             write_atomic(&path, &serde_json::to_vec_pretty(&record).map_err(|e| e.to_string())?).map_err(|e| refuse(key, format!("cannot write its run record: {e}")))?;
             Ok(Opened::Run(Run { dir, record, _lock: lock, resumed: false }))
         }
@@ -227,6 +261,13 @@ impl Run {
         Ok(())
     }
 
+    /// Records the run completed with `outputs`, which gain the report's `resume` object first: what every answer of a
+    /// resumable run (a server's of its ranks of a job too) is recorded as, so a resubmission answers it again.
+    pub fn finish(self, outputs: &mut Value, resumed_at: Option<u32>) -> Result<(), String> {
+        outputs["resume"] = self.report(resumed_at);
+        self.complete(outputs)
+    }
+
     /// The `resume` object of the report.
     pub fn report(&self, resumed_at: Option<u32>) -> Value {
         let state = match (self.resumed, resumed_at) {
@@ -276,33 +317,50 @@ mod tests {
     #[test]
     fn a_key_is_one_run_locked_while_it_runs_and_answered_once_complete() {
         let (_dir, store) = store();
+        let one = Layout::single();
         let id = digest_of(b"run-a");
-        let Opened::Run(run) = open(&store, "pretrain", "k-1", &id, None).unwrap() else { panic!("a fresh run") };
+        let Opened::Run(run) = open(&store, "pretrain", "k-1", &id, None, &one).unwrap() else { panic!("a fresh run") };
         assert!(!run.resumed);
         let seed = run.seed();
-        assert!(open(&store, "pretrain", "k-1", &id, None).err().unwrap().contains("is running"), "the lock is held");
+        assert!(open(&store, "pretrain", "k-1", &id, None, &one).err().unwrap().contains("is running"), "the lock is held");
         drop(run);
-        let Opened::Run(run) = open(&store, "pretrain", "k-1", &id, Some(5)).unwrap() else { panic!("a resumed run") };
+        let Opened::Run(run) = open(&store, "pretrain", "k-1", &id, Some(5), &one).unwrap() else { panic!("a resumed run") };
         assert!(run.resumed);
         assert_eq!(run.seed(), seed, "the seed drawn when the run began is kept");
         let other = digest_of(b"run-b");
         drop(run);
-        assert!(open(&store, "pretrain", "k-1", &other, None).err().unwrap().contains("names another run"));
-        assert!(open(&store, "full_train", "k-1", &id, None).err().unwrap().contains("names another run"));
+        assert!(open(&store, "pretrain", "k-1", &other, None, &one).err().unwrap().contains("names another run"));
+        assert!(open(&store, "full_train", "k-1", &id, None, &one).err().unwrap().contains("names another run"));
         let artifact = store.publish_bytes(b"checkpoint").unwrap();
-        let Opened::Run(run) = open(&store, "pretrain", "k-1", &id, None).unwrap() else { panic!() };
+        let Opened::Run(run) = open(&store, "pretrain", "k-1", &id, None, &one).unwrap() else { panic!() };
         run.complete(&json!({"status": "completed", "checkpoint_digest": artifact.hex()})).unwrap();
-        let Opened::Completed(result) = open(&store, "pretrain", "k-1", &id, None).unwrap() else { panic!("completed") };
+        let Opened::Completed(result) = open(&store, "pretrain", "k-1", &id, None, &one).unwrap() else { panic!("completed") };
         assert_eq!(result["checkpoint_digest"], artifact.hex());
         std::fs::remove_file(store.root().join(artifact.hex())).unwrap();
-        assert!(open(&store, "pretrain", "k-1", &id, None).err().unwrap().contains("no longer in the artifact store"));
+        assert!(open(&store, "pretrain", "k-1", &id, None, &one).err().unwrap().contains("no longer in the artifact store"));
         let record = store.root().join(RUNS_DIR).join(digest_of(b"k-2").hex());
         std::fs::create_dir_all(&record).unwrap();
         std::fs::write(record.join("run.json"), b"{\"format\": 1").unwrap();
-        assert!(open(&store, "pretrain", "k-2", &id, None).err().unwrap().contains("cannot be read"));
+        assert!(open(&store, "pretrain", "k-2", &id, None, &one).err().unwrap().contains("cannot be read"));
         assert_eq!(std::fs::read(record.join("run.json")).unwrap(), b"{\"format\": 1", "a corrupt record is never overwritten");
         for bad in ["", "a/b", "..", "a b", &"k".repeat(MAX_KEY_LEN + 1)] {
-            assert!(open(&store, "pretrain", bad, &id, None).is_err(), "{bad:?}");
+            assert!(open(&store, "pretrain", bad, &id, None, &one).is_err(), "{bad:?}");
         }
+    }
+
+    /// A run resumes only on the layout it began on: another one is refused with both layouts' numbers, before the
+    /// identity (which holds the layout's params too) is compared.
+    #[test]
+    fn a_run_is_refused_on_another_layout_with_both_layouts() {
+        let (_dir, store) = store();
+        let id = digest_of(b"run-a");
+        let two = Layout { world_size: 2, ranks: [0, 2], sharding: Some("gradients".into()) };
+        drop(open(&store, "full_train", "k", &id, Some(7), &two).unwrap());
+        let four = Layout { world_size: 4, ranks: [0, 4], sharding: Some("gradients".into()) };
+        let refused = open(&store, "full_train", "k", &digest_of(b"run-a on 4"), Some(7), &four).err().unwrap();
+        assert!(refused.contains("began on 2 rank(s), ranks 0..2 on this server, sharding gradients") && refused.contains("asks 4 rank(s), ranks 0..4"), "{refused}");
+        let replicated = Layout { sharding: Some("replicated".into()), ..two.clone() };
+        assert!(open(&store, "full_train", "k", &digest_of(b"replicated"), Some(7), &replicated).err().unwrap().contains("sharding replicated"));
+        assert!(matches!(open(&store, "full_train", "k", &id, Some(7), &two), Ok(Opened::Run(_))), "the same layout resumes");
     }
 }

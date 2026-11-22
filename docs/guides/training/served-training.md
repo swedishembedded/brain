@@ -62,7 +62,7 @@ Two more actions of `brain/train` produce a checkpoint instead of an adapter.
   data-parallel rank per claimed card, the same `seed` on every rank, rank 0 streaming the steps and answering with
   the report of a one-card run, whose `parallel` object says how it was spread; a server of a job that does not
   hold rank 0 answers `{"status": "completed", "objective": "full_sft", "job", "ranks": [first, last]}`. A run on
-  several cards does not resume (`resume_key` is refused). `sharding` says what the ranks split among themselves:
+  several cards or servers resumes on the cards and sharding it began on ([Resuming a job](#resuming-a-job)). `sharding` says what the ranks split among themselves:
   `replicated` (each holds the fp32 weights and gradients), `optimizer` (ZeRO-1: each also holds its slice of the
   f32 master copy and AdamW moments on the card), `gradients` (ZeRO-2: those and the reduced gradient slice, half
   the gradient traffic) or `parameters` (ZeRO-3: the weights too, gathered layer by layer; it needs a resident
@@ -154,6 +154,12 @@ one but `init_model` a `checkpoint_every`. The key names one run:
   training record and every kept evaluation; with `return_adapter` the adapter and the record come back as blobs,
   read from the store). An `install_as` the run made
   before dying is recognized as its own when its files are byte-identical.
+- A run on several cards (`cards`) or servers (`job`) keeps each rank's state apart, in numbered generations every
+  rank commits together (each rank its file, then rank 0's manifest once every rank's is durable), and resumes from
+  the newest one every rank committed. It resumes only on the layout it began on: the same number of ranks, the same
+  ranks on this server and the same `sharding`, since each rank's state is its own shard of the records (and of the
+  optimizer); the same key on another layout is refused naming both (`its run began on 2 rank(s), ranks 0..2 on this
+  server, sharding gradients, and this request asks 1 rank(s), ...`).
 - A key whose job is still running is refused, as is a record or a training state that cannot be read or that
   belongs to another run: nothing is silently restarted; submit under a new key. The training state is removed
   when the run completes; the record stays.
@@ -259,7 +265,7 @@ No dataset or adapter travels through the API as a message body.
 | `strict_updates` | abort at the first optimiser step whose loss or gradient is not finite (default off: such a step is skipped, the weights untouched, and the run aborts on the third in a row) |
 | `max_block` | the longest training row in tokens (default 8192). The memory reserved for the run is sized to it and a longer record is refused by name |
 | `cards` | how many of the server's cards the run trains on at once (default 1, at most the cards the server has). Each card runs one data-parallel rank holding the run's whole footprint and its own share of the records, all with the same `seed` (one is drawn for all of them when the request names none), and every step's gradients are reduced over the cards, so each step sees `cards` times the records of a one-card step. The result is the same document as on one card, from rank 0; the same request trains the same adapter, byte for byte, though not the adapter of a one-card run. Every objective but `feedback`, which is refused by name (see [why](#which-objectives-train-as-ranks)) |
-| `job` | makes the run this server's part of one data-parallel job spread over several servers (below); every objective but `feedback`, with `seed`, without `resume_key` |
+| `job` | makes the run this server's part of one data-parallel job spread over several servers (below); every objective but `feedback`, with `seed` |
 | `thinking`, `pack_answers` | how records are rendered |
 | `base_format` | how the frozen base is held: `bf16`, `fp8`, `nf4`, ...; default the tier that fits the card |
 | `eval_every`, `patience`, `replay_share`, `keep_evaluations` | monitoring and early stopping |
@@ -430,7 +436,17 @@ different machines) by sending each server the same `train` request with a
   "adapter_sha256"}` and publishes nothing; every rank holds the same adapter.
 - `seed` is required (every rank must start from the same initialisation),
   and so is the same `data` on every server, each naming datasets its own store
-  or the call holds. A job does not resume (`resume_key` is refused).
+  or the call holds.
+- With a `resume_key` (sent to every server) each server keeps its own ranks'
+  state in its own artifact store, every `checkpoint_every` steps, as one
+  generation the ranks of every server commit together. After the job failed
+  (a server died, or a run was cancelled, which fails the job on every
+  server), sending every server its same request again resumes the job from
+  the newest generation every rank committed, and it trains the adapter the
+  uninterrupted job trains. A server whose part completed answers its
+  recorded result without joining the job again; a server that completed
+  while another did not record its completion leaves that one to fail at the
+  handshake, and its key must then be replaced on every server.
 - A `train`, `full_train` or `pretrain` run never lands on the CPU backend
   silently. On a server started on the CPU (`--device cpu`, `--backend cpu`) it
   trains there and says so in the server log. Where the CPU would only be the

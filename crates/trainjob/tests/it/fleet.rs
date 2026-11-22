@@ -109,9 +109,6 @@ fn a_job_is_refused_at_the_door_for_a_secret_a_coordinator_or_a_plan_this_server
     let mut no_seed = with_job(params(&first, 2), &plan4, 2, &digest);
     no_seed.as_object_mut().unwrap().remove("seed");
     assert!(refused(no_seed).contains("job needs seed"));
-    let mut resumable = with_job(params(&first, 2), &plan4, 2, &digest);
-    resumable["resume_key"] = json!("k");
-    assert!(refused(resumable).contains("does not resume"));
     let mut huge = params(&first, 2);
     huge["job"] = json!("x".repeat(trainjob::parallel::MAX_JOB_DOCUMENT_BYTES + 1));
     assert!(refused(huge).contains("at most"));
@@ -120,6 +117,60 @@ fn a_job_is_refused_at_the_door_for_a_secret_a_coordinator_or_a_plan_this_server
     let off = run(&none, with_job(params(&none, 2), &plan4, 2, &digest), &[], &Frames::default()).unwrap_err();
     assert!(off.contains("--train-job-secret"), "{off}");
     assert_reservation_returned(&first);
+}
+
+/// A resumable job over two servers stopped part way (one server's run cancelled, which fails the job on both)
+/// resumes when both servers are sent the same requests again: each server continues its own ranks from the newest
+/// generation every rank committed, kept in its own artifact store, and the job trains the uninterrupted job's
+/// adapter, byte for byte. Once complete, each server answers the same requests from its record without joining.
+#[test]
+fn a_stopped_job_over_two_servers_resumes_on_both_to_the_uninterrupted_adapter() {
+    let secret = brain::JobSecret::random();
+    let coordinator = free_address();
+    let first = server("fleet-resume-a", &secret, Some(&coordinator));
+    let second = server("fleet-resume-b", &secret, None);
+    let plan = plan(2, &coordinator, 60_000);
+    let digest = secret.digest_hex();
+    let request = |rig: &Rig, first_rank: usize, key: Option<&str>| {
+        let mut p = with_job(params(rig, 1), &plan, first_rank, &digest);
+        p["steps"] = json!(5);
+        if let Some(key) = key {
+            (p["resume_key"], p["checkpoint_every"]) = (json!(key), json!(1));
+        }
+        p
+    };
+    let both = |a: &dyn Fn() -> Result<Value, String>, b: &(dyn Fn() -> Result<Value, String> + Sync)| {
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(b);
+            let published = a();
+            (published, worker.join().unwrap())
+        })
+    };
+    let outputs = |rig: &Rig, p: Value| run(rig, p, &[], &Frames::default()).map(|o| o.outputs);
+    let (straight, _) = both(&|| outputs(&first, request(&first, 0, None)), &|| outputs(&second, request(&second, 1, None)));
+    let straight = straight.expect("the uninterrupted job");
+
+    // Server A's run is cancelled at its first step: the job fails on both servers.
+    let stop_a = || crate::cards::run_action_observed(&first, trainjob::ACTION, crate::support::invocation(request(&first, 0, Some("fleet")), &[]).unwrap(), true).result.map(|o| o.outputs);
+    let (a, b) = both(&stop_a, &|| outputs(&second, request(&second, 1, Some("fleet"))));
+    assert!(a.is_err() && b.is_err(), "the job stopped on both servers: {a:?} {b:?}");
+    assert_reservation_returned(&first);
+    assert_reservation_returned(&second);
+
+    let (a, b) = both(&|| outputs(&first, request(&first, 0, Some("fleet"))), &|| outputs(&second, request(&second, 1, Some("fleet"))));
+    let (a, b) = (a.expect("server A resumes"), b.expect("server B resumes"));
+    assert_eq!(a["resume"]["state"], "continued", "{a}");
+    assert_eq!(b["resume"], a["resume"], "both servers continued from the same generation: {b}");
+    assert_eq!(a["adapter_sha256"], straight["adapter_sha256"], "the resumed job trains the uninterrupted job's adapter");
+    assert_eq!(b["adapter_sha256"], straight["adapter_sha256"]);
+
+    // Complete: each server answers from its record, alone.
+    let again = outputs(&second, request(&second, 1, Some("fleet"))).expect("server B's recorded answer");
+    assert_eq!((&again["adapter_sha256"], &again["ranks"]), (&b["adapter_sha256"], &json!([1, 1])), "{again}");
+    let again = outputs(&first, request(&first, 0, Some("fleet"))).expect("server A's recorded result");
+    assert_eq!((&again["resume"]["state"], &again["adapter_digest"]), (&json!("completed"), &a["adapter_digest"]), "{again}");
+    assert_reservation_returned(&first);
+    assert_reservation_returned(&second);
 }
 
 /// A full fine-tune (`full_train`) spread over two servers the same way: the plan's sharding is the run's, rank 0's

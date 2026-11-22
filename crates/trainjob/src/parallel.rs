@@ -11,7 +11,8 @@
 //! (`train`'s supervised and policy-gradient objectives, `full_train`):
 //!
 //! * the request fields `cards` and `job` ([`cards_param`], [`job_param`]) read into a [`Spread`], with the
-//!   `job` document checked ([`JobRef`]) and what a spread run needs (a `seed`, no `resume_key` across servers);
+//!   `job` document checked ([`JobRef`]) and what a spread run needs (a `seed`), and the layout a resumable run
+//!   keeps in its record ([`Spread::layout`]);
 //! * the check against the server ([`Spread::admit`]): no more cards than it has, and a `job` only with the
 //!   secret it holds;
 //! * the ranks themselves ([`train_as_ranks`]): this server's ranks of the run, one per claimed card, made in this
@@ -54,7 +55,7 @@ pub fn cards_param(holds: &str, objectives: &str) -> ParamSpec {
 /// `job`: this run as the server's part of one data-parallel job spread over several servers; `plan_sharding`
 /// says what the plan may shard, `needs` what else the request must hold.
 pub fn job_param(plan_sharding: &str, needs: &str) -> ParamSpec {
-    ParamSpec::new("job", ParamType::Str, &format!("JSON document that makes this run part of one data-parallel job spread over several servers: {{\"plan\": PLAN, \"first_rank\": N, \"secret_sha256\": \"<hex>\"}} where PLAN is the job plan every server is given (job, world_size, tp 1, pp 1, dp = world_size, coordinator = the address the server holding rank 0 was started to bind as a job coordinator, handshake_timeout_ms, op_timeout_ms, optional collectives and bucket_mib; {plan_sharding}), this server runs ranks first_rank .. first_rank + cards - 1, and secret_sha256 is the SHA-256 of the job secret this server was started with, never the secret; needs seed, {needs}no resume_key"))
+    ParamSpec::new("job", ParamType::Str, &format!("JSON document that makes this run part of one data-parallel job spread over several servers: {{\"plan\": PLAN, \"first_rank\": N, \"secret_sha256\": \"<hex>\"}} where PLAN is the job plan every server is given (job, world_size, tp 1, pp 1, dp = world_size, coordinator = the address the server holding rank 0 was started to bind as a job coordinator, handshake_timeout_ms, op_timeout_ms, optional collectives and bucket_mib; {plan_sharding}), this server runs ranks first_rank .. first_rank + cards - 1, and secret_sha256 is the SHA-256 of the job secret this server was started with, never the secret; needs seed{needs}; with resume_key every server keeps its own ranks' state and the job resumes when every server is sent the same request again"))
 }
 
 /// This server's part of a job spread over several servers, as the `job` document names it.
@@ -132,19 +133,24 @@ pub struct Spread {
 
 impl Spread {
     /// Reads `action`'s `cards` and `job` fields: the job document checked ([`JobRef::parse`]), and a job holding
-    /// a `seed` (every server's ranks must draw the same initialisation and batch order) and no `resume_key` (a job
-    /// spread over several servers restarts whole).
-    pub fn parse(action: &str, cards: u32, job: Option<&str>, seed: Option<u64>, resume_key: Option<&str>, plan_may_shard: bool) -> Result<Spread, String> {
+    /// a `seed` (every server's ranks must draw the same initialisation and batch order).
+    pub fn parse(action: &str, cards: u32, job: Option<&str>, seed: Option<u64>, plan_may_shard: bool) -> Result<Spread, String> {
         let job = job.map(|text| JobRef::parse(action, text, cards, plan_may_shard)).transpose()?;
-        if job.is_some() {
-            if seed.is_none() {
-                return Err(format!("{action}: job needs seed: every server's ranks must draw the same initialisation and batch order"));
-            }
-            if resume_key.is_some() {
-                return Err(format!("{action}: job does not resume (resume_key): a job spread over several servers restarts whole"));
-            }
+        if job.is_some() && seed.is_none() {
+            return Err(format!("{action}: job needs seed: every server's ranks must draw the same initialisation and batch order"));
         }
         Ok(Spread { cards, job })
+    }
+
+    /// The layout a resumable run keeps in its record ([`crate::runs::Layout`]): the group's ranks, this server's,
+    /// and the `sharding` the request names (or its plan does) for a run that trains as ranks.
+    pub fn layout(&self, sharding: Option<brain::Sharding>) -> crate::runs::Layout {
+        let ranks = match &self.job {
+            Some(job) => job.ranks(self.cards),
+            None => 0..self.cards as usize,
+        };
+        let sharding = sharding.filter(|_| self.ranked()).and_then(|s| serde_json::to_value(s).ok()).and_then(|v| v.as_str().map(str::to_string));
+        crate::runs::Layout { world_size: self.world(), ranks: [ranks.start, ranks.end], sharding }
     }
 
     /// Whether the run trains as ranks: on several cards, or as part of a job.

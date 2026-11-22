@@ -264,11 +264,13 @@ impl Generations {
         let step = match agreed.data.first().copied() {
             Some(s) if s >= 0.0 => s as u32,
             Some(-2.0) => {
+                let newest = committed(&self.dir).ok().and_then(|c| c.first().map(|c| format!("job {:?} over {} ranks", c.job, c.world_size))).unwrap_or_else(|| "another job".to_string());
                 return Err(io::Error::other(format!(
-                    "{} holds generations of another job, plan or world (the newest names {:?}); refusing to start over them",
+                    "{} holds generations of another job, plan or world ({newest}; this run is job {:?} over {} ranks); refusing to start over them",
                     self.dir.display(),
-                    committed(&self.dir).ok().and_then(|c| c.first().map(|c| (c.job.clone(), c.world_size)))
-                )))
+                    self.job,
+                    self.world
+                )));
             }
             _ => return Ok(None),
         };

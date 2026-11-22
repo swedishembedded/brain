@@ -81,16 +81,49 @@ fn full_fine_tune_cards_and_sharding_are_refused_at_the_door_with_the_reason() {
     int8["train_precision"] = json!("state=int8");
     let int8 = refused(int8);
     assert!(int8.contains("f32 AdamW"), "a precision the sharded optimizer does not hold is refused at the door: {int8}");
-    let mut resumable = params(&rig, 2, None);
-    resumable["resume_key"] = json!("two");
-    assert!(refused(resumable).contains("resume_key"), "a full fine-tune on several cards does not resume");
-
     // What a check answers names the sharding and what each card is charged.
     let mut check = params(&rig, 2, Some("gradients"));
     check["validate_only"] = json!(true);
     let valid = run_action(&rig, FULL_ACTION, &full_spec(), check, &[], &Frames::default()).expect("the check").outputs;
     assert_eq!((&valid["cards"], &valid["sharding"]), (&json!(2), &json!("gradients")), "{valid}");
     assert_eq!(valid["device_bytes"], rank_bytes(&rig, brain::Sharding::Gradients, 2));
+    assert!(work_is_clean(&rig.work_root));
+    assert_reservation_returned(&rig);
+}
+
+/// A resumable full fine-tune on two cards stopped part way continues on the same two cards, under each sharding of
+/// the optimizer state, to the weights the uninterrupted run writes, byte for byte, and keeps no state of any rank
+/// once complete; the same key on another layout is refused with both layouts' numbers.
+#[test]
+fn a_stopped_full_fine_tune_on_two_cards_resumes_to_the_uninterrupted_weights() {
+    let rig = rig_qwen3_on("full-cards-resume", 16 << 30, &[0, 1], false);
+    for sharding in ["replicated", "gradients"] {
+        let mut straight = params(&rig, 2, Some(sharding));
+        straight["steps"] = json!(4);
+        let straight = run_action(&rig, FULL_ACTION, &full_spec(), straight.clone(), &[], &Frames::default()).expect("the straight run").outputs;
+        let mut keyed = params(&rig, 2, Some(sharding));
+        keyed["steps"] = json!(4);
+        keyed["resume_key"] = json!(format!("two-{sharding}"));
+        keyed["checkpoint_every"] = json!(1);
+        let stopped = run_action_observed(&rig, FULL_ACTION, invocation(keyed.clone()), true);
+        assert_eq!(stopped.result.unwrap_err(), "cancelled");
+        assert_reservation_returned(&rig);
+
+        let mut elsewhere = keyed.clone();
+        elsewhere["cards"] = json!(1);
+        elsewhere.as_object_mut().unwrap().remove("sharding");
+        let refused = run_action(&rig, FULL_ACTION, &full_spec(), elsewhere, &[], &Frames::default()).unwrap_err();
+        assert!(refused.contains(&format!("began on 2 rank(s), ranks 0..2 on this server, sharding {sharding}")) && refused.contains("asks 1 rank(s)"), "{refused}");
+
+        let resumed = run_action(&rig, FULL_ACTION, &full_spec(), keyed, &[], &Frames::default()).expect("the resumed run").outputs;
+        assert_eq!(resumed["resume"]["state"], "continued", "{sharding}: {resumed}");
+        assert!(resumed["resume"]["resumed_at"].as_u64().is_some_and(|at| at >= 1), "{resumed}");
+        assert_eq!(resumed["weights_sha256"], straight["weights_sha256"], "{sharding}: the resumed run writes the uninterrupted run's weights");
+        assert_eq!(resumed["parallel"]["sharding"], json!(sharding));
+    }
+    let runs = rig.store.root().join(trainjob::runs::RUNS_DIR);
+    let left: Vec<String> = std::fs::read_dir(&runs).unwrap().flatten().flat_map(|run| std::fs::read_dir(run.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned())).filter(|name| name != "run.json" && name != "lock").collect();
+    assert!(left.is_empty(), "a completed run keeps no training state of any rank: {left:?}");
     assert!(work_is_clean(&rig.work_root));
     assert_reservation_returned(&rig);
 }

@@ -1069,9 +1069,8 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         footprint, report `parallel`, repeatable weights, door refusals),
         `fleet` (full fine-tune over two servers equals two cards of one,
         byte for byte), `sdk` `full_finetune::tests` (the rule, the model).
-        On n442: Qwen3-4B on 4 cards, ZeRO-2 (Measured). Open: a full
-        fine-tune on several cards does not resume (`resume_key` refused);
-        the optimizer and gradient stages spare no card memory below a
+        On n442: Qwen3-4B on 4 cards, ZeRO-2 (Measured). It resumes on
+        several cards since 2026-11-22 (below). Open: the optimizer and gradient stages spare no card memory below a
         replica (ZeRO-2 gradient memory, below), so the rule only ever moves
         from replicated to parameters; `feedback` (KTO) estimates its
         reference point over the step's batch and stays on one card
@@ -1122,10 +1121,45 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         train the adapter one server's four cards train, byte for byte; a
         server whose peers never join fails within the handshake and
         returns its cards; door refusals), `api_conformance.bats` (no
-        secret, oversized document, startup flags). Open: a resumable job
-        across servers (each server's state is local, the C8 commit needs
-        every rank's file; a shared store or per-server commit is
-        needed); the orchestrator's side lives outside brain.
+        secret, oversized document, startup flags). The orchestrator's side
+        lives outside brain.
+      - [x] Resume across cards and servers (2026-11-22): a served `train`
+        or `full_train` with `resume_key` on several cards or as a `job`
+        resumes exactly. No new file layout: the C8 generations already
+        keep each rank's file and manifest under its own state path
+        (`<store>/.runs/<key>/state.safetensors.job/rank<r>`, so each
+        server's ranks live in its own store), rank 0's job manifest is
+        written once every rank voted its file durable, and a restart
+        resumes from the generation rank 0 broadcasts after each rank
+        verified its own file. What was missing was the served side: the
+        refusals (`full_train` cards > 1, any `job`) are gone; a server
+        without rank 0 records its answer as the run's result
+        (`Run::finish`), so a completed part answers a resubmission
+        without joining; the ranked `full_train` took the request's seed
+        over the run's recorded one (fixed). A run resumes only on the
+        layout it began on: the record keeps a `Layout` (world size, this
+        server's ranks, the named sharding) and another layout is refused
+        naming both; the fit loop's own refusals name the numbers too
+        (another world's generations: both jobs and world sizes; a state of
+        another group: both world sizes; other options: each differing
+        setting saved and now). Resharding onto another world is not
+        offered: each rank's state holds its stream position, and with
+        another world size the next steps cover other records, so no
+        resumed run could equal an uninterrupted one. Tests: `trainjob`
+        `full_cards`
+        `a_stopped_full_fine_tune_on_two_cards_resumes_to_the_uninterrupted_weights`
+        (replicated and ZeRO-2, cancelled after a commit, weights
+        byte-identical, no state left, cards 1 refused with both layouts),
+        `fleet`
+        `a_stopped_job_over_two_servers_resumes_on_both_to_the_uninterrupted_adapter`
+        (one server's cancel fails the job on both; both resume from the
+        same generation to the uninterrupted adapter; a completed part
+        answers alone), `runs` `a_run_is_refused_on_another_layout_with_both_layouts`.
+        Open: a server whose part completed while another server's did not
+        record its completion leaves that one failing at the handshake on
+        a resubmission (a new key on every server is the way out);
+        parameter-sharded (ZeRO-3) served runs resume through the same
+        generations but have no served test yet.
 - [x] **C3 sharded training.** Optimizer state and gradient sharding over the dp
       group (reduce-scatter + all-gather), then parameter sharding; tensor
       parallelism inside a node over NVLink, sharded data parallelism across
@@ -1456,11 +1490,10 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
       full fine-tune (`model::resident_ft`) keeps its linears' gradients
       outside the store and still reduces through the host star; the payload
       ops (`Collective::all_reduce` and friends) stay on the host transport.
-- [ ] Wire the commit into a trainer: rank 0 writes the weights and the
-      exact-resume state, calls `CheckpointCommit::build`/`write`, and the
-      driver resumes from `CheckpointCommit::latest` after verifying it.
-      Replicas are bit-identical, so one writer is enough until tensor
-      parallelism shards the weights.
+- [x] Wire the commit into a trainer: the fit loop's committed generations
+      (C8, `model::jobfault::Generations`) are every distributed trainer's
+      exact-resume state, and the served `train` and `full_train` resume
+      through them on several cards and servers (C2, 2026-11-22).
 - [ ] Ring/tree all-reduce for worlds where the coordinator star's bandwidth
       matters (sealing runs at about 1.3 GB/s per connection, so a ring also
       spreads the encryption over every rank's cores), and cross-rank validation of every op on the worker side (the
