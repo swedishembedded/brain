@@ -59,6 +59,9 @@ pub struct ProjectorConfig {
     pub n_embed: u32,
     /// The last linear's output width: `n_embed` for an aligner.
     pub out_dim: u32,
+    /// Whether every linear carries a bias. A checkpoint without them (Inkling 2's merger) says `false` here instead
+    /// of feeding zero biases: the parameter list, the forward and the backward then have no bias at all.
+    pub bias: bool,
 }
 
 impl ProjectorConfig {
@@ -75,7 +78,7 @@ impl ProjectorConfig {
         if kind == ProjectorKind::HybridSplit && !n_embed.is_multiple_of(2) {
             return Err(format!("a hybrid split projector needs an even n_embed, got {n_embed}"));
         }
-        Ok(ProjectorConfig { kind, depth, input_dim, n_embed, out_dim: n_embed })
+        Ok(ProjectorConfig { kind, depth, input_dim, n_embed, out_dim: n_embed, bias: true })
     }
 
     /// The same stack with its last linear producing `out_dim` columns. A
@@ -86,6 +89,11 @@ impl ProjectorConfig {
             return Err(format!("a one-linear hybrid split projector outputs its two {}-wide halves, not {out_dim} columns", self.n_embed / 2));
         }
         Ok(ProjectorConfig { out_dim, ..self })
+    }
+
+    /// The same stack with no bias on any linear.
+    pub fn without_bias(self) -> ProjectorConfig {
+        ProjectorConfig { bias: false, ..self }
     }
 
     /// Linear `k`'s output width: `out_dim` for the last, `n_embed` before.
@@ -107,18 +115,23 @@ impl ProjectorConfig {
 
     /// Every parameter as `(name, element count)`: `in.{weight,bias}` (or
     /// `in_high.*` and `in_low.*`), then `layers.{k}.{weight,bias}` for the
-    /// linears after each GELU, `k` from 1. Weights are `[out, in]`.
+    /// linears after each GELU, `k` from 1. Weights are `[out, in]`; a
+    /// [`Self::without_bias`] stack lists the weights only.
     pub fn param_list(&self) -> Vec<(String, usize)> {
         let (i, e) = (self.input_dim as usize, self.n_embed as usize);
         let mut out = Vec::new();
         for (name, o) in self.input_linears() {
             out.push((format!("{name}.weight"), o as usize * i));
-            out.push((format!("{name}.bias"), o as usize));
+            if self.bias {
+                out.push((format!("{name}.bias"), o as usize));
+            }
         }
         for k in 1..self.depth {
             let o = self.width(k) as usize;
             out.push((format!("layers.{k}.weight"), o * e));
-            out.push((format!("layers.{k}.bias"), o));
+            if self.bias {
+                out.push((format!("layers.{k}.bias"), o));
+            }
         }
         out
     }
@@ -130,11 +143,13 @@ impl ProjectorConfig {
 }
 
 /// `x [rows, in] · W [out, in]ᵀ + b` on the host.
-fn linear_host(x: &[f32], w: &[f32], b: &[f32], rows: usize, inn: usize, out: usize) -> Vec<f32> {
+fn linear_host(x: &[f32], w: &[f32], b: Option<&[f32]>, rows: usize, inn: usize, out: usize) -> Vec<f32> {
     let mut y = crate::hostmath::linear_rows(x, w, rows, inn, out);
-    for r in 0..rows {
-        for (v, bias) in y[r * out..(r + 1) * out].iter_mut().zip(b) {
-            *v += bias;
+    if let Some(b) = b {
+        for r in 0..rows {
+            for (v, bias) in y[r * out..(r + 1) * out].iter_mut().zip(b) {
+                *v += bias;
+            }
         }
     }
     y
@@ -149,7 +164,7 @@ pub fn forward_host(cfg: &ProjectorConfig, weights: &HashMap<String, Vec<f32>>, 
         .input_linears()
         .iter()
         .zip(inputs)
-        .map(|((name, o), x)| linear_host(x, &weights[&format!("{name}.weight")], &weights[&format!("{name}.bias")], rows, i, *o as usize))
+        .map(|((name, o), x)| linear_host(x, &weights[&format!("{name}.weight")], cfg.bias.then(|| weights[&format!("{name}.bias")].as_slice()), rows, i, *o as usize))
         .collect();
     let mut h: Vec<f32> = if parts.len() == 1 {
         parts.into_iter().next().expect("one part")
@@ -159,7 +174,7 @@ pub fn forward_host(cfg: &ProjectorConfig, weights: &HashMap<String, Vec<f32>>, 
     };
     for k in 1..cfg.depth {
         let g: Vec<f32> = h.iter().map(|&v| crate::hostmath::gelu_exact(v)).collect();
-        h = linear_host(&g, &weights[&format!("layers.{k}.weight")], &weights[&format!("layers.{k}.bias")], rows, e, cfg.width(k) as usize);
+        h = linear_host(&g, &weights[&format!("layers.{k}.weight")], cfg.bias.then(|| weights[&format!("layers.{k}.bias")].as_slice()), rows, e, cfg.width(k) as usize);
     }
     h
 }
@@ -176,7 +191,7 @@ impl HostProjector {
     /// LLaVA's and FastVLM's `mlp2x_gelu` from its two linears
     /// (`[n_embed, input_dim]` then `[n_embed, n_embed]`, torch layout).
     pub fn mlp2x(fc1_w: Vec<f32>, fc1_b: Vec<f32>, fc2_w: Vec<f32>, fc2_b: Vec<f32>, input_dim: usize, n_embed: usize) -> HostProjector {
-        let cfg = ProjectorConfig { kind: ProjectorKind::Mlp, depth: 2, input_dim: input_dim as u32, n_embed: n_embed as u32, out_dim: n_embed as u32 };
+        let cfg = ProjectorConfig { kind: ProjectorKind::Mlp, depth: 2, input_dim: input_dim as u32, n_embed: n_embed as u32, out_dim: n_embed as u32, bias: true };
         let weights = HashMap::from([
             ("in.weight".to_string(), fc1_w),
             ("in.bias".to_string(), fc1_b),
@@ -235,14 +250,18 @@ impl Ids {
     }
 }
 
-/// The projector on the device for `rows` feature rows: parameters with
-/// their gradients, and the activations its backward reads.
+/// The projector on the device with room for `capacity` feature rows: parameters with their gradients, and the
+/// activations its backward reads. Every dispatch takes the row count of the call (at most the capacity), so one
+/// resident projector serves any batch without re-uploading its weights.
 pub struct MlpProjector {
     pub cfg: ProjectorConfig,
-    rows: u32,
+    capacity: u32,
     ids: Ids,
     params: HashMap<String, DeviceBuffer>,
+    /// A weight's gradient buffer, when it has one: a weight without one is differentiated THROUGH only.
     grads: HashMap<String, DeviceBuffer>,
+    /// Whether the backward scratch exists, so [`Self::backward`] can run (input gradients at least).
+    can_backward: bool,
     /// The hybrid split's two half-width projections.
     halves: Vec<DeviceBuffer>,
     /// `pre[k]` is the input to GELU `k` (the output of linear `k - 1`);
@@ -270,7 +289,6 @@ impl MlpProjector {
     }
 
     fn build(gpu: &Gpu, cfg: ProjectorConfig, rows: u32, weights: &HashMap<String, Vec<f32>>, trainable: bool) -> Result<MlpProjector, String> {
-        let ids = Ids::resolve(gpu, cfg.kind)?;
         let mut params = HashMap::new();
         let mut grads = HashMap::new();
         for (name, n) in cfg.param_list() {
@@ -283,28 +301,60 @@ impl MlpProjector {
                 grads.insert(name, gpu.storage(n as u64));
             }
         }
-        let e = (rows * cfg.n_embed) as u64;
-        // A frozen build's backward scratch is a placeholder word.
-        let scratch = |n: u64| gpu.storage(if trainable { n } else { 1 });
+        Self::with_buffers(gpu, cfg, rows, params, grads, trainable)
+    }
+
+    /// A projector over buffers the caller owns (a parameter store's), `capacity` rows wide. `grads` may be empty or
+    /// hold only some weights: a weight with no gradient buffer is not differentiated, and `backward` is `true` for a
+    /// projector whose backward runs at all (for input gradients alone when `grads` is empty).
+    pub fn with_buffers(gpu: &Gpu, cfg: ProjectorConfig, capacity: u32, params: HashMap<String, DeviceBuffer>, grads: HashMap<String, DeviceBuffer>, backward: bool) -> Result<MlpProjector, String> {
+        let ids = Ids::resolve(gpu, cfg.kind)?;
+        for (name, _) in cfg.param_list() {
+            if !params.contains_key(&name) {
+                return Err(format!("projector: missing {name}"));
+            }
+        }
+        if let Some(extra) = grads.keys().find(|n| !params.contains_key(*n)) {
+            return Err(format!("projector: a gradient buffer for {extra}, which is not a parameter"));
+        }
+        Ok(Self::assemble(gpu, cfg, capacity, ids, params, grads, backward))
+    }
+
+    fn assemble(gpu: &Gpu, cfg: ProjectorConfig, capacity: u32, ids: Ids, params: HashMap<String, DeviceBuffer>, grads: HashMap<String, DeviceBuffer>, can_backward: bool) -> MlpProjector {
+        let e = u64::from(capacity) * u64::from(cfg.n_embed);
+        // A forward-only build's backward scratch is a placeholder word.
+        let scratch = |n: u64| gpu.storage(if can_backward { n } else { 1 });
         let halves = if cfg.kind == ProjectorKind::HybridSplit { vec![gpu.storage(e / 2), gpu.storage(e / 2)] } else { Vec::new() };
         let layer = |_| gpu.storage(e);
-        Ok(MlpProjector {
+        MlpProjector {
             cfg,
-            rows,
+            capacity,
             ids,
             params,
             grads,
+            can_backward,
             halves,
             pre: (0..cfg.depth).map(layer).collect(),
             post: (0..cfg.depth).map(layer).collect(),
-            out: gpu.storage((rows * cfg.out_dim) as u64),
+            out: gpu.storage(u64::from(capacity) * u64::from(cfg.out_dim)),
             d_a: scratch(e),
             d_b: scratch(e),
             d_half: scratch(e / 2),
-        })
+        }
     }
 
-    /// The `[rows, out_dim]` output buffer [`Self::forward`] writes.
+    /// The same projector with room for `capacity` rows: the parameter and gradient buffers are SHARED with `self`
+    /// (nothing is uploaded again), only the activations are new.
+    pub fn resized(&self, gpu: &Gpu, capacity: u32) -> MlpProjector {
+        Self::assemble(gpu, self.cfg, capacity, self.ids, self.params.clone(), self.grads.clone(), self.can_backward)
+    }
+
+    /// The most feature rows one call takes.
+    pub fn capacity(&self) -> u32 {
+        self.capacity
+    }
+
+    /// The `[capacity, out_dim]` output buffer [`Self::forward`] writes (its first `rows` rows are the result).
     pub fn out(&self) -> &DeviceBuffer {
         &self.out
     }
@@ -329,26 +379,33 @@ impl MlpProjector {
         }
     }
 
-    fn linear(&self, g: &Gpu, x: &DeviceBuffer, name: &str, y: &DeviceBuffer, inn: u32, out: u32) -> [Step; 2] {
-        let (m, id) = (self.rows, &self.ids);
-        [
-            g.step(id.matmul, &[x, &self.params[&format!("{name}.weight")], y], &[m, inn, out], m * out),
-            g.step(id.bias_add, &[y, &self.params[&format!("{name}.bias")]], &[m, out], m * out),
-        ]
+    fn linear(&self, g: &Gpu, x: &DeviceBuffer, name: &str, y: &DeviceBuffer, (m, inn, out): (u32, u32, u32)) -> Vec<Step> {
+        let id = &self.ids;
+        let mut s = vec![g.step(id.matmul, &[x, &self.params[&format!("{name}.weight")], y], &[m, inn, out], m * out)];
+        if self.cfg.bias {
+            s.push(g.step(id.bias_add, &[y, &self.params[&format!("{name}.bias")]], &[m, out], m * out));
+        }
+        s
     }
 
-    /// The forward over `inputs` (`[rows, input_dim]` each: one stream, or
-    /// high and low for the hybrid split) into [`Self::out`].
+    /// The forward over `inputs` (`[capacity, input_dim]` each: one stream, or
+    /// high and low for the hybrid split) into [`Self::out`], for every row of the capacity.
     pub fn forward(&self, g: &Gpu, inputs: &[&DeviceBuffer]) -> Vec<Step> {
+        self.forward_rows(g, inputs, self.capacity)
+    }
+
+    /// [`Self::forward`] over the first `rows` rows of the inputs, `rows` at most the capacity.
+    pub fn forward_rows(&self, g: &Gpu, inputs: &[&DeviceBuffer], rows: u32) -> Vec<Step> {
         assert_eq!(inputs.len(), self.cfg.inputs(), "projector: {} input stream(s) expected", self.cfg.inputs());
-        let (m, i, e) = (self.rows, self.cfg.input_dim, self.cfg.n_embed);
+        assert!(rows <= self.capacity, "projector: {rows} rows exceed the capacity {}", self.capacity);
+        let (m, i, e) = (rows, self.cfg.input_dim, self.cfg.n_embed);
         let first = self.linear_out(0);
         let mut s = Vec::new();
         match self.cfg.kind {
-            ProjectorKind::Mlp => s.extend(self.linear(g, inputs[0], "in", first, i, self.cfg.width(0))),
+            ProjectorKind::Mlp => s.extend(self.linear(g, inputs[0], "in", first, (m, i, self.cfg.width(0)))),
             ProjectorKind::HybridSplit => {
-                s.extend(self.linear(g, inputs[0], "in_high", &self.halves[0], i, e / 2));
-                s.extend(self.linear(g, inputs[1], "in_low", &self.halves[1], i, e / 2));
+                s.extend(self.linear(g, inputs[0], "in_high", &self.halves[0], (m, i, e / 2)));
+                s.extend(self.linear(g, inputs[1], "in_low", &self.halves[1], (m, i, e / 2)));
                 let concat2 = self.ids.concat2.expect("resolved for the hybrid split");
                 s.push(g.step(concat2, &[&self.halves[0], &self.halves[1], first], &[m, e / 2, e / 2, 1, 1], m * e));
             }
@@ -356,7 +413,7 @@ impl MlpProjector {
         for k in 1..self.cfg.depth {
             let (pre, post) = (&self.pre[k as usize], &self.post[k as usize]);
             s.push(g.step(self.ids.gelu, &[pre, post], &[m * e], m * e));
-            s.extend(self.linear(g, post, &format!("layers.{k}"), self.linear_out(k), e, self.cfg.width(k)));
+            s.extend(self.linear(g, post, &format!("layers.{k}"), self.linear_out(k), (m, e, self.cfg.width(k))));
         }
         s
     }
@@ -364,31 +421,43 @@ impl MlpProjector {
     /// Zero every parameter gradient.
     pub fn zero_grads(&self, g: &Gpu) {
         for (name, n) in self.cfg.param_list() {
-            g.write_f32(&self.grads[&name], &vec![0.0f32; n]);
+            if let Some(buf) = self.grads.get(&name) {
+                g.write_f32(buf, &vec![0.0f32; n]);
+            }
         }
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn linear_bwd(&self, g: &Gpu, id: &BwdIds, s: &mut Vec<Step>, dy: &DeviceBuffer, x: &DeviceBuffer, name: &str, dx: Option<&DeviceBuffer>, inn: u32, out: u32) {
-        let m = self.rows;
-        s.push(g.step(id.matmul_dw, &[dy, x, &self.grads[&format!("{name}.weight")]], &[m, inn, out], out * inn));
-        s.push(g.step(id.bias_grad, &[dy, &self.grads[&format!("{name}.bias")]], &[m, out], out));
+    fn linear_bwd(&self, g: &Gpu, id: &BwdIds, s: &mut Vec<Step>, dy: &DeviceBuffer, x: &DeviceBuffer, name: &str, dx: Option<&DeviceBuffer>, (m, inn, out): (u32, u32, u32)) {
+        if let Some(gw) = self.grads.get(&format!("{name}.weight")) {
+            s.push(g.step(id.matmul_dw, &[dy, x, gw], &[m, inn, out], out * inn));
+        }
+        if let Some(gb) = self.grads.get(&format!("{name}.bias")) {
+            s.push(g.step(id.bias_grad, &[dy, gb], &[m, out], out));
+        }
         if let Some(dx) = dx {
             s.push(g.step(id.matmul_dx, &[dy, &self.params[&format!("{name}.weight")], dx], &[m, inn, out, 0], m * inn));
         }
     }
 
     /// The backward of the last [`Self::forward`] for the output gradient
-    /// `d_out` (`[rows, out_dim]`): accumulates every parameter gradient and,
-    /// when `d_inputs` is given (one buffer per input stream), writes the
-    /// input gradients there. `inputs` are the forward's own inputs.
+    /// `d_out` (`[capacity, out_dim]`): accumulates every parameter gradient
+    /// that has a buffer and, when `d_inputs` is given (one buffer per input
+    /// stream), writes the input gradients there. `inputs` are the forward's
+    /// own inputs.
     ///
     /// # Panics
-    /// On a device that does not register the backward's kernels.
+    /// On a projector built frozen, or on a device that does not register the backward's kernels.
     pub fn backward(&self, g: &Gpu, inputs: &[&DeviceBuffer], d_out: &DeviceBuffer, d_inputs: Option<&[&DeviceBuffer]>) -> Vec<Step> {
-        assert!(!self.grads.is_empty(), "projector backward: this projector was built frozen (MlpProjector::new_frozen)");
-        let id = self.ids.bwd.as_ref().expect("projector backward: the device does not register the backward kernels (see PROJECTOR_PIPELINES)");
-        let (m, i, e) = (self.rows, self.cfg.input_dim, self.cfg.n_embed);
+        self.backward_rows(g, inputs, d_out, d_inputs, self.capacity)
+    }
+
+    /// [`Self::backward`] of a [`Self::forward_rows`] over the same `rows`.
+    pub fn backward_rows(&self, g: &Gpu, inputs: &[&DeviceBuffer], d_out: &DeviceBuffer, d_inputs: Option<&[&DeviceBuffer]>, rows: u32) -> Vec<Step> {
+        assert!(self.can_backward, "projector backward: this projector was built frozen (MlpProjector::new_frozen)");
+        assert!(rows <= self.capacity, "projector: {rows} rows exceed the capacity {}", self.capacity);
+        let id = self.ids.bwd.as_ref().expect("projector backward: the device does not register the backward's kernels (see PROJECTOR_PIPELINES)");
+        let (m, i, e) = (rows, self.cfg.input_dim, self.cfg.n_embed);
         let mut s = Vec::new();
         // `dy` is the gradient at linear k's output, ping-ponged between two
         // scratch buffers on the way down.
@@ -396,17 +465,17 @@ impl MlpProjector {
         for k in (1..self.cfg.depth).rev() {
             let (pre, post) = (&self.pre[k as usize], &self.post[k as usize]);
             let d_post = if std::ptr::eq(dy, &self.d_a) { &self.d_b } else { &self.d_a };
-            self.linear_bwd(g, id, &mut s, dy, post, &format!("layers.{k}"), Some(d_post), e, self.cfg.width(k));
+            self.linear_bwd(g, id, &mut s, dy, post, &format!("layers.{k}"), Some(d_post), (m, e, self.cfg.width(k)));
             let d_pre = if std::ptr::eq(d_post, &self.d_a) { &self.d_b } else { &self.d_a };
             s.push(g.step(id.gelu_bwd, &[pre, d_post, d_pre], &[m * e], m * e));
             dy = d_pre;
         }
         match self.cfg.kind {
-            ProjectorKind::Mlp => self.linear_bwd(g, id, &mut s, dy, inputs[0], "in", d_inputs.map(|d| d[0]), i, self.cfg.width(0)),
+            ProjectorKind::Mlp => self.linear_bwd(g, id, &mut s, dy, inputs[0], "in", d_inputs.map(|d| d[0]), (m, i, self.cfg.width(0))),
             ProjectorKind::HybridSplit => {
                 for (half, name) in [(0u32, "in_high"), (1, "in_low")] {
                     s.push(g.step(id.concat_split, &[dy, &self.d_half], &[m, e, e / 2, half * (e / 2), 1, 1], m * (e / 2)));
-                    self.linear_bwd(g, id, &mut s, &self.d_half, inputs[half as usize], name, d_inputs.map(|d| d[half as usize]), i, e / 2);
+                    self.linear_bwd(g, id, &mut s, &self.d_half, inputs[half as usize], name, d_inputs.map(|d| d[half as usize]), (m, i, e / 2));
                 }
             }
         }

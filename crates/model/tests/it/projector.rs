@@ -14,7 +14,7 @@ use model::projector::{forward_host, MlpProjector, ProjectorConfig, PROJECTOR_PI
 
 const ROWS: usize = 3;
 
-fn configs() -> [ProjectorConfig; 4] {
+fn configs() -> [ProjectorConfig; 6] {
     [
         ProjectorConfig::from_type("mlp_gelu", 2, 6, 8).unwrap(),
         // Janus-Pro's generation head: the last linear widens to the image
@@ -22,6 +22,9 @@ fn configs() -> [ProjectorConfig; 4] {
         ProjectorConfig::from_type("mlp_gelu", 2, 6, 8).unwrap().with_out_dim(11).unwrap(),
         ProjectorConfig::from_type("mlp_gelu", 3, 6, 8).unwrap(),
         ProjectorConfig::from_type("low_high_hybrid_split_mlp_gelu", 2, 6, 8).unwrap(),
+        // A checkpoint without biases (Inkling 2's merger): no bias parameter exists, none is fed.
+        ProjectorConfig::from_type("mlp2x_gelu", 2, 6, 8).unwrap().without_bias(),
+        ProjectorConfig::from_type("low_high_hybrid_split_mlp_gelu", 2, 6, 8).unwrap().without_bias(),
     ]
 }
 
@@ -116,4 +119,64 @@ fn a_frozen_projector_forwards_the_same_and_refuses_backward() {
     let d_out = g.storage(ROWS as u64 * 8);
     let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| frozen.backward(&g, &refs, &d_out, None)));
     assert!(refused.is_err(), "a frozen projector has no gradients to accumulate");
+}
+
+/// A bias-free stack lists weights only, and a projector sized for more rows than a call uses gives that call's rows
+/// the result (and gradients) of an exactly sized one: the resident projector of a serving tower.
+#[test]
+fn a_bias_free_projector_has_no_bias_and_a_capacity_projector_serves_fewer_rows() {
+    let cfg = ProjectorConfig::from_type("mlp2x_gelu", 2, 6, 8).unwrap().without_bias();
+    let names: Vec<String> = cfg.param_list().into_iter().map(|(n, _)| n).collect();
+    assert_eq!(names, ["in.weight", "layers.1.weight"]);
+
+    let g = gpu_core::testgpu::dev(PROJECTOR_PIPELINES);
+    let mut rng = Rng::new(random_seed());
+    let weights: HashMap<String, Vec<f32>> = cfg.param_list().into_iter().map(|(n, len)| (n, random(len, &mut rng))).collect();
+    let (exact, roomy) = (MlpProjector::new(&g, cfg, ROWS as u32, &weights).unwrap(), MlpProjector::new(&g, cfg, 3 * ROWS as u32, &weights).unwrap());
+    assert_eq!(roomy.capacity(), 3 * ROWS as u32);
+    let x = random(ROWS * 6, &mut rng);
+    let mut padded = x.clone();
+    padded.extend(random(2 * ROWS * 6, &mut rng));
+    let (x_exact, x_roomy) = (g.storage_init("x", &x), g.storage_init("x", &padded));
+    g.submit(&[], &exact.forward(&g, &[&x_exact]));
+    g.submit(&[], &roomy.forward_rows(&g, &[&x_roomy], ROWS as u32));
+    let n = ROWS * 8;
+    assert_eq!(g.read(roomy.out(), n), g.read(exact.out(), n), "the first rows of a roomy projector are the exact one's");
+
+    let dir = random(n, &mut rng);
+    let (d_exact, d_roomy) = (g.storage_init("d", &dir), g.storage_init("d", &dir));
+    let (di_exact, di_roomy) = (g.storage(x.len() as u64), g.storage(padded.len() as u64));
+    g.submit(&[], &exact.backward(&g, &[&x_exact], &d_exact, Some(&[&di_exact])));
+    g.submit(&[], &roomy.backward_rows(&g, &[&x_roomy], &d_roomy, Some(&[&di_roomy]), ROWS as u32));
+    for (name, len) in cfg.param_list() {
+        assert_eq!(g.read(roomy.grad(&name), len), g.read(exact.grad(&name), len), "{name} gradient");
+    }
+    assert_eq!(g.read(&di_roomy, x.len()), g.read(&di_exact, x.len()), "input gradient");
+
+    // `resized` shares the parameters: an update through the original is seen by the copy, nothing is re-uploaded.
+    let shared = exact.resized(&g, 2 * ROWS as u32);
+    g.write_f32(exact.param("in.weight"), &vec![0.0; weights["in.weight"].len()]);
+    g.submit(&[], &shared.forward_rows(&g, &[&x_roomy], ROWS as u32));
+    assert!(g.read(shared.out(), n).iter().all(|v| *v == 0.0), "a zero first layer gives a zero output");
+}
+
+/// A projector whose weights have no gradient buffers still passes the gradient to its input (a frozen merger in
+/// front of a trained decoder) and accumulates nothing.
+#[test]
+fn a_projector_over_frozen_weights_differentiates_through() {
+    let g = gpu_core::testgpu::dev(PROJECTOR_PIPELINES);
+    let cfg = ProjectorConfig::from_type("mlp2x_gelu", 2, 6, 8).unwrap().without_bias();
+    let mut rng = Rng::new(random_seed());
+    let weights: HashMap<String, Vec<f32>> = cfg.param_list().into_iter().map(|(n, len)| (n, random(len, &mut rng))).collect();
+    let live = MlpProjector::new(&g, cfg, ROWS as u32, &weights).unwrap();
+    let params = cfg.param_list().into_iter().map(|(n, _)| (n.clone(), live.param(&n).clone())).collect();
+    let through = MlpProjector::with_buffers(&g, cfg, ROWS as u32, params, HashMap::new(), true).unwrap();
+    let x = g.storage_init("x", &random(ROWS * 6, &mut rng));
+    let d_out = g.storage_init("d", &random(ROWS * 8, &mut rng));
+    let (a, b) = (g.storage(ROWS as u64 * 6), g.storage(ROWS as u64 * 6));
+    g.submit(&[], &live.forward(&g, &[&x]));
+    g.submit(&[], &through.forward(&g, &[&x]));
+    g.submit(&[], &live.backward(&g, &[&x], &d_out, Some(&[&a])));
+    g.submit(&[], &through.backward(&g, &[&x], &d_out, Some(&[&b])));
+    assert_eq!(g.read(&a, ROWS * 6), g.read(&b, ROWS * 6));
 }

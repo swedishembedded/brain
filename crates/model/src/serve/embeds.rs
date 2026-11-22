@@ -209,6 +209,29 @@ impl PromptEmbeds {
         self.next_at_or_after(from).is_some_and(|p| p < to)
     }
 
+    /// The splice's backward: the decoder's gradient with respect to the embeddings of the whole prompt
+    /// (`d_embeddings`, `[prompt_len, width]`) holds, at these rows' positions, the gradient with respect to the rows
+    /// themselves (a vision tower's features). Returns those gradients in row order and zeroes them in
+    /// `d_embeddings`, so the token-embedding backward does not add them to the placeholder token's own row, which
+    /// these positions never read. Refuses a gradient that is not whole rows of [`Self::width`] or that does not
+    /// reach a row's position.
+    pub fn take_row_gradients(&self, d_embeddings: &mut [f32]) -> Result<Vec<f32>, String> {
+        if !d_embeddings.len().is_multiple_of(self.width) {
+            return Err(format!("{} gradient values are not whole rows of width {}", d_embeddings.len(), self.width));
+        }
+        let prompt_len = d_embeddings.len() / self.width;
+        if let Some(&last) = self.positions.last().filter(|&&p| p as usize >= prompt_len) {
+            return Err(format!("a row stands at position {last}, the gradient covers {prompt_len} prompt positions"));
+        }
+        let mut out = Vec::with_capacity(self.rows.len());
+        for &p in &self.positions {
+            let at = p as usize * self.width;
+            out.extend_from_slice(&d_embeddings[at..at + self.width]);
+            d_embeddings[at..at + self.width].fill(0.0);
+        }
+        Ok(out)
+    }
+
     /// The reason these rows cannot belong to a prompt of `prompt_len` tokens
     /// for a decoder taking rows of `width`, if any.
     pub fn refusal(&self, prompt_len: usize, width: Option<usize>) -> Option<String> {
@@ -251,6 +274,16 @@ mod tests {
         assert!(PromptEmbeds::new(2, vec![1], vec![0.0; 3]).is_err(), "rows must match positions x width");
         assert!(PromptEmbeds::new(2, vec![1], vec![0.0, f32::NAN]).is_err(), "a non-finite value is refused");
         assert!(PromptEmbeds::new(0, vec![], vec![]).is_err());
+    }
+
+    #[test]
+    fn the_splice_backward_takes_the_rows_gradient_and_clears_it_from_the_prompt_gradient() {
+        let e = PromptEmbeds::new(2, vec![1, 3], vec![0.0; 4]).unwrap();
+        let mut d = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+        assert_eq!(e.take_row_gradients(&mut d).unwrap(), [3.0, 4.0, 7.0, 8.0]);
+        assert_eq!(d, [1.0, 2.0, 0.0, 0.0, 5.0, 6.0, 0.0, 0.0], "the placeholder positions' rows no longer reach the token embedding");
+        assert!(e.take_row_gradients(&mut [0.0; 5]).is_err(), "not whole rows");
+        assert!(e.take_row_gradients(&mut [0.0; 6]).is_err(), "position 3 is outside three prompt positions");
     }
 
     #[test]

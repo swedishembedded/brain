@@ -472,6 +472,7 @@ impl TowerLora {
                 let (a, b) = (format!("{name}.lora_a"), format!("{name}.lora_b"));
                 model::adapter::fold::GradTarget {
                     dw: tower.gr(name).expect("checked at construction"),
+                    offset: 0,
                     a: self.ps.w(&a),
                     b: self.ps.w(&b),
                     ga: self.ps.g(&a),
