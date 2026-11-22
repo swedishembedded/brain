@@ -108,6 +108,18 @@ mod tests {
         assert!(err.to_string().contains("invalid positive configuration"));
     }
 
+    /// A layer-streamed full fine-tune frees each layer's gradient as the layer is updated, so it cannot sum a second
+    /// micro-batch into it: accumulation is refused when the run is planned, not by the model at its second backward.
+    #[test]
+    fn a_layer_streamed_run_refuses_gradient_accumulation_when_planned() {
+        let streamed = |accum: u32| FitOpts { grad_accum: accum, precision: crate::TrainPrecision::parse("weights=bf16,window=2").unwrap(), ..Default::default() };
+        assert!(ValidatedTrainingPlan::build(streamed(1), &[]).is_ok());
+        let why = ValidatedTrainingPlan::build(streamed(4), &[]).unwrap_err().to_string();
+        assert!(why.contains("grad_accum") && why.contains("window"), "{why}");
+        let whole = FitOpts { grad_accum: 4, precision: crate::TrainPrecision::parse("weights=bf16").unwrap(), ..Default::default() };
+        assert!(ValidatedTrainingPlan::build(whole, &[]).is_ok(), "a resident build without a window keeps its gradients");
+    }
+
     #[test]
     fn contradictory_schedules_are_refused() {
         let ok = FitOpts { steps: 100, decay_iters: 100, warmup: 10, eval_interval: 10, ..Default::default() };

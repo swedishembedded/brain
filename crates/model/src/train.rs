@@ -180,6 +180,14 @@ impl FitOpts {
                 return Err(format!("{name} must be at least 1"));
             }
         }
+        // A layer-streamed build (`crate::streamed`, `crate::resident_ft::LayerWindow`) takes each layer's gradient and
+        // updates the layer before its slot is reused, so no gradient survives into a second micro-batch.
+        if self.grad_accum > 1 && self.precision.resident.is_some_and(|r| r.window.is_some()) {
+            return Err(format!(
+                "grad_accum {}: a layer-streamed full fine-tune (train_precision window=N) updates each layer as its gradient completes and keeps none for a second micro-batch, so every micro-batch is its own step; use grad_accum 1, or drop the window when the whole model fits",
+                self.grad_accum
+            ));
+        }
         finite_non_negative("lr", self.lr)?;
         finite_non_negative("min_lr", self.min_lr)?;
         finite_non_negative("weight_decay", self.weight_decay)?;

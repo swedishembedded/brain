@@ -1157,9 +1157,14 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         gradients) is a 400 naming `window=N` / `grad=bf16` instead of four
         ranks panicking at the first layer ("the device failed during the
         run"). Test: `zero_shard`
-        `parameter_sharding_is_admitted_only_with_a_layer_window`. Open: a
-        one-card layer-streamed qwen3 full fine-tune with `grad_accum` > 1
-        still panics at the second backward instead of being refused.
+        `parameter_sharding_is_admitted_only_with_a_layer_window`. A
+        layer-streamed run (`window=N`) with `grad_accum` > 1 is refused when
+        planned (`FitOpts::validate`, so at submission), not by the model's
+        second backward: the streamed backward updates each layer as its
+        gradient completes and frees the lane, so accumulating would need every
+        micro-batch's activations held until one backward over the layers, or
+        every layer loaded once per micro-batch per step (2026-11-22). Test:
+        `training_plan` `a_layer_streamed_run_refuses_gradient_accumulation_when_planned`.
         Overlap (2026-11-22): a layer's finish only issues its reduce-scatter
         (and its norm behind it on the card); the norm read, the running
         clip's scalar all-reduce and the owner's update come at the next
