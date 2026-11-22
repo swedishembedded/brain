@@ -98,7 +98,9 @@ fn a_bf16_base_trains_the_adapters_the_f32_base_does() {
     let rounded: std::collections::HashMap<String, Vec<f32>> = init
         .iter()
         .map(|(n, v)| {
-            let v = if inkling2::train::is_linear(&tc.cfg, n) { model::ops::Weight::round_trip(v, 1, v.len(), gpu_core::select::Dtype::BF16) } else { v.clone() };
+            // Every linear but the router, which stays binary32 at every tier.
+            let rounded = inkling2::train::is_linear(&tc.cfg, n) && !n.ends_with("mlp.gate.weight");
+            let v = if rounded { model::ops::Weight::round_trip(v, 1, v.len(), gpu_core::select::Dtype::BF16) } else { v.clone() };
             (n.clone(), v)
         })
         .collect();

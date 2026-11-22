@@ -722,7 +722,8 @@ impl Inkling2Train {
         let ln = LayerNames::new(layer);
         let (shape, spec) = self.moe_shape(n);
         let kind = router_kind(cfg.route_scale);
-        let logits = self.proj(s, &ln.router(), hn, n);
+        // Routing in binary32 at every precision tier, as the forward routes (`crate::model`).
+        let logits = model::ops::fp32_kernels(|| self.proj(s, &ln.router(), hn, n));
         let (gate, probs) = (self.fresh(n * cfg.experts), self.fresh(n * cfg.experts));
         let bias = self.val(&ln.router_bias());
         s.push(model::moe::router_fwd_kind(g, &self.k.moe, kind, &shape, &logits, Some(bias), &gate, Some(&probs)));
@@ -995,7 +996,7 @@ impl Inkling2Train {
         let d_hn = self.fresh(n * d);
         let (d_gate, d_logits) = (self.fresh(n * e), self.fresh(n * e));
         let mut router_w = Vec::new();
-        self.proj_bwd(&mut router_w, &ln.router(), hn, &d_logits, &d_hn, n, false);
+        model::ops::fp32_kernels(|| self.proj_bwd(&mut router_w, &ln.router(), hn, &d_logits, &d_hn, n, false));
         let router = if self.detach_router.get() {
             RouterGrad::Detached
         } else {

@@ -743,7 +743,9 @@ fn load_frozen(ops: &Ops, cfg: &Inkling2Config, shapes: &HashMap<String, Vec<u64
             continue;
         }
         let (n, k) = (shape[0] as usize, shape[1..].iter().product::<u64>() as usize);
-        let tier = policy.want(name);
+        // The reference keeps the router in binary32 at every tier (a rounded operand turns into another expert).
+        let router = (0..cfg.n_layers).any(|l| LayerNames::new(l).router() == *name);
+        let tier = if router { Dtype::F32 } else { policy.want(name) };
         if !matches!(tier, Dtype::F32 | Dtype::BF16) {
             return Err(format!("inkling2: the frozen linears are held as f32 or bf16, not {}", tier.name()));
         }

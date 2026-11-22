@@ -54,10 +54,13 @@ fn full_model(seed: u64) -> (Inkling2Train, TrainConfig) {
     (m, tc)
 }
 
-/// Every parameter of a full fine-tune, by directional finite differences.
+/// Every parameter of a full fine-tune, by directional finite differences. The step is small because the forward has
+/// kinks the routing pin does not remove (the L2 clips of queries, keys and relative states at their threshold): a step
+/// of 1e-3 in every entry of a tensor at once failed one run in ten (the routing pinned, the failing tensor not
+/// recorded), and the clips are the remaining non-smooth points it can cross.
 pub fn check_inkling2(seed: u64) -> Report {
     let (m, _) = full_model(seed);
-    directional_check(&m, 1e-3, 6, seed ^ 0x1A7)
+    directional_check(&m, 2e-4, 6, seed ^ 0x1A7)
 }
 
 /// Every parameter of the shared core (the layers the passes revisit) and the message queries, entry by entry at a
