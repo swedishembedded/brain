@@ -146,6 +146,9 @@ pub(crate) struct DistillJob<'a> {
     pub lineage: AdapterLineage<'a>,
 }
 
+/// [`ChatTrainer::base_shape`]: `(parameters, layers, width)` of a base, or `None` when the trainer declares none.
+pub(crate) type BaseShapeFn = fn(&Path) -> Result<Option<(u64, u64, u64)>, String>;
+
 /// What the SDK's full-parameter and preference fine-tuners need of one
 /// architecture, resolved once per table row.
 #[derive(Clone, Copy)]
@@ -154,6 +157,9 @@ pub(crate) struct ChatEntry {
     pub model: &'static str,
     pub checkpoint_path: fn(&Path, &Path) -> PathBuf,
     pub vocab: fn(&Path) -> Result<usize, String>,
+    /// `(parameters, layers, width)` of a base, for the automatic base-tier choice; `None` when the trainer declares
+    /// none ([`ChatTrainer::base_shape`]).
+    pub base_shape: BaseShapeFn,
     pub full: FullFn,
     pub export: ExportFn,
     pub preference: PreferenceFn,
@@ -209,6 +215,7 @@ impl ChatEntry {
             model: T::LORA_BASES.model,
             checkpoint_path: T::checkpoint_path,
             vocab: T::vocab,
+            base_shape: T::base_shape,
             full: full::<T>,
             export: T::export_checkpoint,
             preference: preference::<T>,

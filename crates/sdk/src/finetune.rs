@@ -153,14 +153,16 @@ pub struct ChatFineTune {
 /// The architecture a [`ChatFineTune`] trains, with the tier its frozen base
 /// is held at. The one place that names a trainer: `qwen3` and `qwen35` each
 /// have their own checkpoint reader and LoRA trainer over the shared
-/// `model::fit_controlled` loop.
+/// `model::fit_controlled` loop; every other registered architecture with a
+/// chat trainer runs through that trainer's generic entry.
 enum ChatFamily {
     /// Int8 over bf16 over fp32.
     Qwen3(qwen3::Dtype),
     /// NF4 over bf16 over fp32 (the 27B trains on one card only at the first two).
     Qwen35(qwen3::Dtype),
-    /// NF4 over bf16 over fp32, through the generic `model::finetune::ChatTrainer` entry (Ripple).
-    Ripple(qwen3::Dtype),
+    /// The generic `model::finetune::ChatTrainer` entry of a registered architecture (Ripple, Inkling 2, ...), at one
+    /// of the bases its trainer declares.
+    Chat(&'static crate::chat_trainer::ChatEntry, qwen3::Dtype),
 }
 
 /// A trained LoRA, whichever trainer produced it.
@@ -186,11 +188,17 @@ impl ChatFamily {
     /// bf16, else fp32), or as `format` when one is given; a format the family's trainer does not
     /// hold is refused naming the family and its supported set.
     fn of(arch_id: &str, bf16: bool, int8: bool, nf4: bool, format: Option<&str>) -> Result<ChatFamily> {
-        let bases = match arch_id {
-            "qwen3" => qwen3::finetune::TRAIN_BASES,
-            "qwen35" => qwen35::base_source::TRAIN_BASES,
-            "ricursive" => <ricursive::finetune::RippleTrainer as model::finetune::ChatTrainer>::LORA_BASES,
-            other => return Err(Error::Unsupported(model::training::Unsupported::new(other, Capability::ChatLoraFineTune))),
+        let chat = match arch_id {
+            "qwen3" | "qwen35" => None,
+            other => match crate::study::arch(other)?.chat.as_ref() {
+                Some(entry) => Some(entry),
+                None => return Err(Error::Unsupported(model::training::Unsupported::new(other, Capability::ChatLoraFineTune))),
+            },
+        };
+        let bases = match (arch_id, chat) {
+            ("qwen3", _) => qwen3::finetune::TRAIN_BASES,
+            (_, Some(entry)) => entry.lora_bases,
+            _ => qwen35::base_source::TRAIN_BASES,
         };
         let dtype = match format {
             Some(_) if bf16 || int8 || nf4 => return Err(Error::InvalidRequest("ChatFineTune: base_format and the bf16_base, int8_base and nf4_base switches name the same setting; give one".to_string())),
@@ -208,9 +216,9 @@ impl ChatFamily {
                 bases.check(narrowest).map_err(|why| Error::InvalidRequest(format!("ChatFineTune: {why}")))?
             }
         };
-        Ok(match arch_id {
-            "qwen3" => ChatFamily::Qwen3(dtype),
-            "ricursive" => ChatFamily::Ripple(dtype),
+        Ok(match (arch_id, chat) {
+            ("qwen3", _) => ChatFamily::Qwen3(dtype),
+            (_, Some(entry)) => ChatFamily::Chat(entry, dtype),
             _ => ChatFamily::Qwen35(dtype),
         })
     }
@@ -218,7 +226,7 @@ impl ChatFamily {
     /// The tier name recorded on an outcome.
     fn tier_name(&self) -> &'static str {
         match self {
-            ChatFamily::Qwen3(dtype) | ChatFamily::Qwen35(dtype) | ChatFamily::Ripple(dtype) => model::policy::format_name(*dtype),
+            ChatFamily::Qwen3(dtype) | ChatFamily::Qwen35(dtype) | ChatFamily::Chat(_, dtype) => model::policy::format_name(*dtype),
         }
     }
 
@@ -235,7 +243,7 @@ impl ChatFamily {
                 BaseTierChoice::Quantised => qwen3::Dtype::NF4,
                 BaseTierChoice::F32 => qwen3::Dtype::F32,
             }),
-            ChatFamily::Ripple(_) => ChatFamily::Ripple(match tier {
+            ChatFamily::Chat(entry, _) => ChatFamily::Chat(entry, match tier {
                 BaseTierChoice::Bf16 => qwen3::Dtype::BF16,
                 BaseTierChoice::Quantised => qwen3::Dtype::NF4,
                 BaseTierChoice::F32 => qwen3::Dtype::F32,
@@ -248,14 +256,14 @@ impl ChatFamily {
     fn quantised_base_bytes(&self, params: u64) -> u64 {
         match self {
             ChatFamily::Qwen3(_) => params + 4 * params.div_ceil(model::int8::GROUP as u64),
-            ChatFamily::Qwen35(_) | ChatFamily::Ripple(_) => params / 2 + 4 * params.div_ceil(32),
+            ChatFamily::Qwen35(_) | ChatFamily::Chat(..) => params / 2 + 4 * params.div_ceil(32),
         }
     }
 
     /// Device bytes of `params` parameters held at this family's current tier.
     fn base_bytes(&self, params: u64) -> u64 {
         match self {
-            ChatFamily::Qwen3(dtype) | ChatFamily::Qwen35(dtype) | ChatFamily::Ripple(dtype) => match *dtype {
+            ChatFamily::Qwen3(dtype) | ChatFamily::Qwen35(dtype) | ChatFamily::Chat(_, dtype) => match *dtype {
                 qwen3::Dtype::F32 => 4 * params,
                 qwen3::Dtype::BF16 => 2 * params,
                 qwen3::Dtype::I8 | qwen3::Dtype::NF4 => self.quantised_base_bytes(params),
@@ -279,7 +287,7 @@ impl ChatFamily {
                 // The qwen3 LoRA trainer recomputes every layer from fp32 boundaries (`qwen3::finetune::build_trainer`).
                 qwen3::footprint::lora_training_demands(&cfg, *dtype, 1, block, model::saved::SavedPolicy::Recompute, flash).map_err(Error::Backend)
             }
-            ChatFamily::Qwen35(_) | ChatFamily::Ripple(_) => Ok(vec![
+            ChatFamily::Qwen35(_) | ChatFamily::Chat(..) => Ok(vec![
                 Demand::fixed(Category::Weights, "frozen base", self.base_bytes(params)),
                 Demand::fixed(Category::Activations, format!("{block}-token row (calibrated rate)"), activation_bytes(block, layers, width)),
             ]),
@@ -293,18 +301,19 @@ impl ChatFamily {
         Ok(model::memplan::device_total(&self.step_demands(open, params, layers, width, block, rank, flash)?).saturating_sub(self.base_bytes(params)))
     }
 
-    /// `(parameters, layers, model width)` of the checkpoint at `open`, what the tier choice sizes a base by.
-    fn base_shape(&self, open: &Path) -> Result<(u64, u64, u64)> {
+    /// `(parameters, layers, model width)` of the checkpoint at `open`, what the tier choice sizes a base by; `None`
+    /// for a generic family whose trainer declares no shape ([`model::finetune::ChatTrainer::base_shape`]).
+    fn base_shape(&self, open: &Path) -> Result<Option<(u64, u64, u64)>> {
         match self {
             ChatFamily::Qwen3(_) => {
                 let cfg = qwen3::checkpoint_config(utf8(open)?).map_err(Error::Backend)?;
-                Ok((cfg.param_list().iter().map(|(_, n)| *n as u64).sum(), cfg.n_layers as u64, cfg.d_model as u64))
+                Ok(Some((cfg.param_list().iter().map(|(_, n)| *n as u64).sum(), cfg.n_layers as u64, cfg.d_model as u64)))
             }
             ChatFamily::Qwen35(_) => {
                 let cfg = qwen35::base_source::open_base(open).map_err(Error::Backend)?.cfg;
-                Ok((cfg.param_list().iter().map(|(_, n)| *n as u64).sum(), cfg.n_layers as u64, cfg.d_model as u64))
+                Ok(Some((cfg.param_list().iter().map(|(_, n)| *n as u64).sum(), cfg.n_layers as u64, cfg.d_model as u64)))
             }
-            ChatFamily::Ripple(_) => ricursive::finetune::base_shape(open).map_err(Error::Backend),
+            ChatFamily::Chat(entry, _) => (entry.base_shape)(open).map_err(Error::Backend),
         }
     }
 
@@ -313,7 +322,7 @@ impl ChatFamily {
         match self {
             ChatFamily::Qwen3(_) => Ok(qwen3::checkpoint_config(utf8(open)?).map_err(Error::Backend)?.vocab as usize),
             ChatFamily::Qwen35(_) => Ok(qwen35::base_source::open_base(open).map_err(Error::Backend)?.cfg.vocab as usize),
-            ChatFamily::Ripple(_) => <ricursive::finetune::RippleTrainer as model::finetune::ChatTrainer>::vocab(open).map_err(Error::Backend),
+            ChatFamily::Chat(entry, _) => (entry.vocab)(open).map_err(Error::Backend),
         }
     }
 
@@ -322,7 +331,7 @@ impl ChatFamily {
     fn scores_in_process(&self) -> bool {
         match self {
             ChatFamily::Qwen3(_) => false,
-            ChatFamily::Qwen35(_) | ChatFamily::Ripple(_) => true,
+            ChatFamily::Qwen35(_) | ChatFamily::Chat(..) => true,
         }
     }
 
@@ -330,7 +339,7 @@ impl ChatFamily {
     fn scoring_tier(&self) -> Option<qwen3::Dtype> {
         match self {
             ChatFamily::Qwen3(tier) => Some(*tier),
-            ChatFamily::Qwen35(_) | ChatFamily::Ripple(_) => None,
+            ChatFamily::Qwen35(_) | ChatFamily::Chat(..) => None,
         }
     }
 
@@ -363,8 +372,8 @@ impl ChatFamily {
                 let (report, trained, scored) = qwen35::finetune::finetune_lora_scored_tuned(open, prepared_dir, opts, rank, alpha, tuning, continue_from, &run, control, held_out)?;
                 Ok((report, TrainedLora::Qwen35(Box::new(trained)), scored))
             }
-            ChatFamily::Ripple(dtype) => {
-                let (report, trained, scored, _) = self.train_chat(*dtype, open, prepared_dir, opts, rank, alpha, tuning, continue_from, control, held_out, None, modules_to_save)?;
+            ChatFamily::Chat(entry, dtype) => {
+                let (report, trained, scored, _) = self.train_chat(entry, *dtype, open, prepared_dir, opts, rank, alpha, tuning, continue_from, control, held_out, None, modules_to_save)?;
                 Ok((report, trained, scored))
             }
         }
@@ -388,8 +397,8 @@ impl ChatFamily {
         held_out: &[&Path],
         modules_to_save: &[String],
     ) -> std::io::Result<(model::FitReport, TrainedLora, PolicyGradientStats, Vec<model::ScoredSet>)> {
-        if let ChatFamily::Ripple(dtype) = self {
-            let (report, trained, scored, stats) = self.train_chat(*dtype, open, prepared_dir, opts, rank, alpha, tuning, continue_from, control, held_out, Some(config), modules_to_save)?;
+        if let ChatFamily::Chat(entry, dtype) = self {
+            let (report, trained, scored, stats) = self.train_chat(entry, *dtype, open, prepared_dir, opts, rank, alpha, tuning, continue_from, control, held_out, Some(config), modules_to_save)?;
             return Ok((report, trained, stats.unwrap_or_default(), scored));
         }
         // The objective is written over `model::Model`: a family only builds its LoRA model and hands it to the visitor.
@@ -426,7 +435,7 @@ impl ChatFamily {
                 let (report, trained) = qwen35::finetune::finetune_lora_visited(open, prepared_dir, opts, rank, alpha, tuning, continue_from, &run, fit)?;
                 Ok((report, TrainedLora::Qwen35(Box::new(trained))))
             }
-            ChatFamily::Ripple(_) => Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "ricursive runs through its generic ChatTrainer entry")),
+            ChatFamily::Chat(entry, _) => Err(std::io::Error::new(std::io::ErrorKind::Unsupported, format!("{} runs through its generic ChatTrainer entry", entry.model))),
         }
     }
 
@@ -435,6 +444,7 @@ impl ChatFamily {
     #[allow(clippy::too_many_arguments)]
     fn train_chat(
         &self,
+        entry: &crate::chat_trainer::ChatEntry,
         dtype: qwen3::Dtype,
         open: &Path,
         prepared_dir: &Path,
@@ -449,9 +459,8 @@ impl ChatFamily {
         modules_to_save: &[String],
     ) -> std::io::Result<(model::FitReport, TrainedLora, Vec<model::ScoredSet>, Option<PolicyGradientStats>)> {
         if tuning != model::adapter::device::AdapterTuning::default() {
-            return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "ricursive trains the plain LoRA adapter; a rank-stabilised, LoRA+ or frozen-A variant is not wired for it"));
+            return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, format!("{} trains the plain LoRA adapter; a rank-stabilised, LoRA+ or frozen-A variant is not wired for it", entry.model)));
         }
-        let entry = crate::study::arch("ricursive").map_err(std::io::Error::other)?.chat.ok_or_else(|| std::io::Error::other("ricursive has no chat trainer"))?;
         let tiers = model::ops::TierPolicy::uniform(dtype);
         let job = crate::chat_trainer::LoraJob { base: open, lora: model::finetune::LoraRequest { rank, alpha, continue_from, base: &tiers, modules_to_save }, opts, dir: prepared_dir, policy_gradient, held_out };
         let run = (entry.lora)(job, control)?;
@@ -570,7 +579,7 @@ impl ChatFineTune {
         }
         let located = self.locate_base(named)?;
         let family = ChatFamily::of(located.arch.id, self.bf16_base, self.int8_base, self.nf4_base, self.base_format.as_deref())?;
-        let (params, layers, width) = family.base_shape(&located.open)?;
+        let (params, layers, width) = family.base_shape(&located.open)?.ok_or_else(|| Error::InvalidRequest(format!("ChatFineTune: {} declares no base shape, so its training footprint cannot be planned", located.arch.id)))?;
         let explicit = self.bf16_base || self.int8_base || self.nf4_base || self.f32_base || self.base_format.is_some();
         let (rank, _, _) = lora_shape(None, self.rank, self.alpha, self.tuning)?;
         let (family, reason) = match (explicit, card_bytes) {
@@ -1190,10 +1199,10 @@ impl ChatFineTune {
         let Located { model_dir, base_id, arch, open } = self.locate_base(named)?;
         let weights_str = utf8(&open)?;
         let family = ChatFamily::of(arch.id, self.bf16_base, self.int8_base, self.nf4_base, self.base_format.as_deref())?;
-        if self.stages > 0 && !matches!(family, ChatFamily::Ripple(_)) {
+        if self.stages > 0 && !matches!(family, ChatFamily::Chat(entry, _) if entry.pipelined) {
             return Err(Error::InvalidRequest(format!("ChatFineTune: {} stages asked for, and {} lays itself out over the cards and takes no stage count", self.stages, arch.id)));
         }
-        if self.native_sparse.is_some() && !matches!(family, ChatFamily::Qwen3(_) | ChatFamily::Ripple(_)) {
+        if self.native_sparse.is_some() && !matches!(family, ChatFamily::Qwen3(_)) && !matches!(family, ChatFamily::Chat(entry, _) if entry.native_sparse) {
             return Err(Error::InvalidRequest(format!("ChatFineTune: native sparse attention training is not available for {}", arch.id)));
         }
         self.check_policy_gradient_setup(arch.id)?;
@@ -1285,15 +1294,17 @@ impl ChatFineTune {
         // Where this rank trains, as resolved: what the run's report says it ran on.
         let ran_on = crate::data_parallel::place_rank("ChatFineTune", self.parallel.as_ref(), self.seed, &selected_gpus)?;
         let explicit = self.bf16_base || self.int8_base || self.nf4_base || self.f32_base || self.base_format.is_some();
+        let shape = if explicit { None } else { family.base_shape(&open)? };
         let (family, base_tier_reason) = if explicit {
             (family, "asked for".to_string())
-        } else {
+        } else if let Some((params, layers, width)) = shape {
             let cards: Vec<u64> = gpu_core::devices::gpus().iter().filter(|d| selected_gpus.contains(&d.index)).map(|d| d.identity.vram_bytes).collect();
             let native = !cards.is_empty() && gpu_core::Gpu::new(&[]).caps().arch.compute_capability.is_some_and(|cc| cc >= gpu_core::select::I8_MMA_MIN_CC);
-            let (params, layers, width) = family.base_shape(&open)?;
             let row = family.with_tier(BaseTierChoice::Bf16).row_bytes(&open, params, layers, width, block, rank, !cards.is_empty())?;
             let (choice, reason) = choose_base_tier(matches!(family, ChatFamily::Qwen35(_)), native, params, row, block, family.quantised_base_bytes(params), &cards).map_err(Error::Backend)?;
             (family.with_tier(choice), reason)
+        } else {
+            (family, "the trainer declares no base shape to choose a tier by: the default of its declared bases".to_string())
         };
         eprintln!("ChatFineTune: base tier {} ({base_tier_reason})", family.tier_name());
         let scoring_tier = family.scoring_tier();
@@ -3036,15 +3047,31 @@ mod base_tier_tests {
     fn qwen3_tier(bf16: bool, int8: bool) -> Dtype {
         match ChatFamily::of("qwen3", bf16, int8, false, None).unwrap() {
             ChatFamily::Qwen3(tier) => tier,
-            ChatFamily::Qwen35(_) | ChatFamily::Ripple(_) => unreachable!(),
+            ChatFamily::Qwen35(_) | ChatFamily::Chat(..) => unreachable!(),
         }
     }
 
     fn qwen35_tier(bf16: bool, nf4: bool) -> Dtype {
         match ChatFamily::of("qwen35", bf16, false, nf4, None).unwrap() {
             ChatFamily::Qwen35(tier) => tier,
-            ChatFamily::Qwen3(_) | ChatFamily::Ripple(_) => unreachable!(),
+            ChatFamily::Qwen3(_) | ChatFamily::Chat(..) => unreachable!(),
         }
+    }
+
+    /// Every registered architecture with a chat trainer trains a LoRA through its generic entry, at the bases that
+    /// trainer declares: Inkling 2 (bf16 or f32 dense linears over its published expert banks) as much as Ripple.
+    #[test]
+    fn a_registered_chat_trainer_trains_a_lora_at_its_declared_bases() {
+        let tier = |arch, spec| match ChatFamily::of(arch, false, false, false, spec) {
+            Ok(ChatFamily::Chat(entry, t)) => Ok((entry.model, t)),
+            Ok(_) => Err("a bespoke route".to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        assert_eq!(tier("inkling2", Some("bf16")), Ok(("inkling2", Dtype::BF16)));
+        assert_eq!(tier("inkling2", None), Ok(("inkling2", Dtype::F32)));
+        assert_eq!(tier("ricursive", Some("nf4")), Ok(("ricursive", Dtype::NF4)));
+        let refused = tier("inkling2", Some("nf4")).unwrap_err();
+        assert!(refused.contains("inkling2"), "{refused}");
     }
 
     #[test]
@@ -3061,7 +3088,7 @@ mod base_tier_tests {
     #[test]
     fn one_format_flag_names_the_base_of_every_architecture() {
         let tier = |arch, spec| match ChatFamily::of(arch, false, false, false, Some(spec)).unwrap() {
-            ChatFamily::Qwen3(t) | ChatFamily::Qwen35(t) | ChatFamily::Ripple(t) => t,
+            ChatFamily::Qwen3(t) | ChatFamily::Qwen35(t) | ChatFamily::Chat(_, t) => t,
         };
         assert_eq!(tier("ricursive", "nvfp4"), Dtype::F4E2M1, "the NVFP4 release is a base format of Ripple");
         assert_eq!(tier("ricursive", "nf4"), Dtype::NF4);

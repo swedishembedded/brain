@@ -273,6 +273,13 @@ pub trait ChatTrainer {
     /// The vocabulary of the checkpoint at `open`.
     fn vocab(open: &Path) -> Result<usize, String>;
 
+    /// `(parameters, layers, model width)` of the checkpoint at `open`: what a caller sizes the frozen base at each of
+    /// [`Self::LORA_BASES`] by to choose one automatically. `None` (the default) declares no shape: a caller then
+    /// trains at the base it was asked for, or its default.
+    fn base_shape(_open: &Path) -> Result<Option<(u64, u64, u64)>, String> {
+        Ok(None)
+    }
+
     /// Train every parameter of the checkpoint at `base` through `fit`.
     fn train_full(base: &Path, opts: &FitOpts, state: OptimizerState, fit: &mut impl ModelFit) -> std::io::Result<(FitReport, Self::Trained)>;
 

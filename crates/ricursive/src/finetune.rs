@@ -167,6 +167,10 @@ impl ChatTrainer for RippleTrainer {
         }
     }
 
+    fn base_shape(open: &Path) -> Result<Option<(u64, u64, u64)>, String> {
+        base_shape(open).map(Some)
+    }
+
     fn vocab(open: &Path) -> Result<usize, String> {
         Base::open(open).map(|b| b.model.vocab_size).map_err(|e| e.to_string())
     }
