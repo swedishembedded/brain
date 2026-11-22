@@ -66,7 +66,7 @@ pub fn kernels() -> &'static [(&'static str, &'static str)] {
 
 /// Kernel slots of the elementwise and reduction passes, resolved on one `Gpu`.
 /// A model whose pipeline registers these under other names builds the struct
-/// itself; [`Self::from_gpu`] resolves the canonical names of [`kernels`].
+/// itself; [`Self::from_gpu`] resolves the canonical names of [`kernels()`].
 #[derive(Clone, Copy, Debug)]
 pub struct HeadKernels {
     /// Masked per-row cross-entropy value: `[rows, V, IGNORE]` over logits, labels, out.
@@ -88,7 +88,7 @@ pub struct HeadKernels {
 }
 
 impl HeadKernels {
-    /// Resolve the canonical [`kernels`] names on `gpu`.
+    /// Resolve the canonical [`kernels()`] names on `gpu`.
     pub fn from_gpu(gpu: &Gpu) -> Result<HeadKernels, String> {
         let find = |name: &str| gpu.kernel_index(name).ok_or_else(|| format!("HeadKernels: kernel '{name}' is not registered on this Gpu (append model::head_ce::kernels() and model::ops::training_kernel_list())"));
         Ok(HeadKernels {
@@ -334,7 +334,7 @@ impl HeadCe {
     /// the valid vocabulary ([`Self::forward`] and [`Self::backward`] check; a recorded tape cannot). The identity
     /// (`HeadTransform::NONE`) is the default and records nothing; re-record any tape after changing this.
     ///
-    /// Needs the `logit_cap_mask` kernels registered ([`kernels`] lists them); an `Err` names what is missing or invalid.
+    /// Needs the `logit_cap_mask` kernels registered ([`kernels()`] lists them); an `Err` names what is missing or invalid.
     pub fn set_head_transform(&mut self, gpu: &Gpu, t: HeadTransform) -> Result<(), String> {
         t.validate(self.vocab)?;
         if t.is_identity() {

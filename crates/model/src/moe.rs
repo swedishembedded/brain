@@ -14,7 +14,7 @@
 //! motivated this module.
 //!
 //! The fix here is deliberately the smallest one that removes the FLOPs
-//! without adding new failure modes: [`moe_linear_gated`] is `matmul.wgsl`
+//! without adding new failure modes: `moe_linear_gated` is `matmul.wgsl`
 //! with one extra check - a row whose gate weight for this expert is zero
 //! writes 0 and returns *before* the K-reduction, instead of computing it and
 //! discarding it downstream. Composing three of those (gate/up/down
@@ -1779,7 +1779,7 @@ pub struct CompactExpertFwdIds {
     /// `token`.
     pub gather: usize,
     /// The naive reference GEMM (`matmul.wgsl`'s `{x,w,out}`/`{m,k,n}`
-    /// contract) -- [`model::block::pick_gemm`] falls back to this for a
+    /// contract) -- `model::block::pick_gemm` falls back to this for a
     /// compacted batch too small to fill a tile (a lightly-routed expert).
     pub gemm_naive: usize,
     /// The tiled GEMM (`matmul_reg3.wgsl`, SAME contract as `gemm_naive`) --

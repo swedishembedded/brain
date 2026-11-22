@@ -10,7 +10,7 @@
 //! attention on paged KV caches, you can procure our services by sending an
 //! email to info@swedishembedded.com.
 //!
-//! The selection comes from any indexer - [`crate::lsa::select`] is one - as a
+//! The selection comes from any indexer - [`crate::lsa::select()`] is one - as a
 //! [`Selection`]; [`SparseRows::pack`] turns it into the device rows the kernel
 //! reads, refusing a position the sequence does not hold yet, and
 //! [`SparseAttention::step`] records the dispatch. K/V stay where the paged
@@ -81,11 +81,11 @@ const ROWS_MAX_CHANNELS_PER_THREAD: u32 = 64;
 ///
 /// A thread owns `head_dim / tph` channels of one head, so the workgroup is
 /// `n_heads * tph` threads: the smallest `tph` that makes it at least 64 threads
-/// (the kernel's tuned width) with at most [`ROWS_MAX_CHANNELS_PER_THREAD`]
+/// (the kernel's tuned width) with at most `ROWS_MAX_CHANNELS_PER_THREAD`
 /// channels per thread, which keeps the original shapes (16 heads: 4 threads a
 /// head; 32: 2; 8 heads of 64: 8) and takes 40 heads as 80 threads and 80 as
 /// 160. The tile is 8 keys where its staging, partials and weights fit
-/// [`ROWS_WORKGROUP_MEMORY`], fewer otherwise (80 heads of 128 over 8 KV heads: 4).
+/// `ROWS_WORKGROUP_MEMORY`, fewer otherwise (80 heads of 128 over 8 KV heads: 4).
 pub fn rows_geometry(n_heads: u32, n_kv_heads: u32, head_dim: u32) -> Result<(u32, u32), String> {
     let no = |why: &str| Err(format!("sparse attention: no whole-row kernel for {n_heads} heads over {n_kv_heads} KV heads of {head_dim}: {why}"));
     if n_heads == 0 || n_kv_heads == 0 || !n_heads.is_multiple_of(n_kv_heads) {

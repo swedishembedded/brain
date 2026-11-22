@@ -233,7 +233,7 @@ pub trait BankedEngine {
 
 /// How an operator sized a bank, before any model is known: slots, rank cap
 /// and the target choice. [`AdapterBankRequest::config`] resolves it against a
-/// model; a resident that places a model on cards uses [`Self::device_bytes_by_layer`]
+/// model; a resident that places a model on cards uses `Self::device_bytes_by_layer`
 /// to charge the bank to the stage that holds each layer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdapterBankRequest {

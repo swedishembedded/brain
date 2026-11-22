@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Resident-model adapter putting Qwen3-Omni's Thinker text generation behind
-//! the residency [`Executor`], mirroring [`crate::resident_tts::TtsResident`].
+//! the residency `Executor`, mirroring [`crate::resident_tts::TtsResident`].
 //!
 //! This is the path with the full chat/multimodal surface (`generate` with
 //! `messages` + audio/image/video, plus `speak`), served straight from the

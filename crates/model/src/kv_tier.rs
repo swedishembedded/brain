@@ -454,7 +454,7 @@ const FLASH_COMBINE: &str = "paged_flash_decode_gqa_combine";
 /// multi-head attention (DeepSeek-OCR's decoder: 10 heads of 128). Any other shape keeps the triad.
 const FLASH_SHAPES: [(u32, u32); 4] = [(256, 6), (256, 8), (256, 4), (128, 1)];
 
-/// Whether the fused decode attention has a specialisation for `head_dim` and GQA `group` ([`FLASH_SHAPES`]): on a
+/// Whether the fused decode attention has a specialisation for `head_dim` and GQA `group` (`FLASH_SHAPES`): on a
 /// device with work-group reductions such a model's decode keeps split partials and no `[batch, n_heads, cap]`
 /// score and probability slabs ([`KvKernels::flash_decode_available`]). What a memory plan asks before a device opens.
 pub fn flash_decode_shape(head_dim: u32, group: u32) -> bool {
@@ -548,7 +548,7 @@ pub fn kernel_list(existing: &[(&str, &str)]) -> Vec<(&'static str, &'static str
 }
 
 /// [`kernel_list`] with the fused decode of exactly the `(head_dim, group)` pairs in `shapes` (a model's own attention
-/// shape, such as Ripple's 128 / 10) at every KV tier, instead of the built-in [`FLASH_SHAPES`]. A shape that fails
+/// shape, such as Ripple's 128 / 10) at every KV tier, instead of the built-in `FLASH_SHAPES`. A shape that fails
 /// [`check_flash_shape`] gets no fused kernel; the caller checks first and keeps the triad by name.
 pub fn kernel_list_for(existing: &[(&str, &str)], shapes: &[(u32, u32)]) -> Vec<(&'static str, &'static str)> {
     use kernels::template::{dtype_variant, dtype_variant_store, fp8_kv_variant, int8_kv_variant};
@@ -677,7 +677,7 @@ pub struct FlashDecode {
 }
 
 impl FlashDecode {
-    /// The fused decode of `tier` at the built-in [`FLASH_SHAPES`] and each `(head_dim, group)` in `shapes` that `gpu` has
+    /// The fused decode of `tier` at the built-in `FLASH_SHAPES` and each `(head_dim, group)` in `shapes` that `gpu` has
     /// registered.
     pub fn resolve(gpu: &Gpu, tier: KvTier, shapes: &[(u32, u32)]) -> FlashDecode {
         FlashDecode {
@@ -856,7 +856,7 @@ pub struct FlashDecodeShape {
     /// number of partial records however many sequences share the batch, so its
     /// attention result is its own. A split past a sequence's live length costs
     /// one degenerate record, which is why sizing by the context is cheap
-    /// (see [`flash_splits_for`]).
+    /// (see `flash_splits_for`).
     pub pin_splits: bool,
 }
 
@@ -878,9 +878,9 @@ const FLASH_DEVICE_ITEMS_BOUND: u64 = 4096;
 /// The most words of partial records [`FlashDecode::part_words`] asks for when `batch` rows of `n_heads` query heads
 /// over `n_kv_heads` key heads of a `tier` pool decode with room for `cap` keys, unpinned, on any device and kernel:
 /// what a placement charges for a decode step's split records before the device is known. A split choice that cuts
-/// finer than [`FLASH_TILES_PER_SPLIT`] tiles does so only to reach the device's target; the native kernels of the
+/// finer than `FLASH_TILES_PER_SPLIT` tiles does so only to reach the device's target; the native kernels of the
 /// compact tiers (bf16 and the 8-bit ones) cut by a cost rule that takes a finer cut only when it costs no more than
-/// twice the waves of the [`FLASH_TILES_PER_SPLIT`] cut, so their records are at most twice that cut's plus twice the
+/// twice the waves of the `FLASH_TILES_PER_SPLIT` cut, so their records are at most twice that cut's plus twice the
 /// device term. The records grow with `cap`: an engine that sizes
 /// its recorded steps' splits by its whole context pays for that context in every attention layer of the step.
 pub fn flash_part_words_bound(tier: KvTier, batch: u32, n_heads: u32, n_kv_heads: u32, head_dim: u32, cap: u32) -> u64 {

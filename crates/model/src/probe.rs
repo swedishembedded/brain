@@ -277,7 +277,7 @@ impl Default for Plan {
     /// the largest is where the integrated GPU that scan was taken on stopped
     /// getting faster with size.
     ///
-    /// `reps` is a CEILING, not a fixed count - [`timed`]'s deadline check
+    /// `reps` is a CEILING, not a fixed count - `timed`'s deadline check
     /// stops the loop the moment [`Self::budget`] is spent, so a slow device
     /// still pays only one timed rep. Raising it costs a fast device nothing
     /// (the whole ladder fits inside the budget several times over) and gives

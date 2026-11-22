@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Resident adapters that put the ASR models (Nemotron 3.5 ASR, Qwen3-ASR) behind
-//! the residency [`Executor`], so `brain serve --dbus` schedules, batches and swaps
+//! the residency `Executor`, so `brain serve --dbus` schedules, batches and swaps
 //! them exactly like every other model.
 //!
 //! Both build their model ONCE in `activate` (weights uploaded once) and hold it for

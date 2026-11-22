@@ -376,7 +376,7 @@ pub struct PolicySupport {
 
 impl PolicySupport {
     /// Refuse every precision choice in `policy` this model cannot honour, naming the model and
-    /// the supported set. Limits are not checked here ([`Self::inapplicable_limits`]).
+    /// the supported set. Limits are not checked here (`Self::inapplicable_limits`).
     pub fn check(&self, policy: &ServePolicy) -> Result<(), String> {
         if let Some(w) = &policy.weights {
             if self.weights.is_empty() {

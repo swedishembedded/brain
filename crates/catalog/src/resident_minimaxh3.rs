@@ -217,7 +217,7 @@ impl ResidentModel for MiniMaxH3Resident {
     }
 
     /// Names the task plus BOTH latent extents plus the dtype - see this
-    /// module's own doc and [`parse_key`]'s doc for why two extents, not
+    /// module's own doc and `parse_key`'s doc for why two extents, not
     /// one: [`minimaxh3::pipeline::video_latent_num_frames`]/
     /// [`minimaxh3::pipeline::audio_latent_num_frames`] are two different
     /// closed forms over the SAME aligned pixel frame count, not a shared

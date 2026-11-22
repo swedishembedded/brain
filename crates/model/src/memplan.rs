@@ -234,7 +234,7 @@ impl DecoderWidths {
     }
 
     /// The launch workspace of a recorded decode step over `rows` rows beyond
-    /// what the base reserve covers ([`STEP_WORKSPACE_PER_ROW`]).
+    /// what the base reserve covers (`STEP_WORKSPACE_PER_ROW`).
     pub fn step_workspace_bytes(&self, rows: u32) -> u64 {
         let (bytes, per) = STEP_WORKSPACE_PER_ROW;
         let past = u128::from(rows.saturating_sub(RESERVE_COVERED_ROWS));

@@ -659,7 +659,7 @@ pub trait PagedDecoder {
     /// the prompt's hidden states) has cost one sequence, averaged over recent
     /// sequences; `None` (the default) when the decoder has no such cost or has
     /// not measured one yet. The scheduler weighs it against what speculation
-    /// saves per request ([`speculate::PrefillGate`]).
+    /// saves per request (`speculate::PrefillGate`).
     fn spec_prefill_cost(&self) -> Option<f64> {
         None
     }

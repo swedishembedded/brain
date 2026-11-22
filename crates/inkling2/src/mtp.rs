@@ -10,7 +10,7 @@
 //!
 //! `mtp_config.target_layer_ids` are visits of the target, the last of them its full depth: the drafter reads the
 //! carried state entering each of the other visits and the final normalised row
-//! ([`crate::serve::Engine::enable_taps`]). A drafter declared for another width, another vocabulary or depths the loop
+//! (`crate::serve::Engine::enable_taps`). A drafter declared for another width, another vocabulary or depths the loop
 //! does not have is refused by name, as are the head types and biases the forward does not implement.
 
 use std::path::Path;

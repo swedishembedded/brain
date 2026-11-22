@@ -36,7 +36,7 @@
 //! constant sized for one released checkpoint (the 4B) cannot tell an 8B
 //! checkpoint's decoder apart from a 4B's - which is exactly the gap that let
 //! a real 8B GGUF get budgeted at the 4B's own figure and OOM the driver
-//! instead of being refused (see [`FP32_BYTES`]/[`INT8_BYTES`]'s own doc:
+//! instead of being refused (see `FP32_BYTES`/`INT8_BYTES`'s own doc:
 //! they are now the FALLBACK for the rare case `self.dir`'s config cannot be
 //! read - `estimate()` must never itself hard-fail, see this trait's doc).
 //!

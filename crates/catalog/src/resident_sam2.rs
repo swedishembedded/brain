@@ -20,7 +20,7 @@
 //! extent is derived from that), so there is no N-image axis to batch along.
 //!
 //! The architecture's real batching axis is therefore *prompts per image*:
-//! [`Sam2Instance::run_batch`] groups the batch by image so N concurrent prompts
+//! `Sam2Instance::run_batch` groups the batch by image so N concurrent prompts
 //! on one frame cost ONE trunk pass and N decoder passes, instead of N trunk
 //! passes. Two requests on genuinely different images still encode twice —
 //! correctly, and the comment above says why.

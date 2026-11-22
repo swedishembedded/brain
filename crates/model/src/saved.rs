@@ -232,7 +232,7 @@ enum Slot {
 
 impl BoundaryStore {
     /// `boundaries` slots for `rows x width` residuals. `format` must be narrow; the model's kernel list must
-    /// include [`kernels`].
+    /// include [`kernels()`].
     pub fn new(gpu: &Gpu, format: SavedFormat, boundaries: usize, rows: u32, width: u32) -> Result<BoundaryStore, String> {
         let total = rows.checked_mul(width).ok_or_else(|| format!("saved boundaries: {rows} x {width} elements overflow a u32 index"))?;
         let (pack, unpack, slot): (&str, &str, Box<dyn Fn() -> Slot>) = match format {
@@ -310,7 +310,7 @@ impl Residuals {
     }
 
     /// Hold the live boundaries (`rows x width` each) in `format` from now on, releasing all but two f32 buffers.
-    /// The device needs [`kernels`] registered.
+    /// The device needs [`kernels()`] registered.
     pub fn quantize(&mut self, gpu: &Gpu, format: SavedFormat, rows: u32, width: u32) -> Result<(), String> {
         if self.store.is_some() {
             return Err("residuals: the boundary stream is already held narrow".into());

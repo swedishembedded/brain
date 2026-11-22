@@ -648,7 +648,7 @@ pub fn gqa_mixer_decode_batched_fwd(
     gate_ctx(g, ids, &ctx, &prep.q_gate, batch, qd).1
 }
 
-/// [`gqa_mixer_chunk_fwd`] over a [`KvLayer`] in any [`KvTier`], for a sequence
+/// [`gqa_mixer_chunk_fwd`] over a [`KvLayer`] in any `KvTier`, for a sequence
 /// whose K/V may span several physical blocks: the same projections-to-`ctx_gated`
 /// pipeline, with the attention run by [`crate::block::gqa_chunk_step_kv_paged`].
 #[allow(clippy::too_many_arguments)]
@@ -678,7 +678,7 @@ pub fn gqa_mixer_chunk_kv_fwd_paged(
     gate_ctx(g, ids, &ctx, &prep.q_gate, n, qd).1
 }
 
-/// [`gqa_mixer_decode_batched_fwd`] over a [`KvLayer`] in any [`KvTier`] - the
+/// [`gqa_mixer_decode_batched_fwd`] over a [`KvLayer`] in any `KvTier` - the
 /// attention run by [`crate::block::gqa_decode_batched_step_kv`].
 #[allow(clippy::too_many_arguments)]
 pub fn gqa_mixer_decode_batched_kv_fwd(
@@ -810,7 +810,7 @@ pub fn decode_prep_form(g: &Gpu, shape: &GqaMixerShape, layer: &KvLayer, batch: 
 ///
 /// `None` - nothing submitted, the layer untouched - where the device is not
 /// offered the kernel or the shape is outside it: an empty batch, a
-/// head wider than the block holds, or a layer stored in a compact [`KvTier`]
+/// head wider than the block holds, or a layer stored in a compact `KvTier`
 /// other than int8 (the kernel appends `f32` or int8 rows). The caller then runs
 /// [`gqa_mixer_decode_batched_kv_attend`], which this is gated byte-for-byte
 /// against (`tests/gqa_decode_prep_native.rs`).

@@ -1194,14 +1194,14 @@ pub fn serving_manifests() -> Vec<Manifest> {
 /// This is how an embedder that holds no resolver of its own reaches a model,
 /// so it does the resolving itself: an entry carrying a
 /// [`ModelEntry::spec`] is built from a REAL [`Assembly`] scanned out of an
-/// explicitly opted-into model store ([`resolved_assembly`]), which is what
+/// explicitly opted-into model store (`resolved_assembly`), which is what
 /// makes a model whose weights ARE published constructible by name. A caller
 /// that already holds a resolver-built assembly (the CLI, which resolves with
 /// its own `--models-dir`/override vocabulary) calls
 /// [`provider_from_assembly`] with it instead, so it never resolves twice.
 ///
 /// When nothing resolves, an entry that needs no role at construction still
-/// builds - and one that does fails with [`weights_unavailable`]'s message,
+/// builds - and one that does fails with `weights_unavailable`'s message,
 /// never with a complaint about an empty [`Assembly`]'s roles.
 pub fn provider(model: &str) -> Result<Arc<dyn Provider>, String> {
     for e in models() {

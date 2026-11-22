@@ -224,13 +224,13 @@ pub struct LoraBankKernels {
     /// register it, in which case a group is corrected site by site.
     pub delta_multi: Option<usize>,
     /// `lora_xa_rows_tiled` (four rows by four rank indices a workgroup), the
-    /// projection [`KernelVariant::RowTiled`] selects; `None` when the model did
+    /// projection `KernelVariant::RowTiled` selects; `None` when the model did
     /// not register it, in which case the row-wise projection runs.
     pub xa_tiled: Option<usize>,
     /// `lora_delta_rows_tiled` (four rows a thread, one to four sites), the
-    /// epilogue [`KernelVariant::RowTiled`] selects; `None` likewise.
+    /// epilogue `KernelVariant::RowTiled` selects; `None` likewise.
     pub delta_tiled: Option<usize>,
-    /// `lora_delta_rows_multi_tiled`, the group epilogue of [`KernelVariant::RowTiled`];
+    /// `lora_delta_rows_multi_tiled`, the group epilogue of `KernelVariant::RowTiled`;
     /// `None` when the model did not register it.
     pub delta_multi_tiled: Option<usize>,
 }
@@ -327,7 +327,7 @@ fn bank_variant(g: &Gpu, kernels: LoraBankKernels, slots: u32, rows: u32, width:
     }
 }
 
-/// [`lora_bank_rows`] with the projection variant given: [`KernelVariant::RowTiled`] (the
+/// [`lora_bank_rows`] with the projection variant given: `KernelVariant::RowTiled` (the
 /// four-rows-by-four-ranks projection and the four-rows-a-thread epilogue),
 /// `WorkgroupPerOutput` (a workgroup per row and rank index) or `Reference` (a thread
 /// per row and rank index, the barrier-free kernel).

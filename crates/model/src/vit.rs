@@ -201,7 +201,7 @@ impl VitScratch {
 /// resolved BY NAME, or `None` when the model registered none of them or the
 /// device cannot run a workgroup reduction (the CPU JIT cannot).
 ///
-/// Same opt-in shape as [`gemm_step`]'s - a model adopts the fused path by
+/// Same opt-in shape as `gemm_step`'s - a model adopts the fused path by
 /// adding the `flash_attn_bidir*` rows to its own PIPELINES - but a
 /// deliberately SEPARATE opt-in, because it is a different kind of claim. The
 /// GEMM swap is the same arithmetic in a different order; the online softmax
@@ -357,7 +357,7 @@ pub fn attn_chunk_for(sh: &VitShape, max_span: u32, budget_bytes: u64) -> u32 {
 const ATTN_SLAB_BUDGET: u64 = 256 * 1024 * 1024;
 
 /// Query-chunk width for a tower whose longest attention span is `max_span` rows (a whole image): as many rows
-/// as [`ATTN_SLAB_BUDGET`] holds, and never more than this device will bind.
+/// as `ATTN_SLAB_BUDGET` holds, and never more than this device will bind.
 ///
 /// A device taking the fused path never reads the score slab, so the chunk
 /// only has to be legal, not large - `attn_chunk_for`'s own floor is what
@@ -1227,7 +1227,7 @@ impl WindowPlan {
     /// slice per span (the backward kernels that read it have no offset
     /// Param), so every span's `row0*dim` must be 64-float aligned. Always
     /// true for `dim % 64 == 0`; check it before building a shifted plan rather
-    /// than meeting [`aligned_ctx`] at step-build time. The forwards bind
+    /// than meeting `aligned_ctx` at step-build time. The forwards bind
     /// `ctx` whole and are unaffected.
     pub fn ctx_bindable(&self, dim: u32) -> bool {
         self.spans.iter().all(|&(row0, _)| (row0 as u64 * dim as u64).is_multiple_of(BIND_ALIGN))
@@ -1521,7 +1521,7 @@ fn align_up(n: u64) -> u64 {
 /// Base offsets of each span's `[heads, qn, kn]` softmax slab in a cached
 /// `probs` buffer.
 ///
-/// Running prefix sum with each slab PADDED to [`BIND_ALIGN`]. Both halves
+/// Running prefix sum with each slab PADDED to `BIND_ALIGN`. Both halves
 /// matter: the running sum is what makes RAGGED spans (a shifted Swin
 /// partition, a border window) address the right slab, and the padding is what
 /// makes the resulting offset bindable at all. `heads*qn*kn` is very often not

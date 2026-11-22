@@ -44,7 +44,7 @@
 //!
 //! Nothing here names a model. A model contributes the [`ResidentSpec`] of its linears and tables and a
 //! [`checkpoint::TensorSource`] of initial values; the planner refuses a configuration that does not fit
-//! before the first byte is allocated ([`ResidentFullFt::demands`]).
+//! before the first byte is allocated (`ResidentFullFt::demands`).
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;

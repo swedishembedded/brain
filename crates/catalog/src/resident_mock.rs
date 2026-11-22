@@ -13,7 +13,7 @@
 //!   it token-by-token via [`Progress::token`], and returns a `text` blob plus
 //!   `{prompt_tokens, completion_tokens, finish_reason}` — matching
 //!   [`apiserve`'s `bridge::read_outcome`]. Optional `image`/`audio` input blobs
-//!   are echoed as a deterministic descriptor (see [`media_suffix`]), so the
+//!   are echoed as a deterministic descriptor (see `media_suffix`), so the
 //!   multimodal request plumbing of all three transports is testable weight-free.
 //! * **`embed`**: takes `text` as a param OR as an input blob (the fd-in/fd-out
 //!   embedding contract every real embedding model — `lfm` — uses), returns
@@ -215,7 +215,7 @@ impl Instance for MockInstance {
 /// The substring a client sends to trigger the mock **failure** mode (error-hygiene
 /// probe): `generate` returns an `Err` whose text embeds a fake internal detail
 /// (a filesystem path + panic-ish text) that the apiserve layer must NOT reflect to
-/// the client. See [`generate`].
+/// the client. See `generate`.
 pub const FAIL_TRIGGER: &str = "__mock_fail__";
 
 /// The substring a client sends to make the mock refuse the request the way a real engine

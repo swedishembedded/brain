@@ -389,7 +389,7 @@ impl<K: AdapterKind> AdapterSet<K> {
 
     /// [`Self::build`], with a per-site [`TargetHp`] instead of one shared
     /// for every target - what a per-layer rank/alpha plan resolves to
-    /// (see [`super::plan::AdapterPlan::resolve`]). `build` is the uniform
+    /// (see `super::plan::AdapterPlan::resolve`). `build` is the uniform
     /// special case, `planned.iter().map(|s| (s, hp))`.
     pub fn build_planned(planned: Vec<(LinearSite, TargetHp)>, key_style: KeyStyle, init: &mut dyn FnMut() -> f32) -> Self {
         let entries = planned.into_iter().map(|(site, hp)| {
@@ -489,11 +489,11 @@ impl<K: AdapterKind> AdapterSet<K> {
     ///   [`Folder`] that exists. Nothing re-rounds a dense sum, so folding is
     ///   exact and costs nothing at inference.
     /// * [`BaseStorage::Quantized`] -> [`Delivery::Runtime`], one
-    ///   [`RuntimeDelta`] per target, in this set's canonical order. The base
+    ///   `RuntimeDelta` per target, in this set's canonical order. The base
     ///   weights stay untouched and quantize bit-exactly, exactly as they do
     ///   with no adapter at all.
     ///
-    /// The error case is a kind with no [`AdapterKind::low_rank`] form against
+    /// The error case is a kind with no `AdapterKind::low_rank` form against
     /// a quantized base: there is then neither a safe fold nor a runtime
     /// correction, and saying so is the only honest answer.
     pub fn delivery(&self, storage: BaseStorage, strength: f32) -> Result<Delivery<'_, K>, String> {

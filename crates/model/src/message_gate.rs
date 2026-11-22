@@ -38,7 +38,7 @@ pub fn kernels() -> &'static [(&'static str, &'static str)] {
     ]
 }
 
-/// The kernel slots of [`kernels`] on one device.
+/// The kernel slots of [`kernels()`] on one device.
 #[derive(Clone, Copy, Debug)]
 pub struct MessageGateIds {
     norm: usize,

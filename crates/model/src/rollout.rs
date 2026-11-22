@@ -181,7 +181,7 @@ fn eos_logprob(stop: Option<StopReason>, logprob: f32) -> Option<f32> {
 /// The mean per-token entropy (in nats) of the model's own next-token
 /// distribution at each position of `completion`, re-derived one
 /// [`Model::logits_all`] call per position - the same O(T^2),
-/// architecture-agnostic shape [`ModelRollout::sample_one`] samples from, so
+/// architecture-agnostic shape `ModelRollout::sample_one` samples from, so
 /// any [`Model`] with a token-classification head works with zero
 /// per-architecture code. `completion` is read back AFTER generation (it need
 /// not have been produced by this same rollout machinery - `qwen3::caps`'s

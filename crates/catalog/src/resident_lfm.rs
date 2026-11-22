@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! LFM2.5-Encoder behind the residency [`Executor`] — what makes the generic
+//! LFM2.5-Encoder behind the residency `Executor` - what makes the generic
 //! D-Bus interface (`Run`/`Subscribe`, fd blobs) and the scheduler serve the
 //! encoder with true concurrent batching.
 //!

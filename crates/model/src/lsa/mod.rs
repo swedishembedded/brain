@@ -29,7 +29,7 @@
 //! | [`space`] | turning a model's attention heads into index vectors |
 //! | [`ward`] | Ward merging of one block's pools into buckets |
 //! | [`index`] | the append-only bucket index of one sequence's keys |
-//! | [`select`] | a query's read: score, pick, expand, add window and sinks |
+//! | [`select()`] | a query's read: score, pick, expand, add window and sinks |
 //! | [`tree`] | node bucket levels over the buckets and a beam down them |
 //! | [`tree_device`] | the tree read on the device over a paged node pool |
 //! | [`tree_engine`] | a serving engine's node pages, grown and shared like index pages |

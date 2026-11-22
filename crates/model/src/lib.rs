@@ -76,7 +76,6 @@ pub mod gqa_mixer;
 pub mod grid;
 pub mod head_ce;
 pub mod head_transform;
-/// bf16 pack/unpack (B4's storage tier) - see this module's own doc comment.
 pub mod half;
 pub mod eigen;
 pub mod hostmath;
@@ -115,7 +114,6 @@ pub mod plan;
 pub mod postable;
 pub mod projector;
 pub mod prunable;
-/// Real per-device, per-dtype GEMM throughput measurement - see the module doc.
 pub mod probe;
 pub mod hostopt;
 pub mod resident_ft;

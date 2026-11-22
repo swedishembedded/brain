@@ -226,7 +226,7 @@ impl OuroResident {
     }
 
     /// Plan the pool and the batch from `card_bytes`, the usable bytes of the card the model is placed on: the
-    /// pool takes [`POOL_SHARE`] of what the weights and the decode step's buffers leave, and the batch is as many
+    /// pool takes `POOL_SHARE` of what the weights and the decode step's buffers leave, and the batch is as many
     /// sequences as the pool holds at a quarter of the context each (at least the batch already set, at most
     /// [`MAX_PLANNED_BATCH`]). A card too small for the planned pool keeps the sizing it had.
     pub fn with_card_budget(mut self, card_bytes: u64) -> OuroResident {

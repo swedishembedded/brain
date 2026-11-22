@@ -23,7 +23,7 @@
 //!
 //! [`super::AdapterKind`] is their conjunction plus the instance lifecycle
 //! (construct, serialize, load). Adding a kind means implementing the three
-//! roles and listing its suffixes in [`super::device::KINDS`]; nothing else
+//! roles and listing its suffixes in `super::device::KINDS`; nothing else
 //! names a tensor suffix.
 
 use super::{LowRank, TargetHp, TargetSpec};

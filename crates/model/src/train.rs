@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! One generic training/eval/sample loop over any [`Model`](crate::Model)
+//! One generic training/eval/sample loop over any [`Model`]
 //! (ADR §3). [`fit`] is `gpt2::train::train` lifted to `M: Model` - same control
 //! flow (cosine-with-warmup LR, grad accumulation with averaging, periodic eval,
 //! resumable atomic checkpointing); [`generate`] is `gpt2::sample::generate`
@@ -2689,7 +2689,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
 ///
 /// This is `gpt2::train::train` lifted to `M: Model` - same control flow, same
 /// resume/eval/checkpoint semantics, no GPT-specific code. Delegates to
-/// [`build_or_warm_start`] + [`fit_with`] over the [`CausalLm`] objective; the
+/// [`build_or_warm_start`] + [`fit_with`] over the `CausalLm` objective; the
 /// loop body itself lives once, in `fit_with`.
 ///
 /// Native-only: it reads token `.bin` datasets and writes checkpoints, neither
@@ -2830,7 +2830,7 @@ pub fn fit_distributed_resumable<M: Model>(dir: &Path, cfg: M::Config, opts: &Fi
 /// Generate `max_new` tokens continuing `prompt` for any token-head [`Model`].
 /// Context is cropped to the model's block size. `temperature <= 0` selects
 /// greedy argmax; `top_k = 0` disables top-k filtering. A thin wrapper over
-/// [`crate::rollout::ModelRollout::sample_n`] (`n = 1`, no EOS) - the
+/// `crate::rollout::ModelRollout::sample_n` (`n = 1`, no EOS) - the
 /// always-correct, architecture-agnostic rollout this function's own
 /// pre-P10 implementation was lifted into, byte-identical for a fixed
 /// `(seed, temperature, top_k)` (see `qwen3`'s

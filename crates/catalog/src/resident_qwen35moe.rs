@@ -219,7 +219,7 @@ impl ResidentModel for Qwen35Resident {
     }
 }
 
-/// The serving engine over the brain checkpoint at `path` (see [`engine_from`]).
+/// The serving engine over the brain checkpoint at `path` (see `engine_from`).
 pub fn serving_engine(path: &str, ctx: u32, max_concurrent: u32) -> Result<Engine, String> {
     let (config, src) = open_stored_checkpoint(path)?;
     engine_from(&*src, &config, ctx, max_concurrent)

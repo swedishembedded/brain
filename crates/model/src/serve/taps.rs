@@ -12,8 +12,8 @@
 //! A drafter that reads the target's internals (a block drafter attends to the target's hidden states at a handful of
 //! its depths: decoder layers of a plain stack, visits of a looped one) needs those rows for every position the target
 //! has consumed: the prompt, every decoded token and every
-//! verify row. A decoder that can supply them implements [`PagedDecoder::enable_taps`] and
-//! [`PagedDecoder::read_taps`]; this module is the storage it can use.
+//! verify row. A decoder that can supply them implements `PagedDecoder::enable_taps` and
+//! `PagedDecoder::read_taps`; this module is the storage it can use.
 //!
 //! # Where a tap row lives
 //!

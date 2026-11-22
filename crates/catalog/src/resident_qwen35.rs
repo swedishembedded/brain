@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Resident-model adapter putting Qwen3.8-27B's paged serving engine
-//! (`qwen35::serve::Engine`) behind the residency [`Executor`]. Like every
+//! (`qwen35::serve::Engine`) behind the residency `Executor`. Like every
 //! brain LLM resident it is driven by the generic continuous-batching
 //! `model::serve::Scheduler` through `llmserve` (all admitted sequences'
 //! decode rows go through ONE batched forward per iteration); see
@@ -72,8 +72,8 @@ pub use model::kv_tier::KvTier as Qwen35KvTier;
 pub use model::ops::TierPolicy as Qwen35TierPolicy;
 
 /// Everything `brain serve` parses for the Qwen3.8 family, threaded into
-/// `serving::build_executor` as one value: [`fp32`] sizes the
-/// brain-checkpoint resident, [`gguf`] configures every multi-card INT8
+/// `serving::build_executor` as one value: `fp32` sizes the
+/// brain-checkpoint resident, `gguf` configures every multi-card INT8
 /// released-GGUF resident (see [`Qwen35GgufServeConfig`]). One struct per
 /// family in the CLI's parsed output keeps the two residents' knobs from
 /// being confused with each other's.
@@ -173,7 +173,7 @@ impl Qwen35Resident {
     /// The model-dir counterpart of [`from_assembly`](Self::from_assembly): a
     /// checkpoint discovered by `serving::model_dir` (family `"qwen35"` - what
     /// `Qwen35::save` stamps on its `ModelCard`) served under its OWN card id
-    /// rather than the resolver's [`MODEL`].
+    /// rather than the resolver's `MODEL`.
     ///
     /// `tokenizer` is the sibling `tokenizer.json` the scan found. It is
     /// required: `Engine` never opens a `.gguf`, so there is no
@@ -291,7 +291,7 @@ impl ResidentModel for Qwen35Resident {
     }
 }
 
-/// The serving engine over the brain checkpoint at `path` (see [`engine_from`]).
+/// The serving engine over the brain checkpoint at `path` (see `engine_from`).
 pub fn serving_engine(path: &str, ctx: u32, max_concurrent: u32) -> Result<Engine, String> {
     let (config, src) = open_stored_checkpoint(path)?;
     engine_from(&*src, &config, ctx, max_concurrent)
@@ -329,7 +329,7 @@ pub struct Qwen35GgufServeConfig {
     /// grammar). `None` holds every tensor as the checkpoint stores it
     /// (`qwen35::int8_gguf_resident::held_tiers`).
     pub tier: Option<model::ops::TierPolicy>,
-    /// GQA KV-cache storage tier. `None` takes the best of [`KV_DEFAULTS`](crate::serve_defaults::KV_DEFAULTS)
+    /// GQA KV-cache storage tier. `None` takes the best of [`KV_DEFAULTS`]
     /// that fits.
     pub kv: Option<model::kv_tier::KvTier>,
     /// How many sequences one batched decode step carries (the resident's
@@ -781,7 +781,7 @@ fn card_group<T>(offered: &[T], mut holds: impl FnMut(&[T]) -> bool) -> usize {
 
 /// A released Qwen3.8 GGUF resident with the adapters offered beside it.
 ///
-/// Everything about the model is its replicas' [`Qwen35GgufResident`]s'
+/// Everything about the model is its replicas' `Qwen35GgufResident`s'
 /// (placement, activation, the engine); this adds the registry of adapters the
 /// operator wants served and the instance that applies them. Each served
 /// adapter is a model of its own ([`llmserve::adapter_registry::AdapterView`])

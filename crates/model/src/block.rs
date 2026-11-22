@@ -77,7 +77,7 @@ pub struct KernelIds {
     ///
     /// It is a slot on [`KernelIds`] rather than an argument because the
     /// builders that pay the most for the naive kernel are the SHARED ones -
-    /// [`gqa_attn_qkv`]'s three norms, [`crate::gqa_mixer::gqa_mixer_fwd`]'s
+    /// `gqa_attn_qkv`'s three norms, [`crate::gqa_mixer::gqa_mixer_fwd`]'s
     /// QK-norms, [`crate::gdn_mixer::gdn_mixer_fwd`]'s gated norm - which no
     /// model can reach from its own call sites. Registering one pipeline and
     /// filling one slot switches every RMSNorm a model composes, including
@@ -160,7 +160,7 @@ impl Gqa {
 /// it was the dominant share of device time per token, more than the whole int8 weight
 /// stream underneath it - but the swept comparison in `rmsnorm_rows.wgsl` wins
 /// at every row width. Models compose this builder from inside
-/// [`gqa_attn_qkv`], [`crate::gqa_mixer`] and [`crate::gdn_mixer`], so a
+/// `gqa_attn_qkv`, [`crate::gqa_mixer`] and [`crate::gdn_mixer`], so a
 /// per-model fix cannot reach those norms at all.
 ///
 /// NOT a bit-identical swap: 64 partial sums fold in a different order,
@@ -593,7 +593,7 @@ pub fn gqa_decode_batched_step(
     ]
 }
 
-/// [`gqa_decode_batched_step`] over a [`KvLayer`] in any [`KvTier`]: the same
+/// [`gqa_decode_batched_step`] over a [`KvLayer`] in any `KvTier`: the same
 /// buffer contracts, with the pool a layer's K and V planes instead of two
 /// `f32` buffers, so a compact tier changes what is resident and not what is
 /// computed.
@@ -970,7 +970,7 @@ pub struct ChunkPaging<'a> {
     pub tables: &'a DeviceBuffer,
 }
 
-/// [`gqa_chunk_step`] over a [`KvLayer`] in any [`KvTier`], for a sequence whose
+/// [`gqa_chunk_step`] over a [`KvLayer`] in any `KvTier`, for a sequence whose
 /// K/V may span several physical blocks: the chunk's `n` K/V rows are appended
 /// through the tier's own append kernel at `paging`'s `(blocks[i], offsets[i])`,
 /// and the queries then attend rows `0..=start+i` through the block tables - by
@@ -3063,7 +3063,7 @@ pub fn dscores_variant(g: &Gpu, k: &CrossBwdIds, rows: u32, cols: u32) -> (usize
 ///
 /// **Alignment:** `d_ctx`, `d_qkv` and `qkv` windows are sliced bindings at `row * d_out` and `row * stride` (the
 /// backward kernels have no offset Param for `d_ctx`), so `stride` and `d_out` must be multiples of 64 words; a call
-/// that breaks it panics, naming the width ([`assert_row_windows_bindable`]).
+/// that breaks it panics, naming the width (`assert_row_windows_bindable`).
 pub fn chunked_bidir_bwd(
     g: &Gpu,
     fwd: &CrossIds,
@@ -4030,7 +4030,7 @@ pub fn gemm_variant_row_invariant(v: GemmVariants, m: u32, n: u32) -> (usize, gp
 /// Same policy source as both of those (`backend_api::select`'s `Op::MatMul`
 /// table, whose decode-regime head is `WorkgroupPerOutput`), but keyed on
 /// `g.caps()` the way [`rms_variant`] already is rather than on
-/// [`fast_tier_caps`]'s always-capable stand-in. That distinction is
+/// `fast_tier_caps`'s always-capable stand-in. That distinction is
 /// load-bearing for a model whose graph runs on BOTH backends: `matmul_gemv`
 /// needs `workgroup_reductions`, which `backend-cpu` reports as `false`, and
 /// selecting it there would take the dispatch off that backend's native AVX2

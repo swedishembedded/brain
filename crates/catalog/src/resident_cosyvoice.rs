@@ -32,9 +32,9 @@
 //! box's 30 GB RAM and no discrete GPU cannot hold `llm.pt` (~2 GB),
 //! `flow.pt` (451 MB CosyVoice 2 / 1.33 GB CosyVoice 3), `hift.pt` (~83 MB),
 //! `speech_tokenizer_v2.onnx` (~496 MB) and `campplus.onnx` (~28 MB) all
-//! resident at once, or even want to). And [`CosyVoiceInstance`] itself,
+//! resident at once, or even want to). And `CosyVoiceInstance` itself,
 //! between calls, holds nothing but a handful of path `String`s - its real
-//! idle footprint is negligible, not the number [`estimate`] reports.
+//! idle footprint is negligible, not the number `estimate` reports.
 //!
 //! So the byte figure this file reports is not "what is currently
 //! allocated" (nothing is, most of the time) - it is an ADMISSION-CONTROL

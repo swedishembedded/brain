@@ -13,9 +13,9 @@
 //! A device model stores an adapter as extra named tensors beside the base
 //! weight (`{base}{suffix}`). Which suffixes exist, their shapes, how they
 //! start and whether and how fast they train are all answered by the kind's
-//! [`AdapterDefinition`] and [`AdapterOptimization`] - the model crates ask the
+//! `AdapterDefinition` and `AdapterOptimization` - the model crates ask the
 //! functions below and never spell a suffix. A new kind joins by listing
-//! itself in [`kinds`]; the role assignment, init, save filter and parameter
+//! itself in `kinds`; the role assignment, init, save filter and parameter
 //! lists of every model follow.
 //!
 //! [`LoraCfg`] is the one device-side configuration: rank, alpha, targets and

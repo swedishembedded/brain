@@ -142,7 +142,7 @@ fn pair_into_node_buckets(sums: &[f32], blocks: usize, block: usize, dim: usize,
 }
 
 /// One node cluster block's node buckets: the block's rows of the level
-/// below paired into node buckets ([`pair_into_node_buckets`]), numbered in
+/// below paired into node buckets (`pair_into_node_buckets`), numbered in
 /// the order of their first row.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NodePage {

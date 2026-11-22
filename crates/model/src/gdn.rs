@@ -72,7 +72,7 @@
 //! across chunks (state feeds forward), but fully PARALLEL across
 //! `(batch,head)` within one chunk. Dispatching one chunk's worth of work
 //! therefore needs "every `(b,h)`, one fixed chunk" as a single batch range
-//! for [`bmm`]/[`bmm_acc`] and the offset-taking elementwise kernels
+//! for `bmm`/`bmm_acc` and the offset-taking elementwise kernels
 //! (`gdn_row_scale_off.wgsl`, `sub.wgsl`, `gdn_decay_scale.wgsl`,
 //! `gdn_state_decay.wgsl`). With chunk OUTERMOST, that range is the
 //! CONTIGUOUS slice `[chunk*(B*H), (chunk+1)*(B*H))` of the buffer's own
@@ -209,7 +209,7 @@ pub struct GdnFastIds {
     /// serves both `bmm` and `bmm_acc` (bit-identical to them).
     pub bmm_tiled: usize,
     /// Whether the fused tensor-core prefix (`gdn_chunk_prep_tc`, see
-    /// [`native_chunk_prep`]) may replace the whole-tensor steps 1-9 on a device
+    /// `native_chunk_prep`) may replace the whole-tensor steps 1-9 on a device
     /// that offers it. Unlike the other fast kernels it is NOT bit-identical to
     /// the portable path (three-pass TF32 products, agreement about 1e-6
     /// relative), so a caller that needs the portable numbers - or a parity
@@ -1274,7 +1274,7 @@ pub struct GdnBwdIds {
 }
 
 /// The training-mode sibling of [`gdn_chunk_fwd`]: byte-identical forward
-/// math (same steps 1-9 via the shared [`gdn_chunk_fwd_prefix`], same
+/// math (same steps 1-9 via the shared `gdn_chunk_fwd_prefix`, same
 /// per-chunk step-10 kernel calls, so this function's `out`/`final_state`
 /// outputs are IDENTICAL to what [`gdn_chunk_fwd`] would produce for the same
 /// inputs - a cheap cross-check worth running before trusting a backward

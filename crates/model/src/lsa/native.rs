@@ -243,7 +243,7 @@ pub struct SelectKernels {
 /// projected: the attention's own index space), every closed cluster block of
 /// every sequence Ward-merged in one dispatch, each query's read written
 /// straight into the index, and the selection inverted per key by a stable
-/// sort of (key, query) pairs - the [`super::select`] the host reference
+/// sort of (key, query) pairs - the [`super::select()`] the host reference
 /// makes, as recorded steps. Scratch is linear in the context except the
 /// read's scores, one per bucket of every closed block per query (a bucket
 /// holds about `bucket_size` keys).

@@ -890,7 +890,7 @@ impl Weight {
 
     /// The weight-scale group width along `k` this weight was packed with -
     /// 32 for every tier except a non-affine (Q6_K) [`Weight::KQuant`],
-    /// which is 16. [`Ops::bind`]'s own `group` parameter exists ONLY to
+    /// which is 16. `Ops::bind`'s own `group` parameter exists ONLY to
     /// carry this to the physical-kernel-name choice (see that method's doc
     /// comment); every dtype this crate had before M12 was implicitly
     /// group=32 everywhere, which is exactly why this returns a plain `u32`
@@ -2371,7 +2371,7 @@ impl Ops {
         self.matmul_rows_bf16_out(s, w, (0, w.n()), act, y)
     }
 
-    /// [`Self::matmul_bf16_out`] for the row window `rows = (first, count)` of `w` (see [`Self::fp8_forward`] for the
+    /// [`Self::matmul_bf16_out`] for the row window `rows = (first, count)` of `w` (see `Self::fp8_forward` for the
     /// window's alignment): `y` holds the window's `[m, count]` bf16 rows.
     pub fn matmul_rows_bf16_out(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), act: &Act, y: &DeviceBuffer) -> bool {
         assert_eq!(act.k, w.k(), "Ops::matmul_rows_bf16_out: activation width {} does not match weight K {}", act.k, w.k());
@@ -2391,13 +2391,13 @@ impl Ops {
     /// `model::block::pick_gemm`/`gemm_variant` already use per variant
     /// family, EXCEPT `PackedInt8`, which - unlike every other variant here -
     /// is not one fixed dispatch geometry: `matmul_i8_dyn.wgsl` and (since
-    /// M5.5 was wired into [`Ops::bind`]) `matmul_q4_dyn_reg.wgsl` are BOTH
+    /// M5.5 was wired into `Ops::bind`) `matmul_q4_dyn_reg.wgsl` are BOTH
     /// register-tiled (128×128 tile, 256-thread workgroup, `workgroup_id`-
     /// indexed - `matmul_q4_dyn_reg.wgsl`'s own header: "mirroring
     /// `matmul_i8_dyn`'s shape"), and need the SAME tile dispatch count; only
     /// `matmul_q4_gemv`'s `WorkgroupPerOutput` sibling and the two K-quant
     /// `WorkgroupPerOutput` kernels stay outside this arm. The dispatch count
-    /// has to follow the REAL kernel [`Ops::bind`] chose, not the logical
+    /// has to follow the REAL kernel `Ops::bind` chose, not the logical
     /// variant name alone - using `m*n` for a register-tiled kernel
     /// under-dispatches it (leaves real output elements never written);
     /// using the tile formula for a one-thread-per-output kernel merely
@@ -2431,7 +2431,7 @@ impl Ops {
     /// selection/kernel-name/thread-count/dispatch logic that used to live
     /// directly in this method now lives in `gpu_core::provider::wgsl::
     /// WgslProvider::lower` (moved verbatim - same selector call, same
-    /// [`Self::bind`] name table, same thread-count formula, same
+    /// `Self::bind` name table, same thread-count formula, same
     /// `step_sliced` call); this method's own job is now only building the
     /// per-dtype [`Operand`] bundle (identical buffers, identical offsets,
     /// identical params to what it pushed by hand before) and handing it to
@@ -3448,7 +3448,7 @@ impl Ops {
 
     /// Which kernel [`Self::matmul`] would dispatch for this weight at `m`
     /// rows - the selector's REAL choice, resolved through the same
-    /// [`Self::bind`] the dispatch itself uses.
+    /// `Self::bind` the dispatch itself uses.
     ///
     /// Exists so a caller that has to *report* what ran (a device benchmark,
     /// a `--explain` flag) reads it off the one selection path instead of
@@ -3456,7 +3456,7 @@ impl Ops {
     /// rather than the [`KernelVariant`] is deliberate: the variant alone is
     /// ambiguous (`PackedInt8` is `matmul_i8_dyn` for `I8` but
     /// `matmul_q4_dyn_reg` for `Q4` - two different physical kernel files
-    /// behind the same variant, see [`Ops::threads`]'s doc comment), and the
+    /// behind the same variant, see `Ops::threads`'s doc comment), and the
     /// name is what a reader can grep for.
     #[must_use]
     pub fn matmul_kernel(&self, w: &Weight, m: u32) -> &'static str {

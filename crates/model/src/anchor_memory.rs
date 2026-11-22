@@ -407,7 +407,7 @@ fn commit_step(g: &Gpu, ids: &AnchorMemoryKernels, s: &AnchorMemoryShape, n_seq:
 }
 
 /// `refs` for every block of every sequence of `scores` (`[n_seq * t, n_kv_heads]`): block 0 reads an empty bank,
-/// block `b + 1`'s bank is [`commit_step`] of block `b`'s bank and block `b`'s tokens. `refs` need not be
+/// block `b + 1`'s bank is `commit_step` of block `b`'s bank and block `b`'s tokens. `refs` need not be
 /// initialised. The same kernel that commits a decode step's block orders the records, so a sequence processed whole
 /// and a sequence processed token by token select identically.
 pub fn anchor_select_steps(g: &Gpu, ids: &AnchorMemoryKernels, s: &AnchorMemoryShape, scores: &DeviceBuffer, refs: &DeviceBuffer) -> Vec<Step> {

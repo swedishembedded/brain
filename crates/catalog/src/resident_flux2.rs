@@ -45,7 +45,7 @@ pub struct Flux2Resident {
     max_batch: u32,
 }
 
-/// [`Flux2Resident::max_batch`] when the serving policy names none: only the
+/// `Flux2Resident::max_batch` when the serving policy names none: only the
 /// DiT activation scratch scales with it, and the scheduler's own
 /// `Policy::max_batch` caps the group size on top of it.
 pub const DEFAULT_MAX_BATCH: u32 = 4;

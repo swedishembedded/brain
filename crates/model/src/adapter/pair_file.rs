@@ -8,7 +8,7 @@
 //! carries `rank`/`alpha` (plus family-specific fields). Every one of those
 //! families had its own copy of the write and, worse, its own read: some
 //! reconstructed tensors with empty shapes, which silently downgraded
-//! [`crate::lora::LoraPair::load_tensors`]'s A/B-swap check to a length
+//! `crate::lora::LoraPair::load_tensors`'s A/B-swap check to a length
 //! comparison. This module is the one read/write pair, and it always carries
 //! the shapes the file records.
 //!

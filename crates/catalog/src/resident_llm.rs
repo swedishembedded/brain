@@ -3,7 +3,7 @@
 
 //! Resident-model adapters for brain's text-generation LLMs - GPT (dense
 //! char-level baseline), GLM (MLA + noaux_tc MoE decoder), and Qwen3 (BPE
-//! decoder) - behind the residency [`Executor`], mirroring the yolo/z-image
+//! decoder) - behind the residency `Executor`, mirroring the yolo/z-image
 //! adapters in [`crate::resident_yolo`] and [`crate::resident_zimage`].
 //!
 //! Each model family is one [`ResidentModel`] with a single `"generate"` action.
@@ -20,7 +20,7 @@
 //! precision - is [`QwenServeConfig`], which `run_cli.rs`'s serving-policy
 //! flags build; see that struct's own doc for every field and its default.
 //! With no `--ctx` given, context auto-sizes to the target device's
-//! real free VRAM (see [`QwenResident::resolve_ctx`]) rather than a single
+//! real free VRAM (see `QwenResident::resolve_ctx`) rather than a single
 //! fixed number for every box.
 
 use capability::{ActionResult, Invocation, Manifest, Progress, Provider};
@@ -84,7 +84,7 @@ pub(crate) fn est_vram(path: &str) -> MemCost {
 }
 
 /// The device byte footprint of `cfg`'s weights at fp32, with the same 1.3x
-/// allowance [`est_vram`] gives a file - derived from the config, since the
+/// allowance `est_vram` gives a file - derived from the config, since the
 /// checkpoint on disk may be a directory, or bf16 at half the device size.
 pub fn weights_fp32_bytes(cfg: &qwen3::config::QwenConfig) -> u64 {
     cfg.param_list().into_iter().map(|(_, elems)| elems as u64 * 4).sum::<u64>() * 13 / 10
@@ -352,7 +352,7 @@ pub struct QwenServeConfig {
     /// embedded tokenizer).
     pub tokenizer: Option<String>,
     /// `--ctx N`. `None` means "size it automatically" - see
-    /// [`QwenResident::resolve_ctx`]. Historical default when NEITHER this
+    /// `QwenResident::resolve_ctx`. Historical default when NEITHER this
     /// nor `auto_budget_bytes` is given: 24576.
     pub ctx: Option<u32>,
     /// The device budget to auto-size `ctx` against, when `ctx` itself is
@@ -366,10 +366,10 @@ pub struct QwenServeConfig {
     /// The usable bytes of the largest card this server may place the model on
     /// (total minus `--reserve-gb`), when known. Unlike `auto_budget_bytes` it
     /// never sizes `ctx`: it only bounds the default KV pool
-    /// ([`QwenResident::resolve_kv_tokens`]).
+    /// (`QwenResident::resolve_kv_tokens`).
     pub card_budget_bytes: Option<u64>,
     /// `--max-batch N`. `None` (the default) is planned from the card when its budget is known
-    /// ([`QwenResident::resolve_max_batch`]: the widest of [`max_batch_ranking`] that fits beside the weights
+    /// (`QwenResident::resolve_max_batch`: the widest of [`max_batch_ranking`] that fits beside the weights
     /// with one sequence at the context floor), and [`FALLBACK_MAX_BATCH`] when no budget is.
     pub max_batch: Option<u32>,
     /// `--kv-cache f32` (presence opts OUT), default `true` (int8 KV is the
@@ -895,7 +895,7 @@ impl QwenResident {
     /// on this base name as theirs. `tokenizer` is the sibling
     /// `tokenizer.json` (empty/None defers the "set a tokenizer" error to
     /// `activate`). `cfg` resolves `ctx` once, here (see
-    /// [`Self::resolve_ctx`]), and is otherwise copied straight into fields
+    /// `Self::resolve_ctx`), and is otherwise copied straight into fields
     /// `estimate`/`activate` read.
     pub fn from_card_configured(path: &str, card: &ModelCard, tokenizer: Option<&str>, cfg: QwenServeConfig) -> QwenResident {
         let architecture = brain_arch::by_family(&card.family).map(|a| a.id.to_string());

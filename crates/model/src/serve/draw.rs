@@ -174,7 +174,7 @@ fn draw_truncated_row(row: &[f32], d: RowDraw) -> (u32, f32) {
 }
 
 /// The keyed draw over a best-first `list` (`(token, logit)`, equal logits lowest id first) that holds every
-/// survivor of `d`: the row sampler's truncation of the list ([`super::truncated_weights_of`]; `full_mass` is the
+/// survivor of `d`: the row sampler's truncation of the list (`super::truncated_weights_of`; `full_mass` is the
 /// softmax normaliser of the whole row when the list is only its prefix and the nucleus is measured against the row),
 /// then the Gumbel-max rule over what survives, with the drawn token's log-probability.
 pub fn draw_list(list: &[(u32, f32)], d: RowDraw, full_mass: Option<f32>) -> (u32, f32) {

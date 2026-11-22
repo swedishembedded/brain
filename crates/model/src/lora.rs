@@ -448,7 +448,7 @@ fn base_stem(stem: &str) -> &str {
 /// the base tensor key it targets.
 ///
 /// Key matching is ComfyUI's: strip a leading `diffusion_model.` or PEFT's
-/// `base_model.model.` wrapper ([`base_stem`]), strip the family suffix, and the remaining stem plus `.weight` is the base tensor.
+/// `base_model.model.` wrapper (`base_stem`), strip the family suffix, and the remaining stem plus `.weight` is the base tensor.
 /// `.alpha`, when present, is read as the scalar it is.
 ///
 /// **Two families, decided per target stem**, because one file adapts every
@@ -1395,7 +1395,7 @@ pub mod device_adapter {
         (a2, b2)
     }
 
-    /// [`save_adapter_with_lineage`] for a model built from a [`LoraCfg`]:
+    /// [`save_adapter_with_lineage`] for a model built from a `LoraCfg`:
     /// the file carries the scale each target trained with (an rsLoRA scale
     /// in the card's alpha; targets with their own rank or alpha padded to
     /// the widest rank with their scale folded into `B`).
@@ -1992,7 +1992,7 @@ pub mod device_adapter {
     }
 }
 
-/// [`Pair`]'s gradient pair, as consumed by [`crate::adapter::AdapterKind::step`].
+/// [`Pair`]'s gradient pair, as consumed by `crate::adapter::AdapterKind::step`.
 pub struct LoraGrads {
     pub da: Vec<f32>,
     pub db: Vec<f32>,

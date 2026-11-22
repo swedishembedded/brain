@@ -50,7 +50,7 @@ pub fn kernels() -> &'static [(&'static str, &'static str)] {
     &[("depth_attn_fwd", kernels::DEPTH_ATTN_FWD), ("depth_attn_bwd", kernels::DEPTH_ATTN_BWD), ("depth_attn_bwd_query", kernels::DEPTH_ATTN_BWD_QUERY)]
 }
 
-/// The kernel slots of [`kernels`] on one device: the forward and state backward as the selector chose them for this
+/// The kernel slots of [`kernels()`] on one device: the forward and state backward as the selector chose them for this
 /// handle (the cooperative twin or the reference), and the query backward.
 #[derive(Clone, Copy, Debug)]
 pub struct DepthAttnIds {

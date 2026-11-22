@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Qwen3-TTS voice synthesis behind the residency [`Executor`].
+//! Qwen3-TTS voice synthesis behind the residency `Executor`.
 //!
 //! The speech actions (`synth`, `clone`, `design`) run on a hot
 //! [`qwen3tts::ResidentEngine`]: the Talker, MTP, codec and tokenizer load ONCE
