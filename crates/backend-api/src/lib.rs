@@ -2376,7 +2376,19 @@ pub trait RankCollective: Send + Sync {
         let _ = limit;
         Err(format!("{} communicators bound an operation only when it is waited for", self.provider()))
     }
+    /// A handle that aborts this communicator from any thread, whatever another thread is doing with it (blocked in
+    /// an operation, in [`RankCollective::wait`], or on the card behind one): the operations end, peers see the
+    /// failure, and every later call fails with the reason given. For ranks that share a process, so one that fails
+    /// ends its peers' waits at once instead of at their deadline. `None` when this communicator cannot be aborted
+    /// from outside.
+    fn aborter(&self) -> Option<CommAborter> {
+        None
+    }
 }
+
+/// Aborts one communicator with a reason ([`RankCollective::aborter`]); calling it again, or after the communicator
+/// ended, does nothing.
+pub type CommAborter = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Per-handle device-op counters - the queryable form of what
 /// `--kernel-profile` used to print only to stderr. What a benchmark records so

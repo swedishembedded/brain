@@ -23,7 +23,7 @@
 //! `dyn`, and async device init / read-back via `new_async` / `read_async`).
 
 pub use backend_api::{
-    f, AllocPolicy, BufUsage, CollectiveDtype, CollectiveId, DeviceBuffer, DeviceCaps, DeviceClass, DeviceOutOfMemory, DeviceStats, LiveResources, LiveTally,
+    f, AllocPolicy, BufUsage, CollectiveDtype, CollectiveId, CommAborter, DeviceBuffer, DeviceCaps, DeviceClass, DeviceOutOfMemory, DeviceStats, LiveResources, LiveTally,
     MemAdvice, MemoryLimits, MemoryUsage, Lowering, NumericSupport, PlacementFacts, PortableDispatch, PrefetchTarget, Step, StepMeta,
     STORAGE_BINDING_OFFSET_ALIGN_BYTES,
 };

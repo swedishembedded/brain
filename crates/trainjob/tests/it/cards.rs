@@ -157,3 +157,40 @@ fn a_stopped_run_on_two_cards_resumes_to_the_uninterrupted_adapter_and_leaves_no
     assert!(crate::support::work_is_clean(&rig.work_root));
     assert_reservation_returned(&rig);
 }
+
+/// One rank of a run on several cards fails alone, mid-run, while its peer waits for it in the step's reduction (on
+/// the cards over NCCL when the server has CUDA cards, through host memory on the CPU suite): the peer fails at once
+/// with the failed rank's reason instead of at the group's op timeout (600 s), and the run fails with the reason of
+/// the rank that failed first, not the "aborted" its failure caused in the other.
+#[test]
+fn a_rank_that_fails_alone_mid_run_fails_the_run_at_once_with_its_reason() {
+    let model = crate::fixture::qwen3_model_dir_of("cards-rank-fails", qwen3::QwenConfig::tiny());
+    let train = crate::fixture::write_chat_dataset(&model, &[("cab", "bad"), ("fed", "deaf"), ("ace", "face"), ("bag", "gab"), ("dab", "bead"), ("cafe", "face")]);
+    let ranks = brain::DataParallel::in_process(2).expect("a two-rank group");
+    let peer_error: Mutex<Option<String>> = Mutex::new(None);
+    let failed_at: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    let body = |rank: brain::DataParallel, _frames: Option<std::sync::mpsc::Sender<capability::Progress>>| -> Result<(), String> {
+        let r = rank.rank();
+        let tune = brain::ChatFineTune::from_pretrained(model.join("model.safetensors").to_str().unwrap()).placed(true).dataset(&train).out_dir(model.join(format!("rank{r}"))).rank(2).steps(1000).lr(1e-2).seed(11).data_parallel(rank);
+        let outcome = tune.run_with(&CancelToken::armed(), |step| {
+            // Rank 1 fails after step 1, once the group (the device group, on cards) is formed and rank 0 is
+            // on its way into step 2's reduction.
+            if r == 1 && step.step == 1 {
+                *failed_at.lock().unwrap() = Some(std::time::Instant::now());
+                panic!("rank 1 lost its card");
+            }
+        });
+        let error = outcome.map(drop).map_err(|e| e.to_string());
+        if r == 0 {
+            *peer_error.lock().unwrap() = error.clone().err();
+        }
+        error
+    };
+    let devices = [Device::Gpu(0), Device::Gpu(1)];
+    let why = trainjob::job::run_ranks(ranks, &devices, body, &mut |_| {}).expect_err("the run fails with its rank");
+    let waited = failed_at.lock().unwrap().expect("rank 1 failed after step 1").elapsed();
+    assert_eq!(why, "train: the device failed during the run (see the server log)", "the run names the first rank's failure");
+    let peer = peer_error.lock().unwrap().clone().expect("rank 0 failed too");
+    assert!(peer.contains("rank 1 failed"), "rank 0 fails with rank 1's reason, not a timeout: {peer}");
+    assert!(waited < std::time::Duration::from_secs(30), "rank 0 failed {waited:?} after rank 1, not at once");
+}

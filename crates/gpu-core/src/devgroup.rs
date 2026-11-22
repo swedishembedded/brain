@@ -206,4 +206,10 @@ impl RankGroup {
     pub fn bound_in_flight(&self, limit: Duration) -> Result<(), String> {
         self.comm.bound_in_flight(limit)
     }
+
+    /// A handle that aborts this group from any thread ([`backend_api::RankCollective::aborter`]): what ranks that share
+    /// a process hold, so a rank that fails ends its peers' operations at once. `None` when the provider has none.
+    pub fn aborter(&self) -> Option<crate::CommAborter> {
+        self.comm.aborter()
+    }
 }

@@ -726,8 +726,8 @@ fn train_chat(request: &Request, base_dir: &Path, staged: &Staged, files: &RunFi
 /// [`train_chat`] as one data-parallel rank per card of `devices` ([`brain::DataParallel::in_process`]): every rank
 /// trains the same request with the same seed on its own card and shard of the records, and every step's gradients
 /// are reduced over the group, so every rank ends with the same adapter (checked). Rank 0 streams the steps and its
-/// outcome is the run's; the ranks share the run's cancellation and stop after the same step; a rank that fails
-/// breaks the group, so the others fail instead of waiting for it, and the job fails with the first rank's reason.
+/// outcome is the run's; the ranks share the run's cancellation and stop after the same step ([`run_ranks`] for
+/// what a failing rank does).
 #[allow(clippy::too_many_arguments)]
 fn train_chat_ranks(request: &Request, base_dir: &Path, staged: &Staged, files: &RunFiles, work: &Workdir, devices: &[residency::Device], cancel: &capability::CancelToken, began: Instant, progress: &mut dyn FnMut(Progress)) -> Result<Trained, String> {
     let p = &request.params;
@@ -736,31 +736,54 @@ fn train_chat_ranks(request: &Request, base_dir: &Path, staged: &Staged, files: 
     let seed = files.resumable.as_ref().map(|(_, seed, _)| *seed).or(p.seed).unwrap_or_else(brain::random_seed);
     let ranks = brain::DataParallel::in_process(devices.len()).map_err(trainer_failure)?;
     let rank_files: Vec<RunFiles> = (0..devices.len()).map(|r| files.for_rank(r, work.path())).collect();
+    let body = |rank: brain::DataParallel, frames: Option<std::sync::mpsc::Sender<Progress>>| -> Result<Trained, String> {
+        let files = &rank_files[rank.rank()];
+        let fine_tune = build_fine_tune(request, base_dir, staged, files)?.seed(seed).data_parallel(rank);
+        let outcome = fine_tune
+            .run_with(cancel, |step| {
+                if let Some(frames) = &frames {
+                    let _ = frames.send(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64())));
+                }
+            })
+            .map_err(trainer_failure)?;
+        trained_chat(request, files, outcome)
+    };
+    let mut ranks_trained = run_ranks(ranks, devices, body, progress)?;
+    let first = ranks_trained.swap_remove(0);
+    if let Some(other) = ranks_trained.iter().find(|t| t.adapter_sha256 != first.adapter_sha256) {
+        return Err(format!("train: the ranks ended with different adapters ({} and {}); the run is not published", first.adapter_sha256, other.adapter_sha256));
+    }
+    Ok(first)
+}
+
+/// Runs `body` once per rank of `ranks`, each on its own thread scoped to its card of `devices` (rank `r` on
+/// `devices[r]`), and returns every rank's result in rank order once all are done. Rank 0's `body` is handed the
+/// sender of the steps it reports, which reach `progress` on this thread as they arrive.
+///
+/// A rank that fails (an error or a panic) breaks the group at once ([`brain::DataParallel::abort`]: the host
+/// transport and the device group on every card), so the others fail in their next or current reduction instead of
+/// waiting for it until the group's op timeout; the run then fails with the reason of the rank that failed first,
+/// not the "aborted" its failure caused in the others.
+pub fn run_ranks<T: Send>(
+    ranks: Vec<brain::DataParallel>,
+    devices: &[residency::Device],
+    body: impl Fn(brain::DataParallel, Option<std::sync::mpsc::Sender<Progress>>) -> Result<T, String> + Sync,
+    progress: &mut dyn FnMut(Progress),
+) -> Result<Vec<T>, String> {
+    let first_failure: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
     let (frames, steps) = std::sync::mpsc::channel::<Progress>();
-    let results: Vec<Result<Trained, String>> = std::thread::scope(|scope| {
+    let results: Vec<Result<T, String>> = std::thread::scope(|scope| {
         let handles: Vec<_> = ranks
             .into_iter()
             .zip(devices.iter().copied())
-            .zip(&rank_files)
-            .map(|((rank, device), files)| {
+            .map(|(rank, device)| {
                 let frames = (rank.rank() == 0).then(|| frames.clone());
+                let (body, first_failure) = (&body, &first_failure);
                 scope.spawn(move || {
                     let breaker = rank.clone();
-                    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        residency::on_device(device, || -> Result<Trained, String> {
-                            let fine_tune = build_fine_tune(request, base_dir, staged, files)?.seed(seed).data_parallel(rank);
-                            let outcome = fine_tune
-                                .run_with(cancel, |step| {
-                                    if let Some(frames) = &frames {
-                                        let _ = frames.send(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64())));
-                                    }
-                                })
-                                .map_err(trainer_failure)?;
-                            trained_chat(request, files, outcome)
-                        })
-                    }));
+                    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| residency::on_device(device, || body(rank, frames))));
                     let result = match run {
-                        Ok(placed) => placed.and_then(|trained| trained),
+                        Ok(placed) => placed.and_then(|done| done),
                         Err(panic) => {
                             let why = panic.downcast_ref::<String>().cloned().or_else(|| panic.downcast_ref::<&str>().map(|s| (*s).to_string())).unwrap_or_default();
                             eprintln!("brain train: a rank on {device:?} panicked: {why}");
@@ -768,6 +791,8 @@ fn train_chat_ranks(request: &Request, base_dir: &Path, staged: &Staged, files: 
                         }
                     };
                     if let Err(why) = &result {
+                        // Recorded before the group is broken, so no failure the break causes can come first.
+                        first_failure.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(|| why.clone());
                         breaker.abort(why);
                     }
                     result
@@ -781,23 +806,10 @@ fn train_chat_ranks(request: &Request, base_dir: &Path, staged: &Staged, files: 
         }
         handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err("train: a rank's thread ended abnormally".to_string()))).collect()
     });
-    let mut ranks_trained = Vec::with_capacity(results.len());
-    for result in results {
-        match result {
-            Ok(trained) => ranks_trained.push(trained),
-            // The rank that failed first names the reason; the ones it broke say only that the group was aborted.
-            Err(why) if why.contains("group was aborted") => continue,
-            Err(why) => return Err(why),
-        }
+    if let Some(why) = first_failure.into_inner().unwrap_or_else(|e| e.into_inner()) {
+        return Err(why);
     }
-    if ranks_trained.len() != devices.len() {
-        return Err("train: a rank failed and the others stopped with it (see the server log)".to_string());
-    }
-    let first = ranks_trained.swap_remove(0);
-    if let Some(other) = ranks_trained.iter().find(|t| t.adapter_sha256 != first.adapter_sha256) {
-        return Err(format!("train: the ranks ended with different adapters ({} and {}); the run is not published", first.adapter_sha256, other.adapter_sha256));
-    }
-    Ok(first)
+    results.into_iter().collect()
 }
 
 /// What a completed chat fine-tune produced, from the trainer's `outcome`; a cancelled one is the error "cancelled".

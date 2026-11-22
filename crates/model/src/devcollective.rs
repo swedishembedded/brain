@@ -176,6 +176,15 @@ pub struct JobCollective<C: Collective> {
     /// The bucket layout of the last reduction and its flat buffers, kept for the next one: a training run reduces
     /// the same tensors every step, so the buffers are allocated once.
     buckets: Mutex<Vec<Buckets>>,
+    /// What [`Collective::abort`] needs while another thread holds `device` inside an op: the device group's aborter
+    /// once it is formed, and the reason once the group was aborted (a group formed after that is aborted at once).
+    aborting: Mutex<Aborting>,
+}
+
+#[derive(Default)]
+struct Aborting {
+    aborter: Option<gpu_core::CommAborter>,
+    why: Option<String>,
 }
 
 /// A bucket layout and the flat buffers of its packed buckets, for one element type and set of tensor sizes.
@@ -190,7 +199,7 @@ impl<C: Collective> JobCollective<C> {
     /// Wrap the job's host transport; `join_timeout` bounds forming the device
     /// collective and `op_timeout` every device reduction.
     pub fn new(host: C, path: CollectivePath, join_timeout: Duration, op_timeout: Duration) -> JobCollective<C> {
-        JobCollective { host, path, join_timeout, op_timeout, device: Mutex::new(DevicePath::Undecided), bucket_bytes: 0, buckets: Mutex::new(Vec::new()) }
+        JobCollective { host, path, join_timeout, op_timeout, device: Mutex::new(DevicePath::Undecided), bucket_bytes: 0, buckets: Mutex::new(Vec::new()), aborting: Mutex::default() }
     }
 
     /// Pack device reductions into flat buckets of at most `bytes` of gradient ([`crate::gradbucket::plan`]); `0`
@@ -292,6 +301,13 @@ impl<C: Collective> JobCollective<C> {
                 if let Err(why) = group.bound_in_flight(self.op_timeout) {
                     eprintln!("brain: rank {rank}: a device collective is bounded by the op timeout only when it is waited for: {why}");
                 }
+                // A rank that fails ends the group's operations on every card at once ([`Collective::abort`]).
+                let mut aborting = self.aborting.lock().unwrap_or_else(|e| e.into_inner());
+                aborting.aborter = group.aborter();
+                if let (Some(abort), Some(why)) = (&aborting.aborter, &aborting.why) {
+                    abort(why);
+                }
+                drop(aborting);
                 Ok(DevicePath::Device(Box::new(group)))
             }
             Err(why) if self.path == CollectivePath::Device => Err(CollectiveError::Transport(format!("the job plan asks for device collectives, but {why}"))),
@@ -306,6 +322,18 @@ impl<C: Collective> JobCollective<C> {
 impl<C: Collective> Collective for JobCollective<C> {
     fn world_size(&self) -> usize {
         self.host.world_size()
+    }
+
+    /// Aborts the device group, when one was formed, without waiting for the thread inside one of its operations
+    /// (the operation then ends with `why`), and breaks the host transport.
+    fn abort(&self, why: &str) {
+        let mut aborting = self.aborting.lock().unwrap_or_else(|e| e.into_inner());
+        aborting.why.get_or_insert_with(|| why.to_string());
+        if let Some(abort) = &aborting.aborter {
+            abort(why);
+        }
+        drop(aborting);
+        self.host.abort(why);
     }
 
     /// On the device group once the ranks formed one: a step's scalars (its token count, an evaluation's result)

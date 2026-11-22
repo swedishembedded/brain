@@ -218,6 +218,13 @@ pub trait Collective: Send + Sync {
     fn settle_device<'a>(&'a self, _rank: usize, _gpu: &'a gpu_core::Gpu) -> CollectiveFuture<'a, ()> {
         Box::pin(async { Ok(()) })
     }
+
+    /// Break the group because this rank failed and will not take part again: every rank waiting in an op of this
+    /// group, on the host or on the card, and every later op, fails with `why` (or, across machines, with the
+    /// transport's report of it) instead of waiting for this rank until its timeout. Safe to call from any thread,
+    /// while another thread is inside an op, and more than once (the first reason is kept). The default has nothing
+    /// to break.
+    fn abort(&self, _why: &str) {}
 }
 
 /// A shared group is the group: ranks that are threads of one process hold it behind an `Arc`.
@@ -248,6 +255,9 @@ impl<T: Collective + ?Sized> Collective for std::sync::Arc<T> {
     }
     fn settle_device<'a>(&'a self, rank: usize, gpu: &'a gpu_core::Gpu) -> CollectiveFuture<'a, ()> {
         (**self).settle_device(rank, gpu)
+    }
+    fn abort(&self, why: &str) {
+        (**self).abort(why)
     }
 }
 
@@ -354,12 +364,6 @@ impl HostCollective {
         })
     }
 
-    /// Break the group: every rank waiting in an op, and every later op, returns an error naming `why`. For a rank
-    /// that failed and will not arrive; the first reason given is the one reported.
-    pub fn abort(&self, why: &str) {
-        self.barrier.abort(why);
-    }
-
     /// Publish `local` into this rank's slot, barrier, run `combine` over all
     /// slots (read-only, every rank computes the same thing), barrier again so no
     /// rank overwrites its slot before all have read. Returns `combine`'s output
@@ -444,6 +448,12 @@ impl Collective for HostCollective {
             check_rank(root, world)?;
             self.exchange(rank, local, move |slots| Ok(slots[root].clone()))
         })
+    }
+
+    /// Every rank waiting in an op, and every later op, returns an error naming `why`; the first reason given is the
+    /// one reported.
+    fn abort(&self, why: &str) {
+        self.barrier.abort(why);
     }
 }
 

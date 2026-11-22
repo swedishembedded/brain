@@ -232,6 +232,15 @@ pub struct NetworkCollective {
     /// Coordinator (rank 0): one stream per worker, indexed by peer rank (`[0]`
     /// unused). Worker: a single stream to the coordinator in slot 0.
     conns: Vec<Option<Mutex<SealedStream>>>,
+    /// The sockets under `conns`, outside their locks: [`Collective::abort`] shuts them down while another thread may
+    /// be blocked reading one.
+    sockets: Vec<TcpStream>,
+}
+
+/// The sockets under `conns`, for [`Collective::abort`]: one that cannot be duplicated is left out (an abort then
+/// still writes the reason to it when its lock is free).
+fn sockets_of(conns: &[Option<Mutex<SealedStream>>]) -> Vec<TcpStream> {
+    conns.iter().flatten().filter_map(|c| c.lock().unwrap_or_else(|e| e.into_inner()).tcp().try_clone().ok()).collect()
 }
 
 impl NetworkCollective {
@@ -307,7 +316,8 @@ impl NetworkCollective {
             stream.tcp().set_write_timeout(Some(io_timeout)).ok();
             conns[peer.rank] = Some(Mutex::new(stream));
         }
-        Ok(NetworkCollective { rank: 0, world, conns })
+        let sockets = sockets_of(&conns);
+        Ok(NetworkCollective { rank: 0, world, conns, sockets })
     }
 
     /// A worker rank of a job: connect to the coordinator until `connect_timeout`
@@ -347,7 +357,8 @@ impl NetworkCollective {
         stream.tcp().set_write_timeout(Some(io_timeout)).ok();
         let mut conns: Vec<Option<Mutex<SealedStream>>> = (0..world).map(|_| None).collect();
         conns[0] = Some(Mutex::new(stream));
-        Ok(NetworkCollective { rank: hello.rank, world, conns })
+        let sockets = sockets_of(&conns);
+        Ok(NetworkCollective { rank: hello.rank, world, conns, sockets })
     }
 
     /// Tell every worker why the group stopped, so none waits for a result that
@@ -394,6 +405,21 @@ impl NetworkCollective {
 impl Collective for NetworkCollective {
     fn world_size(&self) -> usize {
         self.world
+    }
+
+    /// Tell the peers this rank reaches why it stops (the coordinator relays a worker's reason to every other rank
+    /// at its next op), then shut every connection, so a thread of this rank blocked reading one, and every peer
+    /// waiting on this rank, fails at once.
+    fn abort(&self, why: &str) {
+        for conn in self.conns.iter().flatten() {
+            // A connection another thread holds is in an op: shutting it down below ends that op.
+            if let Ok(mut stream) = conn.try_lock() {
+                let _ = write_abort(&mut stream, why);
+            }
+        }
+        for socket in &self.sockets {
+            let _ = socket.shutdown(std::net::Shutdown::Both);
+        }
     }
 
     fn all_reduce<'a>(&'a self, rank: usize, local: Payload) -> CollectiveFuture<'a, Payload> {
@@ -534,6 +560,43 @@ mod tests {
     use std::thread;
 
     const TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// Ranks 0, 1 and 2 over loopback; rank 2 aborts instead of joining an all-reduce the others wait in. Returns how
+    /// long rank 0 and rank 1 waited and what they failed with.
+    fn one_rank_aborts(why: &'static str) -> Vec<(Duration, String)> {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let secret = JobSecret::random();
+        let handles: Vec<_> = (0..3)
+            .map(|rank| {
+                let (secret, addr) = (secret.clone(), addr.clone());
+                let listener = (rank == 0).then(|| listener.try_clone().unwrap());
+                thread::spawn(move || {
+                    let coll = match listener {
+                        Some(l) => NetworkCollective::coordinator(&l, &hello(3, 0), &secret, TIMEOUT, TIMEOUT).unwrap(),
+                        None => NetworkCollective::worker(&hello(3, rank), &addr, &secret, TIMEOUT, TIMEOUT).unwrap(),
+                    };
+                    if rank == 2 {
+                        thread::sleep(Duration::from_millis(200));
+                        coll.abort(why);
+                        return None;
+                    }
+                    let started = Instant::now();
+                    let err = pollster::block_on(coll.all_reduce(rank, Payload::f32(vec![1.0]))).expect_err("a peer aborted");
+                    Some((started.elapsed(), err.to_string()))
+                })
+            })
+            .collect();
+        handles.into_iter().filter_map(|h| h.join().unwrap()).collect()
+    }
+
+    #[test]
+    fn a_rank_that_aborts_fails_every_peer_at_once_with_its_reason() {
+        for (waited, err) in one_rank_aborts("rank 2 failed: its card is gone") {
+            assert!(waited < Duration::from_secs(5), "a peer waited {waited:?}, not the {TIMEOUT:?} op timeout");
+            assert!(err.contains("rank 2 failed: its card is gone"), "{err}");
+        }
+    }
 
     fn hello(world: usize, rank: usize) -> GroupHello {
         GroupHello { plan: "test".into(), world, rank }

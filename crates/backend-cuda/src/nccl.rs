@@ -516,6 +516,8 @@ struct WatchState {
     bound: Option<Bound>,
     /// A communicator the watchdog aborted, and why.
     aborted: Option<(usize, String)>,
+    /// The communicator the rank owns, which [`Watchdog::aborter`] aborts; cleared when the owner retires it.
+    owned: Option<usize>,
 }
 
 impl WatchState {
@@ -613,6 +615,25 @@ impl Watchdog {
         true
     }
 
+    /// Make `comm` the communicator [`Self::aborter`] aborts.
+    fn own(&self, comm: Comm) {
+        self.state().owned = Some(comm as usize);
+    }
+
+    /// Abort the owned communicator from any thread, under the lock every user of it checks first: as the watchdog's
+    /// own abort of an operation past its bound, so its calls fail with `why`. Nothing once it was aborted or retired.
+    fn aborter(&self, abort: unsafe extern "C" fn(Comm) -> NcclResult) -> backend_api::CommAborter {
+        let watch = Arc::clone(&self.shared);
+        Arc::new(move |why: &str| {
+            let mut state = watch.state.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(comm) = state.owned else { return };
+            if state.aborted.as_ref().is_some_and(|(c, _)| *c == comm) {
+                return;
+            }
+            state.abort(comm, why.to_string(), abort);
+        })
+    }
+
     /// Record that an operation was enqueued on the bounded communicator `comm` at `at`.
     fn enqueued(&self, comm: Comm, at: Instant) {
         if let Some(bound) = self.state().bound.as_mut().filter(|b| b.comm == comm as usize) {
@@ -645,6 +666,9 @@ impl Watchdog {
         }
         if state.bound.as_ref().is_some_and(|b| b.comm == comm as usize) {
             state.bound = None;
+        }
+        if state.owned == Some(comm as usize) {
+            state.owned = None;
         }
         if let Some(abort) = abort {
             // SAFETY: `comm` is live (the watchdog has not aborted it, and cannot now: the lock is held).
@@ -777,6 +801,7 @@ impl NcclRank {
             }
             return Err(e);
         }
+        watchdog.own(ops);
         Ok(NcclRank { lib, fns, state: Mutex::new(RankState::new(ops)), watchdog, handle, world, rank, settle: timeout })
     }
 
@@ -1016,12 +1041,18 @@ impl RankCollective for NcclRank {
             unsafe { (self.fns.comm_abort)(child) };
             return Err(e);
         }
-        let child = NcclRank { lib: self.lib, fns: self.fns, state: Mutex::new(RankState::new(child)), watchdog: Watchdog::start(self.fns.comm_abort), handle, world: world as usize, rank: rank as usize, settle: self.settle };
+        let watchdog = Watchdog::start(self.fns.comm_abort);
+        watchdog.own(child);
+        let child = NcclRank { lib: self.lib, fns: self.fns, state: Mutex::new(RankState::new(child)), watchdog, handle, world: world as usize, rank: rank as usize, settle: self.settle };
         // A sub-group's operations are bounded as its parent's are.
         if let Some(limit) = state.bound {
             child.bound_in_flight(limit)?;
         }
         Ok(Some(Box::new(child)))
+    }
+
+    fn aborter(&self) -> Option<backend_api::CommAborter> {
+        Some(self.watchdog.aborter(self.fns.comm_abort))
     }
 
     fn bound_in_flight(&self, limit: Duration) -> Result<(), String> {

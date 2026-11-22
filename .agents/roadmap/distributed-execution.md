@@ -820,8 +820,19 @@ addresses onto `--job-plan`/`--job-rank`, brain reads no scheduler variable.
         abort). The claimed cards are handed to the ranks in card order, so the
         same card set always gets the same rank layout: chosen by free room
         alone, two repeats of a 4-card run got different layouts and different
-        adapter bytes (Measured). Open: a rank blocked in an NCCL reduction learns of a failed
-        peer only at the group's op timeout (600 s in-process), not at once.
+        adapter bytes (Measured). A rank that fails aborts every in-process
+        rank's device group too (2026-11-22): `Collective::abort` breaks a
+        group from any thread while another thread is inside one of its ops
+        (host star: the breakable barrier; TCP star: the reason sent to the
+        coordinator, which relays it, and the sockets shut; `JobCollective`:
+        `ncclCommAbort` of the formed device group through the communicator's
+        watchdog lock, `RankGroup::aborter`), so a peer blocked in an NCCL
+        reduction fails at once with "rank N failed: ..." instead of at the
+        600 s op timeout; the served job reports the first rank's reason
+        (`trainjob::job::run_ranks`). Tests: `trainjob` `cards`
+        `a_rank_that_fails_alone_mid_run_fails_the_run_at_once_with_its_reason`
+        (host path on the CPU suite, NCCL on cards), `netcollective`
+        `a_rank_that_aborts_fails_every_peer_at_once_with_its_reason`.
         Residency half (2026-11-21): `ResidentModel::cards(key)` (default 1) and
         `activate_cards(key, &[Device])` make a claim of "any N cards with
         room" (`ResidencyManager::claim_cards`, `manager/cards.rs`): planned

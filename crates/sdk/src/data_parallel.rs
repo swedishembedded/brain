@@ -39,10 +39,10 @@ pub struct DataParallel {
     local: Option<Arc<LocalGroup>>,
 }
 
-/// What the threads of one in-process group share: the host transport (so a failed rank can break it) and the step
-/// the ranks agreed to stop after.
+/// What the ranks that are threads of this process share: each one's collective (so a rank that fails can break the
+/// group on the host and on every card at once) and the step they agreed to stop after.
 struct LocalGroup {
-    host: Arc<HostCollective>,
+    members: Vec<Arc<dyn Collective>>,
     stop_after: Mutex<Option<u32>>,
 }
 
@@ -70,22 +70,23 @@ impl DataParallel {
             return Err(Error::MissingArgument("a data-parallel group needs at least one rank".into()));
         }
         let host = HostCollective::new(world);
-        let local = Arc::new(LocalGroup { host: Arc::clone(&host), stop_after: Mutex::new(None) });
-        Ok((0..world)
-            .map(|rank| {
-                let group = JobCollective::new(Arc::clone(&host), CollectivePath::Auto, IN_PROCESS_JOIN, IN_PROCESS_OP).with_bucket_bytes(u64::from(model::job::DEFAULT_BUCKET_MIB) << 20);
-                DataParallel { group: Arc::new(group), rank, job: None, sharding: model::zero::Sharding::Replicated, local: Some(Arc::clone(&local)) }
-            })
-            .collect())
+        let members: Vec<Arc<dyn Collective>> = (0..world)
+            .map(|_| Arc::new(JobCollective::new(Arc::clone(&host), CollectivePath::Auto, IN_PROCESS_JOIN, IN_PROCESS_OP).with_bucket_bytes(u64::from(model::job::DEFAULT_BUCKET_MIB) << 20)) as Arc<dyn Collective>)
+            .collect();
+        let local = Arc::new(LocalGroup { members: members.clone(), stop_after: Mutex::new(None) });
+        Ok(members.into_iter().enumerate().map(|(rank, group)| DataParallel { group, rank, job: None, sharding: model::zero::Sharding::Replicated, local: Some(Arc::clone(&local)) }).collect())
     }
 
     /// Break an in-process group because this rank failed and will not take part again: every other rank waiting in
-    /// a reduction through host memory, and every later one, fails with `why` instead of waiting for it. A reduction
-    /// on the cards ends within the group's op timeout. Nothing for a rank of a launched job, whose launcher sees the
-    /// process end.
+    /// a reduction, through host memory or on the cards (the device group is aborted, which ends its operations on
+    /// every card), and every later one, fails at once with `why` instead of waiting for it. Nothing for a rank of a
+    /// launched job, whose launcher sees the process end.
     pub fn abort(&self, why: &str) {
         if let Some(local) = &self.local {
-            local.host.abort(&format!("rank {} failed: {why}", self.rank));
+            let why = format!("rank {} failed: {why}", self.rank);
+            for member in &local.members {
+                member.abort(&why);
+            }
         }
     }
 
