@@ -941,6 +941,14 @@ The first trainable target needs no streaming: the base is about 19.5 GB.
     `depth_attn_bwd` 19 % and `depth_attn_fwd` 16 % (barrier-free reference kernels, 2.7-8 ms a launch), `moe_linear_gated_dx`
     16 %; on the host 250,908 `cuMemAlloc`/`cuMemFree` pairs over the run (per-stage storage, 14.6 s in `cuMemFree`)
     and the host gate readback per MoE call (`MoeActs::compact_for`) - not changed here.
+  - Left (CUDA, found 2026-11-22 with the goldens present): the tests over the tiny checkpoint directory now pin the
+    exact products on both sides (they compared a tensor-core trainer with an exact engine or golden: 2.7e-2); still
+    failing on CUDA after that: `serve_adapters` trainer vs engine at 1.3e-4 / 5.1e-5 against a 5e-5 bound and the
+    adapter half of `the_serving_engine_serves_what_the_trainer_trains` at 5.0e-3 (the family's `serving_engine`
+    ignores its tiers and runs the device default) - the adapter-serving lane's; `image_text` failed one CUDA run
+    (a tower lora_b entry 6 % from its central difference; four CPU runs pass); `gradcheck` `inkling2_fd` LoRA fails
+    at seed 1778422313 on every backend, origin/main included (`wr_du.lora_b`: 2.035 vs 2.234, a kink the
+    perturbation crosses); `optim` `parallel_update` fails on origin/main.
 - **I4.4** `model::train` + `data`: packed rows with document-boundary resets of
   attention, every conv state and the relative-position origin. Gate: no supervision or
   state crosses a boundary.
@@ -1116,8 +1124,28 @@ The first trainable target needs no streaming: the base is about 19.5 GB.
   lower the loss, the save holds bf16 banks equal to that rounding, reloads to the trained logits bit for bit, is
   served by the engine within 5e-5, exact resume through the fit loop's `check_exact_resume`) on CPU and CUDA;
   `model/tests/it/layer_streamed_ft.rs::a_bf16_value_read_as_f32_trains_what_the_bf16_weights_do`; ouro, huginn,
-  deepseek2, gpt2, toyseq2seq, qwen3, qwen35 streaming suites unchanged. Real run:
-  `inkling2/tests/it/real_full_ft.rs` (ignored; command below).
+  deepseek2, gpt2, toyseq2seq, qwen3, qwen35 streaming suites unchanged. Real run
+  (`inkling2/tests/it/real_full_ft.rs`, ignored: one GH200 of n442, CUDA, the exact fp32 products, one 20-token row,
+  AdamW lr 1e-5, no clip): built in 125 s; device 36.7 GB live (peak the same) - the f32 remainder with its AdamW
+  state and grads, one layer's f32 slots and lanes; host resident 50 GB (peak 94 GB during the core's carried
+  backward), cgroup 52 GB after a step; loss 1.2420 (the QLoRA run's 1.2364 on the published tier: the bf16 rounding
+  of the dequantized banks) -> 0.6113 -> 0.3578 -> 0.2643 after three steps; a step 301-313 s with the state file's
+  pipelined write-back (421-471 s with a synchronous one; the first run without either was OOM-killed by the job's
+  cgroup, knowledge #566), host-bound (the card idle most of it: the update of 24.5B elements through the state file
+  and the bf16 loads of 96 layer visits a step); commit of the state 850-859 s, restore 549-735 s; the run restored
+  from the state committed after step 2 took step 3 exactly as the uninterrupted one (losses before and after it
+  equal bit for bit, two runs); the export (`Model::save` with bf16 banks, then the generic `export_checkpoint`,
+  which now carries the base's frozen vision tower in `model-frozen.safetensors` beside the trained weights) took
+  68 s, and the served engine over it (bf16 banks held as bf16) decoded 4 cached greedy tokens equal to the
+  trainer's argmax at every step. 3,200 s for the whole test.
+  Command: `BRAIN_BACKEND=cuda BRAIN_DEVICE=gpuN CUDA_PATH=<cuda> TMPDIR=<local disk with ~800 GB> <inkling2 it binary>
+  --ignored --exact --nocapture real_full_ft::a_full_fine_tune_of_the_release_learns_resumes_exactly_and_exports_what_it_trained`
+  (`cargo test -p brain-inkling2 --test it -- --ignored real_full_ft`).
+- Left (I6): the step is host-bound - measure the update / load / carry split (`ResidentFullFt::host_times`) and
+  overlap the next layer's load with the current visit (window=2 needs 8 GB more on the card); the fit loop (CLI
+  `--train-precision weights=bf16,window=1`) keeps the state in memory (about 300 GB of host RAM): no CLI key for
+  `state_dir` yet; ZeRO across cards cannot carry revisited layers or widened slots (refused by name); the full
+  fine-tune routes through the router's f32 product like the forward, the released bias stays frozen.
 
 ### Phase 7: throughput
 

@@ -19,5 +19,6 @@ effort.
 - `inkling2` `real_full_ft` on a GH200 node whose job cgroup allows 440 GB: before the change the step was OOM-killed
   during the first update (VmHWM 93 GB, the state file being written); after it the run's cgroup read 52.3 GB after
   the first step with the state file at its full size on the node's disk.
-- The price is the update's speed: the first step took 268 s before the kill and 471 s with a synchronous write-back of
-  each range (one card, one 20-token row); the pipelined form above replaced it.
+- The price is the update's speed: the first step took 268 s before the kill, 471 s with a synchronous write-back of
+  each range, and 301-313 s with the pipelined form above (one card, one 20-token row; the cgroup at 52.5 GB after a
+  step in every run that finished).
