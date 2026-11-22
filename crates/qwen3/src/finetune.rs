@@ -923,7 +923,9 @@ impl model::finetune::ChatTrainer for Qwen3Trainer {
     fn export_checkpoint(trained: &Path, tokenizer_dir: &Path, out: &Path, adapter: Option<&Path>, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
         let (cfg, src) = crate::open_checkpoint(path_str(trained)?)?;
         let adapter = adapter.map(path_str).transpose()?;
-        let opts = crate::export::HfExport { dtype: crate::export::HfDtype::F32, shard_bytes: u64::MAX, tokenizer_dir: Some(tokenizer_dir), adapter };
+        // The export keeps the tier the run trained its weights at (bf16 stays bf16), not f32 at twice the size.
+        let dtype = crate::export::HfDtype::of_tier(crate::open::source_weight_tier(&cfg, &*src));
+        let opts = crate::export::HfExport { dtype, shard_bytes: u64::MAX, tokenizer_dir: Some(tokenizer_dir), adapter };
         crate::export::export_hf(&*src, &cfg, out, &opts, keep_going).map_err(|e| if e == capability::failure::CANCELLED { e } else { format!("{}: writing the checkpoint: {e}", out.display()) })
     }
 

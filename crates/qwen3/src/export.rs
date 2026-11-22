@@ -41,6 +41,17 @@ pub enum HfDtype {
 }
 
 impl HfDtype {
+    /// The export type that keeps weights stored at `tier` as they are: bf16 and f16 stay half-width, every
+    /// other tier (fp32, or an encoding the engine decodes) is written f32. Norms follow the linears, as in
+    /// the published Qwen3 checkpoints (all bf16).
+    pub fn of_tier(tier: crate::Dtype) -> HfDtype {
+        match tier {
+            crate::Dtype::BF16 => HfDtype::Bf16,
+            crate::Dtype::F16 => HfDtype::F16,
+            _ => HfDtype::F32,
+        }
+    }
+
     fn bytes(self) -> u64 {
         match self {
             HfDtype::F32 => 4,

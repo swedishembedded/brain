@@ -38,6 +38,7 @@ mod fim_request;
 mod finetune_full_hf;
 mod flops;
 mod flux2_text_parity;
+mod finetune_export_dtype;
 mod frozen_build;
 mod full_ft_precision;
 mod full_ft_resume;
