@@ -833,3 +833,12 @@ Driven by the per-device gap list, as new candidates only:
     Hugging Face CLI.
   - Once I2.2 lands, `brain pull` must accept the entry as is and write its checksums
     (I0.4).
+
+## GPU validation (2026-11-22, partial)
+
+- CUDA (GH200, gpu3) ran only `tiny_parity` before another session took the card: at the default `GemmPrecision::Auto`
+  the tiny reference drifted to 8.5e-3 relative at `final_in` (CPU: 2.9e-5). The parity tests now pin
+  `Fp32Reference` (the convention of the other reference gates); the Auto-tier distance is a precision metric of
+  the default path, still to be measured on the real checkpoint (KL/top-1 vs the f32 reference).
+- Left: every campaign test on CUDA and Vulkan, real-weight parity and the uncached forward's timing and profile on a
+  GH200, once a card is free.

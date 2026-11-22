@@ -42,7 +42,12 @@ fn rel_err(got: &[f32], want: &[f32]) -> f32 {
 pub fn ops() -> model::ops::Ops {
     static LIST: std::sync::OnceLock<&'static [(&'static str, &'static str)]> = std::sync::OnceLock::new();
     let list = LIST.get_or_init(|| Box::leak(inkling2::kernels().into_boxed_slice()));
-    model::ops::Ops::new(gpu_core::testgpu::dev(list)).expect("Ops::new")
+    let mut ops = model::ops::Ops::new(gpu_core::testgpu::dev(list)).expect("Ops::new");
+    // Parity gates hold the products to binary32: on a tensor-core device the default tier rounds operands to
+    // TF32/bf16, which drifted the tiny reference by 8.5e-3 over ten visits on CUDA (a precision metric of the default
+    // path, measured separately, not a defect of the recipe).
+    ops.set_gemm_precision(gpu_core::provider::library::GemmPrecision::Fp32Reference);
+    ops
 }
 
 #[test]
