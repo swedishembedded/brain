@@ -353,6 +353,8 @@ pub struct ChatTemplate {
     defaults: BTreeMap<String, Value>,
     /// The template's own Jinja source, as compiled.
     source: String,
+    /// [`Self::reads_argument_objects`], decided on first use (it may render a probe).
+    argument_objects: std::sync::OnceLock<bool>,
 }
 
 impl ChatTemplate {
@@ -409,7 +411,7 @@ impl ChatTemplate {
         // for real inference/training, so this OVERRIDES the built-in filter.
         env.add_filter("tojson", tojson_filter);
         env.add_template_owned("chat", without_generation_tags(jinja_src)).map_err(|e| TemplateError::new(format!("{e:#}")))?;
-        Ok(ChatTemplate { env, defaults: BTreeMap::new(), source: jinja_src.to_string() })
+        Ok(ChatTemplate { env, defaults: BTreeMap::new(), source: jinja_src.to_string(), argument_objects: std::sync::OnceLock::new() })
     }
 
     /// Compile the `chat_template` field out of `<model_dir>/tokenizer_config.json`
@@ -518,13 +520,27 @@ impl ChatTemplate {
     /// served request, or rendering fails on the first tool call.
     ///
     /// A template that serializes the arguments itself (`arguments | tojson`) with no branch for text
-    /// (`arguments is string`) reads objects too: handed the JSON text it would encode it a second time.
+    /// (`arguments is string`) reads objects too: handed the JSON text it would encode it a second time. So does one
+    /// that refuses the text outright, whatever it names the value (Inkling 2's `args is string` raises): a probe
+    /// call renders with the arguments as an object and fails with them as text.
     #[must_use]
     pub fn reads_argument_objects(&self) -> bool {
-        let src = &self.source;
-        let iterates = src.contains("arguments|items") || src.contains("arguments | items");
-        let serializes = (src.contains("arguments|tojson") || src.contains("arguments | tojson")) && !src.contains("arguments is string");
-        iterates || serializes
+        *self.argument_objects.get_or_init(|| {
+            let src = &self.source;
+            let iterates = src.contains("arguments|items") || src.contains("arguments | items");
+            let serializes = (src.contains("arguments|tojson") || src.contains("arguments | tojson")) && !src.contains("arguments is string");
+            iterates || serializes || self.refuses_argument_text()
+        })
+    }
+
+    /// Whether a call whose arguments are an object renders and the same call with them as JSON text does not.
+    fn refuses_argument_text(&self) -> bool {
+        let renders = |arguments: serde_json::Value| {
+            let call = serde_json::json!({"id": "call0", "type": "function", "function": {"name": "probe", "arguments": arguments}});
+            let turns = serde_json::json!([{"role": "user", "content": "q"}, {"role": "assistant", "content": "", "tool_calls": [call]}]);
+            parse_json_ordered(&turns.to_string()).is_ok_and(|messages| self.render(messages, None, false, &BTreeMap::new()).is_ok())
+        };
+        renders(serde_json::json!({"a": 1})) && !renders(serde_json::json!("{\"a\":1}"))
     }
 
     /// Whether this template writes an assistant turn with one framing newline between its parts, the layout
@@ -615,8 +631,9 @@ impl ChatTemplate {
     /// # Errors
     /// The messages cannot be turned into template values.
     pub fn conversation(&self, turns: &[serde_json::Value]) -> Result<Value, TemplateError> {
+        let turns: Vec<serde_json::Value> = turns.iter().map(with_openai_calls).collect();
         if !self.reads_argument_objects() {
-            return parse_json_ordered(&serde_json::Value::Array(turns.to_vec()).to_string());
+            return parse_json_ordered(&serde_json::Value::Array(turns).to_string());
         }
         Ok(Value::from(turns.iter().map(|turn| with_argument_objects(turn, false)).collect::<Vec<_>>()))
     }
@@ -835,6 +852,36 @@ fn is_leading_system(messages: &[Value], i: usize) -> bool {
 /// switch: `enable_thinking` (Qwen3, Qwen3.8) and `thinking` (DeepSeek-V3.1).
 /// `node` as a template value, with the `arguments` of every tool call under it parsed as JSON where they are
 /// JSON text. `in_call` marks `node` as a tool call (or its `function`), whose `arguments` field is the one parsed.
+/// `turn` with every tool call in the OpenAI shape `transformers` renders (`{id, type, function: {name, arguments}}`),
+/// the shape [`ChatMessage`](crate::chat::ChatMessage) hands a template too. The serving contract carries a call flat
+/// (`{id, name, arguments}`); a template that reads `tool_call.function` (Inkling 2's, Mistral's) finds nothing in
+/// that, while one written for both (Qwen's `if tool_call.function`) reads either. A call already in the OpenAI shape
+/// is kept as sent.
+fn with_openai_calls(turn: &serde_json::Value) -> serde_json::Value {
+    let Some(calls) = turn.get("tool_calls").and_then(serde_json::Value::as_array) else { return turn.clone() };
+    let lifted: Vec<serde_json::Value> = calls
+        .iter()
+        .map(|call| match call.as_object() {
+            Some(flat) if !flat.contains_key("function") && flat.contains_key("name") => {
+                let mut function = serde_json::Map::new();
+                function.insert("name".into(), flat["name"].clone());
+                function.insert("arguments".into(), flat.get("arguments").cloned().unwrap_or_else(|| serde_json::Value::from("{}")));
+                let mut lifted = serde_json::Map::new();
+                if let Some(id) = flat.get("id") {
+                    lifted.insert("id".into(), id.clone());
+                }
+                lifted.insert("type".into(), serde_json::Value::from("function"));
+                lifted.insert("function".into(), serde_json::Value::Object(function));
+                serde_json::Value::Object(lifted)
+            }
+            _ => call.clone(),
+        })
+        .collect();
+    let mut turn = turn.clone();
+    turn["tool_calls"] = serde_json::Value::Array(lifted);
+    turn
+}
+
 fn with_argument_objects(node: &serde_json::Value, in_call: bool) -> Value {
     let Some(object) = node.as_object() else { return Value::from(minijinja::value::Serde(node)) };
     let fields: BTreeMap<String, Value> = object
@@ -980,6 +1027,40 @@ mod tests {
         assert!(!prompt.contains("THINK-HARD"), "{prompt}");
         assert_eq!(&full[..supervised.start], prompt);
         assert_eq!(&full[supervised], "yo<|end|>");
+    }
+
+    /// A served request's tool calls arrive in the contract shape (`{id, name, arguments}`, the arguments the JSON
+    /// text the client sent). A template that reads the OpenAI shape (`tool_call.function.name`) and refuses
+    /// arguments as text (it iterates them itself; Inkling 2's) is handed `{id, type, function: {name, arguments}}`
+    /// with the arguments parsed, key order kept, as `transformers` is by an OpenAI server; one that takes the text
+    /// (Qwen3's `arguments is string` branch) still gets the client's bytes.
+    #[test]
+    fn a_served_tool_call_reaches_the_template_in_the_shape_it_reads() {
+        let turns = [
+            serde_json::json!({"role": "user", "content": "q"}),
+            serde_json::json!({"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "name": "get", "arguments": "{\"b\":2,\"a\":1}"}]}),
+        ];
+        let strict = ChatTemplate::compile(
+            "{%- for m in messages -%}{%- for tc in m.tool_calls or [] -%}{%- set fn = tc.function -%}\
+             {%- if fn.name is not defined or fn.name is not string -%}{{ raise_exception('tool call function name must be a string') }}{%- endif -%}\
+             {%- set args = fn.arguments -%}{%- if args is string -%}{{ raise_exception('arguments must be a parsed object') }}{%- endif -%}\
+             [{{ tc.id }}:{{ fn.name }}({% for k, v in args | dictsort %}{{ k }}={{ v }};{% endfor %})]{%- endfor -%}\
+             <{{ m.role }}>{{ m.content }}{%- endfor -%}",
+        )
+        .unwrap();
+        assert!(strict.reads_argument_objects());
+        let rendered = strict.render(strict.conversation(&turns).unwrap(), None, false, &BTreeMap::new()).unwrap();
+        assert_eq!(rendered, "<user>q[c1:get(a=1;b=2;)]<assistant>");
+
+        let textual = ChatTemplate::compile(
+            "{%- for m in messages -%}{%- for tc in m.tool_calls or [] -%}{%- if tc.function %}{%- set tc = tc.function %}{%- endif -%}\
+             {{ tc.name }}:{%- if tc.arguments is string %}{{ tc.arguments }}{%- else %}{{ tc.arguments | tojson }}{%- endif -%}{%- endfor -%}\
+             <{{ m.role }}>{%- endfor -%}",
+        )
+        .unwrap();
+        assert!(!textual.reads_argument_objects());
+        let rendered = textual.render(textual.conversation(&turns).unwrap(), None, false, &BTreeMap::new()).unwrap();
+        assert_eq!(rendered, "<user>get:{\"b\":2,\"a\":1}<assistant>");
     }
 
     #[test]
