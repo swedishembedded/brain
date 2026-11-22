@@ -78,6 +78,7 @@ pub fn kernels() -> Vec<(&'static str, &'static str)> {
         ("router_gate_sigmoid", kernels::ROUTER_GATE_SIGMOID),
         ("router_topk_compact", kernels::ROUTER_TOPK_COMPACT),
         ("moe_group_combine", kernels::MOE_GROUP_COMBINE),
+        ("moe_slot_combine", kernels::MOE_SLOT_COMBINE),
         ("scale_add", kernels::SCALE_ADD),
         ("silu_mul", kernels::SILU_MUL),
         ("rmsnorm", kernels::RMSNORM),
@@ -90,6 +91,8 @@ pub fn kernels() -> Vec<(&'static str, &'static str)> {
     more.extend_from_slice(model::message_gate::kernels());
     more.extend(model::ops::micro_bank_kernels());
     more.extend(model::act_quant::KERNELS);
+    // The declared tier's routing weight per slot: the flat `[token, expert]` index of each slot, then the gather.
+    more.extend(model::dispatch::LORA_EXPERT_BANK_PIPELINES);
     more.extend(model::head_transform::KERNELS);
     // The served engine's: the visit-state pool and the device readout.
     more.extend(model::serve::visit_state::VisitPool::<Vec<f32>>::pipelines());
@@ -141,6 +144,11 @@ struct Kernels {
     moe: MoeIds,
     topk: usize,
     combine: usize,
+    /// `moe_slot_combine`: a weighted sum of per-slot rows (with one slot per row, a per-row scale).
+    slot_combine: usize,
+    /// `lora_expert_slots` and `embed`: each slot's flat index into the dense `[token, expert]` gate, and its gather.
+    slot_index: usize,
+    gather_rows: usize,
     rms: usize,
     rms_nogain: usize,
     l2clip: usize,
@@ -170,6 +178,9 @@ impl Kernels {
             moe: MoeIds { router_gate: k("router_gate_sigmoid")?, linear_gated: k("moe_linear_gated")?, silu_mul: k("silu_mul")?, scale_add: k("scale_add")? },
             topk: k("router_topk_compact")?,
             combine: k("moe_group_combine")?,
+            slot_combine: k("moe_slot_combine")?,
+            slot_index: k("lora_expert_slots")?,
+            gather_rows: k("embed")?,
             rms: k("rmsnorm")?,
             rms_nogain: k("rmsnorm_nogain")?,
             l2clip: k("l2clip_scale")?,
@@ -863,24 +874,49 @@ impl Inkling2 {
                 const REGISTERED: &str = "the bank's kernels are registered";
                 let xq = quantized(s, act[0], x, t, d);
                 let x = xq.as_ref().unwrap_or(x);
-                if grouped {
-                    let route = MicroRoute::new(g, slots, e);
+                let route = grouped.then(|| MicroRoute::new(g, slots, e));
+                if let Some(route) = &route {
                     s.extend(route.steps(g, &ids).expect(REGISTERED));
                     s.push(w13.grouped(g, x, &route.tab, &route.perm, &gate_up, route.tiles(), k, e).expect(REGISTERED));
-                    s.push(glu_act_step(g, &self.k.glu, &spec, slots, ff, &gate_up, None, &h));
-                    let hq = quantized(s, act[1], &h, slots, ff);
-                    s.push(w2.grouped(g, hq.as_ref().unwrap_or(&h), &route.tab, &route.perm, &y, route.tiles(), 1, e).expect(REGISTERED));
                 } else {
                     s.push(w13.gather(g, x, &ids, &gate_up, slots, k).expect(REGISTERED));
-                    s.push(glu_act_step(g, &self.k.glu, &spec, slots, ff, &gate_up, None, &h));
-                    let hq = quantized(s, act[1], &h, slots, ff);
-                    s.push(w2.gather(g, hq.as_ref().unwrap_or(&h), &ids, &y, slots, 1).expect(REGISTERED));
+                }
+                s.push(glu_act_step(g, &self.k.glu, &spec, slots, ff, &gate_up, None, &h));
+                // The vendor's runtime multiplies each slot's activation by its routing weight BEFORE quantizing the
+                // down product's input, so under the declared tier the weight moves in front of the round trip (an
+                // MXFP8 block's power-of-two scale is not invariant to it) and the combine sums the products unweighted.
+                // The reference numerics keep the weight after the product, as the reference does.
+                let weighted_input = act[1].is_some() && declared;
+                let h = if weighted_input { self.weighted_slots(s, &gate, &ids, &h, t, slots, ff) } else { h };
+                let hq = quantized(s, act[1], &h, slots, ff);
+                let h = hq.as_ref().unwrap_or(&h);
+                if let Some(route) = &route {
+                    s.push(w2.grouped(g, h, &route.tab, &route.perm, &y, route.tiles(), 1, e).expect(REGISTERED));
+                } else {
+                    s.push(w2.gather(g, h, &ids, &y, slots, 1).expect(REGISTERED));
                 }
                 let identity = g.storage(u64::from(slots));
                 g.write(&identity, &(0..slots).collect::<Vec<u32>>());
-                s.push(g.step(self.k.combine, &[&gate, &ids, &identity, &y, &out], &[t, d, e, k], t * d));
+                let combine_gate = if weighted_input { g.storage_init("inkling2.unit_gate", &vec![1.0f32; (t * e) as usize]) } else { gate.clone() };
+                s.push(g.step(self.k.combine, &[&combine_gate, &ids, &identity, &y, &out], &[t, d, e, k], t * d));
             }
         }
+        out
+    }
+
+    /// Each slot's row of `h` `[slots, width]` scaled by its routing weight: slot `i` is token `i / top_k`'s choice
+    /// `ids[i]`, whose weight stands in the dense `[t, experts]` `gate`. The flat index is `lora_expert_slots` with
+    /// every token its own "adapter slot" (`row_slot = token`, so the sub-slot `token * experts + expert` is the gate's
+    /// element), gathered by `embed` and applied by `moe_slot_combine` with one slot per row.
+    #[allow(clippy::too_many_arguments)]
+    fn weighted_slots(&self, s: &mut Vec<Step>, gate: &DeviceBuffer, ids: &DeviceBuffer, h: &DeviceBuffer, t: u32, slots: u32, width: u32) -> DeviceBuffer {
+        let (g, e, k) = (self.g(), self.cfg.experts, self.cfg.top_k);
+        let tokens = g.storage(u64::from(t));
+        g.write(&tokens, &(0..t).collect::<Vec<u32>>());
+        let (flat, xrow, weight, out) = (g.storage(u64::from(slots)), g.storage(u64::from(slots)), g.storage(u64::from(slots)), g.storage(u64::from(slots * width)));
+        s.push(g.step(self.k.slot_index, &[&tokens, ids, &flat, &xrow], &[slots, k, k, e, t], slots));
+        s.push(g.step(self.k.gather_rows, &[&flat, gate, &weight], &[1, slots], slots));
+        s.push(g.step(self.k.slot_combine, &[h, &weight, &out], &[slots, width, 1], slots * width));
         out
     }
 
