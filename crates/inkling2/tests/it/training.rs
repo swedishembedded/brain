@@ -267,3 +267,30 @@ fn the_backward_always_recomputes_each_visit() {
     let mut m = Inkling2Train::new(tc, 1, 4, &init);
     model::saved::check_always_recomputes("inkling2", &mut m).unwrap();
 }
+
+/// The router's gradient is a declared choice: detached, the routers take no gradient (and the loss is unchanged), while
+/// the experts and everything below them still train.
+#[test]
+fn a_detached_router_takes_no_gradient_and_leaves_the_loss() {
+    let tc = tiny_config();
+    let init = init_weights(&tc.cfg, data::rng::random_seed());
+    let m = Inkling2Train::new(tc.clone(), 2, 6, &init);
+    let (x, y) = batch(2, 6, tc.cfg.valid_vocab);
+    // The last layer: nothing after it routes, so its experts' gradient is the same with every router detached.
+    let router = "model.llm.layers.7.mlp.gate.weight";
+    let expert = "model.llm.layers.7.mlp.experts.w2_weight";
+    let run = |detached: bool| {
+        m.set_detached_router(detached);
+        m.zero_grads();
+        m.set_batch(model::Batch::Lm { tokens: &x, targets: &y });
+        let loss = m.forward();
+        m.backward();
+        (loss, m.read_grad(router), m.read_grad(expert))
+    };
+    let (full_loss, full_router, full_expert) = run(false);
+    let (loss, router_grad, expert_grad) = run(true);
+    assert_eq!(loss, full_loss, "detaching the router changes no forward");
+    assert!(full_router.iter().any(|g| *g != 0.0), "the differentiated router has a gradient");
+    assert!(router_grad.iter().all(|g| *g == 0.0), "a detached router takes none");
+    assert_eq!(expert_grad, full_expert, "the last layer's experts' gradient does not depend on the routers'");
+}
