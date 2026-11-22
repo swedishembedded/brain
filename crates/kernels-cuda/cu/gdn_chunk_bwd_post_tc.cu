@@ -57,6 +57,12 @@
 // dk = dv = 128 and 1 <= c_len <= 64 (the provider checks; the entry does not).
 // Dynamic shared memory: POST_SMEM_FLOATS floats.
 //
+// Deterministic: no atomics. A row's dot products come from the two warps of its row tile (one per column half), so
+// each row accumulator keeps one slot per column half, written by exactly one thread in program order, and the two are
+// summed in a fixed order once the block has synchronised; the decay mask's row and column sums go to slots of their
+// own the same way. With shared-memory atomics the order the halves landed in varied from run to run and so did the
+// last bits of d_g_cs, d_beta and every gradient behind them (a parameter-sharded fine-tune did not repeat its norms).
+//
 // No `__restrict__`: brain's device buffers alias by design.
 
 #define D 128
@@ -69,9 +75,10 @@
 #define SSL (SLAB_K + 4)     // row stride of an n-major 128 x 16 slab (conflict-free as an n-major B operand)
 #define SLAB_FLOATS (D * SSL)  // the larger of the two slab shapes: 2560 floats
 
-// Four 64 x 128 tiles, four 64 x 64 matrices, eight 64-float row vectors and 16 floats of reduction scratch.
+// Four 64 x 128 tiles, four 64 x 64 matrices, twelve 64-float row vectors (four inputs, four accumulators of two
+// halves each) and 16 floats of reduction scratch.
 // The two 64 x 64 matrices sDM and sDT are idle until the middle of the kernel and hold the double-buffered slabs.
-#define POST_SMEM_FLOATS (4 * MAXC * SK + 4 * MAXC * SC + 8 * MAXC + 16)
+#define POST_SMEM_FLOATS (4 * MAXC * SK + 4 * MAXC * SC + 12 * MAXC + 16)
 
 // x = hi + lo with both parts TF32-representable. Truncation (a mask) instead of `cvt.rna.tf32`: the convert runs on
 // a slow pipe and the splits are most of the instructions around the MMAs. lo = x - hi is exact in fp32 and is then
@@ -222,11 +229,13 @@ brain_gdn_chunk_bwd_post_tc(const unsigned int* params, const float* query, cons
     float* sexp = sg + MAXC;             // exp of it
     float* sds = sexp + MAXC;            // decay_scale
     float* sbeta = sds + MAXC;
+    // The accumulators hold two halves, [2][MAXC]: column half nh's partial at nh * MAXC (sdg: the decay mask's row
+    // sums, then its column sums), summed in that order once the block has synchronised.
     float* sdexp = sbeta + MAXC;         // d_exp_g_cs
-    float* sdds = sdexp + MAXC;          // d_decay_scale
-    float* sdg = sdds + MAXC;            // d_g_cs
-    float* sdb = sdg + MAXC;             // d_beta
-    float* sred = sdb + MAXC;            // block-reduction scratch
+    float* sdds = sdexp + 2 * MAXC;      // d_decay_scale
+    float* sdg = sdds + 2 * MAXC;        // d_g_cs
+    float* sdb = sdg + 2 * MAXC;         // d_beta
+    float* sred = sdb + 2 * MAXC;        // block-reduction scratch
 
     const unsigned int tid = threadIdx.x, lane = tid & 31u, warp = tid >> 5;
     const unsigned int g = lane >> 2, t4 = lane & 3u;
@@ -265,10 +274,10 @@ brain_gdn_chunk_bwd_post_tc(const unsigned int* params, const float* query, cons
         sexp[tid] = live ? exp_g_cs[row_base + tid] : 0.0f;
         sds[tid] = live ? ds_hist[row_base + tid] : 0.0f;
         sbeta[tid] = live ? beta[row_base + tid] : 0.0f;
-        sdexp[tid] = 0.0f;
-        sdds[tid] = 0.0f;
-        sdg[tid] = 0.0f;
-        sdb[tid] = 0.0f;
+        sdexp[tid] = sdexp[MAXC + tid] = 0.0f;
+        sdds[tid] = sdds[MAXC + tid] = 0.0f;
+        sdg[tid] = sdg[MAXC + tid] = 0.0f;
+        sdb[tid] = sdb[MAXC + tid] = 0.0f;
     }
     __syncthreads();
     load_rows(sK, SK, key + row_base * D, D, C);
@@ -347,7 +356,7 @@ brain_gdn_chunk_bwd_post_tc(const unsigned int* params, const float* query, cons
         for (int h2 = 0; h2 < 2; ++h2) {
             const float d = quad_sum(dots[h2]);
             const unsigned int r = m0 + g + h2 * 8u;
-            if (t4 == 0 && r < C) { atomicAdd(&sdds[r], d); }
+            if (t4 == 0 && r < C) { sdds[nh * MAXC + r] += d; }
         }
     }
     cp_async_wait<0>();
@@ -386,7 +395,7 @@ brain_gdn_chunk_bwd_post_tc(const unsigned int* params, const float* query, cons
         for (int h2 = 0; h2 < 2; ++h2) {
             const float d = quad_sum(dots[h2]);
             const unsigned int r = m0 + g + h2 * 8u;
-            if (t4 == 0 && r < C) { atomicAdd(&sdexp[r], scale * d); }
+            if (t4 == 0 && r < C) { sdexp[nh * MAXC + r] += scale * d; }
         }
 #pragma unroll
         for (int t = 0; t < 8; ++t) {
@@ -461,7 +470,7 @@ brain_gdn_chunk_bwd_post_tc(const unsigned int* params, const float* query, cons
         for (int h2 = 0; h2 < 2; ++h2) {
             const float d = quad_sum(dots[h2]);
             const unsigned int r = m0 + g + h2 * 8u;
-            if (t4 == 0 && r < C) { atomicAdd(&sdb[r], d); }
+            if (t4 == 0 && r < C) { sdb[nh * MAXC + r] += d; }
         }
     }
     __syncthreads();  // sO held the value rows until here; d_k_beta overwrites them below
@@ -488,7 +497,7 @@ brain_gdn_chunk_bwd_post_tc(const unsigned int* params, const float* query, cons
         for (int h2 = 0; h2 < 2; ++h2) {
             const float d = quad_sum(dots[h2]);
             const unsigned int r = m0 + g + h2 * 8u;
-            if (t4 == 0 && r < C) { atomicAdd(&sdexp[r], d); }
+            if (t4 == 0 && r < C) { sdexp[nh * MAXC + r] += d; }
         }
     }
 
@@ -596,12 +605,12 @@ brain_gdn_chunk_bwd_post_tc(const unsigned int* params, const float* query, cons
     if (tid < C) {
         float acc = 0.0f;
         for (unsigned int j = 0; j <= tid; ++j) { acc += sDM[tid * SC + j] * expf(sg[tid] - sg[j]); }
-        atomicAdd(&sdg[tid], acc);
+        sdg[tid] = acc;
     } else if (tid >= MAXC && tid < MAXC + C) {
         const unsigned int j = tid - MAXC;
         float acc = 0.0f;
         for (unsigned int i = j; i < C; ++i) { acc += sDM[i * SC + j] * expf(sg[i] - sg[j]); }
-        atomicAdd(&sdg[j], -acc);
+        sdg[MAXC + j] = -acc;
     }
 
     // ---- raw_attn0 = -(k_beta @ key^T) backward: d_k_beta -= d_raw_attn0 @ key, d_key -= d_raw_attn0^T @ k_beta ----
@@ -658,15 +667,18 @@ brain_gdn_chunk_bwd_post_tc(const unsigned int* params, const float* query, cons
         for (int h2 = 0; h2 < 2; ++h2) {
             const float d = quad_sum(dots[h2]);
             const unsigned int r = m0 + g + h2 * 8u;
-            if (t4 == 0 && r < C) { atomicAdd(&sdb[r], d); }
+            if (t4 == 0 && r < C) { sdb[nh * MAXC + r] += d; }
         }
     }
     __syncthreads();
 
     // ---- d_g_cs from its remaining sources, then the suffix sum that is the cumulative sum's adjoint ----
     if (tid < C) {
-        sdg[tid] += sdexp[tid] * sexp[tid] - sdds[tid] * sds[tid];
-        d_beta[scal_base + tid * scal_stride] = sdb[tid];
+        const float dexp = sdexp[tid] + sdexp[MAXC + tid];
+        const float dds = sdds[tid] + sdds[MAXC + tid];
+        sdds[tid] = dds;
+        sdg[tid] = (sdg[tid] + sdg[MAXC + tid]) + (dexp * sexp[tid] - dds * sds[tid]);
+        d_beta[scal_base + tid * scal_stride] = sdb[tid] + sdb[MAXC + tid];
     }
     __syncthreads();
     if (tid == 0) {

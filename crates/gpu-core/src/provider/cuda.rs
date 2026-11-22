@@ -1062,8 +1062,8 @@ const GDN_BWD_SWEEP_TC_DYNAMIC_SHARED_BYTES: u32 = (2 * 64 * 132 + 128 * 40 + 2 
 const GDN_BWD_SWEEP_TC_SPLITS: u32 = 4;
 
 /// Dynamic shared memory of `gdn_chunk_bwd_post_tc`: four 64 x 132 tiles, four 64 x 68 matrices and
-/// eight 64-float vectors, all f32.
-const GDN_CHUNK_BWD_POST_TC_DYNAMIC_SHARED_BYTES: u32 = (4 * 64 * 132 + 4 * 64 * 68 + 8 * 64 + 16) * 4;
+/// twelve 64-float vectors (the row accumulators keep one half per column half, for a fixed summation order), all f32.
+const GDN_CHUNK_BWD_POST_TC_DYNAMIC_SHARED_BYTES: u32 = (4 * 64 * 132 + 4 * 64 * 68 + 12 * 64 + 16) * 4;
 
 /// The tensor-core reverse sweep of Gated DeltaNet's across-chunk recurrence: the same job as
 /// [`gdn_bwd_sweep_step`], restated so that the 48 heads split over 192 blocks. The state gradient's

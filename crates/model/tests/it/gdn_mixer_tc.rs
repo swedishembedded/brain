@@ -105,6 +105,38 @@ fn the_tensor_core_layer_matches_the_portable_layer_forward_and_backward() {
     }
 }
 
+/// The tensor-core layer's backward repeats bit for bit: the same inputs give the same bytes in every output and
+/// every gradient, run after run. A parameter-sharded fine-tune's resume, its repeat and the exams it feeds rely on
+/// it; the chunk backward once accumulated its row sums with shared-memory atomics, whose landing order varied, and
+/// a 27B step's gradient norm then differed between two runs of the same binary.
+#[test]
+fn the_tensor_core_backward_repeats_bit_for_bit() {
+    let kernels: &'static [(&'static str, &'static str)] = {
+        let mut v = KERNELS.to_vec();
+        v.push(("gdn_ut_fwd", kernels::GDN_UT_FWD));
+        v.push(("bmm_tiled", kernels::BMM_TILED));
+        Box::leak(v.into_boxed_slice())
+    };
+    let Ok(g) = Gpu::try_new_cuda(kernels) else {
+        return brain_testutil::skip_unavailable("gdn_mixer_tc: no CUDA device on this box");
+    };
+    if !model::gdn::use_fast_kernels(&g) {
+        return brain_testutil::skip_unavailable("gdn_mixer_tc: this device does not take the fast kernels");
+    }
+    let bits = |r: &Run| -> Vec<Vec<u32>> { std::iter::once(&r.gated).chain(r.grads.iter().map(|(_, v)| v)).map(|v| v.iter().map(|x| x.to_bits()).collect()).collect() };
+    for (t, chunk) in [(320u32, 64u32), (63, 63)] {
+        let s = shape(t, chunk);
+        // seed: fixed fixture so a failure reproduces on the same values
+        let h = Host::random(&s, 20261122);
+        let first = run(&g, &s, &h, true, true);
+        assert!(!first.grads.is_empty(), "the training form ran its backward");
+        for repeat in 1..16 {
+            let again = run(&g, &s, &h, true, true);
+            assert!(bits(&again) == bits(&first), "t={t} chunk={chunk}: repeat {repeat} differs from the first run in some output or gradient");
+        }
+    }
+}
+
 /// One segmented layer, forward and backward, with the convolution weight frozen: the shape of a LoRA step.
 fn run_segmented(g: &Gpu, s: &GdnMixerShape, h: &Host, tensor_core: bool, segment_tokens: u32) -> Vec<(&'static str, Vec<f32>)> {
     let mut ids = mixer_ids(g);

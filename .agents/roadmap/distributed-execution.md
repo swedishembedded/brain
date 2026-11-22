@@ -813,6 +813,24 @@ Scope: Running one training job as ranks across machines, and serving one model 
   transport `in_process`, sharding `gradients`. The installed export
   (`model.safetensors`, 16.1 GB fp32) served on one card and answered
   "What is 147 plus 592?" with "147 plus 592 is 739." One run, no repeat.
+- **Repeatable parameter-sharded steps on cards (2026-11-22, n442, 4
+  GH200, one process per card over NCCL, brain 4a170e039 and the fix).** The
+  qwen35 27B harness (`measure_sharded_parameters_rank`, Qwen3.8-27B-FP8 cut
+  to 4 and 8 layers, block 1024, window 2, running and two-pass clip, 4
+  steps) gave a different gradient norm on every run of one binary (step 1:
+  7.720721 / 7.720708 / 7.7207236). Cause: Gated DeltaNet's fused chunk
+  backward summed two warps' partials with shared-memory `atomicAdd`
+  (knowledge 567). After the fix: 3 + 2 runs bit-identical in loss and norm
+  at every step, step time unchanged (1.12-1.16 s before, 1.11-1.19 s after,
+  8 layers). Qwen3-4B parameter-sharded on 4 cards: bit-identical weights and
+  per-step loss and norm across two server processes; replicated, gradient-
+  sharded, one-card fp32 and one-card bf16 runs bit-identical across repeats
+  in one process. Test on cards: `gdn_mixer_tc`
+  `the_tensor_core_backward_repeats_bit_for_bit` (16 runs of the layer, every
+  output and gradient compared bitwise; fails at the first repeat before).
+  Open: the NVFP4 decode products (`matmul_nvfp4_mmae`, `fp8_nvfp4_gemv`)
+  meet their K-slices with shared atomics, so NVFP4 serving is not
+  bit-repeatable.
 - **Is the 4-card loss collapse a wrong gradient? No (2026-11-22, n442,
   4 GH200, served `full_train`, Qwen3-4B, the same 256 records, seed 7,
   `max_block` 512, lr 1e-6, brain c25ea1f69 + this change).** The run above
