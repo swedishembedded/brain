@@ -33,6 +33,10 @@ const D: usize = 32;
 const LAYERS: usize = 4;
 const LR: f32 = 1e-2;
 const ADAM: Adam = Adam { beta1: 0.9, beta2: 0.999, eps: 1e-8 };
+/// The task's data: fixed, so every run compares the same trajectories.
+const TASK_SEED: u64 = 0x2026_1122;
+/// How far a sharded run's loss may be from the single-rank run's, relative to it: the sharded update's rounding.
+const FOLLOW: f64 = 1e-3;
 
 fn ops() -> Ops {
     let mut list = training_kernel_list().to_vec();
@@ -53,7 +57,7 @@ struct Task {
 }
 
 fn task() -> Task {
-    let mut rng = Lcg::random();
+    let mut rng = Lcg::new(TASK_SEED);
     let init = specs().iter().map(|s| (s.name.clone(), rng.vec_scaled(D * D, 0.15))).collect();
     Task { x: rng.vec_scaled(M * D, 1.0), target: rng.vec_scaled(M * D, 1.0), init }
 }
@@ -181,10 +185,13 @@ fn a_parameter_sharded_step_follows_the_layer_streamed_step() {
                 assert_eq!(losses.iter().map(|l| l.to_bits()).collect::<Vec<_>>(), got[0].iter().map(|l| l.to_bits()).collect::<Vec<_>>(), "clip {clip:?} world {world}: rank {rank}'s losses differ from rank 0's");
             }
             for (step, (a, b)) in want.iter().zip(&got[0]).enumerate() {
-                assert!((a - b).abs() <= 1e-3 * a.abs().max(1e-3), "clip {clip:?} world {world} step {step}: loss {b} sharded, {a} single");
+                assert!((a - b).abs() <= FOLLOW * a.abs().max(1e-3), "clip {clip:?} world {world} step {step}: loss {b} sharded, {a} single");
             }
-            assert!(got[0][4] < got[0][0], "clip {clip:?} world {world}: the sharded run did not train: {:?}", got[0]);
         }
+        // Following is only evidence when the reference moves: its updates change the loss by far more than the
+        // tolerance (a step that updated nothing would be followed trivially).
+        let moved = want.iter().map(|l| (l - want[0]).abs()).fold(0.0, f64::max);
+        assert!(moved > 10.0 * FOLLOW * want[0].abs(), "clip {clip:?}: the single-rank run's loss moved only {moved:e} over its steps: {want:?}");
     }
 }
 
