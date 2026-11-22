@@ -103,7 +103,7 @@ fn the_cached_engine_reproduces_the_references_prefill_state_and_decode() {
                 let (c, k) = (shape[0], shape[1]);
                 // The reference keeps the last `taps` inputs; the next step reads the last `taps - 1`.
                 let tail: Vec<f32> = (0..c).flat_map(|ch| want[ch * k + 1..(ch + 1) * k].iter().copied()).collect();
-                let state = g.read(&e.pool().conv_rows(g, visit.index, j, &[&table]), c * (k - 1));
+                let state = g.read(&e.pool().conv_rows(g, visit.index, j, &e.pool().state_rows(g, &[&table])), c * (k - 1));
                 let err = rel_err(&state, &tail);
                 assert!(err <= TOL, "slices of {slice}: visit {} conv state {j} is {err:.3e} from the reference's", visit.index);
             }

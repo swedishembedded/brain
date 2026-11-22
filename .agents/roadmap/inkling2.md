@@ -1200,6 +1200,38 @@ Driven by the per-device gap list, as new candidates only:
     rows would make the rollback a copy); the Markov walk runs one vocabulary-wide head product per step; speculation
     is opt-in until the GPU crossover is measured (knowledge #318); CUDA not exercised.
 
+Done (2026-11-22), the gap list's barrier-free references, each a cooperative candidate selected by capability
+(`select::Op::DepthAttention`, `Op::RouterGate`, `Op::FlashAttentionExt`: workgroup-per-row, no shape gate,
+`workgroup_reductions` the correctness gate, so the CPU JIT keeps the references) and gated against them. GH200, CUDA,
+the uncached forward of the three golden prompts (22-27 rows), nsys kernel time per launch (achieved fraction of the
+roof: bytes a launch reads over the measured ~4 TB/s):
+- `depth_attn_fwd_rows` (+ `depth_attn_bwd_rows`, gpu-core twin table): 2.8 ms -> 39 us (120 launches a forward;
+  ~4.5 MB a launch, ~3% of the bandwidth roof: 25 workgroups, latency-bound at this row count). Gate: `model`
+  `depth_attn` (host reference forward, every backward output against the reference kernels at width 2304 and stacks
+  of 9 and 33 states; mutation of the tree verified).
+- `router_gate_sigmoid_rows`: a transparent `gpu_core::upgrade` row (bit-identical: a selection over the reference's own
+  per-element arithmetic, ties to the lower expert), 326 us -> 16 us. Gate: `gpu-core` `router_gate_upgrade` (bits,
+  with and without group masking, exact ties and infinities; mutation of the tie-break verified).
+- `flash_attn_gqa_ext_rows` (and its bf16-pool form, built by the same `dtype_variant` rewrite; the twin table is now
+  built once at run time, `upgrade::twins()`): one workgroup per (query row, head), keys in tiles of 128, 453 us ->
+  15 us. Gate: every `model` `flash_ext` check now runs the selected forward (whole, chunked, paged, ring, bf16 planes,
+  documents) plus the decoder's shape (24/8 heads of 128, 300 rows, three tiles) against the f64 oracle and the
+  reference kernel; dropping the per-tile rescale fails it.
+- Host: the model's handle holds freed blocks (`Gpu::hold_freed_blocks`, the stream-ordered pool): the ~3,500
+  `cuMemAlloc`/`cuMemFree` pairs a forward (332 ms of host time a forward under nsys, against 100 ms of kernels)
+  became pool allocations (9 ms). No arena was needed for the uncached forward: its temporaries are reissued in stream
+  order.
+- The uncached forward already takes the grouped expert products (`Inkling2::forward` runs the engine's `trunk`): no
+  `moe_nvfp4_gemv_gather` in the profile.
+- Result: warm uncached forward (default arithmetic) 492-525 ms -> 67-90 ms; binary32 with every visit read back
+  559-641 ms -> 143-164 ms. Device time per forward ~62 ms (9-forward mean, binary32 and default mixed).
+- `real_parity`'s default-arithmetic greedy check now counts routed flips by distinct context (knowledge #568): every
+  arm flips or keeps position 5 of the shared chat-template prefix depending on equally accurate f32 reductions.
+- Left (gap list after these, per forward of 27 rows at the default arithmetic): `moe_nvfp4_grouped` 175 us x 88
+  (15 ms), `moe_mxfp8_grouped` 707 us x 8 (5.7 ms), bf16 products on the library; the binary32 arm's
+  `matmul_gemv_w_bf16` at 27 rows 170 us a launch (~2% of its roof; the GEMV is selected up to 32 rows); host launch
+  count (~3,200 launches, ~3,250 zero-fills a forward); a recorded/graph decode step.
+
 ## Decisions (2026-11-21)
 
 - I2.4: the default serves the reference numerics (dequantized expert weights,

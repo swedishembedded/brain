@@ -393,9 +393,10 @@ impl Engine {
         let served = self.bank_for(&[&*table], n);
         let bank = served.as_ref().map(|(bank, slots)| Banked { bank, slots });
         let mut taps = self.tap_probe();
+        let states = self.pool.state_rows(self.g(), &[&*table]);
         let normed = {
             let mut probe: Option<&mut dyn Probe> = taps.as_mut().map(|p| p as &mut dyn Probe);
-            self.m.trunk(&mut s, &Rows::Chunk { pool: &self.pool, table, start, bank }, x, n as u32, &mut probe, routes.as_mut()).expect("an admitted chunk runs")
+            self.m.trunk(&mut s, &Rows::Chunk { pool: &self.pool, table, start, states: &states, bank }, x, n as u32, &mut probe, routes.as_mut()).expect("an admitted chunk runs")
         };
         self.m.flush(&mut s);
         if let Some(routes) = routes {
@@ -506,8 +507,9 @@ impl Engine {
             let refs: Vec<&BlockTable> = tables.iter().map(|t| &**t).collect();
             let served = self.bank_for(&refs, 1);
             let bank = served.as_ref().map(|(bank, slots)| Banked { bank, slots });
+            let rows = self.pool.decode_rows(self.g(), &refs);
             let mut probe: Option<&mut dyn Probe> = taps.as_mut().map(|p| p as &mut dyn Probe);
-            let normed = self.m.trunk(&mut s, &Rows::Decode { pool: &self.pool, tables: &refs, bank }, x, b, &mut probe, routes.as_mut()).expect("an admitted batch runs");
+            let normed = self.m.trunk(&mut s, &Rows::Decode { pool: &self.pool, rows: &rows, bank }, x, b, &mut probe, routes.as_mut()).expect("an admitted batch runs");
             self.m.head(&mut s, &normed, b)
         };
         self.m.flush(&mut s);

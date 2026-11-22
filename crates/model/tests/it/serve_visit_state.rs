@@ -173,17 +173,19 @@ impl Looped {
                 g.submit(&[], &[short_conv_fwd(g, &self.conv_ids, &s, x, None, base, None, None, &y)]);
             }
             Rows::Chunk { table, .. } => {
-                let hist = self.pool.conv_rows(g, visit, state, &[table]);
+                let states = self.pool.state_rows(g, &[table]);
+                let hist = self.pool.conv_rows(g, visit, state, &states);
                 let s = ShortConvShape::static_taps(n, c, TAPS, BaseLayout::ChannelMajor).residual_scaled(CONV_SCALE).with_history();
                 let tail = g.storage(u64::from(c * (TAPS - 1)));
                 g.submit(&[], &[short_conv_fwd(g, &self.conv_ids, &s, x, None, base, None, Some(&hist), &y), conv_state_tail_step(g, &self.conv_ids, n, c, TAPS, x, &hist, &tail)]);
-                self.pool.store_conv_rows(g, visit, state, &[table], &tail);
+                self.pool.store_conv_rows(g, visit, state, &states, &tail);
             }
             Rows::Decode { tables } => {
-                let hist = self.pool.conv_rows(g, visit, state, tables);
+                let states = self.pool.state_rows(g, tables);
+                let hist = self.pool.conv_rows(g, visit, state, &states);
                 let s = ShortConvShape::static_taps(n, c, TAPS, BaseLayout::ChannelMajor).residual_scaled(CONV_SCALE);
                 g.submit(&[], &[short_conv_step(g, &self.conv_ids, &s, x, None, base, &hist, &y)]);
-                self.pool.store_conv_rows(g, visit, state, tables, &hist);
+                self.pool.store_conv_rows(g, visit, state, &states, &hist);
             }
         }
         y
@@ -202,7 +204,7 @@ impl Looped {
             let (opts, inputs) = (options(visit.attention), AttnInputs { sink: Some(&sink), ..AttnInputs::default() });
             let ctx = match rows {
                 Rows::Chunk { table, start } => self.pool.attend_chunk(g, visit.index, table, *start, &heads(), &opts, &inputs, &q, &k, &v, n as u32),
-                Rows::Decode { tables } => self.pool.attend_decode(g, visit.index, tables, &heads(), &opts, &inputs, &q, &k, &v),
+                Rows::Decode { tables } => self.pool.attend_decode(g, visit.index, &self.pool.decode_rows(g, tables), &heads(), &opts, &inputs, &q, &k, &v),
                 Rows::Whole => {
                     let (ctx, lse) = (g.storage((n * QD) as u64), g.storage((n * NH as usize) as u64));
                     g.submit(&[], &flash_ext_fwd(g, &self.pool_flash(), &heads(), &opts, &inputs, Contiguous { b: 1, t: n as u32, pos0: 0 }, &q, &k, &v, &ctx, &lse));

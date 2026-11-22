@@ -49,7 +49,7 @@ use model::adapter::bank::{AdapterBank, MergedRows};
 use model::paged::BlockTable;
 use model::policy::LinearActivations;
 use model::saved::RetainedStates;
-use model::serve::visit_state::VisitPool;
+use model::serve::visit_state::{DecodeRows, StateRows, VisitPool};
 use model::serve::PromptEmbeds;
 use model::short_conv::{conv_state_tail_step, short_conv_fwd, short_conv_step, BaseLayout, DynTaps, ShortConvIds, ShortConvShape};
 
@@ -124,10 +124,12 @@ pub(crate) type Pool = VisitPool<Vec<f32>>;
 pub(crate) enum Rows<'a> {
     /// One whole sequence from position 0 that keeps no state: the reference forward.
     Whole,
-    /// One prompt chunk of one served sequence at positions `start ..`, under the adapter bank's current row slots.
-    Chunk { pool: &'a Pool, table: &'a BlockTable, start: u32, bank: Option<Banked<'a>> },
-    /// One new token of each served sequence, at the last position its table backs, under the bank's row slots.
-    Decode { pool: &'a Pool, tables: &'a [&'a BlockTable], bank: Option<Banked<'a>> },
+    /// One prompt chunk of one served sequence at positions `start ..`, whose state row is `states`, under the adapter
+    /// bank's current row slots.
+    Chunk { pool: &'a Pool, table: &'a BlockTable, start: u32, states: &'a StateRows, bank: Option<Banked<'a>> },
+    /// One new token of each served sequence, at the last position its table backs: the step's shared index buffers,
+    /// under the bank's row slots.
+    Decode { pool: &'a Pool, rows: &'a DecodeRows, bank: Option<Banked<'a>> },
 }
 
 /// The served adapter bank of a pass and each row's slot in it (written to the bank's slot buffer for the pass).
@@ -286,6 +288,8 @@ pub struct Inkling2 {
     ops: Ops,
     k: Kernels,
     w: Weights,
+    /// The expert combine's slot map and its length ([`Self::identity`]).
+    identity: std::sync::Mutex<Option<(u32, DeviceBuffer)>>,
     /// The declared activation quantizations brain does not implement, by tensor: they refuse
     /// [`LinearActivations::Declared`] and nothing else.
     unsupported_activations: Vec<String>,
@@ -429,8 +433,14 @@ impl Inkling2 {
         let k = Kernels::resolve(ops.gpu())?;
         let w = Weights::load(&ops, &cfg, &src, &micro, &activations)?;
         let plan = visit_plan(&cfg)?;
+        // Every pass (an uncached forward, a prefill chunk, a decode step) allocates its temporaries per visit and drops
+        // them when the pass is done. Freed to the driver, each drop is a `cuMemFree` that waits for the whole device
+        // and the next allocation maps it again: about 3,500 pairs a forward, measured at three times the forward's
+        // device time on a GH200 (ledger, Phase 7). Held, the backend reissues them in stream order; what it holds stays
+        // under its retention bound.
+        ops.gpu().hold_freed_blocks(true);
         let choice = ops.linear_activations();
-        let mut m = Inkling2 { cfg, plan, ops, k, w, unsupported_activations };
+        let mut m = Inkling2 { cfg, plan, ops, k, w, identity: std::sync::Mutex::new(None), unsupported_activations };
         m.set_linear_activations(choice)?;
         Ok(m)
     }
@@ -871,9 +881,9 @@ impl Inkling2 {
                 self.flush(s);
                 pool.attend_chunk(g, v.index, table, *start, &heads, &opts, &inputs, &q, &kv[0], &kv[1], t)
             }
-            Rows::Decode { pool, tables, .. } => {
+            Rows::Decode { pool, rows, .. } => {
                 self.flush(s);
-                pool.attend_decode(g, v.index, tables, &heads, &opts, &inputs, &q, &kv[0], &kv[1])
+                pool.attend_decode(g, v.index, rows, &heads, &opts, &inputs, &q, &kv[0], &kv[1])
             }
         };
 
@@ -997,8 +1007,7 @@ impl Inkling2 {
                 if let Some(bank) = bank {
                     bank.correct_experts(g, s, &names.w2(), h, 1, &ids, &y, slots);
                 }
-                let identity = g.storage(u64::from(slots));
-                g.write(&identity, &(0..slots).collect::<Vec<u32>>());
+                let identity = self.identity(slots);
                 let combine_gate = if weighted_input { g.storage_init("inkling2.unit_gate", &vec![1.0f32; (t * e) as usize]) } else { gate.clone() };
                 s.push(g.step(self.k.combine, &[&combine_gate, &ids, &identity, &y, &out], &[t, d, e, k], t * d));
             }
@@ -1020,6 +1029,21 @@ impl Inkling2 {
         s.push(g.step(self.k.gather_rows, &[&flat, gate, &weight], &[1, slots], slots));
         s.push(g.step(self.k.slot_combine, &[h, &weight, &out], &[slots, width, 1], slots * width));
         out
+    }
+
+    /// The slot map `0, 1, ..` of at least `slots` entries (the combine reads the slots in order): uploaded once and
+    /// grown when a pass has more slots, instead of once per visit.
+    fn identity(&self, slots: u32) -> DeviceBuffer {
+        let mut held = self.identity.lock().unwrap_or_else(|e| e.into_inner());
+        match &*held {
+            Some((n, buf)) if *n >= slots => buf.clone(),
+            _ => {
+                let buf = self.g().storage_uninit(u64::from(slots));
+                self.g().write(&buf, &(0..slots).collect::<Vec<u32>>());
+                *held = Some((slots, buf.clone()));
+                buf
+            }
+        }
     }
 
     /// The message gate `site` (q, k, v, MLP) of `layer` over `t` rows; a served adapter bank corrects each of its three
@@ -1121,18 +1145,18 @@ impl Inkling2 {
         let y = g.storage(u64::from(t * c));
         match rows {
             Rows::Whole => s.push(short_conv_fwd(g, &self.k.conv, &shape, x, dynamic, base, None, None, &y)),
-            Rows::Chunk { pool, table, .. } => {
+            Rows::Chunk { pool, states, .. } => {
                 self.flush(s);
-                let hist = pool.conv_rows(g, visit, state, &[table]);
+                let hist = pool.conv_rows(g, visit, state, states);
                 let tail = g.storage(u64::from(c * (k - 1)));
                 g.submit(&[], &[short_conv_fwd(g, &self.k.conv, &shape.with_history(), x, dynamic, base, None, Some(&hist), &y), conv_state_tail_step(g, &self.k.conv, t, c, k, x, &hist, &tail)]);
-                pool.store_conv_rows(g, visit, state, &[table], &tail);
+                pool.store_conv_rows(g, visit, state, states, &tail);
             }
-            Rows::Decode { pool, tables, .. } => {
+            Rows::Decode { pool, rows, .. } => {
                 self.flush(s);
-                let hist = pool.conv_rows(g, visit, state, tables);
+                let hist = pool.conv_rows(g, visit, state, rows.states());
                 g.submit(&[], &[short_conv_step(g, &self.k.conv, &shape, x, dynamic, base, &hist, &y)]);
-                pool.store_conv_rows(g, visit, state, tables, &hist);
+                pool.store_conv_rows(g, visit, state, rows.states(), &hist);
             }
         }
         y

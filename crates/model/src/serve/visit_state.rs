@@ -271,15 +271,50 @@ pub struct Resumed<P> {
     pub copied_tail: Option<(u32, u32, u32)>,
 }
 
-/// Where the rows of one decode step go for one visit: the K/V layer, its block geometry (a ring's block is one
-/// sequence's whole ring), each row's `(block, offset)` and each sequence's block table.
-struct DecodeTarget<'a> {
-    layer: &'a KvLayer,
+/// Where one decode step's rows go in one kind of K/V state and how they attend: the append coordinates and the
+/// attention index (a ring's block is one sequence's whole ring), uploaded once per step and read by every visit of that
+/// kind.
+struct StepTarget {
+    blocks: DeviceBuffer,
+    offsets: DeviceBuffer,
+    index: DeviceBuffer,
     block_size: u32,
     /// Ring rows, 0 for a growing cache ([`PagedKv::ring`]).
     ring: u32,
-    rows: Vec<(u32, u32)>,
-    tables: Vec<Vec<u32>>,
+    max_bt: u32,
+}
+
+/// The state rows of a set of sequences on the device: what every convolution state gather and scatter of a pass
+/// reads ([`VisitPool::state_rows`]), uploaded once per pass instead of once per visit and state.
+pub struct StateRows {
+    ids: DeviceBuffer,
+    n: u32,
+}
+
+/// The index buffers every visit of one decode step shares ([`VisitPool::decode_rows`]): the sequences' state rows, and
+/// for the paged planes and each ring size the rows the new tokens are written to and the attention index. They depend
+/// only on the step's tables, so a step of 48 visits uploads them once, not per visit.
+pub struct DecodeRows {
+    states: StateRows,
+    paged: Option<StepTarget>,
+    /// Per distinct ring size (its rows), the ring rows of the step.
+    rings: Vec<(u32, StepTarget)>,
+}
+
+impl DecodeRows {
+    /// The sequences' state rows, for the convolution states of the step.
+    pub fn states(&self) -> &StateRows {
+        &self.states
+    }
+
+    /// Sequences in the step.
+    pub fn len(&self) -> u32 {
+        self.states.n
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.states.n == 0
+    }
 }
 
 /// Kernel indices the pool dispatches, resolved from [`VisitPool::pipelines`].
@@ -610,15 +645,10 @@ impl<P: Clone> VisitPool<P> {
         }
     }
 
-    /// The context `[b, n_heads * head_dim]` of one new token of each of `b` sequences through visit `visit`'s
-    /// attention: row `i` of `q`/`k`/`v` is the token at the last backed position of `tables[i]` ([`Self::append`]).
-    /// The tokens' K/V are written first (each at its block, or its ring row), then every row attends through its own
-    /// sequence's table.
-    #[allow(clippy::too_many_arguments)]
-    pub fn attend_decode(&self, g: &Gpu, visit: usize, tables: &[&BlockTable], heads: &HeadShape, opts: &AttnOptions, inputs: &AttnInputs, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer) -> DeviceBuffer {
-        self.check_heads(heads);
-        let b = tables.len() as u32;
-        assert!(b >= 1, "visit state: a decode step of no sequence");
+    /// The index buffers of one decode step of `tables` (each holding its new token's position, [`Self::append`]):
+    /// built once and handed to every visit's [`Self::attend_decode`] and convolution state move of the step.
+    pub fn decode_rows(&self, g: &Gpu, tables: &[&BlockTable]) -> DecodeRows {
+        assert!(!tables.is_empty(), "visit state: a decode step of no sequence");
         let positions: Vec<u32> = tables
             .iter()
             .map(|t| {
@@ -627,48 +657,87 @@ impl<P: Clone> VisitPool<P> {
             })
             .collect();
         let seqs: Vec<PagedSeq> = positions.iter().enumerate().map(|(i, &p)| PagedSeq { q_row0: i as u32, n_q: 1, q_pos0: p, kv_pos0: 0 }).collect();
-        let target = match self.layout.slot_kv(visit) {
+        let states = self.state_rows(g, tables);
+        let target = |rows: Vec<(u32, u32)>, block_tables: Vec<Vec<u32>>, block_size: u32, ring: u32| {
+            let n = rows.len() as u64;
+            let (blocks, offsets) = (g.storage_uninit(n), g.storage_uninit(n));
+            g.write(&blocks, &rows.iter().map(|r| r.0).collect::<Vec<_>>());
+            g.write(&offsets, &rows.iter().map(|r| r.1).collect::<Vec<_>>());
+            let refs: Vec<&[u32]> = block_tables.iter().map(Vec::as_slice).collect();
+            let max_bt = refs.iter().map(|t| t.len() as u32).max().unwrap_or(1).max(1);
+            let words = paged_index(&seqs, &refs, max_bt);
+            let index = g.storage_uninit(words.len() as u64);
+            g.write(&index, &words);
+            StepTarget { blocks, offsets, index, block_size, ring, max_bt }
+        };
+        let paged = (!self.paged.is_empty()).then(|| {
+            let bs = self.sizing.block_size;
+            target(tables.iter().zip(&positions).map(|(t, &p)| t.locate(p, bs)).collect(), tables.iter().map(|t| t.blocks().to_vec()).collect(), bs, 0)
+        });
+        let state: Vec<u32> = tables.iter().map(|t| t.state_row().expect("visit state: a decoding sequence holds its state row")).collect();
+        let mut sizes: Vec<u32> = self.layout.rings.clone();
+        sizes.sort_unstable();
+        sizes.dedup();
+        let rings = sizes
+            .into_iter()
+            .map(|rows| (rows, target(state.iter().zip(&positions).map(|(&r, &p)| (r, crate::gqa_mixer::ring_row(p, rows))).collect(), state.iter().map(|&r| vec![r]).collect(), rows, rows)))
+            .collect();
+        DecodeRows { states, paged, rings }
+    }
+
+    /// The context `[b, n_heads * head_dim]` of one new token of each of the `b` sequences of `rows`
+    /// ([`Self::decode_rows`]) through visit `visit`'s attention: row `i` of `q`/`k`/`v` is the token at the last backed
+    /// position of sequence `i`. The tokens' K/V are written first (each at its block, or its ring row), then every row
+    /// attends through its own sequence's table.
+    #[allow(clippy::too_many_arguments)]
+    pub fn attend_decode(&self, g: &Gpu, visit: usize, rows: &DecodeRows, heads: &HeadShape, opts: &AttnOptions, inputs: &AttnInputs, q: &DeviceBuffer, k: &DeviceBuffer, v: &DeviceBuffer) -> DeviceBuffer {
+        self.check_heads(heads);
+        let b = rows.len();
+        let (layer, target) = match self.layout.slot_kv(visit) {
             SlotKv::Paged { plane } => {
                 assert!(opts.window.is_none(), "visit state: visit {visit} attends its whole history; it takes no window");
-                let bs = self.sizing.block_size;
-                DecodeTarget { layer: &self.paged[plane], block_size: bs, ring: 0, rows: tables.iter().zip(&positions).map(|(t, &p)| t.locate(p, bs)).collect(), tables: tables.iter().map(|t| t.blocks().to_vec()).collect() }
+                (&self.paged[plane], rows.paged.as_ref().expect("a pool with paged visits builds their step target"))
             }
-            SlotKv::Ring { ring, rows } => {
-                assert!(opts.window.is_some_and(|w| w <= rows), "visit state: visit {visit} keeps a ring of {rows} rows, so it attends a window of at most {rows} keys, not {:?}", opts.window);
-                let state: Vec<u32> = tables.iter().map(|t| t.state_row().expect("visit state: a decoding sequence holds its state row")).collect();
-                DecodeTarget { layer: &self.rings[ring], block_size: rows, ring: rows, rows: state.iter().zip(&positions).map(|(&r, &p)| (r, crate::gqa_mixer::ring_row(p, rows))).collect(), tables: state.iter().map(|&r| vec![r]).collect() }
+            SlotKv::Ring { ring, rows: n } => {
+                assert!(opts.window.is_some_and(|w| w <= n), "visit state: visit {visit} keeps a ring of {n} rows, so it attends a window of at most {n} keys, not {:?}", opts.window);
+                (&self.rings[ring], &rows.rings.iter().find(|(r, _)| *r == n).expect("every ring size has its step target").1)
             }
         };
-        let mut steps = self.append_rows(g, target.layer, &target.rows, target.block_size, k, v);
-        let tables: Vec<&[u32]> = target.tables.iter().map(Vec::as_slice).collect();
-        let max_bt = tables.iter().map(|t| t.len() as u32).max().unwrap_or(1).max(1);
-        let (ctx, attend) = self.attend(g, target.layer, &seqs, &tables, max_bt, target.block_size, target.ring, heads, opts, inputs, q, b);
-        steps.extend(attend);
+        let mut steps = self.append_steps(g, layer, &target.blocks, &target.offsets, b, target.block_size, k, v);
+        let paged = PagedKv { index: &target.index, n_seqs: b, max_q: 1, n_rows: b, block_size: target.block_size, max_bt: target.max_bt, ring: target.ring };
+        let ctx = g.storage_uninit(u64::from(b) * u64::from(heads.n_heads) * u64::from(heads.head_dim));
+        let lse = g.storage_uninit(u64::from(b) * u64::from(heads.n_heads));
+        steps.extend(flash_ext_paged_fwd(g, &self.ids.flash, heads, opts, inputs, &paged, q, KvPlanes::of(layer), &ctx, &lse));
         g.submit(&[], &steps);
         ctx
     }
 
-    /// Convolution state `state` of visit `visit` for each sequence of `tables`, gathered into a fresh
-    /// `[tables.len(), channels, taps - 1]` buffer (the layout [`crate::short_conv::short_conv_step`] and, for one
+    /// The state rows of `tables`' sequences on the device, for the convolution state moves of one pass.
+    pub fn state_rows(&self, g: &Gpu, tables: &[&BlockTable]) -> StateRows {
+        assert!(!tables.is_empty(), "visit state: no sequence to move state for");
+        let rows: Vec<u32> = tables.iter().map(|t| t.state_row().expect("visit state: the sequence holds its state row")).collect();
+        let ids = g.storage_uninit(rows.len() as u64);
+        g.write(&ids, &rows);
+        StateRows { ids, n: rows.len() as u32 }
+    }
+
+    /// Convolution state `state` of visit `visit` for each sequence of `rows` ([`Self::state_rows`]), gathered into a
+    /// fresh `[rows, channels, taps - 1]` buffer (the layout [`crate::short_conv::short_conv_step`] and, for one
     /// sequence, the prefill's history read).
-    pub fn conv_rows(&self, g: &Gpu, visit: usize, state: usize, tables: &[&BlockTable]) -> DeviceBuffer {
+    pub fn conv_rows(&self, g: &Gpu, visit: usize, state: usize, rows: &StateRows) -> DeviceBuffer {
         let (buf, words) = self.conv_buffer(visit, state);
-        let ids = self.state_rows(g, tables);
-        let n = tables.len() as u32;
-        let out = g.storage_uninit(u64::from(n) * words);
+        let out = g.storage_uninit(u64::from(rows.n) * words);
         let w = word(words, "convolution state words");
-        g.submit(&[], &[g.step(self.ids.gather, &[&ids, buf, &out], &[n, w, 0, w], n * w)]);
+        g.submit(&[], &[g.step(self.ids.gather, &[&rows.ids, buf, &out], &[rows.n, w, 0, w], rows.n * w)]);
         out
     }
 
-    /// Write `src` (`[tables.len(), channels, taps - 1]`) back as the convolution state `state` of visit `visit` of each
-    /// sequence of `tables`.
-    pub fn store_conv_rows(&self, g: &Gpu, visit: usize, state: usize, tables: &[&BlockTable], src: &DeviceBuffer) {
+    /// Write `src` (`[rows, channels, taps - 1]`) back as the convolution state `state` of visit `visit` of each sequence
+    /// of `rows`.
+    pub fn store_conv_rows(&self, g: &Gpu, visit: usize, state: usize, rows: &StateRows, src: &DeviceBuffer) {
         let (buf, words) = self.conv_buffer(visit, state);
-        let ids = self.state_rows(g, tables);
-        let n = tables.len() as u32;
         let w = word(words, "convolution state words");
-        g.submit(&[], &[g.step(self.ids.scatter, &[&ids, src, buf], &[n, w, 0, w], n * w)]);
+        g.submit(&[], &[g.step(self.ids.scatter, &[&rows.ids, src, buf], &[rows.n, w, 0, w], rows.n * w)]);
     }
 
     // ---- speculative verify ----
@@ -720,24 +789,22 @@ impl<P: Clone> VisitPool<P> {
         (&self.conv[slot][state], c.words())
     }
 
-    fn state_rows(&self, g: &Gpu, tables: &[&BlockTable]) -> DeviceBuffer {
-        assert!(!tables.is_empty(), "visit state: no sequence to move state for");
-        let rows: Vec<u32> = tables.iter().map(|t| t.state_row().expect("visit state: the sequence holds its state row")).collect();
-        let ids = g.storage(rows.len() as u64);
-        g.write(&ids, &rows);
-        ids
-    }
-
     /// Steps writing row `i` of `k`/`v` at `rows[i] = (block, offset)` of `layer`, whose blocks are `block_size` rows (a
     /// ring's block is one sequence's whole ring).
     fn append_rows(&self, g: &Gpu, layer: &KvLayer, rows: &[(u32, u32)], block_size: u32, k: &DeviceBuffer, v: &DeviceBuffer) -> Vec<gpu_core::Step> {
         let n = rows.len() as u32;
-        let (blocks, offsets) = (g.storage(u64::from(n)), g.storage(u64::from(n)));
+        let (blocks, offsets) = (g.storage_uninit(u64::from(n)), g.storage_uninit(u64::from(n)));
         g.write(&blocks, &rows.iter().map(|r| r.0).collect::<Vec<_>>());
         g.write(&offsets, &rows.iter().map(|r| r.1).collect::<Vec<_>>());
+        self.append_steps(g, layer, &blocks, &offsets, n, block_size, k, v)
+    }
+
+    /// Steps writing row `i` of `k`/`v` (`n` rows) at `(blocks[i], offsets[i])` of `layer`.
+    #[allow(clippy::too_many_arguments)]
+    fn append_steps(&self, g: &Gpu, layer: &KvLayer, blocks: &DeviceBuffer, offsets: &DeviceBuffer, n: u32, block_size: u32, k: &DeviceBuffer, v: &DeviceBuffer) -> Vec<gpu_core::Step> {
         let kvd = self.layout.shape.kv_dim();
         let (kind, threads) = if self.layout.shape.kv_tier == KvTier::BF16 { (self.ids.append_bf16, crate::kv_tier::append_word_threads(n, kvd)) } else { (self.ids.append_f32, n * kvd) };
-        [(&layer.k, k), (&layer.v, v)].into_iter().map(|(plane, src)| g.step(kind, &[src, &blocks, &offsets, plane.data()], &[n, kvd, block_size], threads)).collect()
+        [(&layer.k, k), (&layer.v, v)].into_iter().map(|(plane, src)| g.step(kind, &[src, blocks, offsets, plane.data()], &[n, kvd, block_size], threads)).collect()
     }
 
     /// The extended attention of `seqs` (rows of `q`) through `tables` into `layer`.
