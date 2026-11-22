@@ -29,6 +29,7 @@
 //! kernel), and what a training tower would still need is recorded in the roadmap ledger.
 
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 use checkpoint::packed::PackedSource;
 use gpu_core::{DeviceBuffer, Gpu, Step};
@@ -41,10 +42,15 @@ use model::vit::{
     attn_chunk_for_device, gather_rows, linear_rows_step, row_index_buffer, scatter_rows, vit_block_fwd, VitBlockWeights, VitKernelIds, VitPermuteIds, VitScratch, VitShape,
     RopeTables, UNREGISTERED,
 };
+use paramstore::{ParamStore, Role};
 use serde::Deserialize;
 
 use crate::config::VisionConfig;
 use crate::names::{vision_manifest_of, VISION_PREFIX};
+
+mod train;
+
+pub use train::{train_pipelines, LoraTraining, VisionPass};
 
 /// The default id of the image placeholder token (`<|unused_200054|>`), the reference configuration's
 /// `image_token_id`. Callers that hold the tokenizer should pass the id they resolve from the processor's
@@ -189,6 +195,26 @@ impl VisionWeights {
         Ok(VisionWeights { tensors })
     }
 
+    /// Weights from tensors already in memory, held to the same name map as [`Self::load`]: every tensor of `cfg`
+    /// present at its element count and finite, nothing else.
+    pub fn from_tensors(cfg: &VisionConfig, tensors: HashMap<String, Vec<f32>>) -> Result<VisionWeights, String> {
+        let manifest = vision_manifest_of(cfg);
+        for e in &manifest {
+            let data = tensors.get(&e.name).ok_or_else(|| format!("inkling2 vision: missing tensor {}", e.name))?;
+            let numel: u64 = e.shape.iter().product();
+            if data.len() as u64 != numel {
+                return Err(format!("inkling2 vision: {} holds {} values, the config makes it {:?}", e.name, data.len(), e.shape));
+            }
+            if data.iter().any(|v| !v.is_finite()) {
+                return Err(format!("inkling2 vision: tensor {} holds a non-finite value", e.name));
+            }
+        }
+        if let Some(extra) = tensors.keys().find(|n| !manifest.iter().any(|e| &e.name == *n)) {
+            return Err(format!("inkling2 vision: tensor {extra} is not in the name map of the vision config"));
+        }
+        Ok(VisionWeights { tensors })
+    }
+
     fn get(&self, name: &str) -> &[f32] {
         &self.tensors[name]
     }
@@ -242,23 +268,6 @@ fn build_pipelines() -> Vec<(&'static str, &'static str)> {
 // ---------------------------------------------------------------------------------------------------------------
 // The tower
 // ---------------------------------------------------------------------------------------------------------------
-
-struct BlockBuffers {
-    ln1_w: DeviceBuffer,
-    ln1_b: DeviceBuffer,
-    qkv_w: DeviceBuffer,
-    qkv_b: DeviceBuffer,
-    out_w: DeviceBuffer,
-    out_b: DeviceBuffer,
-    ls1: DeviceBuffer,
-    ln2_w: DeviceBuffer,
-    ln2_b: DeviceBuffer,
-    fc1_w: DeviceBuffer,
-    fc1_b: DeviceBuffer,
-    fc2_w: DeviceBuffer,
-    fc2_b: DeviceBuffer,
-    ls2: DeviceBuffer,
-}
 
 /// The features of a group of images: one row of the decoder's width per region, the images' rows concatenated in the
 /// order given.
@@ -327,6 +336,43 @@ struct GroupPlan {
     patches: u32,
 }
 
+/// The device inputs of one group of images.
+struct GroupSetup {
+    plan: GroupPlan,
+    sh: VitShape,
+    /// The `[patches, patch_size^2 * 3]` patch matrix.
+    pix: DeviceBuffer,
+    taps: DeviceTaps,
+    /// One zero per image: gathering the single class row through it repeats it per image.
+    zero_idx: DeviceBuffer,
+    patch_idx: DeviceBuffer,
+    cls_idx: DeviceBuffer,
+    cos: DeviceBuffer,
+    sin: DeviceBuffer,
+    spans: Vec<(u32, u32)>,
+    max_span: u32,
+}
+
+/// Regions the resident projector has room for until a larger group makes it grow.
+pub const PROJECTOR_REGIONS: u32 = 1024;
+
+/// The store name of a backbone tensor.
+fn backbone(tail: &str) -> String {
+    format!("{VISION_PREFIX}backbone.{tail}")
+}
+
+/// The store name of a tensor of layer `l`.
+fn layer_param(l: u32, tail: &str) -> String {
+    backbone(&format!("layers.{l}.{tail}"))
+}
+
+/// The store name of the fused `[3C, C]` query/key/value weight (`.weight`) or `[3C]` bias (`.bias`) of layer `l`. The
+/// published file keeps the three projections apart; the shared block reads one fused tensor, so the store does too.
+/// An adapter still addresses the three by their published names (see [`crate::vision::train`]).
+pub fn fused_qkv_name(l: u32, kind: &str) -> String {
+    layer_param(l, &format!("self_attn.qkv_proj.{kind}"))
+}
+
 /// The vision tower on a device.
 pub struct VisionTower {
     cfg: VisionConfig,
@@ -334,21 +380,92 @@ pub struct VisionTower {
     pos_kernels: PosTableKernels,
     permute: VitPermuteIds,
     region_copy: usize,
-    patch_w: DeviceBuffer,
-    pos_table: DeviceBuffer,
-    cls_row: Vec<f32>,
-    ln_pre_w: DeviceBuffer,
-    ln_pre_b: DeviceBuffer,
-    blocks: Vec<BlockBuffers>,
-    projector_weights: HashMap<String, Vec<f32>>,
-    projector_cfg: ProjectorConfig,
+    /// Every tower tensor, in the published naming except the fused attention input (see [`fused_qkv_name`]). The
+    /// merger's two weights live here too and the projector shares their buffers.
+    store: ParamStore,
+    /// The resident merger: its weights are the store's, its activations have room for a group's regions and grow when
+    /// a larger group arrives (the weights are never uploaded again).
+    projector: Mutex<MlpProjector>,
+    /// What training adds: backward kernels, the saved-activation policy, gradient sinks and the adapters.
+    train: Option<train::TowerTraining>,
 }
 
 impl VisionTower {
-    /// Upload the tower. `gpu` must register [`pipelines`] (the rows the shared blocks do not strictly need may be
-    /// absent); a missing required kernel is an error naming it.
+    /// Upload the tower for inference. `gpu` must register [`pipelines`] (the rows the shared blocks do not strictly
+    /// need may be absent); a missing required kernel is an error naming it.
     pub fn new(gpu: &Gpu, cfg: &VisionConfig, w: &VisionWeights) -> Result<VisionTower, String> {
-        let dim = cfg.hidden_size as usize;
+        Self::assemble(gpu, cfg, w, &|_| false, None, false)
+    }
+
+    /// The store entries in a fixed order, with their sizes.
+    fn param_list(cfg: &VisionConfig) -> Vec<(String, usize)> {
+        let (c, ff) = (cfg.hidden_size as usize, cfg.mlp_width() as usize);
+        let patch_dim = 3 * (cfg.native_patch_size as usize).pow(2);
+        let merged = (cfg.adapter_merge_size * cfg.adapter_merge_size * cfg.hidden_size) as usize;
+        let mut out = vec![
+            (backbone("embeddings.class_embedding"), c),
+            (backbone("embeddings.cls_position_embedding"), c),
+            (backbone("embeddings.patch_embedding.weight"), c * patch_dim),
+            (backbone("embeddings.position_embedding"), (cfg.posemb_grid_size * cfg.posemb_grid_size) as usize * c),
+            (backbone("ln_pre.weight"), c),
+            (backbone("ln_pre.bias"), c),
+        ];
+        for l in 0..cfg.num_hidden_layers {
+            out.extend([
+                (layer_param(l, "ln_1.weight"), c),
+                (layer_param(l, "ln_1.bias"), c),
+                (fused_qkv_name(l, "weight"), 3 * c * c),
+                (fused_qkv_name(l, "bias"), 3 * c),
+                (layer_param(l, "self_attn.out_proj.weight"), c * c),
+                (layer_param(l, "self_attn.out_proj.bias"), c),
+                (layer_param(l, "ls_1.gamma"), c),
+                (layer_param(l, "ln_2.weight"), c),
+                (layer_param(l, "ln_2.bias"), c),
+                (layer_param(l, "mlp.c_fc.weight"), ff * c),
+                (layer_param(l, "mlp.c_fc.bias"), ff),
+                (layer_param(l, "mlp.c_proj.weight"), c * ff),
+                (layer_param(l, "mlp.c_proj.bias"), c),
+                (layer_param(l, "ls_2.gamma"), c),
+            ]);
+        }
+        out.push((format!("{VISION_PREFIX}proj_in.weight"), cfg.projection_hidden_dim as usize * merged));
+        out.push((format!("{VISION_PREFIX}proj_out.weight"), cfg.text_hidden_size as usize * cfg.projection_hidden_dim as usize));
+        out
+    }
+
+    /// The store's initial tensors: the published ones, with each layer's q, k and v fused.
+    fn initial_tensors(cfg: &VisionConfig, w: &VisionWeights) -> HashMap<String, Vec<f32>> {
+        let mut init: HashMap<String, Vec<f32>> = Self::param_list(cfg)
+            .into_iter()
+            .map(|(n, _)| n)
+            .filter(|n| !n.contains("qkv_proj"))
+            .map(|n| {
+                let data = w.get(&n).to_vec();
+                (n, data)
+            })
+            .collect();
+        for l in 0..cfg.num_hidden_layers {
+            for kind in ["weight", "bias"] {
+                let fused = ["q_proj", "k_proj", "v_proj"].iter().flat_map(|p| w.get(&layer_param(l, &format!("self_attn.{p}.{kind}"))).iter().copied()).collect();
+                init.insert(fused_qkv_name(l, kind), fused);
+            }
+        }
+        init
+    }
+
+    /// The projector's parameter names for the store's merger weights.
+    fn projector_names() -> [(&'static str, String); 2] {
+        [("in.weight", format!("{VISION_PREFIX}proj_in.weight")), ("layers.1.weight", format!("{VISION_PREFIX}proj_out.weight"))]
+    }
+
+    pub(crate) fn projector_config(cfg: &VisionConfig) -> Result<ProjectorConfig, String> {
+        let merge = cfg.adapter_merge_size;
+        Ok(ProjectorConfig::from_type("mlp2x_gelu", 2, merge * merge * cfg.hidden_size, cfg.projection_hidden_dim)?.with_out_dim(cfg.text_hidden_size)?.without_bias())
+    }
+
+    /// Build the tower: `trainable` names the store tensors that train (all others are frozen), `lora` the adapters over
+    /// the frozen weights, `training` whether the backward is available at all.
+    fn assemble(gpu: &Gpu, cfg: &VisionConfig, w: &VisionWeights, trainable: &dyn Fn(&str) -> bool, lora: Option<LoraTraining<'_>>, training: bool) -> Result<VisionTower, String> {
         let mut ids = VitKernelIds::by_name(gpu, "gelu_erf");
         let pairs = gpu.kernel_index("rope2d_pairs").ok_or("inkling2 vision: kernel \"rope2d_pairs\" is not registered (see vision::pipelines)")?;
         ids.rope2d = pairs;
@@ -367,62 +484,46 @@ impl VisionTower {
         }
         let kernel = |name: &str| gpu.kernel_index(name).ok_or_else(|| format!("inkling2 vision: kernel {name:?} is not registered (see vision::pipelines)"));
         let permute = VitPermuteIds { embed: kernel("embed")?, row_scatter: kernel("row_scatter")? };
-        let b = format!("{VISION_PREFIX}backbone.");
-        let get = |n: &str| w.get(n);
-        let up = |label: &str, data: &[f32]| gpu.storage_init(label, data);
 
-        let class = get(&format!("{b}embeddings.class_embedding"));
-        let cls_pos = get(&format!("{b}embeddings.cls_position_embedding"));
-        let cls_row: Vec<f32> = class.iter().zip(cls_pos).map(|(a, b)| a + b).collect();
+        let roles = Self::param_list(cfg).into_iter().map(|(n, len)| (n.clone(), len, if trainable(&n) { Role::Trainable } else { Role::Frozen })).collect();
+        let store = ParamStore::new_with_roles(gpu, roles, &Self::initial_tensors(cfg, w));
+        let train = if training { Some(train::TowerTraining::new(gpu, cfg, &store, lora)?) } else { None };
 
-        let mut blocks = Vec::with_capacity(cfg.num_hidden_layers as usize);
-        for l in 0..cfg.num_hidden_layers {
-            let n = |s: &str| format!("{b}layers.{l}.{s}");
-            // q, k and v are separate tensors in the file; the shared block reads one fused [3C, C] weight.
-            let fuse = |kind: &str| -> Vec<f32> { ["q_proj", "k_proj", "v_proj"].iter().flat_map(|p| get(&n(&format!("self_attn.{p}.{kind}"))).iter().copied()).collect() };
-            blocks.push(BlockBuffers {
-                ln1_w: up("vit.ln1.w", get(&n("ln_1.weight"))),
-                ln1_b: up("vit.ln1.b", get(&n("ln_1.bias"))),
-                qkv_w: up("vit.qkv.w", &fuse("weight")),
-                qkv_b: up("vit.qkv.b", &fuse("bias")),
-                out_w: up("vit.out.w", get(&n("self_attn.out_proj.weight"))),
-                out_b: up("vit.out.b", get(&n("self_attn.out_proj.bias"))),
-                ls1: up("vit.ls1", get(&n("ls_1.gamma"))),
-                ln2_w: up("vit.ln2.w", get(&n("ln_2.weight"))),
-                ln2_b: up("vit.ln2.b", get(&n("ln_2.bias"))),
-                fc1_w: up("vit.fc1.w", get(&n("mlp.c_fc.weight"))),
-                fc1_b: up("vit.fc1.b", get(&n("mlp.c_fc.bias"))),
-                fc2_w: up("vit.fc2.w", get(&n("mlp.c_proj.weight"))),
-                fc2_b: up("vit.fc2.b", get(&n("mlp.c_proj.bias"))),
-                ls2: up("vit.ls2", get(&n("ls_2.gamma"))),
-            });
+        let (mut weights, mut grads) = (HashMap::new(), HashMap::new());
+        for (inner, name) in Self::projector_names() {
+            weights.insert(inner.to_string(), store.w(&name).clone());
+            if let Some(g) = store.grad.get(&name).or_else(|| train.as_ref().and_then(|t| t.weight_grad(&name))) {
+                grads.insert(inner.to_string(), g.clone());
+            }
         }
+        let projector = MlpProjector::with_buffers(gpu, Self::projector_config(cfg)?, PROJECTOR_REGIONS, weights, grads, training)?;
 
-        let merge = cfg.adapter_merge_size;
-        let projector_cfg = ProjectorConfig::from_type("mlp2x_gelu", 2, merge * merge * cfg.hidden_size, cfg.projection_hidden_dim)?.with_out_dim(cfg.text_hidden_size)?;
-        let projector_weights = HashMap::from([
-            ("in.weight".to_string(), get(&format!("{VISION_PREFIX}proj_in.weight")).to_vec()),
-            ("in.bias".to_string(), vec![0.0; cfg.projection_hidden_dim as usize]),
-            ("layers.1.weight".to_string(), get(&format!("{VISION_PREFIX}proj_out.weight")).to_vec()),
-            ("layers.1.bias".to_string(), vec![0.0; cfg.text_hidden_size as usize]),
-        ]);
-        debug_assert_eq!(cls_row.len(), dim);
+        Ok(VisionTower { cfg: cfg.clone(), ids, pos_kernels: PosTableKernels::by_name(gpu)?, permute, region_copy: kernel("region_copy")?, store, projector: Mutex::new(projector), train })
+    }
 
-        Ok(VisionTower {
-            cfg: cfg.clone(),
-            ids,
-            pos_kernels: PosTableKernels::by_name(gpu)?,
-            permute,
-            region_copy: kernel("region_copy")?,
-            patch_w: up("vit.patch.w", get(&format!("{b}embeddings.patch_embedding.weight"))),
-            pos_table: up("vit.pos", get(&format!("{b}embeddings.position_embedding"))),
-            cls_row,
-            ln_pre_w: up("vit.ln_pre.w", get(&format!("{b}ln_pre.weight"))),
-            ln_pre_b: up("vit.ln_pre.b", get(&format!("{b}ln_pre.bias"))),
-            blocks,
-            projector_weights,
-            projector_cfg,
-        })
+    /// The tower with a resident merger that has room for `regions` regions from the start, for a caller that knows
+    /// its images' size and wants no growth on the first large group.
+    pub fn with_projector_capacity(self, gpu: &Gpu, regions: u32) -> VisionTower {
+        {
+            let mut p = self.projector.lock().unwrap_or_else(|e| e.into_inner());
+            *p = p.resized(gpu, regions.max(1));
+        }
+        self
+    }
+
+    /// The resident merger with room for at least `regions` regions: grown (activations only, the weights are shared)
+    /// when the group is larger than what it holds.
+    fn projector_for(&self, gpu: &Gpu, regions: u32) -> std::sync::MutexGuard<'_, MlpProjector> {
+        let mut p = self.projector.lock().unwrap_or_else(|e| e.into_inner());
+        if p.capacity() < regions {
+            *p = p.resized(gpu, regions.max(p.capacity().saturating_mul(2)));
+        }
+        p
+    }
+
+    /// Every tower tensor, by store name.
+    pub fn store(&self) -> &ParamStore {
+        &self.store
     }
 
     /// The decoder width of the features.
@@ -441,18 +542,23 @@ impl VisionTower {
         self.encode_group_batches(gpu, images, Some(trace_layers))
     }
 
-    fn encode_group_batches(&self, gpu: &Gpu, images: &[RegionImage], trace_layers: Option<&[usize]>) -> Result<(ImageFeatures, VisionTrace), String> {
-        let patch = self.cfg.native_patch_size;
-        let merge = self.cfg.adapter_merge_size;
-        let region = patch * merge;
+    /// Every image holds the pixels of its region grid.
+    fn check_images(&self, images: &[RegionImage]) -> Result<(), String> {
+        let region = self.cfg.native_patch_size * self.cfg.adapter_merge_size;
         let cell = (region * region * 3) as usize;
         for (i, img) in images.iter().enumerate() {
             if img.rows == 0 || img.cols == 0 || img.pixels.len() != img.regions() * cell {
                 return Err(format!("inkling2 vision: image {i} holds {} floats, a {}x{} grid of {region}-pixel regions needs {}", img.pixels.len(), img.rows, img.cols, img.regions() * cell));
             }
         }
-        if let Some(bad) = trace_layers.unwrap_or(&[]).iter().find(|&&l| l >= self.blocks.len()) {
-            return Err(format!("inkling2 vision: traced layer {bad} of {}", self.blocks.len()));
+        Ok(())
+    }
+
+    fn encode_group_batches(&self, gpu: &Gpu, images: &[RegionImage], trace_layers: Option<&[usize]>) -> Result<(ImageFeatures, VisionTrace), String> {
+        let merge = self.cfg.adapter_merge_size;
+        self.check_images(images)?;
+        if let Some(bad) = trace_layers.unwrap_or(&[]).iter().find(|&&l| l >= self.cfg.num_hidden_layers as usize) {
+            return Err(format!("inkling2 vision: traced layer {bad} of {}", self.cfg.num_hidden_layers));
         }
         let mut tokens = Vec::with_capacity(images.len());
         let mut rows_out = Vec::new();
@@ -549,48 +655,88 @@ impl VisionTower {
         (cos, sin)
     }
 
-    fn encode_group(&self, g: &Gpu, images: &[RegionImage], trace_layers: Option<&[usize]>) -> Result<(Vec<f32>, VisionTrace), String> {
+    /// The block's weights from the store, with the group's rotary tables.
+    fn block_weights<'a>(&'a self, l: u32, rope: &'a RopeTables<'a>) -> VitBlockWeights<'a> {
+        let w = |tail: &str| self.store.w(&layer_param(l, tail));
+        VitBlockWeights {
+            norm1_w: w("ln_1.weight"),
+            norm1_b: w("ln_1.bias"),
+            qkv_w: self.store.w(&fused_qkv_name(l, "weight")),
+            qkv_b: self.store.w(&fused_qkv_name(l, "bias")),
+            qk_norm: None,
+            rope: Some(RopeTables { cos: rope.cos, sin: rope.sin, tmod: rope.tmod }),
+            proj_w: w("self_attn.out_proj.weight"),
+            proj_b: w("self_attn.out_proj.bias"),
+            ls1: Some(w("ls_1.gamma")),
+            norm2_w: w("ln_2.weight"),
+            norm2_b: w("ln_2.bias"),
+            fc1_w: w("mlp.c_fc.weight"),
+            fc1_b: w("mlp.c_fc.bias"),
+            fc2_w: w("mlp.c_proj.weight"),
+            fc2_b: w("mlp.c_proj.bias"),
+            ls2: Some(w("ls_2.gamma")),
+        }
+    }
+
+    /// The device inputs of a group of images: pixels, position taps, row maps of the sequence layout, rotary tables
+    /// and attention spans.
+    fn group_setup(&self, g: &Gpu, images: &[RegionImage]) -> GroupSetup {
         let c = self.cfg.hidden_size;
-        let cw = c as usize;
-        let patch_dim = 3 * self.cfg.native_patch_size.pow(2);
         let merge = self.cfg.adapter_merge_size;
         let plan = self.plan(images);
-        let (rows, patches) = (plan.rows, plan.patches);
-        let regions = patches / (merge * merge);
-        let sh = VitShape { dim: c, heads: self.cfg.num_attention_heads, mlp: self.cfg.mlp_width(), eps: self.cfg.layer_norm_eps as f32 };
-
-        // Inputs: patch matrix, the position taps, the per-image class rows and the row maps of the sequence layout.
-        let pix = g.storage_init("vit.pixels", &self.patch_matrix(images));
-        let pos_plan = bilinear_grid_plan(&plan.grids, self.cfg.posemb_grid_size, merge, false)?;
-        let taps = DeviceTaps::upload(g, &pos_plan, self.cfg.posemb_grid_size * self.cfg.posemb_grid_size)?;
-        let cls_rows = g.storage_init("vit.cls", &self.cls_row.repeat(images.len()));
-        let patch_idx = row_index_buffer(g, "vit.patch_rows", &plan.patch_rows);
-        let cls_idx = row_index_buffer(g, "vit.cls_rows", &plan.starts);
+        let pos_plan = bilinear_grid_plan(&plan.grids, self.cfg.posemb_grid_size, merge, false).expect("image grids are multiples of the merge size by construction");
+        let taps = DeviceTaps::upload(g, &pos_plan, self.cfg.posemb_grid_size * self.cfg.posemb_grid_size).expect("a plan built from the table's own side is in range");
         let (cos, sin) = self.rope_tables(&plan);
-        let (cos_b, sin_b) = (g.storage_init("vit.rope.cos", &cos), g.storage_init("vit.rope.sin", &sin));
         let spans: Vec<(u32, u32)> = plan.starts.iter().zip(&plan.grids).map(|(&s, &(h, w))| (s, 1 + h * w)).collect();
-        let max_span = spans.iter().map(|&(_, n)| n).max().unwrap_or(1);
+        GroupSetup {
+            sh: VitShape { dim: c, heads: self.cfg.num_attention_heads, mlp: self.cfg.mlp_width(), eps: self.cfg.layer_norm_eps as f32 },
+            pix: g.storage_init("vit.pixels", &self.patch_matrix(images)),
+            taps,
+            zero_idx: row_index_buffer(g, "vit.cls_source", &vec![0; images.len()]),
+            patch_idx: row_index_buffer(g, "vit.patch_rows", &plan.patch_rows),
+            cls_idx: row_index_buffer(g, "vit.cls_rows", &plan.starts),
+            cos: g.storage_init("vit.rope.cos", &cos),
+            sin: g.storage_init("vit.rope.sin", &sin),
+            max_span: spans.iter().map(|&(_, n)| n).max().unwrap_or(1),
+            spans,
+            plan,
+        }
+    }
 
-        // Buffers.
-        let pe = g.storage(u64::from(patches) * u64::from(c));
-        let pos = g.storage(u64::from(patches) * u64::from(c));
-        let pe_pos = g.storage(u64::from(patches) * u64::from(c));
+    /// Embeddings: patch projection (no bias) + resampled position table, patches and class rows scattered into the
+    /// sequence into `emb`, then `ln_pre` into `x`.
+    fn embedding_steps(&self, g: &Gpu, s: &GroupSetup, emb: &DeviceBuffer, x: &DeviceBuffer) -> Vec<Step> {
+        let c = s.sh.dim;
+        let patch_dim = 3 * self.cfg.native_patch_size.pow(2);
+        let (rows, patches, images) = (s.plan.rows, s.plan.patches, s.plan.starts.len() as u32);
+        let (pe, pos, pe_pos) = (g.storage(u64::from(patches * c)), g.storage(u64::from(patches * c)), g.storage(u64::from(patches * c)));
+        let (cls_sum, cls_rows) = (g.storage(u64::from(c)), g.storage(u64::from(images * c)));
+        let ln = LayerNormIds::resolve_fwd(g, self.ids.layernorm);
+        vec![
+            linear_rows_step(g, &self.ids, &s.pix, self.store.w(&backbone("embeddings.patch_embedding.weight")), &pe, (patches, patch_dim, c)),
+            s.taps.gather_step(g, &self.pos_kernels, self.store.w(&backbone("embeddings.position_embedding")), &pos, c),
+            g.step(self.ids.add2, &[&pe, &pos, &pe_pos], &[patches * c], patches * c),
+            scatter_rows(g, &self.permute, &s.patch_idx, &pe_pos, emb, patches, c, rows),
+            // The class token is the class embedding plus its position embedding, one row per image.
+            g.step(self.ids.add2, &[self.store.w(&backbone("embeddings.class_embedding")), self.store.w(&backbone("embeddings.cls_position_embedding")), &cls_sum], &[c], c),
+            gather_rows(g, &self.permute, &s.zero_idx, &cls_sum, &cls_rows, images, c),
+            scatter_rows(g, &self.permute, &s.cls_idx, &cls_rows, emb, images, c, rows),
+            model::block::layernorm_fwd(g, &ln, emb, self.store.w(&backbone("ln_pre.weight")), self.store.w(&backbone("ln_pre.bias")), x, c, rows, s.sh.eps),
+        ]
+    }
+
+    fn encode_group(&self, g: &Gpu, images: &[RegionImage], trace_layers: Option<&[usize]>) -> Result<(Vec<f32>, VisionTrace), String> {
+        self.fold_adapters(g);
+        let setup = self.group_setup(g, images);
+        let (c, cw) = (setup.sh.dim, setup.sh.dim as usize);
+        let (rows, patches) = (setup.plan.rows, setup.plan.patches);
+        let regions = patches / (self.cfg.adapter_merge_size * self.cfg.adapter_merge_size);
+
         let emb = g.storage(u64::from(rows) * u64::from(c));
         let x = g.storage(u64::from(rows) * u64::from(c));
-        let chunk = attn_chunk_for_device(g, &sh, max_span);
-        let scratch = VitScratch::new(g, &sh, rows, chunk, max_span);
-
-        // Embeddings: patch projection (no bias) + resampled position table, patches and class rows scattered into
-        // the sequence, then ln_pre.
-        let ln = LayerNormIds::resolve_fwd(g, self.ids.layernorm);
-        let mut steps: Vec<Step> = vec![
-            linear_rows_step(g, &self.ids, &pix, &self.patch_w, &pe, (patches, patch_dim, c)),
-            taps.gather_step(g, &self.pos_kernels, &self.pos_table, &pos, c),
-            g.step(self.ids.add2, &[&pe, &pos, &pe_pos], &[patches * c], patches * c),
-            scatter_rows(g, &self.permute, &patch_idx, &pe_pos, &emb, patches, c, rows),
-            scatter_rows(g, &self.permute, &cls_idx, &cls_rows, &emb, images.len() as u32, c, rows),
-            model::block::layernorm_fwd(g, &ln, &emb, &self.ln_pre_w, &self.ln_pre_b, &x, c, rows, sh.eps),
-        ];
+        let chunk = attn_chunk_for_device(g, &setup.sh, setup.max_span);
+        let scratch = VitScratch::new(g, &setup.sh, rows, chunk, setup.max_span);
+        let mut steps = self.embedding_steps(g, &setup, &emb, &x);
 
         let tap = |steps: &mut Vec<Step>, src: &DeviceBuffer| -> DeviceBuffer {
             let dst = g.storage(u64::from(rows) * u64::from(c));
@@ -600,35 +746,19 @@ impl VisionTower {
         let emb_tap = trace_layers.map(|_| tap(&mut steps, &emb));
         let pre_tap = trace_layers.map(|_| tap(&mut steps, &x));
         let mut layer_taps = Vec::new();
-        for (l, blk) in self.blocks.iter().enumerate() {
-            let bw = VitBlockWeights {
-                norm1_w: &blk.ln1_w,
-                norm1_b: &blk.ln1_b,
-                qkv_w: &blk.qkv_w,
-                qkv_b: &blk.qkv_b,
-                qk_norm: None,
-                rope: Some(RopeTables { cos: &cos_b, sin: &sin_b, tmod: rows }),
-                proj_w: &blk.out_w,
-                proj_b: &blk.out_b,
-                ls1: Some(&blk.ls1),
-                norm2_w: &blk.ln2_w,
-                norm2_b: &blk.ln2_b,
-                fc1_w: &blk.fc1_w,
-                fc1_b: &blk.fc1_b,
-                fc2_w: &blk.fc2_w,
-                fc2_b: &blk.fc2_b,
-                ls2: Some(&blk.ls2),
-            };
-            vit_block_fwd(g, &self.ids, &sh, &bw, &x, rows, &spans, chunk, &scratch, &mut steps);
-            if trace_layers.is_some_and(|t| t.contains(&l)) {
-                layer_taps.push((l, tap(&mut steps, &x)));
+        let rope = RopeTables { cos: &setup.cos, sin: &setup.sin, tmod: rows };
+        for l in 0..self.cfg.num_hidden_layers {
+            let bw = self.block_weights(l, &rope);
+            vit_block_fwd(g, &self.ids, &setup.sh, &bw, &x, rows, &setup.spans, chunk, &scratch, &mut steps);
+            if trace_layers.is_some_and(|t| t.contains(&(l as usize))) {
+                layer_taps.push((l as usize, tap(&mut steps, &x)));
             }
         }
         // Merger: the patch states of each region (consecutive patches) side by side, then proj_in / GELU / proj_out.
         let states = g.storage(u64::from(patches) * u64::from(c));
-        steps.push(gather_rows(g, &self.permute, &patch_idx, &x, &states, patches, c));
-        let projector = MlpProjector::new_frozen(g, self.projector_cfg, regions, &self.projector_weights)?;
-        steps.extend(projector.forward(g, &[&states]));
+        steps.push(gather_rows(g, &self.permute, &setup.patch_idx, &x, &states, patches, c));
+        let projector = self.projector_for(g, regions);
+        steps.extend(projector.forward_rows(g, &[&states], regions));
         g.submit(&[], &steps);
 
         let features = g.read(projector.out(), regions as usize * self.out_width());

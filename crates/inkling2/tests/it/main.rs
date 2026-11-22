@@ -8,3 +8,4 @@ mod layout;
 mod real_parity;
 mod tiny_parity;
 mod vision;
+mod vision_train;

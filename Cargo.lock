@@ -1953,10 +1953,12 @@ name = "brain-inkling2"
 version = "6.0.0"
 dependencies = [
  "brain-checkpoint",
+ "brain-data",
  "brain-gpu-core",
  "brain-imaging",
  "brain-kernels",
  "brain-model",
+ "brain-paramstore",
  "brain-testutil",
  "serde",
  "serde_json",

@@ -774,6 +774,24 @@ The first trainable target needs no streaming: the base is about 19.5 GB.
   call; serving wants a capacity-sized projector or a two-matmul step list on resident weights. TF32 tensor-core
   products (`vit_block_fwd_tc`) are not passed. Tower activations are f32 end to end; the reference's bf16 rounding
   points are not reproduced.
+
+  Done, training (2026-11-22): `vision::{VisionTower::new_trainable, encode_train, backward, set_saved_policy,
+  zero_grads, lora_store, store, embed_prompt_train, VisionPass, LoraTraining, train_pipelines}` over a `ParamStore`
+  (published names, q/k/v fused as `fused_qkv_name`). Per-layer backward on `vit_block_fwd_cached`/`vit_block_bwd` with
+  `SavedPolicy::{Keep, Recompute}` (bit-identical gradients); patch-embedding, class-token (both parameters),
+  position-table (`DeviceTaps::table_grad_step`) and `ln_pre` gradients; the backward stops at the lowest tensor that
+  needs a gradient. Shared pieces: `ProjectorConfig::without_bias` (no zero biases), `MlpProjector::{with_buffers,
+  resized, forward_rows, backward_rows}` (capacity-sized resident merger sharing the store's weights; serving no longer
+  re-uploads 100 MB per call), `adapter::fold::{fold_fused, Slice, FusedTarget}` plus `GradTarget::offset` (several
+  adapter sites in one fused weight), `PromptEmbeds::take_row_gradients` (the splice backward), `impl LoraSites for
+  VisionConfig` (q, k, v, out_proj, c_fc, c_proj, proj_in, proj_out). Gates on the CPU backend: finite differences of
+  every parameter class and of adapter factors on a random tower, keep == recompute bitwise, a frozen-tower LoRA step
+  lowers a toy loss, existing vision parity unchanged (tiny and published tower).
+  Left: CUDA/Vulkan not exercised; weights without gradient buffers still get dense dW computed into a shared sink
+  (a skip-dW option in `vit_block_bwd` would save about a third of the backward of a LoRA run); training caches
+  attention probabilities per image (bounded by `MAX_CACHE_BYTES`, needs hidden size a multiple of 64), so large
+  images need a flash backward; adapters are plain LoRA with one rank (fold), other kinds are refused; tower updates
+  are host-side through the store (no device optimizer wiring in this crate).
 - **I5.2** `imaging`: the preprocessor (pad, checkerboard alpha, normalisation, region
   grid), byte-exact against the reference processor.
 
