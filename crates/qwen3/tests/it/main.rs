@@ -42,6 +42,7 @@ mod finetune_export_dtype;
 mod frozen_build;
 mod full_ft_precision;
 mod full_ft_resume;
+mod generate_host_peak;
 mod gguf_export_roundtrip;
 mod gguf_serving_real;
 mod gguf_vs_safetensors_real;

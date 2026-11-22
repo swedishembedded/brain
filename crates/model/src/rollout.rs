@@ -186,7 +186,7 @@ fn eos_logprob(stop: Option<StopReason>, logprob: f32) -> Option<f32> {
 /// per-architecture code. `completion` is read back AFTER generation (it need
 /// not have been produced by this same rollout machinery - `qwen3::caps`'s
 /// promote/reject gate calls this over a completion
-/// `crate::sample::generate_kv_stream_with_head` already produced), so this
+/// `qwen3::sample::generate_kv_stream` already produced), so this
 /// recomputes the distribution rather than reusing a [`Completion::logprobs`]
 /// that was never captured.
 ///

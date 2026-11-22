@@ -47,7 +47,7 @@ pub fn generate(
 /// incremental `step` (filling the cache), then samples one token per `step`
 /// instead of re-running the whole context each time. Produces the same tokens
 /// as [`generate`] for greedy decoding (the cache is algebraically exact). The
-/// tied/untied head is applied on the host to the final-norm hidden state.
+/// tied/untied head is applied on the device to the final-norm hidden state.
 /// Any id in `stop` ends generation; an empty slice runs to `max_new`.
 #[allow(clippy::too_many_arguments)]
 pub fn generate_kv(
@@ -67,18 +67,14 @@ pub fn generate_kv(
 /// each token is accepted (before the next decode step), giving callers a true
 /// streaming timeline (TTFT/ITL) without re-implementing the decode loop.
 /// Returning `false` from `on_token` stops generation early (the token is kept),
-/// letting callers honour cancellation or stop-strings. This IS the
-/// implementation; [`generate_kv`] delegates here with a keep-going callback.
+/// letting callers honour cancellation or stop-strings.
 ///
 /// `eos` is a set of stop ids (Qwen3 has two: `<|im_end|>` 151645 and
 /// `<|endoftext|>` 151643) — generation stops as soon as the sampled token
 /// matches ANY of them; an empty slice disables the stop check.
 ///
-/// Reads the LM head weight fresh from `model` on every call — for tied
-/// embeddings that is a `[vocab, d_model]` device→host transfer (hundreds of
-/// MB at real vocab sizes) repeated per request. A caller serving many
-/// requests against one resident model should read the head once and call
-/// [`generate_kv_stream_with_head`] directly instead.
+/// The prompt is one prefill call and the head is applied on the device
+/// ([`generate_kv_stream_on_device`]): no host copy of the head exists.
 #[allow(clippy::too_many_arguments)]
 pub fn generate_kv_stream(
     model: &Qwen,
@@ -91,100 +87,25 @@ pub fn generate_kv_stream(
     rng: &mut Rng,
     on_token: &mut dyn FnMut(usize, u32) -> bool,
 ) -> Vec<u32> {
-    let head = model.read_weight(model.cfg.head_weight()); // [vocab, d]
-    generate_kv_stream_with_head(model, prompt, max_new, temperature, top_k, top_p, eos, rng, &head, on_token)
+    generate_kv_stream_on_device(model, prompt, max_new, temperature, top_k, top_p, eos, rng, &capability::CancelToken::default(), prompt.len(), on_token)
 }
 
-/// [`generate_kv_stream`] with the LM head weight supplied by the caller
-/// instead of read fresh from `model` on every call — the fix for the 594 MiB
-/// (vocab 151936 × d_model 1024, f32) tied-embedding re-download `generate_kv_stream`
-/// otherwise pays per request. `head` is `[vocab, d_model]` row-major, exactly
-/// [`Qwen::read_weight`]`(cfg.head_weight())`'s shape; the caller reads it once
-/// (e.g. at model load) and reuses the buffer across calls.
-#[allow(clippy::too_many_arguments)]
-pub fn generate_kv_stream_with_head(
-    model: &Qwen,
-    prompt: &[u32],
-    max_new: usize,
-    temperature: f32,
-    top_k: usize,
-    top_p: f32,
-    eos: &[u32],
-    rng: &mut Rng,
-    head: &[f32],
-    on_token: &mut dyn FnMut(usize, u32) -> bool,
-) -> Vec<u32> {
-    // An unarmed token never fires, and one whole-prompt chunk is exactly the
-    // single prefill call this function has always been: existing callers are
-    // unchanged, byte for byte on the device.
-    generate_kv_stream_cancellable(
-        model,
-        prompt,
-        max_new,
-        temperature,
-        top_k,
-        top_p,
-        eos,
-        rng,
-        head,
-        &capability::CancelToken::default(),
-        prompt.len(),
-        on_token,
-    )
-}
-
-/// [`generate_kv_stream_with_head`] with brain's cooperative cancellation:
-/// the prompt is prefilled in chunks of `prefill_chunk` tokens with `cancel`
+/// KV-cached generation with brain's cooperative cancellation and the LM head
+/// applied **on the device** the weights already live on
+/// ([`Qwen::decode_logits`], tiled over the vocabulary for the binding limit),
+/// so a generation needs no host copy of the head and spends no host compute
+/// per token: at a 152k-token vocabulary and `d_model` 3584 that would be a
+/// 2.2 GB table held in RAM and a half-gigaflop matvec per token on the CPU.
+///
+/// The prompt is prefilled in chunks of `prefill_chunk` tokens with `cancel`
 /// polled between chunks, and the decode loop stops when the caller's
 /// `on_token` says so (the same place a cancel surfaces through
-/// `qwen3::chat`'s [`SeqState`](crate::chat::SeqState)).
-///
-/// Why chunk at all: `Qwen::prefill` submits the whole prompt and fences
-/// ONCE at the end, so a whole-prompt prefill is one uninterruptible device
-/// wait - for a real agentic prompt (a system prompt plus a full tool
-/// schema, thousands of tokens) that is work a cancellation requested
-/// mid-flight cannot reach, and a process that must not wait for it cannot
-/// exit cleanly under it. Chunking costs one extra readback per chunk -
-/// noise against the per-chunk compute - and bounds the cancellation latency
-/// to one chunk. Numerically it is the single-call prefill up to fp32
-/// summation order: how the prompt is split moves only the batched
-/// forward's chunk boundaries (proved by
-/// `chunked_prefill_generation_matches_the_single_call_path` and
-/// `tests/batched_prefill.rs`).
-///
-/// A token already cancelled when the call starts submits nothing and
-/// returns the empty sequence; one armed mid-prefill stops the generation
-/// with whatever tokens were produced so far.
-#[allow(clippy::too_many_arguments)]
-pub fn generate_kv_stream_cancellable(
-    model: &Qwen,
-    prompt: &[u32],
-    max_new: usize,
-    temperature: f32,
-    top_k: usize,
-    top_p: f32,
-    eos: &[u32],
-    rng: &mut Rng,
-    head: &[f32],
-    cancel: &capability::CancelToken,
-    prefill_chunk: usize,
-    on_token: &mut dyn FnMut(usize, u32) -> bool,
-) -> Vec<u32> {
-    let vocab = model.cfg.vocab as usize;
-    let d = model.cfg.d_model as usize;
-    // Row-parallel: the single-threaded head was measured at hundreds of ms
-    // PER TOKEN at real vocabularies (one implementation: model::hostmath).
-    let logits_of = |hidden: &[f32]| -> Vec<f32> { model::hostmath::matvec_par(head, hidden, vocab, d) };
-    generate_kv_core(model, prompt, None, max_new, temperature, top_k, top_p, eos, rng, cancel, prefill_chunk, &logits_of, on_token)
-}
-
-/// [`generate_kv_stream_cancellable`] with the LM head applied **on the
-/// device** the weights already live on ([`Qwen::decode_logits`], tiled over
-/// the vocabulary for the binding limit), so a generation needs no host copy
-/// of the head and spends no host compute per token: at a 152k-token
-/// vocabulary and `d_model` 3584 that is a 2.2 GB table held in RAM and a
-/// half-gigaflop matvec per token on the CPU. The tokens are the host head's:
-/// both are the same GEMV, and the logits agree to rounding.
+/// `qwen3::chat`'s [`SeqState`](crate::chat::SeqState)). `Qwen::prefill`
+/// fences once per call, so a whole-prompt prefill is one uninterruptible
+/// device wait; chunking bounds the cancellation latency to one chunk at the
+/// cost of one readback per chunk, and moves only the batched forward's chunk
+/// boundaries (`tests/batched_prefill.rs`). A token already cancelled when the
+/// call starts submits nothing and returns the empty sequence.
 ///
 /// `decode_logits` reads the hidden state the last prefill or step left on the
 /// device, so the core calls it directly after each of those and ignores the
@@ -471,42 +392,18 @@ mod kv_gen_tests {
         let cancel = capability::CancelToken::default();
         let baseline = {
             let mut rng = data::rng::Rng::new(seed);
-            generate_kv_stream_with_head(
-                &model,
-                &prompt,
-                8,
-                1.0,
-                0,
-                1.0,
-                &[],
-                &mut rng,
-                &model.read_weight(model.cfg.head_weight()),
-                &mut |_, _| true,
-            )
+            generate_kv_stream(&model, &prompt, 8, 1.0, 0, 1.0, &[], &mut rng, &mut |_, _| true)
         };
         for chunk in [1usize, 2, 4] {
             let mut rng = data::rng::Rng::new(seed);
-            let chunked = generate_kv_stream_cancellable(
-                &model,
-                &prompt,
-                8,
-                1.0,
-                0,
-                1.0,
-                &[],
-                &mut rng,
-                &model.read_weight(model.cfg.head_weight()),
-                &cancel,
-                chunk,
-                &mut |_, _| true,
-            );
+            let chunked = generate_kv_stream_on_device(&model, &prompt, 8, 1.0, 0, 1.0, &[], &mut rng, &cancel, chunk, &mut |_, _| true);
             assert_eq!(chunked, baseline, "chunk size {chunk} must not change the sampled tokens");
         }
     }
 
     /// The device head is the same GEMV as the host head, applied where the
     /// weights already are: greedy generation through it must pick exactly the
-    /// tokens the host-head sampler picks, at every prefill chunk size, and
+    /// tokens a host-applied head picks, at every prefill chunk size, and
     /// must honour an armed cancel token the same way.
     #[test]
     fn device_head_generation_matches_the_host_head_greedy() {
@@ -515,11 +412,18 @@ mod kv_gen_tests {
         }
         let model = tiny_model(3);
         let prompt = vec![1u32, 5, 3, 9, 2, 7];
-        let head = model.read_weight(model.cfg.head_weight());
         let cancel = capability::CancelToken::default();
-        let mut r = data::rng::Rng::random();
-        let host = generate_kv_stream_with_head(&model, &prompt, 12, 0.0, 0, 1.0, &[], &mut r, &head, &mut |_, _| true);
-        assert!(!host.is_empty());
+        // The reference: the same prefill and steps, the head applied on the host to each final hidden row.
+        let head = model.read_weight(model.cfg.head_weight());
+        let (vocab, d) = (model.cfg.vocab as usize, model.cfg.d_model as usize);
+        model.reset_cache();
+        let mut hidden = model.prefill(&prompt.iter().map(|&t| PrefillInput::Token(t)).collect::<Vec<_>>());
+        let mut host = Vec::new();
+        for _ in 0..12 {
+            let next = argmax(&model::hostmath::matvec_par(&head, &hidden, vocab, d)) as u32;
+            host.push(next);
+            hidden = model.step(next);
+        }
         for chunk in [1usize, 3, prompt.len()] {
             let mut r = data::rng::Rng::random();
             let device = generate_kv_stream_on_device(&model, &prompt, 12, 0.0, 0, 1.0, &[], &mut r, &cancel, chunk, &mut |_, _| true);
@@ -546,20 +450,7 @@ mod kv_gen_tests {
         let cancel = capability::CancelToken::armed();
         cancel.cancel();
         let mut rng = data::rng::Rng::random();
-        let out = generate_kv_stream_cancellable(
-            &model,
-            &prompt,
-            8,
-            1.0,
-            0,
-            1.0,
-            &[],
-            &mut rng,
-            &model.read_weight(model.cfg.head_weight()),
-            &cancel,
-            1,
-            &mut |_, _| true,
-        );
+        let out = generate_kv_stream_on_device(&model, &prompt, 8, 1.0, 0, 1.0, &[], &mut rng, &cancel, 1, &mut |_, _| true);
         assert!(out.is_empty(), "a cancelled prefill must produce no tokens");
     }
 
@@ -612,22 +503,6 @@ mod kv_gen_tests {
         let mut r3 = data::rng::Rng::new(sample_seed);
         let no_stop = generate_kv_stream(&model, &prompt, 16, 1.0, 0, 1.0, &[], &mut r3, &mut |_, _| true);
         assert_eq!(no_stop, full, "empty eos slice must not stop generation");
-    }
-
-    /// [`generate_kv_stream_with_head`] with a caller-supplied head must be
-    /// bit-for-bit identical to [`generate_kv_stream`]'s self-reading wrapper —
-    /// the hoist is a pure caching optimisation, not a behaviour change.
-    #[test]
-    fn with_head_matches_the_self_reading_wrapper() {
-        let model = tiny_model(2);
-        let prompt = vec![2u32, 4, 6];
-        let head = model.read_weight(model.cfg.head_weight());
-
-        let mut r1 = data::rng::Rng::random();
-        let a = generate_kv_stream(&model, &prompt, 10, 0.0, 0, 1.0, &[], &mut r1, &mut |_, _| true);
-        let mut r2 = data::rng::Rng::random();
-        let b = generate_kv_stream_with_head(&model, &prompt, 10, 0.0, 0, 1.0, &[], &mut r2, &head, &mut |_, _| true);
-        assert_eq!(a, b, "generate_kv_stream_with_head must match generate_kv_stream given the same head");
     }
 
     /// A tight nucleus collapses the distribution onto the single dominant token

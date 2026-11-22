@@ -755,10 +755,12 @@ Scope: Running one training job as ranks across machines, and serving one model 
   moments are host memory on a CPU device): 130 MB, 243 MB before. The
   `qwen3 lora_gate` arm folds its candidate adapter into the streamed base
   as each tensor is read (functional gate test; no peak test). Decoding in
-  qwen35moe projects the head on the card, as qwen35 does. Open: `qwen3
-  generate` still keeps an f32 host copy of the head for its host-side
-  sampling; the remaining allowlisted whole-model loads are trainers,
-  importers and tests.
+  qwen35moe projects the head on the card, as qwen35 does. `qwen3 generate` (and
+  every `qwen3::sample::generate_kv*` caller) projects the head on the card
+  too: on a 169 MB mostly-head model the generation's host peak growth is
+  159 MB (the CPU device's own weights), 283 MB with the f32 host head
+  (qwen3 `generate_host_peak`). Open: the remaining allowlisted whole-model
+  loads are trainers, importers and tests.
 - **Cost of bounding every device collective (2026-11-22, n442 cards 2-3,
   `brain bench collectives`, f32, 50 iterations, two runs each).** p50
   before -> after: all-reduce 5.9-6.8 -> 7.7-8.1 us at 8 B, 28.7 -> 31.2-31.8

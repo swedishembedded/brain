@@ -268,7 +268,7 @@ fn cancellable_chunked_generation_matches_per_token_decode() {
     let generate = |chunk: usize| {
         let mut rng = data::rng::Rng::random();
         let cancel = capability::CancelToken::armed();
-        qwen3::sample::generate_kv_stream_cancellable(&m, &ids, CONTINUATION, 0.0, 0, 1.0, &[], &mut rng, &head, &cancel, chunk, &mut |_, _| true)
+        qwen3::sample::generate_kv_stream_on_device(&m, &ids, CONTINUATION, 0.0, 0, 1.0, &[], &mut rng, &cancel, chunk, &mut |_, _| true)
     };
     for chunk in [1usize, 7, 128, 299, 300] {
         assert_eq!(generate(chunk), want, "prefill chunk {chunk}");
@@ -281,7 +281,7 @@ fn cancellable_chunked_generation_matches_per_token_decode() {
     let cancelled = capability::CancelToken::armed();
     cancelled.cancel();
     let mut rng = data::rng::Rng::random();
-    let none = qwen3::sample::generate_kv_stream_cancellable(&m, &ids, CONTINUATION, 0.0, 0, 1.0, &[], &mut rng, &head, &cancelled, 64, &mut |_, _| true);
+    let none = qwen3::sample::generate_kv_stream_on_device(&m, &ids, CONTINUATION, 0.0, 0, 1.0, &[], &mut rng, &cancelled, 64, &mut |_, _| true);
     assert!(none.is_empty(), "a cancelled generation produces no tokens");
     assert_eq!(generate(64), want, "after a cancelled generation");
 }

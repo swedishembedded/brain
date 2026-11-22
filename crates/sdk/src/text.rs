@@ -23,7 +23,7 @@
 //! `brain do qwen3 chat_generate` / HTTP `/v1/chat/completions` path) runs -
 //! `chat::parse_request` (chat-template rendering, sampling-param parsing,
 //! stop-strings) + `chat::SeqState` (streaming/finalization, cancellation,
-//! `finish_reason`) + `sample::generate_kv_stream_cancellable` - constructed
+//! `finish_reason`) + `sample::generate_kv_stream_on_device` - constructed
 //! in-process from a plain [`capability::Invocation`] built here, with no
 //! capability-dispatch machinery, no scheduler and no paged KV cache in the
 //! loop. This is deliberately the SAME code the served path runs, not a

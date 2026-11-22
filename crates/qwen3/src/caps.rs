@@ -334,10 +334,6 @@ pub fn manifest() -> Manifest {
 struct QwenResident {
     cap: u32,
     model: Qwen,
-    /// The LM head, read once when this resident is (re)built -- see
-    /// `generate_kv_stream_with_head`'s doc comment for the per-request cost
-    /// re-reading it every call otherwise pays.
-    head: Vec<f32>,
 }
 
 /// What a built [`QwenResident`] is reused for: its checkpoint, the context it
@@ -553,8 +549,7 @@ impl Action for GenerateAction {
                 // a resident model's weights and scratch, which outlive the cache
                 // anyway - the condition `enable_step_cache` asks for.
                 model.gpu().enable_step_cache(STEP_CACHE_ENTRIES);
-                let head = model.read_weight(model.cfg.head_weight());
-                Ok(QwenResident { cap, model, head })
+                Ok(QwenResident { cap, model })
             },
             |hot| {
                 let model = &hot.model;
@@ -565,7 +560,7 @@ impl Action for GenerateAction {
                 let mut rng = Rng::new(req.seed);
                 let mut seq = SeqState::new(&req, inv.cancel.clone());
                 let mut ids_out: Vec<u32> = Vec::with_capacity(req.max_new.unwrap_or(DEFAULT_MAX_NEW as usize).min(hot.cap as usize));
-                let gen = crate::sample::generate_kv_stream_with_head(
+                let gen = crate::sample::generate_kv_stream(
                     model,
                     &req.ids,
                     req.max_new.unwrap_or(DEFAULT_MAX_NEW as usize),
@@ -574,7 +569,6 @@ impl Action for GenerateAction {
                     req.top_p,
                     &eos,
                     &mut rng,
-                    &hot.head,
                     &mut |_i, t| {
                         ids_out.push(t);
                         !seq.advance(&tok, &ids_out, progress)
@@ -585,7 +579,7 @@ impl Action for GenerateAction {
             Plan::Raw { ids, max_new, temp, top_k, top_p, seed, eos } => {
                 let mut rng = Rng::new(seed);
                 let total = max_new as u32;
-                let gen = crate::sample::generate_kv_stream_with_head(model, &ids, max_new, temp, top_k, top_p, &eos, &mut rng, &hot.head, &mut |i, _t| {
+                let gen = crate::sample::generate_kv_stream(model, &ids, max_new, temp, top_k, top_p, &eos, &mut rng, &mut |i, _t| {
                     progress(Progress::step(i as u32 + 1, total, "token"));
                     true
                 });
@@ -1101,7 +1095,6 @@ struct Arm {
 /// emit. It costs one extra forward per task, which is what buys a
 /// degeneracy signal a pass-rate cannot see.
 fn score_arm(qwen: &Qwen, tasks: &[Task], verifier: &dyn Verifier, max_new: usize, eos: &[u32], cancel: &CancelToken) -> Result<Arm, String> {
-    let head = qwen.read_weight(qwen.cfg.head_weight());
     let mut scores = Vec::with_capacity(tasks.len());
     let mut entropy = 0.0f64;
     for task in tasks {
@@ -1114,7 +1107,7 @@ fn score_arm(qwen: &Qwen, tasks: &[Task], verifier: &dyn Verifier, max_new: usiz
         // Greedy (`temp = 0`), so the rng is never drawn from; it exists
         // because the shared decode loop takes one.
         let mut rng = Rng::new(0);
-        let completion = crate::sample::generate_kv_stream_with_head(qwen, &task.prompt, max_new, 0.0, 0, 1.0, eos, &mut rng, &head, &mut |_, _| true);
+        let completion = crate::sample::generate_kv_stream(qwen, &task.prompt, max_new, 0.0, 0, 1.0, eos, &mut rng, &mut |_, _| true);
         scores.push(verifier.verify(task, &[], &completion).value as f64);
         entropy += model::rollout::mean_completion_entropy(qwen, &task.prompt, &completion);
     }
