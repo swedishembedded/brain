@@ -15,6 +15,7 @@ pub mod grpo_stats;
 pub mod grpo_term;
 pub mod mixture;
 pub mod numerics;
+pub mod onpolicy_distill;
 pub mod pg_batch;
 pub mod score_cache;
 pub(crate) mod stream;
