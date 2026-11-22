@@ -26,9 +26,11 @@
 //! - `--gdn-state f32|bf16` ([`ServePolicy::gdn_state`]): the element type the Gated DeltaNet recurrent state and conv
 //!   history are stored in between steps ([`GdnState`]); bf16 halves the bytes a decode step streams, at bf16 rounding of
 //!   the carried state. Default f32.
-//! - `--linear-activations auto|bf16|e4m3` ([`ServePolicy::linear_activations`]): the precision of the activation operand
-//!   that quantized-weight linears (FP4/NVFP4 micro-scaled weights) feed their products ([`LinearActivations`]); `e4m3` is
-//!   the faster, lower-precision W4A8 product, `bf16` the W4A16 one. Where the default points is [`LinearActivations::AUTO`].
+//! - `--linear-activations auto|bf16|e4m3|declared` ([`ServePolicy::linear_activations`]): the precision of the activation
+//!   operand that quantized-weight linears (FP4/NVFP4 micro-scaled weights) feed their products ([`LinearActivations`]);
+//!   `e4m3` is the faster, lower-precision W4A8 product, `bf16` the W4A16 one, `declared` the activation quantization the
+//!   release declares for each product (the numerics it was trained with, e.g. W4A4 NVFP4). Where the default points is
+//!   [`LinearActivations::AUTO`].
 //! - `--gemm auto|fp32` ([`ServePolicy::gemm`]) and `--no-fuse-norm`,
 //!   `--kv-calibration`, `--exact-decode`: arithmetic, calibration and
 //!   batch-independence switches. `--exact-decode` makes a decode row's result
@@ -121,7 +123,9 @@ impl std::fmt::Display for GdnState {
 /// Accumulation is f32 either way. It selects among the products an NVFP4 weight has: `Bf16` reads the activations as bf16
 /// (W4A16, what vLLM runs on Hopper), `E4m3` quantises them to FP8 with one scale per row and runs the FP8 tensor cores
 /// (W4A8, faster and coarser). A weight tier where the setting has no effect (FP8 checkpoints are W8A8 by design, bf16
-/// weights) ignores it.
+/// weights) ignores it. `Declared` quantizes each product's activations as the release declares
+/// (`required_activation_quantization`, [`crate::act_quant`]): the vendor runtime's numerics, lower precision than the
+/// reference, so never the default.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LinearActivations {
     /// The default precision, [`Self::AUTO`].
@@ -129,6 +133,7 @@ pub enum LinearActivations {
     Auto,
     Bf16,
     E4m3,
+    Declared,
 }
 
 impl LinearActivations {
@@ -140,12 +145,13 @@ impl LinearActivations {
     /// in top-1 agreement and KL. `e4m3` stays the explicit choice for throughput.
     pub const AUTO: LinearActivations = LinearActivations::Bf16;
 
-    /// Parse the `--linear-activations` value (`auto`, `bf16` or `e4m3`).
+    /// Parse the `--linear-activations` value (`auto`, `bf16`, `e4m3` or `declared`).
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "auto" => Some(Self::Auto),
             "bf16" => Some(Self::Bf16),
             "e4m3" => Some(Self::E4m3),
+            "declared" => Some(Self::Declared),
             _ => None,
         }
     }
@@ -156,10 +162,16 @@ impl LinearActivations {
             Self::Auto => "auto",
             Self::Bf16 => "bf16",
             Self::E4m3 => "e4m3",
+            Self::Declared => "declared",
         }
     }
 
-    /// `Auto` replaced by [`Self::AUTO`]: always `Bf16` or `E4m3`.
+    /// Whether the products quantise their activations as the release declares.
+    pub fn is_declared(self) -> bool {
+        self == Self::Declared
+    }
+
+    /// `Auto` replaced by [`Self::AUTO`]: never `Auto`.
     pub fn resolved(self) -> Self {
         if self == Self::Auto { Self::AUTO } else { self }
     }
@@ -234,7 +246,7 @@ impl ServePolicy {
             }
             "--act-precision" => self.act_precision = Some(gpu_core::ActChoice::parse(value.trim().to_ascii_lowercase().as_str()).ok_or_else(|| format!("--act-precision {value:?}: expected auto, f32 or bf16"))?),
             "--gdn-state" => self.gdn_state = Some(GdnState::parse(value.trim().to_ascii_lowercase().as_str()).ok_or_else(|| format!("--gdn-state {value:?}: expected f32 or bf16"))?),
-            "--linear-activations" => self.linear_activations = Some(LinearActivations::parse(value.trim().to_ascii_lowercase().as_str()).ok_or_else(|| format!("--linear-activations {value:?}: expected auto, bf16 or e4m3"))?),
+            "--linear-activations" => self.linear_activations = Some(LinearActivations::parse(value.trim().to_ascii_lowercase().as_str()).ok_or_else(|| format!("--linear-activations {value:?}: expected auto, bf16, e4m3 or declared"))?),
             "--sparse-attention" => {
                 if value.trim().is_empty() {
                     return Err("--sparse-attention needs the path of an indexer file".into());
@@ -581,6 +593,16 @@ mod tests {
         sparse_attention: false,
         draft_model: false,
     };
+
+    /// Spec: the declared activation quantization is an explicit choice: neither the default nor `auto` selects it.
+    #[test]
+    fn declared_activation_quantization_is_opt_in() {
+        assert!(!LinearActivations::default().resolved().is_declared() && !LinearActivations::AUTO.is_declared());
+        assert_eq!(LinearActivations::parse("declared"), Some(LinearActivations::Declared));
+        let mut p = ServePolicy::default();
+        p.set("--linear-activations", "Declared").unwrap();
+        assert_eq!(p.linear_activations, Some(LinearActivations::Declared));
+    }
 
     #[test]
     fn every_flag_sets_its_field_and_a_bad_value_names_the_flag() {

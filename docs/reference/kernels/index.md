@@ -56,6 +56,7 @@ load of it must already be bare-identifier-indexed.
 | kernel | what it does | how | opt | cpu | gpu | npu | quant | dtype |
 |---|---|---|---|---|---|---|---|---|
 | [`accum_bf16`](../../../crates/kernels/wgsl/accum_bf16.wgsl) | Add an f32 tile into a packed bf16 gradient buffer (round to nearest even) and clear the tile | one thread per packed word (two elements), so no two threads share a word | 1/5 | ✓ | ✓ | - | - | f32 |
+| [`act_qdq_nvfp4_mxfp8`](../../../crates/kernels/wgsl/act_qdq_nvfp4_mxfp8.wgsl) | Round-trip activation rows through a declared microscaled format (NVFP4 per-token four-over-six MAE, or MXFP8): out = dequant(quant(x)) | 64-thread workgroup per row, a lane per scale block, 1 barrier | 4/5 | ✓ | ✓ | - | nvfp4 | f32 |
 | [`adaln_row`](../../../crates/kernels/wgsl/adaln_row.wgsl) | Extract one row of a per-token adaLN table and add a per-block table row | one thread per output element, gathering the token's own table row | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`adamw`](../../../crates/kernels/wgsl/adamw.wgsl) | AdamW update (decoupled weight decay) fused with grad unscale/clip, matching torch.optim.AdamW + clip_grad_norm_ | one thread per output element | 3/5 | ✓ | ✓ | - | - | f32 |
 | [`adamw_bf16`](../../../crates/kernels/wgsl/adamw_bf16.wgsl) | AdamW with bf16 first/second moments: fused decode, update, re-encode (stochastic rounding optional) | one thread per word of two moment elements, so threads never share a word | 3/5 | ✓ | ✓ | - | - | f32 |

@@ -31,7 +31,7 @@ pub use load::{LoadConfig, LoadOp, LoadPlan, LoadPolicy, LoadReport, LoadRequest
 pub use report::{PrecisionReport, TensorFormat};
 pub use reader::{quant_sidecars, PackedReader, PackedTensorReader, PACKED_METADATA_KEY};
 pub use file_sink::SafetensorsSink;
-pub use hfquant::{ActivationQuant, DeclaredWeight, HfQuant, Nvfp4Global, TensorDeclaration};
+pub use hfquant::{ActivationQuant, ActivationScheme, DeclaredWeight, HfQuant, Nvfp4Global, TensorDeclaration};
 pub use sink::{MemorySink, TensorSink};
 pub use slice::SlicedReader;
 pub use source::{stored_source, Binding, PackedSource};

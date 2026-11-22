@@ -685,6 +685,146 @@ pub fn argmax_row(row: &[f32]) -> u32 {
     best as u32
 }
 
+/// The E4M3 value nearest `y` (`0 <= y <= 448`), ties to even: `act_qdq_nvfp4_mxfp8.wgsl`'s encoder and decoder.
+fn e4m3_round(y: f32) -> f32 {
+    let m = if y < 0.015625 {
+        (y * 512.0).round_ties_even() as u32
+    } else {
+        let bits = y.to_bits();
+        ((bits + 0x7FFFF + ((bits >> 20) & 1)) >> 20).wrapping_sub(960).min(126)
+    };
+    if m < 8 { m as f32 / 512.0 } else { f32::from_bits((((m >> 3) + 120) << 23) | ((m & 7) << 20)) }
+}
+
+/// `|v|` rounded to E2M1 (nearest, ties to even, saturating at 6).
+fn e2m1_magnitude(a: f32) -> f32 {
+    match a {
+        a if a <= 0.25 => 0.0,
+        a if a < 0.75 => 0.5,
+        a if a <= 1.25 => 1.0,
+        a if a < 1.75 => 1.5,
+        a if a <= 2.5 => 2.0,
+        a if a < 3.5 => 3.0,
+        a if a <= 5.0 => 4.0,
+        _ => 6.0,
+    }
+}
+
+/// Activation rows (`[rows, k]`, `k` a multiple of 16) round-tripped through NVFP4 with a per-token amax and the
+/// "four over six" block scale chosen by mean absolute error (`fouroversix_mae`), the declared activation numerics of
+/// a W4A4 product. The reference of `act_qdq_nvfp4_mxfp8.wgsl` (scheme 0), bit for bit; the arithmetic is the vendor
+/// runtime's quantizer:
+/// - per row, `amax = max |x|`, `enc = 1536 / amax`, `dec = 1 / enc`, `outer = amax * (1/1536)` (1536 = 6 * 256: the
+///   six-based block scale tops out at 256 so its 1.5x four-based twin still fits E4M3's 448); a row whose amax is
+///   below 2^-100 is all zero;
+/// - per 16-block with `bmax = max |x|`: `s6 = e4m3(min(bmax * (enc * (1/6)), 448))`, `s4 = e4m3(min(bmax * (enc *
+///   0.25), 448))`; each candidate reconstructs `(e2m1(x * (1 / (s * dec))) * s) * outer` (zero for a zero scale), its
+///   error is the pairwise-tree sum of `|recon - x|`, and the four-based one is kept only when strictly better.
+pub fn nvfp4_four_over_six_qdq(x: &[f32], k: usize) -> Vec<f32> {
+    assert!(k.is_multiple_of(16) && x.len().is_multiple_of(k), "nvfp4_four_over_six_qdq: rows of a multiple of 16");
+    let recon = |xv: f32, s: f32, inv: f32, outer: f32| {
+        if s == 0.0 {
+            return 0.0;
+        }
+        let v = xv * inv;
+        let m = (e2m1_magnitude(v.abs()) * s) * outer;
+        if v < 0.0 { -m } else { m }
+    };
+    let inverse = |s: f32, dec: f32| if s == 0.0 { 0.0 } else { 1.0 / (s * dec) };
+    let error = |blk: &[f32], s: f32, inv: f32, outer: f32| {
+        let mut e: Vec<f32> = blk.iter().map(|&xv| (recon(xv, s, inv, outer) - xv).abs()).collect();
+        while e.len() > 1 {
+            e = e.chunks(2).map(|p| p[0] + p[1]).collect();
+        }
+        e[0]
+    };
+    let mut out = Vec::with_capacity(x.len());
+    for row in x.chunks(k) {
+        let amax = row.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        if amax < TINY_AMAX {
+            out.extend(std::iter::repeat_n(0.0, k));
+            continue;
+        }
+        let enc = 1536.0 / amax;
+        let dec = 1.0 / enc;
+        let outer = amax * (1.0 / 1536.0);
+        let (enc6, enc4) = (enc * (1.0 / 6.0), enc * 0.25);
+        for blk in row.chunks(16) {
+            let bmax = blk.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+            let (s6, s4) = (e4m3_round((bmax * enc6).min(448.0)), e4m3_round((bmax * enc4).min(448.0)));
+            let (inv6, inv4) = (inverse(s6, dec), inverse(s4, dec));
+            let (s, inv) = if error(blk, s4, inv4, outer) < error(blk, s6, inv6, outer) { (s4, inv4) } else { (s6, inv6) };
+            out.extend(blk.iter().map(|&xv| recon(xv, s, inv, outer)));
+        }
+    }
+    out
+}
+
+/// Below this a row's amax quantizes it to zero (2^-100; an all-zero row in practice).
+const TINY_AMAX: f32 = 7.888609e-31;
+
+/// Activation rows (`[rows, k]`, `k` a multiple of 32) round-tripped through MXFP8: per 32-block, `raw = bmax *
+/// (1/448)` rounded UP to a power of two is the scale (read off raw's bits, so the block maximum never saturates), and
+/// each value is `e4m3(clamp(x / scale, ±448)) * scale` (nearest, ties to even). A block whose `raw` is not a normal
+/// float is all zero. The reference of `act_qdq_nvfp4_mxfp8.wgsl` (scheme 1), bit for bit.
+pub fn mxfp8_qdq(x: &[f32], k: usize) -> Vec<f32> {
+    assert!(k.is_multiple_of(32) && x.len().is_multiple_of(k), "mxfp8_qdq: rows of a multiple of 32");
+    let mut out = Vec::with_capacity(x.len());
+    for blk in x.chunks(32) {
+        let bmax = blk.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let raw = bmax * (1.0 / 448.0);
+        if raw < f32::MIN_POSITIVE {
+            out.extend(std::iter::repeat_n(0.0, 32));
+            continue;
+        }
+        let e = (((raw.to_bits() + 0x7FFFFF) & 0x7F800000) >> 23).min(253);
+        let (scale, inverse) = (f32::from_bits(e << 23), f32::from_bits((254 - e) << 23));
+        out.extend(blk.iter().map(|&xv| {
+            let v = xv * inverse;
+            let m = e4m3_round(v.abs().min(448.0)) * scale;
+            if v < 0.0 { -m } else { m }
+        }));
+    }
+    out
+}
+
+#[cfg(test)]
+mod act_qdq_tests {
+    use super::*;
+
+    /// Spec: a block whose values sit between E2M1's 4 and 6 is better served scaled to 4 (the four-based grid has
+    /// 4.5 at this scale, the six-based one jumps from 4 to 6), and the rule takes it only when its absolute error is
+    /// strictly smaller; the per-token amax makes the row maximum exact.
+    #[test]
+    fn four_over_six_takes_the_four_based_scale_only_where_it_is_more_accurate() {
+        let mut row = vec![0.0f32; 32];
+        row[0] = 6.0;
+        row[1] = 5.0; // six-based: 4 (error 1); four-based: 4.5 (error 0.5)
+        row[16] = 6.0;
+        row[17] = -1.0; // six-based: exact; four-based: 0.75 (error 0.25)
+        let got = nvfp4_four_over_six_qdq(&row, 32);
+        assert_eq!(&got[..2], &[6.0, 4.5]);
+        assert_eq!(&got[16..18], &[6.0, -1.0]);
+        assert!(got[2..16].iter().chain(&got[18..]).all(|&v| v == 0.0));
+        let scaled: Vec<f32> = row.iter().map(|v| v * 0.125).collect();
+        assert_eq!(nvfp4_four_over_six_qdq(&scaled, 32), got.iter().map(|v| v * 0.125).collect::<Vec<_>>(), "a power-of-two rescale of a token commutes");
+        assert!(nvfp4_four_over_six_qdq(&[0.0; 16], 16).iter().all(|&v| v == 0.0));
+    }
+
+    /// Spec: the MXFP8 scale is the block's `amax / 448` rounded up to a power of two, so the block maximum is
+    /// represented without saturating, and the other values round to the nearest E4M3 step at that scale.
+    #[test]
+    fn mxfp8_rounds_the_scale_up_to_a_power_of_two_and_values_to_nearest_e4m3() {
+        let mut blk = vec![0.0f32; 32];
+        blk[0] = 1.0; // scale 2^-8: 256 exactly
+        blk[1] = 0.29; // 74.24 -> 72 -> 0.28125
+        blk[2] = -0.9; // 230.4 -> 224 -> -0.875
+        let got = mxfp8_qdq(&blk, 32);
+        assert_eq!(&got[..3], &[1.0, 0.28125, -0.875]);
+        assert!(mxfp8_qdq(&[1e-40; 32], 32).iter().all(|&v| v == 0.0));
+    }
+}
+
 #[cfg(test)]
 mod embed_tests {
     use super::*;

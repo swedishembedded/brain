@@ -442,14 +442,17 @@ SERVING POLICY  (one model-agnostic policy for every model that serves it.
                          support it (the Qwen3.8 releases): `bf16` (default on
                          CUDA), half the bytes per decode step, or `f32`.
                          --exact-decode keeps f32 and refuses bf16.
-  --linear-activations auto|bf16|e4m3
+  --linear-activations auto|bf16|e4m3|declared
                          precision of the activation operand the NVFP4-weight
                          linears feed their products, for the models that
                          support it (the Qwen3.8 releases): `e4m3` quantises
                          the activations to FP8 with one scale per row (W4A8,
-                         faster, coarser), `bf16` reads them as bf16 (W4A16).
-                         `auto` (default) is bf16. FP8 and bf16 weights
-                         ignore it (the serve log says so once).
+                         faster, coarser), `bf16` reads them as bf16 (W4A16),
+                         `declared` quantizes them as the release declares
+                         (its W4A4/W8A8 training numerics; a checkpoint that
+                         declares none is told so). `auto` (default) is bf16.
+                         FP8 and bf16 weights ignore it (the serve log says so
+                         once).
   --gemm auto|fp32       `fp32` pins exact fp32 arithmetic for the linears (the
                          reference tier); `auto` (default) uses tensor cores
                          where the device has them.

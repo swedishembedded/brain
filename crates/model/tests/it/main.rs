@@ -12,6 +12,7 @@ mod gdn_kit;
 #[path = "../tier_kit/mod.rs"]
 mod tier_kit;
 
+mod act_quant;
 mod adapter_basics;
 mod adapter_contract;
 mod adapter_dropout;

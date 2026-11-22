@@ -1000,6 +1000,12 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         // twice (the head's absmax pass, then the encode pass) and written once;
         // abs+max, then divide, round (or the E4M3 code search's compares),
         // clamp and rescale.
+        // params [rows, k, scheme]: NVFP4 four-over-six reconstructs two candidates and their errors per element
+        // (about 12 ops each, plus the amax and the kept reconstruction); MXFP8 one scale and one rounding.
+        "act_qdq_nvfp4_mxfp8" => {
+            let n = p(0)? * p(1)?;
+            f(if p(2)? == 0 { 30 * n } else { 6 * n }, 8 * n)
+        }
         "kv_roundtrip_i8" | "kv_roundtrip_fp8" => {
             let n = p(0)? * p(1)?;
             f(5 * n, 12 * n)

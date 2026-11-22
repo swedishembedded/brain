@@ -42,6 +42,8 @@ pub mod template;
 
 /// `wgsl/accum_bf16.wgsl`
 pub const ACCUM_BF16: &str = include_str!("../wgsl/accum_bf16.wgsl");
+/// `wgsl/act_qdq_nvfp4_mxfp8.wgsl`
+pub const ACT_QDQ_NVFP4_MXFP8: &str = include_str!("../wgsl/act_qdq_nvfp4_mxfp8.wgsl");
 /// `wgsl/adaln_row.wgsl`
 pub const ADALN_ROW: &str = include_str!("../wgsl/adaln_row.wgsl");
 /// `wgsl/adamw.wgsl`
@@ -1811,6 +1813,7 @@ pub const WEIGHTED_GAP_DX: &str = include_str!("../wgsl/weighted_gap_dx.wgsl");
 /// Every kernel as `(name, source)`, name = file stem.
 pub const ALL: &[(&str, &str)] = &[
     ("accum_bf16", ACCUM_BF16),
+    ("act_qdq_nvfp4_mxfp8", ACT_QDQ_NVFP4_MXFP8),
     ("adaln_row", ADALN_ROW),
     ("adamw", ADAMW),
     ("adamw_bf16", ADAMW_BF16),

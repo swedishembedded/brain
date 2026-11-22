@@ -155,6 +155,11 @@ impl PackedReader {
         self
     }
 
+    /// What the release declares about its quantization (`config.json` / `hf_quant_config.json`), when it declares any.
+    pub fn declaration(&self) -> Option<&HfQuant> {
+        self.declared.as_ref()
+    }
+
     /// Adopt the quantization the release declares: its FP8 block size, which tensors are quantized, and the scale
     /// levels it declares as computed from other sidecars (computed here, once).
     pub fn with_declaration(mut self, declared: Option<HfQuant>) -> PackedReader {

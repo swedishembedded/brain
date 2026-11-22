@@ -22,6 +22,7 @@
 
 use std::collections::HashMap;
 
+pub mod act_quant;
 pub mod actstats;
 pub mod adapter;
 pub mod anchor_memory;

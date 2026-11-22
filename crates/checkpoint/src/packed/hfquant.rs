@@ -78,6 +78,43 @@ pub struct ActivationQuant {
     pub scale_selection_rule: Option<String>,
 }
 
+/// A declared activation quantization brain can apply ([`ActivationQuant::scheme`]): the numerics of the vendor's
+/// W4A4 / W8A8 product, as an opt-in tier (`--linear-activations declared`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ActivationScheme {
+    /// NVFP4 (E2M1 values, an E4M3 scale per 16) with a per-token amax second level and the "four over six" block
+    /// scale chosen by mean absolute error (`fouroversix_mae`), rounding to nearest.
+    Nvfp4FourOverSixMae,
+    /// MXFP8: E4M3 values with an E8M0 (power-of-two) scale per 32, rounding to nearest.
+    Mxfp8E4m3,
+}
+
+impl ActivationScheme {
+    /// Elements one scale covers along a row.
+    pub fn block(self) -> u32 {
+        match self {
+            Self::Nvfp4FourOverSixMae => 16,
+            Self::Mxfp8E4m3 => 32,
+        }
+    }
+}
+
+impl ActivationQuant {
+    /// The scheme this declaration names, every field checked: a format, block, scale dtype, amax type, rounding or
+    /// scale rule brain does not implement is an error naming it, never a nearby scheme.
+    pub fn scheme(&self) -> Result<ActivationScheme, String> {
+        let found = (self.format.as_str(), self.block_size, self.scale_dtype.as_str(), self.amax_type.as_deref(), self.rounding.as_str(), self.scale_selection_rule.as_deref());
+        match found {
+            ("nvfp4_e2m1", 16, "float8_e4m3fn", Some("per_token"), "nearest", Some("fouroversix_mae")) => Ok(ActivationScheme::Nvfp4FourOverSixMae),
+            ("mxfp8_e4m3", 32, "ue8m0", None, "nearest", None) => Ok(ActivationScheme::Mxfp8E4m3),
+            _ => Err(format!(
+                "activation quantization {} (block {}, scale {}, amax {:?}, rounding {}, scale rule {:?}) is not implemented: brain runs nvfp4_e2m1/16/float8_e4m3fn/per_token/nearest/fouroversix_mae and mxfp8_e4m3/32/ue8m0/nearest",
+                self.format, self.block_size, self.scale_dtype, self.amax_type, self.rounding, self.scale_selection_rule
+            )),
+        }
+    }
+}
+
 /// Everything a `parameter_groups` release declares about one tensor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TensorDeclaration {
@@ -433,6 +470,20 @@ mod tests {
         assert_eq!(q.declared("fuse"), DeclaredWeight::Cast(FloatFormat::F32));
         assert_eq!(q.declared("other.weight"), DeclaredWeight::Undeclared, "config.json's NVFP4 does not apply");
         assert_eq!(q.declaration("l1.w13_weight").unwrap().stored_dtype, "F8_E4M3");
+    }
+
+    /// Spec: the two activation quantizations a release declares are read as their schemes, field for field; any other
+    /// value of any field is refused by name.
+    #[test]
+    fn declared_activation_quantization_is_read_exactly_and_anything_else_is_refused_by_name() {
+        let nv = |rule: &str| ActivationQuant { format: "nvfp4_e2m1".into(), block_size: 16, rounding: "nearest".into(), scale_dtype: "float8_e4m3fn".into(), amax_type: Some("per_token".into()), scale_selection_rule: Some(rule.into()) };
+        let mx = ActivationQuant { format: "mxfp8_e4m3".into(), block_size: 32, rounding: "nearest".into(), scale_dtype: "ue8m0".into(), amax_type: None, scale_selection_rule: None };
+        assert_eq!(nv("fouroversix_mae").scheme(), Ok(ActivationScheme::Nvfp4FourOverSixMae));
+        assert_eq!(mx.scheme(), Ok(ActivationScheme::Mxfp8E4m3));
+        assert!(nv("fouroversix_mse").scheme().unwrap_err().contains("fouroversix_mse"));
+        assert!(ActivationQuant { amax_type: Some("per_tensor".into()), ..nv("fouroversix_mae") }.scheme().unwrap_err().contains("per_tensor"));
+        assert!(ActivationQuant { rounding: "stochastic".into(), ..mx.clone() }.scheme().unwrap_err().contains("stochastic"));
+        assert!(ActivationQuant { block_size: 16, ..mx }.scheme().is_err());
     }
 
     /// Spec: unknown transforms and scale formats are refused by name on the tensors they declare; a malformed

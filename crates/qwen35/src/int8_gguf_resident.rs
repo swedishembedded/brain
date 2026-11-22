@@ -218,6 +218,9 @@ const EMBED_RESIDENT_MAX_SHARE: u64 = 16;
 /// What the serve log says about `--linear-activations` when it was given and `tier` holds no micro-scaled (NVFP4) weight
 /// that it could apply to: FP8 checkpoints are W8A8 by design and bf16 weights have no quantized product.
 fn linear_activations_note(choice: LinearActivations, tier: &TierPolicy) -> Option<String> {
+    if choice.is_declared() {
+        return Some("--linear-activations declared has no effect: a GGUF checkpoint declares no activation quantization, so its products keep the auto (bf16) activations".to_string());
+    }
     (choice != LinearActivations::Auto && !tier.dtypes().any(|d| d == Dtype::F4E2M1))
         .then(|| format!("--linear-activations {choice} has no effect: this checkpoint holds no NVFP4 weights (FP8 products are W8A8, bf16 weights have no quantized product)"))
 }
