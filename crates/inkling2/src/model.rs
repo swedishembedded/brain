@@ -351,6 +351,13 @@ impl Inkling2 {
         &self.ops
     }
 
+    /// Choose the arithmetic of the dense bf16-weight products (see [`Ops::set_gemm_precision`]): `Auto`, the default,
+    /// lets a tensor-core device round their operands, `Fp32Reference` keeps every product in binary32, what a parity
+    /// gate against the f32 reference needs. The expert banks' products are f32 either way.
+    pub fn set_gemm_precision(&mut self, precision: gpu_core::provider::library::GemmPrecision) {
+        self.ops.set_gemm_precision(precision);
+    }
+
     /// The logits of every position of `tokens` (one sequence, from position 0), row-major `[tokens, valid_vocab]`,
     /// soft-capped as the head declares.
     pub fn forward(&self, tokens: &[u32]) -> Result<Vec<f32>, String> {
@@ -696,7 +703,8 @@ impl Inkling2 {
         let key = |name: &str| format!("visit{}.{name}", v.index);
         let (e, k, ff) = (cfg.experts, cfg.top_k, cfg.moe_ff);
         let shape = MoeShape { rows: t, d_model: d, moe_ff: ff, n_experts: e, top_k: k };
-        let logits = self.proj(s, &lw.router, x, t);
+        // Routing in binary32 at every precision tier: a top-k turns a rounded operand into a different expert.
+        let logits = model::ops::fp32_kernels(|| self.proj(s, &lw.router, x, t));
         self.tap(s, probe, &key("router_logits"), &logits, t * e);
         let gate = g.storage(u64::from(t * e));
         let probs = g.storage(u64::from(t * e));
@@ -922,7 +930,9 @@ impl Weights {
                 attn_conv: host(&n.attn_conv())?,
                 mlp_norm: host(&n.mlp_norm())?,
                 mlp_conv: host(&n.mlp_conv())?,
-                router: dense(&n.router())?,
+                // The reference keeps the router in binary32 (`_keep_in_fp32_modules_strict`): its bf16-stored weight is
+                // widened once here and its product never rounds an operand (see `moe`).
+                router: Weight::dense_f32(host(&n.router())?, cfg.experts, d),
                 router_bias: host(&n.router_bias())?,
                 experts,
                 gates,
