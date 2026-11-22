@@ -237,7 +237,9 @@ fn read_once(path: &Path, expect: Option<&ServedFamily>) -> Result<(LoadedAdapte
     }
     let bytes = std::fs::read(path).map_err(|e| format!("adapter {shown}: {e}"))?;
     let digest = format!("sha256:{}", brain_modelstore::fetch::bytes_digest(&bytes));
-    let (adapter, card) = model::lora::device_adapter::parse_adapter(&bytes, &shown.to_string()).map_err(|e| match e.kind() {
+    // Stacked expert pairs (`[experts, r, in]` / `[experts, out, r]`) are read too: whether a base can hold them is the
+    // engine's bank's answer (`AdapterBank::register` refuses an expert pair it has no site for, by name).
+    let (adapter, card) = model::lora::device_adapter::parse_adapter_with_experts(&bytes, &shown.to_string()).map_err(|e| match e.kind() {
         // The model crate says "has no ModelCard"; say what that means for a release.
         std::io::ErrorKind::InvalidData if e.to_string().contains("has no ModelCard") => format!("adapter {shown}: no model card, so nothing says which base it belongs to"),
         _ => e.to_string(),
@@ -539,6 +541,25 @@ mod tests {
         // Parsing the bytes and reading the path agree.
         let same = qwen3::lora::read_adapter(adapter.to_str().unwrap()).unwrap();
         assert!(same.sites[0].a.iter().all(|&v| v == 9.0));
+    }
+
+    /// An adapter that corrects a routed expert bank (one stacked factor pair over every expert, beside a linear pair) is
+    /// read as a release with its expert pair; which base can hold it is left to the engine's bank.
+    #[test]
+    fn an_adapter_with_stacked_expert_factors_is_read_as_a_release() {
+        let dir = tmp("experts");
+        let adapter = dir.join("adapter.safetensors");
+        write_adapter(&adapter, "local/moe:local:chat:latest", "local/moe", None, 0.5);
+        let mut tensors: Vec<(String, Vec<u64>, Vec<f32>)> =
+            checkpoint::safetensors::read(adapter.to_str().unwrap()).unwrap().into_iter().map(|t| (t.name, t.shape.iter().map(|&d| d as u64).collect(), t.data)).collect();
+        tensors.push(("blocks.0.mlp.experts.w13.lora_a".to_string(), vec![3, 2, 4], vec![0.25; 24]));
+        tensors.push(("blocks.0.mlp.experts.w13.lora_b".to_string(), vec![3, 8, 2], vec![0.125; 48]));
+        let mut card = checkpoint::st::read_card(adapter.to_str().unwrap()).unwrap().expect("a card");
+        card.adapter.as_mut().expect("an adapter card").targets = Some(vec!["wq".to_string(), "w13".to_string()]);
+        checkpoint::st::save_safetensors(adapter.to_str().unwrap(), &tensors, &serde_json::json!({"rank": 2, "alpha": 4.0}), Some(&card)).unwrap();
+        let loaded = load_adapter(&adapter).expect("a stacked expert pair is part of the release");
+        assert_eq!((loaded.adapter.sites.len(), loaded.adapter.experts.len()), (1, 1));
+        assert_eq!((loaded.adapter.experts[0].base.as_str(), loaded.adapter.experts[0].experts), ("blocks.0.mlp.experts.w13", 3));
     }
 
     /// A Hugging Face directory served as the base is named by its config and

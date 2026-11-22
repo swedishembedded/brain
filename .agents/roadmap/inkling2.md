@@ -640,8 +640,10 @@ The phases are ordered by dependency. Items inside a phase can run in parallel.
     `end_of_turn_markers()` is the sampling eos alone (`<|end_message|>` closes the thinking message too); test that a
     think-then-answer stream is cut only at its end.
   - Left: images through the request path (apiserve media -> `VisionTower::embed_prompt` -> `PromptEmbeds`; the engine
-    splice and content-keyed prefixes are in, the front end is not: an image request is refused by name); adapters
-    (`llmserve::adapter_release` -> `parse_adapter_with_experts`, an `AdapterBank` over the linear and expert sites);
+    splice and content-keyed prefixes are in, the front end is not: an image request is refused by name); adapters in
+    the engine (an `AdapterBank::new_with_experts` over the decoder's linear sites and the w13/w2 expert sites, corrections
+    after each product; the catalog path `llmserve::adapter_release` now reads stacked expert pairs through
+    `parse_adapter_with_experts`, done 2026-11-22, so only the engine side is missing);
     a recorded/graph decode step (every pass allocates its buffers, attention and conv state submit per visit; no
     profile yet); bf16 K/V as a measured opt-in; MTP drafting.
 - **I3.5** Acceptance through the public API with the vendor's published verification
