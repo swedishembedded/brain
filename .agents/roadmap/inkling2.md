@@ -969,6 +969,10 @@ The first trainable target needs no streaming: the base is about 19.5 GB.
     ran the device default whatever the run asked). `the_serving_engine_serves_what_the_trainer_trains` declares the
     exact products on both sides and passes on CUDA (it was 5.0e-3 off: trainer and engine at the default TF32/bf16
     tensor-core tiers round two recipes differently).
+  - Done (2026-11-22, fix2): `model::adapter::merged::MergedLora` forms and projects `W + s B A` on the fp32 kernels
+    whatever the model's GEMM precision (`ops::fp32_kernels`, which now also covers `matmul_dx` / `matmul_dw` of an
+    f32 weight): the served bank forms the effective matrix exactly on the host, and TF32 rounded the factors' product
+    (`adapter_merged` failed on CUDA at 5e-5 of 1e-5, passes now).
 - **I4.4** `model::train` + `data`: packed rows with document-boundary resets of
   attention, every conv state and the relative-position origin. Gate: no supervision or
   state crosses a boundary.

@@ -793,13 +793,14 @@ impl Ops {
     }
 
     /// `dw[row0 * k ..] += dy[m, n]^T x[m, k]` in fp32: the library TF32 product where the device has it
-    /// (accumulating into `dw`), else the portable accumulating kernel.
+    /// (accumulating into `dw`) and [`super::fp32_kernels`] does not pin the fp32 kernels, else the portable
+    /// accumulating kernel.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn dw_f32(&self, s: &mut Vec<Step>, x: &DeviceBuffer, dy: &DeviceBuffer, m: u32, n: u32, k: u32, dw: &DeviceBuffer, row0: u32) {
         let range = if row0 == 0 { WHOLE } else { (row0 as u64 * k as u64, n as u64 * k as u64) };
         let (dy_op, x_op) = (library::Operand { buf: dy, range: WHOLE }, library::Operand { buf: x, range: WHOLE });
         let pushed = s.len();
-        if self.gemm.dw_tf32(&self.gpu, s, &dy_op, &x_op, &library::Operand { buf: dw, range }, m, n, k, true) {
+        if !super::fp32_kernels_active() && self.gemm.dw_tf32(&self.gpu, s, &dy_op, &x_op, &library::Operand { buf: dw, range }, m, n, k, true) {
             // Priced as the reference weight gradient it replaces (`Self::matmul_dw`'s kernel and uniform).
             Self::price_unpriced(&mut s[pushed..], || PortableDispatch { kernel: kname::MATMUL_DW.into(), params: vec![m, k, n], threads: n * k });
             return;

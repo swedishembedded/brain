@@ -1533,7 +1533,10 @@ fn fp8_bf16_activations_active() -> bool {
 /// changes with how many rows share the call, while the fp32 kernels compute a row the same way whatever the row
 /// count (on the products a decode step dispatches; an exact regime still has to pin the int8 kernels' own row
 /// buckets). A decode step uses it so a sequence's tokens do not change with its co-batch through an fp32 leaf (a
-/// router, whose top-k turns a rounding into a different expert). Thread-scoped like [`row_count_invariant`].
+/// router, whose top-k turns a rounding into a different expert). The backward products of an fp32 weight
+/// ([`Ops::matmul_dx`], [`Ops::matmul_dw`]) obey it too: a weight formed from factors
+/// ([`crate::adapter::merged::MergedLora`]) is formed and differentiated exactly. Thread-scoped like
+/// [`row_count_invariant`].
 pub fn fp32_kernels<R>(f: impl FnOnce() -> R) -> R {
     struct Restore(bool);
     impl Drop for Restore {
@@ -2019,6 +2022,9 @@ impl Ops {
     #[allow(clippy::too_many_arguments)]
     fn library_dx_steps(&self, s: &mut Vec<Step>, w: &Weight, rows: (u32, u32), dy: &DeviceBuffer, m: u32, dx: &DeviceBuffer, dx_row0: u32, accumulate: bool) -> bool {
         if let Weight::F32 { w: wb, n, k } = w {
+            if fp32_kernels_active() {
+                return false;
+            }
             let window = if rows.0 == 0 && rows.1 == *n { WHOLE } else { Self::row_window(rows.0, rows.1, *n, *k, 1) };
             let dx_range = if dx_row0 == 0 { WHOLE } else { (dx_row0 as u64 * *k as u64, m as u64 * *k as u64) };
             let dy_op = library::Operand { buf: dy, range: WHOLE };
