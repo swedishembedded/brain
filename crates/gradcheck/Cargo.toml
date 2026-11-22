@@ -34,6 +34,8 @@ brain-ouro.workspace = true
 brain-ricursive.workspace = true
 brain-spectrallm.workspace = true
 brain-huginn.workspace = true
+# `check_inkling2*`: the looped expert decoder with depth-attention residuals.
+brain-inkling2.workspace = true
 brain-flux2.workspace = true
 # `check_wan` / `check_wan_conditioning` (src/lib.rs) - the Wan video DiT's host
 # training reference.

@@ -412,9 +412,10 @@ fn bf16_head_at_real_width_runs_4096_tokens_and_reports_its_time() {
     assert!((sums[0] - sums[1]).abs() <= 1e-4 * sums[0].abs(), "chunk size changed the loss: {sums:?}");
 }
 
-/// f64 loss of `sum_i CE(softcap(scale * h_i W^T) over the first `valid` columns, y_i) * d_scale` (the columns
-/// at and beyond `valid` are padding and take no part), and its gradient with respect to the hidden states by the chain
-/// rule through the cap: `d/dz (c tanh(z / c)) = 1 - tanh^2(z / c)`.
+/// f64 loss of `sum_i CE(scale * softcap(h_i W^T) over the first `valid` columns, y_i) * d_scale` (the columns at and
+/// beyond `valid` are padding and take no part; the scale is the sampler's temperature on the served, capped logits),
+/// and its gradient with respect to the hidden states by the chain rule through the cap:
+/// `d/dz (c tanh(z / c)) = 1 - tanh^2(z / c)`.
 #[allow(clippy::too_many_arguments)]
 fn transformed_reference(p: &Problem, w: &[f32], valid: usize, cap: Option<f32>, logit_scale: f32, d_scale: f32) -> (Vec<f64>, Vec<f64>) {
     let (n, d) = (p.n, p.d);
@@ -424,8 +425,8 @@ fn transformed_reference(p: &Problem, w: &[f32], valid: usize, cap: Option<f32>,
         if p.labels[i] == IGNORE {
             continue;
         }
-        let z: Vec<f64> = (0..valid).map(|j| f64::from(logit_scale) * (0..d).map(|c| f64::from(p.hidden[i * d + c]) * f64::from(w[j * d + c])).sum::<f64>()).collect();
-        let y: Vec<f64> = z.iter().map(|&v| cap.map_or(v, |c| f64::from(c) * (v / f64::from(c)).tanh())).collect();
+        let z: Vec<f64> = (0..valid).map(|j| (0..d).map(|c| f64::from(p.hidden[i * d + c]) * f64::from(w[j * d + c])).sum::<f64>()).collect();
+        let y: Vec<f64> = z.iter().map(|&v| f64::from(logit_scale) * cap.map_or(v, |c| f64::from(c) * (v / f64::from(c)).tanh())).collect();
         let mx = y.iter().cloned().fold(f64::MIN, f64::max);
         let sum: f64 = y.iter().map(|&v| (v - mx).exp()).sum();
         nll[i] = mx + sum.ln() - y[p.labels[i] as usize];

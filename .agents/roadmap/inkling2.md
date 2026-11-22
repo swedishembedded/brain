@@ -763,6 +763,39 @@ The first trainable target needs no streaming: the base is about 19.5 GB.
     - `elementwise_check` on every shared core parameter;
     - conformance C1-C9;
     - capability-matrix rows.
+  - Done (2026-11-22): `inkling2::train` - `Inkling2Train` (`model::Model` + `TokenObjectives`), `TrainConfig`
+    (`ModelConfig`; `tiny_config`, `tiny_config_every_expert_routed`), `sites` (`lora_sites`, `expert_sites`,
+    `DEFAULT_TARGETS`, `targets`), `finetune::Inkling2Trainer` (`ChatTrainer`), SDK row `inkling2` (study + chat
+    trainer). The backward walks the visits in reverse, recomputing each from its saved input partial (saved: every
+    visit's input partial and the `RetainedStates` block states; the prelude-output slot shared by every core pass,
+    the previous pass's own core block states read by the next pass's messages); `dB[j]` per partial, slot gradients
+    collected at the retaining visit, the core's parameters accumulated over the passes; the message queries gathered
+    from and scattered back into the two published tensors. Ops: `depth_attn`, `message_gate`, `flash_ext` (window,
+    sink, distance bias, tau, packed documents), `short_conv` (static/dynamic, segments), `l2clip_scale`,
+    `rmsnorm_nogain`, compacted MoE (`experts_fwd_train_adapted` / `moe_layer_bwd_adapted`, `RouterGrad::Full` or
+    detached by `set_detached_router`), chunked `HeadCe` with `HeadTransform`. Full fine-tune (f32, float experts) and
+    LoRA over the frozen base: bf16 or f32 linears through `AdapterRuntime`, the published NVFP4/MXFP8 banks read in
+    place with stacked per-expert pairs, and the f32 matrices no linear reads (depth/readout/message queries,
+    message-gate factors) through the new shared `model::adapter::merged::MergedLora` (`W + s B A` formed per step,
+    pair gradients projected from `dW`). Routing replay: one MoE call per logical visit (`routing_calls`),
+    `router_fwd_replay` after every router, `Inkling2Train::taken_routing` hands the last forward's routing back as a
+    replay. Packed rows (`reads_packed_rows`, `Batch::LmPacked`). `HeadCe` fixed: the logit scale multiplies the
+    capped logits (knowledge #561). Gates (CPU backend): training forward == tiny reference logits and its loss ==
+    their CE (`tests/it/training.rs`); `gradcheck` `inkling2_fd` - every parameter of a full fine-tune (directional),
+    every shared core tensor and the message queries entry by entry, every adapter tensor of a LoRA build (routing
+    pinned by replay: a finite difference must not flip a top-k); rl conformance `inkling2_conforms` (C1-C4, C6, C10
+    and every objective's step; the subject routes both of two experts, since the suite cannot pin a routing);
+    bf16 base == f32 over rounded values; packed row == documents alone; LoRA run lowers the loss and its saved adapter
+    reloads; `rl/tests/grpo_inkling2.rs` (on-policy ratio, routing replay applied and exact on the trainer's own
+    routing); capability matrix rows.
+  - Left: the real-weight QLoRA smoke run (see below); `serving_engine` (lane "engine": `inkling2::serve::Engine` not
+    on main yet); C8 (chunked head) and C9 (tiers) are not run by the conformance subject (the tiny rows fit one head
+    chunk; bf16 is gated in `training.rs` with the routing pinned); expert pairs over float banks (the shared op
+    refuses them, I4.2 Left), so a small checkpoint's adapter leaves `w13_weight`/`w2_weight` out; full fine-tune of the
+    released 26B needs a streamed window (I6.2), host/ZeRO optimizer state (I6.1) or expert parallelism (I6.3); the
+    training forward allocates per stage and syncs on the host once per MoE call (the compacted routing reads the
+    gate) - no recorded tape, no CUDA run; `export_checkpoint` refuses to fold an adapter (its expert pairs correct
+    quantized banks).
 - **I4.4** `model::train` + `data`: packed rows with document-boundary resets of
   attention, every conv state and the relative-position origin. Gate: no supervision or
   state crosses a boundary.

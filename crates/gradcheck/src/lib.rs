@@ -102,10 +102,12 @@ pub use sam_hd::{check_sam_hd, check_sam_hd_shared};
 /// `Timesfm3Train`, not the blanket `model::Model` impl: that trait is
 /// LM-shaped (`vocab()`/`block_size()`) and this is a forecaster.
 pub mod horizon;
+pub mod inkling2;
 pub mod ouro;
 
 /// `check_ricursive` / `check_ricursive_folded` (src/ricursive.rs) - the Ripple training graph.
 pub mod ricursive;
+pub use inkling2::{check_inkling2, check_inkling2_lora, check_inkling2_shared};
 pub use ouro::{check_ouro, check_ouro_exit_entropy};
 pub mod spectrallm;
 pub use spectrallm::check_spectrallm;

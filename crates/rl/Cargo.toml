@@ -71,6 +71,8 @@ brain-gpu-core.workspace = true
 brain-qwen35moe.workspace = true
 # `tests/conformance.rs` registers `ricursive::Ripple` (a hybrid local/global decoder with a value residual).
 brain-ricursive.workspace = true
+# `tests/conformance.rs` registers `inkling2::Inkling2Train` (a looped expert decoder with depth-attention residuals).
+brain-inkling2.workspace = true
 # `tests/lora_acceptance.rs` runs the LoRA workflow over the diffusion trainer too.
 brain-flux2.workspace = true
 
@@ -95,6 +97,11 @@ required-features = ["qwen3"]
 [[test]]
 name = "grpo_fixes"
 path = "tests/grpo_fixes.rs"
+required-features = ["qwen3"]
+
+[[test]]
+name = "grpo_inkling2"
+path = "tests/grpo_inkling2.rs"
 required-features = ["qwen3"]
 
 [[test]]

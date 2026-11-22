@@ -55,9 +55,9 @@ use crate::config::{Inkling2Config, LayerKind};
 use crate::names::{self, GateSite, LayerNames};
 
 /// The RMS norm epsilon of the depth-attention stacks (the reference's module default, not the config's).
-const DEPTH_EPS: f32 = 1e-6;
+pub(crate) const DEPTH_EPS: f32 = 1e-6;
 /// Added to a vector's L2 norm before the clip divides by it.
-const CLIP_EPS: f32 = 1e-6;
+pub(crate) const CLIP_EPS: f32 = 1e-6;
 /// Host staging a single tile upload may take.
 const STAGING_BYTES: u64 = 64 << 20;
 
@@ -268,7 +268,7 @@ pub fn visit_plan(cfg: &Inkling2Config) -> Result<VisitPlan, String> {
 
 /// How each boundary visit retains its incoming partial: `Some((slot, fresh))`, `fresh` false when the slot already
 /// holds it (the first core layer of a pass after the first sees the prelude's output again), and the slots in use.
-fn block_slots(cfg: &Inkling2Config, plan: &VisitPlan) -> (Vec<Option<(u32, bool)>>, u32) {
+pub(crate) fn block_slots(cfg: &Inkling2Config, plan: &VisitPlan) -> (Vec<Option<(u32, bool)>>, u32) {
     let mut next = 0u32;
     let mut core_first = None;
     let out = plan
@@ -293,11 +293,51 @@ fn block_slots(cfg: &Inkling2Config, plan: &VisitPlan) -> (Vec<Option<(u32, bool
     (out, next)
 }
 
+/// The checkpoint directory `dir` opened for reading: its validated config, the tensors (held to the name map first, so
+/// a file the config does not describe is refused by name before any weight is read) with every microscaled expert
+/// bank also viewed expert by expert (`{bank}.{e}`), the names of those banks, and the quantization declaration.
+pub(crate) fn open_checkpoint(dir: &Path) -> Result<(Inkling2Config, PackedSource, Vec<String>, Option<HfQuant>), String> {
+    let cfg = Inkling2Config::from_dir(dir)?;
+    let reader = PackedReader::open(dir)?;
+    names::check(&cfg, &reader)?;
+    let declared = reader.declaration().cloned();
+    let mut micro = Vec::new();
+    for l in 0..cfg.n_layers {
+        let n = LayerNames::new(l);
+        for name in [n.w13(), n.w2()] {
+            let e = reader.descriptor(&name)?.encoding;
+            if e == QuantEncoding::nvfp4_per_slab() || e == QuantEncoding::mxfp8() {
+                micro.push(name);
+            }
+        }
+    }
+    let mut sliced = SlicedReader::new(Box::new(reader));
+    for name in &micro {
+        sliced = sliced.with_slab_views(name, |e| format!("{name}.{e}"))?;
+    }
+    let src = PackedSource::identity(Box::new(sliced), CodecRegistry::reference())?;
+    Ok((cfg, src, micro, declared))
+}
+
+/// A dynamic convolution's tap projection rows reordered between the published `[kv head][tap]` order and the
+/// `[tap][kv head]` order the convolution reads (`to_tap_major`), or back. Each row is `width` values.
+pub(crate) fn reorder_tap_rows(rows: &[f32], kv_heads: usize, taps: usize, width: usize, to_tap_major: bool) -> Vec<f32> {
+    let mut out = vec![0f32; rows.len()];
+    for h in 0..kv_heads {
+        for j in 0..taps {
+            let (published, tap_major) = ((h * taps + j) * width, (j * kv_heads + h) * width);
+            let (from, to) = if to_tap_major { (published, tap_major) } else { (tap_major, published) };
+            out[to..to + width].copy_from_slice(&rows[from..from + width]);
+        }
+    }
+    out
+}
+
 /// Values a host read takes from the source at a time.
 const READ_CHUNK: usize = 1 << 20;
 
 /// `name` as a fresh f32 device buffer, streamed from the source a bounded chunk at a time.
-fn upload_f32(g: &Gpu, src: &dyn TensorSource, name: &str) -> Result<DeviceBuffer, String> {
+pub(crate) fn upload_f32(g: &Gpu, src: &dyn TensorSource, name: &str) -> Result<DeviceBuffer, String> {
     let n = src.numel(name).ok_or_else(|| format!("inkling2: tensor {name} is missing"))?;
     let buf = g.storage(n as u64);
     if !src.with_tensor_chunks(name, READ_CHUNK, &mut |off, chunk| g.write_f32_at(&buf, off, chunk)) {
@@ -309,7 +349,7 @@ fn upload_f32(g: &Gpu, src: &dyn TensorSource, name: &str) -> Result<DeviceBuffe
 
 /// A small tensor's values on the host, for a reordering at load (the dynamic convolutions' tap projections and the
 /// message queries), read a bounded chunk at a time.
-fn read_small(src: &dyn TensorSource, name: &str) -> Result<Vec<f32>, String> {
+pub(crate) fn read_small(src: &dyn TensorSource, name: &str) -> Result<Vec<f32>, String> {
     let mut out = Vec::with_capacity(src.numel(name).unwrap_or(0));
     if !src.with_tensor_chunks(name, READ_CHUNK, &mut |_, chunk| out.extend_from_slice(chunk)) {
         return Err(format!("inkling2: tensor {name} is missing"));
@@ -346,25 +386,8 @@ impl Inkling2 {
     /// loaded. The activation operand `ops` is set to ([`Ops::set_linear_activations`]) is held to what this model can
     /// run ([`Self::set_linear_activations`]).
     pub fn load(ops: Ops, dir: &Path) -> Result<Inkling2, String> {
-        let cfg = Inkling2Config::from_dir(dir)?;
-        let reader = PackedReader::open(dir)?;
-        names::check(&cfg, &reader)?;
-        let (activations, unsupported_activations) = declared_activations(reader.declaration(), &cfg);
-        let mut micro = Vec::new();
-        for l in 0..cfg.n_layers {
-            let n = LayerNames::new(l);
-            for name in [n.w13(), n.w2()] {
-                let e = reader.descriptor(&name)?.encoding;
-                if e == QuantEncoding::nvfp4_per_slab() || e == QuantEncoding::mxfp8() {
-                    micro.push(name);
-                }
-            }
-        }
-        let mut sliced = SlicedReader::new(Box::new(reader));
-        for name in &micro {
-            sliced = sliced.with_slab_views(name, |e| format!("{name}.{e}"))?;
-        }
-        let src = PackedSource::identity(Box::new(sliced), CodecRegistry::reference())?;
+        let (cfg, src, micro, declared) = open_checkpoint(dir)?;
+        let (activations, unsupported_activations) = declared_activations(declared.as_ref(), &cfg);
         let k = Kernels::resolve(ops.gpu())?;
         let w = Weights::load(&ops, &cfg, &src, &micro, &activations)?;
         let plan = visit_plan(&cfg)?;
@@ -947,14 +970,7 @@ impl Weights {
                 }
                 // Published rows are `[kv head][tap]`; the convolution reads `[tap][kv head]`.
                 let taps = cfg.conv_taps as usize;
-                let rows = read_small(src, &n.kv_conv_proj(v))?;
-                let mut permuted = vec![0f32; rows.len()];
-                for h in 0..a.kv_heads as usize {
-                    for j in 0..taps {
-                        let (from, to) = ((h * taps + j) * d as usize, (j * a.kv_heads as usize + h) * d as usize);
-                        permuted[to..to + d as usize].copy_from_slice(&rows[from..from + d as usize]);
-                    }
-                }
+                let permuted = reorder_tap_rows(&read_small(src, &n.kv_conv_proj(v))?, a.kv_heads as usize, taps, d as usize, true);
                 let tier = src.packed_descriptor(&n.kv_conv_proj(v)).map(|desc| if desc.encoding == QuantEncoding::bf16() { gpu_core::select::Dtype::BF16 } else { gpu_core::select::Dtype::F32 });
                 let proj = Weight::upload(ops, &permuted, a.kv_heads as usize * taps, d as usize, tier.unwrap_or(gpu_core::select::Dtype::F32));
                 Ok(KvConv::Dynamic { taps: host(&n.kv_conv_static(v))?, proj })

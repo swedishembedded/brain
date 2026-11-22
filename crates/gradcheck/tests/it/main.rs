@@ -25,6 +25,7 @@ mod glue;
 mod grid_sample_kernels;
 mod horizon_fd;
 mod huginn_fd;
+mod inkling2_fd;
 mod imaging_models;
 mod layernorm2d_kernels;
 mod maxpool2d_kernels;

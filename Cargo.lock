@@ -605,6 +605,7 @@ dependencies = [
  "brain-gpu-core",
  "brain-horizon",
  "brain-imaging",
+ "brain-inkling2",
  "brain-kronos",
  "brain-lfm2",
  "brain-llmserve",
@@ -1832,6 +1833,7 @@ dependencies = [
  "brain-gpu-core",
  "brain-horizon",
  "brain-huginn",
+ "brain-inkling2",
  "brain-kernels",
  "brain-lfm2",
  "brain-ltxv",
@@ -1954,12 +1956,14 @@ dependencies = [
 name = "brain-inkling2"
 version = "6.0.0"
 dependencies = [
+ "brain-capability",
  "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",
  "brain-imaging",
  "brain-kernels",
  "brain-model",
+ "brain-optim",
  "brain-paramstore",
  "brain-testutil",
  "serde",
@@ -2926,6 +2930,7 @@ dependencies = [
  "brain-gpt2",
  "brain-gpu-core",
  "brain-gradcheck",
+ "brain-inkling2",
  "brain-model",
  "brain-modelopt",
  "brain-modelstore",

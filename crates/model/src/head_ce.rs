@@ -327,7 +327,8 @@ impl HeadCe {
     }
 
     /// Declare the transform between the head's raw logits and the logits the loss reads: a soft cap
-    /// `c * tanh(x / c)` (applied after the logit scale) and a bound on the valid vocabulary, whose padding columns are
+    /// `c * tanh(x / c)` on the raw logits and a bound on the valid vocabulary: the logits the model serves, which a logit
+    /// scale (the sampler's temperature correction) then multiplies, as the sampler does; the padding columns are
     /// excluded from the softmax (they carry probability exactly zero and receive no gradient). The backward chains
     /// through both: the gradient is multiplied by the cap's derivative before it reaches the head. Labels must be below
     /// the valid vocabulary ([`Self::forward`] and [`Self::backward`] check; a recorded tape cannot). The identity
@@ -426,14 +427,17 @@ impl HeadCe {
                 s.push(gpu.step(self.k.copy_cols, &[&self.tile, &self.logits], &[rows, c, c, 0, v, c0], rows * c));
             }
         }
+        // The declared transform belongs to the logits the model serves; the logit scale is the sampler's temperature
+        // correction (`1 / T`), applied to those served logits as the sampler applies it.
+        if let Some((t, fwd, _)) = self.transform {
+            s.extend(t.step(gpu, fwd, &self.logits, rows, v));
+        }
         if logit_scale != 1.0 {
             s.push(gpu.step(self.k.grad_scale, &[&self.logits], &[rows * v, logit_scale.to_bits()], rows * v));
         }
         if let Some(buf) = &self.scale_buf {
+            assert!(self.transform.is_none(), "HeadCe: a device-held logit scale with a head transform is not supported; pass the scale from the host");
             s.push(gpu.step(self.k.grad_scale_buf, &[&self.logits, buf], &[rows * v], rows * v));
-        }
-        if let Some((t, fwd, _)) = self.transform {
-            s.extend(t.step(gpu, fwd, &self.logits, rows, v));
         }
     }
 
@@ -524,9 +528,14 @@ impl HeadCe {
                 s.push(gpu.step_sliced(self.k.ce_stats, &[&self.logits, b.labels, &self.stats], &[(0, 0), at, (0, 0)], &[rows, v, IGNORE], rows));
             }
             s.push(gpu.step_sliced(self.k.ce_grad_stats, &[&self.logits, b.labels, &self.stats, &self.d_logits], &[(0, 0), at, (0, 0), (0, 0)], &[rows, v, IGNORE, 1f32.to_bits()], rows * v));
-            // The gradient so far is with respect to the transformed logits: through the soft cap (and the padding
-            // mask) first, then through the logit scale below.
+            // The gradient so far is with respect to the scaled transformed logits `scale * cap(z)`: through the soft
+            // cap (and the padding mask), which reads `cap(z)` - the chunk's logits with the scale taken back out (they
+            // are scratch from here on) - and then through the logit scale below (the factors commute).
             if let Some((t, _, bwd)) = self.transform {
+                assert!(self.scale_buf.is_none(), "HeadCe: a device-held logit scale with a head transform is not supported; pass the scale from the host");
+                if b.logit_scale != 1.0 {
+                    s.push(gpu.step(self.k.grad_scale, &[&self.logits], &[rows * v, (1.0 / b.logit_scale).to_bits()], rows * v));
+                }
                 s.extend(t.bwd_step(gpu, bwd, &self.d_logits, &self.logits, rows, v));
             }
             // Chain rule through `logits = logit_scale * (h W^T)`, then the caller's scale.

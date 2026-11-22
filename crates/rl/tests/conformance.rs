@@ -187,8 +187,38 @@ fn ricursive_subject() -> Subject<ricursive::Ripple> {
     subject
 }
 
+/// The tiny looped Inkling 2 (`inkling2::train::tiny_config`): a core of two depth-attention blocks run three times
+/// with messages between passes, sliding and full layers, two experts both routed. Its adapter covers every linear and merged
+/// site (the float expert banks of a small configuration take no expert pair); its frozen base is held at f32 here.
+fn inkling2_subject() -> Subject<inkling2::Inkling2Train> {
+    use inkling2::{Inkling2Train, TrainConfig};
+
+    fn config(adapter_rank: Option<u32>) -> TrainConfig {
+        // Every token routes to both experts: the suite's finite differences and single steps cannot pin a top-k
+        // selection, and a flipped one is another function (the gradient checks with a pinned routing on the
+        // four-expert config are `gradcheck`'s `inkling2_fd`).
+        let cfg = inkling2::train::tiny_config_every_expert_routed();
+        match adapter_rank {
+            Some(rank) => cfg.with_lora(model::adapter::device::LoraCfg::new(rank, rank as f32, inkling2::train::targets(false))).unwrap_or_else(|e| panic!("{e}")),
+            None => cfg,
+        }
+    }
+    Subject {
+        name: "inkling2",
+        config,
+        declares: Declares { token_objectives: true, adapters: true },
+        load: |path, rows, seq| Inkling2Train::load(path, rows, seq).unwrap_or_else(|e| panic!("{e}")),
+        // A bf16 base rounds the router's logits, so a near-tie selects other experts than the f32 base and the
+        // gradients are of another function: the tier is held to the f32 base with the routing pinned, in
+        // `inkling2/tests/it/training.rs` (`a_bf16_base_trains_the_adapters_the_f32_base_does`).
+        tiers: Vec::new(),
+        budget: Budget { tensors: Some(12), directions: 2 },
+        chunked_head: None,
+    }
+}
+
 /// Every registered model, by name. The suite refuses to pass over none.
-const REGISTERED: &[&str] = &["qwen3", "gpt2", "qwen35", "qwen35moe", "ricursive"];
+const REGISTERED: &[&str] = &["qwen3", "gpt2", "qwen35", "qwen35moe", "ricursive", "inkling2"];
 
 macro_rules! subject {
     ($test:ident, $subject:expr) => {
@@ -209,6 +239,7 @@ subject!(gpt2_conforms, gpt2_subject());
 subject!(qwen35_conforms, qwen35_subject());
 subject!(qwen35moe_conforms, qwen35moe_subject());
 subject!(ricursive_conforms, ricursive_subject());
+subject!(inkling2_conforms, inkling2_subject());
 
 #[test]
 fn at_least_one_model_is_registered() {

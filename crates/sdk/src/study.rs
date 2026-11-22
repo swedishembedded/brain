@@ -204,6 +204,25 @@ impl StudyArch for Ripple {
 /// [`ARCHS`]. The model itself implements `model::Model` and, when it offers
 /// them, `model::training::TokenObjectives`; nothing in the SDK dispatch or in
 /// `rl` names it. `a_new_architecture_is_one_row` shows this with a fake row.
+pub(crate) struct Inkling2;
+impl StudyArch for Inkling2 {
+    type M = inkling2::Inkling2Train;
+    const ID: &'static str = "inkling2";
+    const FAMILY: &'static str = inkling2::train::FAMILY;
+    const TOKEN_OBJECTIVES: bool = true;
+    const CHAT_LORA_FINE_TUNE: bool = true;
+    /// Every linear and merged site; the stacked expert pairs join over a microscaled release
+    /// ([`inkling2::finetune::Inkling2Trainer::train_lora`] decides from the checkpoint).
+    fn lora(rank: u32, alpha: f32) -> LoraCfg {
+        LoraCfg::new(rank, alpha, inkling2::train::targets(false))
+    }
+    fn study_config(base: &inkling2::TrainConfig, lora: LoraCfg, block: u32) -> inkling2::TrainConfig {
+        let mut cfg = base.clone().with_lora(lora).unwrap_or_else(|e| panic!("{e}"));
+        cfg.cfg.max_positions = cfg.cfg.max_positions.max(u64::from(block));
+        cfg
+    }
+}
+
 pub(crate) struct ArchEntry {
     /// A `brain_arch` registry id.
     pub id: &'static str,
@@ -286,6 +305,7 @@ const ARCHS: &[ArchEntry] = &[
     ArchEntry::of::<Qwen35Moe>().with_chat_trainer::<qwen35moe::finetune::Qwen35MoeTrainer>(),
     ArchEntry::of::<Ripple>().with_chat_trainer::<ricursive::finetune::RippleTrainer>(),
     ArchEntry::trainer_only::<ouro::finetune::OuroTrainer>("ouro", ouro::finetune::FAMILY),
+    ArchEntry::of::<Inkling2>().with_chat_trainer::<inkling2::finetune::Inkling2Trainer>(),
 ];
 
 /// The registered architectures whose trainer declares from-scratch initialization
@@ -993,6 +1013,7 @@ mod tests {
             (Ripple::ID, Ripple::TOKEN_OBJECTIVES, offered::<Ripple>(ricursive::TrainConfig::tiny())),
             // A trainer-only row: its claim is the row's own, the model is asked the same question.
             ("ouro", arch_in(ARCHS, "ouro").unwrap().token_objectives, offered_by::<ouro::model::Ouro>(ouro::OuroConfig::tiny())),
+            (Inkling2::ID, Inkling2::TOKEN_OBJECTIVES, offered::<Inkling2>(inkling2::train::tiny_config())),
         ];
         for (id, claimed, actual) in claims {
             assert_eq!(claimed, actual, "{id}: the registry claims token_objectives={claimed} but the model offers {actual}");

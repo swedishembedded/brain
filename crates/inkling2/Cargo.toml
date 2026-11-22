@@ -22,6 +22,11 @@ brain-paramstore.workspace = true
 brain-kernels.workspace = true
 # The pad-and-tile image preprocessor.
 brain-imaging.workspace = true
+# `capability::failure::CANCELLED`, the answer of a cancelled export.
+brain-capability.workspace = true
+brain-optim.workspace = true
+# The per-token document positions of packed rows and the draws of fresh weights.
+brain-data.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
@@ -29,5 +34,4 @@ serde_json.workspace = true
 # `testutil::skip` / `skip_unavailable` - an absent fixture can be made fatal
 # and absent hardware cannot.
 brain-testutil.workspace = true
-brain-data.workspace = true
 

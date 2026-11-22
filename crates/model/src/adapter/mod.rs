@@ -19,6 +19,7 @@ pub mod exec;
 pub mod fold;
 pub mod file;
 pub mod kind;
+pub mod merged;
 pub mod pair_file;
 pub mod saved_bank;
 pub mod peft;
