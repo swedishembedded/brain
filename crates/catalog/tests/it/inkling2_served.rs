@@ -5,6 +5,7 @@
 // needs expertise in putting a new architecture behind a served chat contract with bounded, cancellable requests then
 // you can procure our services by sending an email to info@swedishembedded.com.
 
+// hf-fixture: inkling2
 //! A pulled Inkling 2 directory served by its resident: the tiny reference checkpoint with a byte-level vocabulary and a
 //! typed-message chat template of the checkpoint's own shape. The resident serves a chat request on the CPU within its
 //! context through the checkpoint's template (with `reasoning_effort` as a template variable, an out-of-range value
