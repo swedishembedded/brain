@@ -193,6 +193,8 @@ navigation:
         path: examples/learning/visualclick.md
       - source: samples/models/chronos2/README.md
         path: examples/models/chronos2.md
+      - source: samples/models/cosyvoice/README.md
+        path: examples/models/cosyvoice.md
       - source: samples/models/deepseekocr2/README.md
         path: examples/models/deepseekocr2.md
       - source: samples/models/diamond/README.md

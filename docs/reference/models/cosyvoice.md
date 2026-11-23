@@ -13,8 +13,9 @@ generations (`FunAudioLLM/CosyVoice2-0.5B`,
 **The non-streaming pipeline is real and runnable end to end**: text + a
 reference audio clip in, a real playable 24 kHz WAV out
 (`cosyvoice::pipeline::generate`, see "Pipeline" below), now served as
-`brain cosyvoice synth` / `brain do brain/cosyvoice synth` with D-Bus/HTTP
-for free (see "Serving" below) - CosyVoice 3 is accepted as a `variant`
+the `synth` action over D-Bus/HTTP and run on the host by the
+[`sample-models-cosyvoice`](../../../samples/models/cosyvoice/README.md)
+program (see "Serving" below) - CosyVoice 3 is accepted as a `variant`
 value but not implemented as a servable pipeline yet, and streaming
 (chunked `token2wav`, cross-fade) is a deliberate follow-up for both
 generations.
@@ -289,8 +290,9 @@ See "Serving" below for the served `synth` action this pipeline backs.
 `crates/cosyvoice/src/caps.rs` wires `pipeline::generate` into brain's
 generic capability contract: one `synth` action (target text + a
 `ref_audio` input blob + its transcript in, a complete 24 kHz mono WAV
-out), reachable as `brain cosyvoice synth`, `brain do brain/cosyvoice
-synth`, and - with no extra code - D-Bus/HTTP, through the same
+out), reachable as `sample-models-cosyvoice synth` (`samples/models/cosyvoice`;
+the `brain` binary has no `cosyvoice` verb and names that program when asked
+for one) and - with no extra code - D-Bus/HTTP, through the same
 `Provider`/`ResidentModel` pair every other served model uses
 (`crates/catalog/src/resident_cosyvoice.rs` is the residency-facing half,
 following `resident_minimaxmusic3.rs`'s "load per call, nothing kept warm"
@@ -314,7 +316,7 @@ fidelity ceiling on that one path, not a correctness bug.
 
 Validated end to end against real weights, through the
 served CLI verb itself (not just the underlying `pipeline::generate`
-function) - `brain cosyvoice synth --text ... --ref_text ... --in
+function) - `sample-models-cosyvoice synth --text ... --ref_text ... --in
 ref_audio=resources/cosyvoice/source/asset/zero_shot_prompt.wav --out
 audio=out.wav` produced a real, playable WAV.
 

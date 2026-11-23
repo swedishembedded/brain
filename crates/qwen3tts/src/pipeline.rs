@@ -29,7 +29,7 @@ use crate::sampling::DegenerationWatch;
 
 /// Where each component's weights are read from, plus the HF checkpoint dir
 /// (for `config.json`, tokenizer). A component path is a brain checkpoint
-/// file (`brain qwen3tts import`) or the HF checkpoint dir itself, which its
+/// file (`sample-models-qwen3tts import`) or the HF checkpoint dir itself, which its
 /// loader reads as downloaded (see [`crate::import`]).
 #[derive(Clone, Debug)]
 pub struct TtsPaths {

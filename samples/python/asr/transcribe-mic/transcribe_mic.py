@@ -16,7 +16,7 @@ pipe fd, and prints the transcription **segments** as each ~1 s window decodes.
     python3 samples/python/asr/transcribe-mic/transcribe_mic.py --wav $BRAIN_TESTDATA/asr/audio/librispeech_mr_quilter.wav
 
 No mic? Generate a test clip with brain's own TTS and feed it with --wav:
-    brain qwen3tts synth --text "the quick brown fox" --out audio=/tmp/test.wav   # 24 kHz
+    target/release/sample-models-qwen3tts synth --text "the quick brown fox" --out audio=/tmp/test.wav   # 24 kHz (make samples/models/qwen3tts/build)
     # (resample to 16 kHz mono first, e.g. `sox /tmp/test.wav -r 16000 -c 1 /tmp/16k.wav`)
 
 Dependencies: `jeepney` (D-Bus, always), and `sounddevice`+`numpy` only for live

@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Qwen3-TTS's capabilities behind the generalized [`capability`] interface:
-//! what `brain serve`, D-Bus/HTTP clients, `brain qwen3tts <action>` and the
-//! `sample-models-qwen3tts` program all drive with the same parameters.
+//! what `brain serve`, D-Bus/HTTP clients and the `sample-models-qwen3tts`
+//! program (`samples/models/qwen3tts`) all drive with the same parameters.
 //!
 //! Actions, each a thin wrapper over the pipeline in [`crate::pipeline`]:
 //!   - `synth` - speaker-free text-to-speech.
@@ -48,7 +48,7 @@ use serde_json::json;
 use crate::reference::Reference;
 use crate::{FinetuneOpts, GenOpts, TtsPaths};
 
-/// The model id on the command line (`brain qwen3tts …`) and the event API.
+/// The model id of `brain caps`, the served surfaces and the event API.
 pub const MODEL: &str = "brain/qwen3tts";
 
 /// Qwen3-TTS output sample rate.

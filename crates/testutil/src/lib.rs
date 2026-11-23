@@ -342,7 +342,7 @@ pub fn model_dir(reference: &str) -> Option<String> {
     Some(brain_modelstore::Store::new(root).repo_dir(&r).to_string_lossy().into_owned())
 }
 
-/// The Qwen3-TTS speech codec in the model store, as `brain qwen3tts import`
+/// The Qwen3-TTS speech codec in the model store, as `sample-models-qwen3tts import`
 /// lays it out (`<repo>/brain_tts/codec.safetensors`; every size ships the same
 /// codec), or `None` after a skip naming the repositories looked in.
 pub fn qwen3tts_codec() -> Option<String> {
@@ -353,7 +353,7 @@ pub fn qwen3tts_codec() -> Option<String> {
         .map(|d| format!("{d}/brain_tts/codec.safetensors"))
         .find(|p| std::path::Path::new(p).is_file());
     if found.is_none() {
-        skip(&format!("no imported Qwen3-TTS codec in the model store ({}; brain pull, then brain qwen3tts import)", REPOS.join(", ")));
+        skip(&format!("no imported Qwen3-TTS codec in the model store ({}; brain pull, then sample-models-qwen3tts import)", REPOS.join(", ")));
     }
     found
 }

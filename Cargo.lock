@@ -7942,6 +7942,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sample-models-cosyvoice"
+version = "6.0.0"
+dependencies = [
+ "brain-cosyvoice",
+ "brain-invoke",
+]
+
+[[package]]
 name = "sample-models-deepseekocr2"
 version = "6.0.0"
 dependencies = [

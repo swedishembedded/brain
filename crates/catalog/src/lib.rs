@@ -947,10 +947,7 @@ pub fn models() -> Vec<ModelEntry> {
         // `paths` this provider holds cost nothing to keep between calls.
         ModelEntry {
             manifest: cosyvoice::caps::manifest,
-            provider: |assembly: &Assembly| {
-                let paths = cosyvoice::pipeline::CosyVoicePaths::from_assembly(assembly)?;
-                Ok(Arc::new(cosyvoice::caps::CosyVoiceProvider::new(paths)) as Arc<dyn Provider>)
-            },
+            provider: cosyvoice::caps::provider,
             spec: Some(("cosyvoice", &cosyvoice::spec::CosyVoiceSpec)),
             resident: crate::resident_in_store!(crate::resident_cosyvoice::CosyVoiceResident::from_store),
         },

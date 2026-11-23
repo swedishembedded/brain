@@ -33,7 +33,7 @@ tools/dbus-session.sh --serve "--dbus" -- \
   PCM. `cosyvoice::caps::decode_ref_audio` (server-side) parses the WAV
   container's own sample rate directly, so this preserves the clip's full
   native rate - deliberately different from
-  `brain do cosyvoice synth --in ref_audio=clip.wav` on the CLI, which
+  `sample-models-cosyvoice synth --in ref_audio=clip.wav` on the command line, which
   downsamples any input clip to a fixed 16 kHz before the action ever sees
   it. Going through D-Bus directly, as this script does, avoids that cap.
 
@@ -62,10 +62,12 @@ back, never a silent fallback to CosyVoice 2's weights.
 | `--seed N` | random: drawn and printed, echoed in the result |
 | `--out PATH` | `cosyvoice_synth.wav` |
 
-## The CLI, for comparison
+## The sample program, for comparison
+
+[`samples/models/cosyvoice`](../../../models/cosyvoice/README.md) runs the same action on the host:
 
 ```bash
-brain cosyvoice synth \
+target/release/sample-models-cosyvoice synth \
     --text "..." --ref_text "..." \
     --in ref_audio=reference.wav --out audio=clone.wav
 ```

@@ -13,7 +13,7 @@ The reference clip is sent as the `ref_audio` input blob - its raw file
 bytes, WAV header included - rather than decoded PCM: `cosyvoice::caps::
 decode_ref_audio` (server-side) parses a WAV container's own sample rate
 directly, so sending the file as-is over D-Bus preserves its full native
-rate. This is deliberately NOT the same path `brain do cosyvoice synth --in
+rate. This is deliberately NOT the same path `sample-models-cosyvoice synth --in
 ref_audio=clip.wav` takes on the CLI, which downsamples any input clip to a
 fixed 16 kHz before the action ever sees it - going through D-Bus directly,
 as this script does, avoids that cap.

@@ -12,7 +12,7 @@ assistant pipeline - all running locally, no external TTS service.
 |---|---|
 | Inference             | [x] |
 | LoRA fine-tune         | [x] |
-| CLI (`brain <arch> <action>`)       | [x] |
+| CLI (`sample-models-qwen3tts <action>`) | [x] |
 | HTTP API               | [ ] |
 | D-Bus                  | [x] |
 | Batched/streaming serving | [x] |
@@ -35,10 +35,13 @@ Voice cloning needs the speaker encoder, which only the Base checkpoints
 ship.
 
 `--weights-dir` may instead name a directory of brain-format files, which the
-`import` action writes from a checkpoint:
+`import` action writes from a checkpoint. The actions run from the
+`sample-models-qwen3tts` program (`samples/models/qwen3tts`); build it once:
 
 ```bash
-brain qwen3tts import --source /path/to/Qwen3-TTS-12Hz-0.6B-Base \
+make samples/models/qwen3tts/build
+Q=target/release/sample-models-qwen3tts
+$Q import --source /path/to/Qwen3-TTS-12Hz-0.6B-Base \
   [--codec-source <dir>] [--speaker-source <dir>] \
   --dest out/tts
 ```
@@ -51,23 +54,23 @@ is read as these files; any other is read as the checkpoint itself.
 
 ## Running it
 
-`brain qwen3tts <action> ...` runs a served action, and so does the
-standalone `sample-models-qwen3tts` program (`samples/models/qwen3tts`), which
-adds the NPU route. Every flag below is the action's served param; the reference
+`$Q <action> ...` (the `sample-models-qwen3tts` program built above) runs a
+served action on the host, and adds the NPU route; the `brain` binary itself
+has no `qwen3tts` verb and names this program when asked for one. Every flag below is the action's served param; the reference
 recording and the output are blobs: `--ref voice.wav` names an input,
 `--out audio=out.wav` an output.
 
 Speaker-free synthesis:
 
 ```bash
-brain qwen3tts synth --text "Hello from brain." --out audio=out.wav --seed $RANDOM
+$Q synth --text "Hello from brain." --out audio=out.wav --seed $RANDOM
 ```
 
 Voice cloning from a reference clip (with `--ref-text`, the in-context path;
 without, x-vector-only):
 
 ```bash
-brain qwen3tts clone \
+$Q clone \
   --text "This sentence is spoken in the reference speaker's voice." \
   --ref voice.wav --ref-text "transcript of voice.wav" \
   --out audio=demo.wav --seed $RANDOM
@@ -77,7 +80,7 @@ Instructed voice design / preset speakers (CustomVoice/VoiceDesign
 checkpoints only):
 
 ```bash
-brain qwen3tts design --text "..." --instruct "a calm, low voice" \
+$Q design --text "..." --instruct "a calm, low voice" \
   [--speaker NAME] --out audio=out.wav
 ```
 
@@ -167,7 +170,7 @@ npu-stream|windowed|cpu-stream`, `--stream-chunk`, `--stream-window`,
 LoRA fine-tuning (single-speaker) of the Talker on a `text -> codes` dataset:
 
 ```bash
-brain qwen3tts finetune --data data/tts --save out/tts/talker_lora.safetensors \
+$Q finetune --data data/tts --save out/tts/talker_lora.safetensors \
   [--full] [--steps N --lr X --rank R --alpha A --batch B --block T --seed S --activations keep|recompute]
 ```
 

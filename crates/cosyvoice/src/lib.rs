@@ -136,8 +136,8 @@
 //!
 //! [`caps`] wires `pipeline::generate` into brain's generic model-serving
 //! contract: one `synth` action (target text + a reference clip and its
-//! transcript in, a 24 kHz WAV out), discoverable and runnable as `brain do
-//! brain/cosyvoice synth …` / `brain cosyvoice synth …`, with D-Bus/HTTP
+//! transcript in, a 24 kHz WAV out), discoverable and runnable as
+//! `sample-models-cosyvoice synth …` (`samples/models/cosyvoice`), with D-Bus/HTTP
 //! surfaced for free through the same `Provider`/`ResidentModel` pair every
 //! other served model uses (`crates/catalog/src/resident_cosyvoice.rs` is the
 //! residency-facing half). `variant` selects the generation - see [`caps`]'s

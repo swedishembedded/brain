@@ -2,8 +2,8 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! CosyVoice's capabilities behind the generalized [`capability`] interface -
-//! what makes `brain caps brain/cosyvoice` / `brain do cosyvoice synth …` /
-//! `brain cosyvoice synth …`, and the D-Bus/HTTP surfaces built on top of the
+//! what makes `brain caps brain/cosyvoice`, `sample-models-cosyvoice synth …`
+//! (`samples/models/cosyvoice`), and the D-Bus/HTTP surfaces built on top of the
 //! same `Provider`/`ResidentModel` pair, work with no CosyVoice-specific
 //! plumbing in the CLI or the transports.
 //!
@@ -57,7 +57,7 @@
 //! returns (success or failure alike).
 //!
 //! One real, honestly-recorded consequence of reusing the generic CLI blob
-//! loader: `crates/cli/src/caps_cli.rs`'s `--in ref_audio=clip.wav` decodes
+//! loader: `crates/invoke/src/media.rs`'s `--in ref_audio=clip.wav` decodes
 //! ANY input WAV through `audio::asr_caps::audio_blob_from_wav`, which
 //! downmixes to mono and resamples to a fixed 16 kHz before this action ever
 //! sees the bytes - a convention shared by every ASR-style audio input in
@@ -68,7 +68,7 @@
 //! audio with no content above 8 kHz - a real fidelity ceiling on the plain
 //! CLI path, not a correctness bug (the pipeline still runs and produces
 //! valid speech). A direct D-Bus/HTTP caller that builds its own `Blob`
-//! (rather than going through `brain do ... --in`) is NOT subject to this
+//! (rather than going through `sample-models-cosyvoice synth --in`) is NOT subject to this
 //! cap: [`decode_ref_audio`] honours a WAV container's own sample rate, or a
 //! raw-PCM blob's own `meta.sample_rate`, either way preserving full-rate
 //! audio when the caller supplies it directly.
@@ -80,8 +80,8 @@ use serde_json::json;
 
 use crate::pipeline::{generate, CosyVoicePaths, GenOpts, Variant};
 
-/// The model id used on the CLI (`brain do brain/cosyvoice …`, `brain
-/// cosyvoice synth …`), over D-Bus/HTTP, and in the residency manifest.
+/// The model id used by `brain caps`, over D-Bus/HTTP, and in the residency
+/// manifest; `sample-models-cosyvoice` runs it on the host.
 pub const MODEL: &str = "brain/cosyvoice";
 
 /// The two generations `synth`'s `variant` param accepts. Both run; see this
@@ -240,6 +240,14 @@ impl CosyVoiceProvider {
     pub fn new(paths: CosyVoicePaths) -> CosyVoiceProvider {
         CosyVoiceProvider { paths }
     }
+}
+
+/// The provider over the six roles [`crate::spec::CosyVoiceSpec`] resolved:
+/// what the catalog serves and `samples/models/cosyvoice` runs, built once
+/// here so the two cannot diverge.
+pub fn provider(assembly: &capability::Assembly) -> Result<Arc<dyn Provider>, String> {
+    let paths = CosyVoicePaths::from_assembly(assembly)?;
+    Ok(Arc::new(CosyVoiceProvider::new(paths)))
 }
 
 impl Provider for CosyVoiceProvider {

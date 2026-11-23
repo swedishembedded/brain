@@ -2118,7 +2118,7 @@ $(PAPER_TARGETS): papers/%/pdf:
 # Heavy and network-bound, not compute-bound - see scripts/demo/quickstart.sh's
 # own docs. `test/e2e/quickstart` asserts on this target's output afterward.
 ## docs/quickstart - regenerate README's Quick start assets against REAL auto-fetched weights (heavy, network)
-docs/quickstart: build/release
+docs/quickstart: build/release samples/models/qwen3tts/build
 	scripts/demo/quickstart.sh
 
 ## generate - lists the generators of checked-in files; writes nothing

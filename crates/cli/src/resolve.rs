@@ -64,7 +64,6 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("timesfm3", "brain/timesfm3"),
     ("horizon", "brain/horizon"),
     ("minimaxmusic3", "brain/minimaxmusic3"),
-    ("cosyvoice", "brain/cosyvoice"),
     ("supir", "brain/supir"),
     ("sdxlunet", "brain/sdxl"),
     ("controlnet", "brain/sdxl-controlnet"),
@@ -100,7 +99,6 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     ("qwen35", "brain/qwen35"),
     ("qwen35moe", "brain/qwen35moe"),
     ("qwen3omnimoe", "brain/qwen3omnimoe"),
-    ("qwen3tts", "brain/qwen3tts"),
     ("pulid", "brain/flux1-pulid"),
     // No-weights utility models: listed by `brain caps` (via `catalog::MODELS`)
     // but, before this row existed, unreachable from the CLI - the same
@@ -115,6 +113,28 @@ const ARCH_TO_MODEL: &[(&str, &str)] = &[
     // was never actually reachable.
     ("imgpipe", "brain/imgpipe"),
 ];
+
+/// Served models whose command line is their own sample program rather than
+/// `brain <arch> <action>`: `<arch id>, <canonical model id>, <sample
+/// directory under samples/>`. `brain serve` still serves them; on the host,
+/// `sample-models-<arch> <action>` takes the same actions and flags (one
+/// `invoke` runner over the same manifest), and `brain <arch> ...` refuses by
+/// naming it instead of running anything.
+const SAMPLE_OWNED: &[(&str, &str, &str)] = &[
+    ("cosyvoice", "brain/cosyvoice", "models/cosyvoice"),
+    ("qwen3tts", "brain/qwen3tts", "models/qwen3tts"),
+];
+
+/// The sample program that runs `model`'s actions on the host, when the
+/// `brain` binary does not: its Cargo package name.
+pub(crate) fn sample_for_model(model: &str) -> Option<String> {
+    SAMPLE_OWNED.iter().find(|(_, m, _)| *m == model).map(|(_, _, dir)| sample_package(dir))
+}
+
+/// `samples/<category>/<name>` is the package `sample-<category>-<name>`.
+fn sample_package(dir: &str) -> String {
+    format!("sample-{}", dir.replace('/', "-"))
+}
 
 enum Resolved {
     /// `arch` is `brain_arch`'s canonical id (`'static`, from the registry
@@ -255,6 +275,14 @@ fn dispatch_arch(arch: &str, rest: Vec<String>) {
         args.extend(["--arch".to_string(), arch.to_string()]);
         crate::finetune_cli::run_finetune(&args);
     }
+    if let Some((_, _, dir)) = SAMPLE_OWNED.iter().find(|(id, _, _)| *id == arch) {
+        let verb = rest.first().map(String::as_str).unwrap_or("<action>");
+        eprintln!(
+            "brain: {arch} runs from its own sample, with the same actions and flags: `make samples/{dir}/build`, then `target/release/{} {verb} ...` (`brain serve` still serves it)",
+            sample_package(dir)
+        );
+        std::process::exit(2);
+    }
     if let Some((_, model)) = ARCH_TO_MODEL.iter().find(|(id, _)| *id == arch) {
         // `run_do` resolves the model's `--<role>` override flags and its
         // `Assembly` through the catalog's spec. It expects `[model, action, ...flags]`; `rest` is already
@@ -373,9 +401,25 @@ mod tests {
             .filter_map(|m| m.spec.map(|(arch, _)| arch))
             .filter(|arch| brain_arch::by_id(arch).is_some())
             .filter(|arch| !ARCH_TO_MODEL.iter().any(|(id, _)| id == arch))
+            .filter(|arch| !SAMPLE_OWNED.iter().any(|(id, _, _)| id == arch))
             .map(str::to_string)
             .collect();
-        assert!(unreachable.is_empty(), "served with a resolver spec but unreachable as `brain <arch> <verb>`: {unreachable:?}");
+        assert!(unreachable.is_empty(), "served with a resolver spec but unreachable as `brain <arch> <verb>` or a sample: {unreachable:?}");
+    }
+
+    /// A model the `brain` binary hands to its sample names a sample that
+    /// exists, serves the catalog model of that id, and is not also routed
+    /// by `ARCH_TO_MODEL` (one command line per model).
+    #[test]
+    fn every_sample_owned_model_names_a_real_sample_and_no_brain_verb() {
+        for (arch, model, dir) in SAMPLE_OWNED {
+            let manifest = std::path::PathBuf::from(brain_testutil::repo_path(&format!("samples/{dir}/Cargo.toml")));
+            let toml = std::fs::read_to_string(&manifest).unwrap_or_else(|e| panic!("{arch}: {}: {e}", manifest.display()));
+            assert!(toml.contains(&format!("name = \"{}\"", sample_package(dir))), "{arch}: {} is not package {}", manifest.display(), sample_package(dir));
+            assert!(catalog::models().iter().any(|m| m.spec.is_some_and(|(a, _)| a == *arch) && (m.manifest)().model == *model), "{arch}: no catalog model {model}");
+            assert!(!ARCH_TO_MODEL.iter().any(|(id, _)| id == arch), "{arch} is in both ARCH_TO_MODEL and SAMPLE_OWNED");
+            assert!(matches!(resolve(&s(&[arch, "synth"])), Resolved::Arch { .. }), "{arch} must still resolve, to be refused by name");
+        }
     }
 
     /// `ARCH_TO_MODEL` ids with no `brain_arch::Arch` row: no-weights utility

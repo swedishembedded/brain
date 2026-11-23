@@ -57,7 +57,13 @@ pub fn run_caps(argv: &[String]) -> i32 {
         return 0;
     }
     print!("{}", render_listing(&mans, Style::for_stdout()));
-    println!("run one with:  brain <architecture> <action> [--param value]… [--in name=path]… [--out name=path]…");
+    let samples: Vec<(String, String)> = mans.iter().filter_map(|m| crate::resolve::sample_for_model(&m.model).map(|p| (m.model.clone(), p))).collect();
+    if samples.len() < mans.len() {
+        println!("run one with:  brain <architecture> <action> [--param value]… [--in name=path]… [--out name=path]…");
+    }
+    for (model, package) in samples {
+        println!("run {model} with:  {package} <action> [--param value]… (samples/README.md)");
+    }
     0
 }
 

@@ -1,0 +1,23 @@
+[package]
+# Package names under samples/ are derived from the path:
+# `samples/models/cosyvoice` -> `sample-models-cosyvoice`.
+name = "sample-models-cosyvoice"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+homepage.workspace = true
+description = "Sample application: CosyVoice 2/3 zero-shot voice cloning from the command line, the served synth action with every parameter."
+publish = false
+
+[dependencies]
+# A per-model program links the model it drives and the shared action runner
+# directly (samples/README.md rule 1): the action is CosyVoice's own, served
+# one, and `invoke` turns its manifest into this program's command line.
+brain-cosyvoice.workspace = true
+brain-invoke.workspace = true
+
+[package.metadata.brain]
+# `make check/samples` fails if the real `cargo tree` closure exceeds this.
+max-brain-crates = 44

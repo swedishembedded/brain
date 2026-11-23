@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Qwen3-TTS's [`ArchSpec`]: `weights_dir` (talker/mtp/codec/speaker - the
-//! checkpoint as downloaded, or the files `brain qwen3tts import` writes, see
+//! checkpoint as downloaded, or the files `sample-models-qwen3tts import` writes, see
 //! [`crate::TtsPaths::new`]) and `ckpt` (the HF checkpoint dir for
 //! `config.json`/the tokenizer).
 //!

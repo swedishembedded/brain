@@ -29,6 +29,8 @@ cd "$REPO"
 
 BRAIN="${BRAIN:-$REPO/target/release/brain}"
 [ -x "$BRAIN" ] || { echo "quickstart: no brain binary at $BRAIN -- run 'make build/release' first" >&2; exit 1; }
+QWEN3TTS="$REPO/target/release/sample-models-qwen3tts"
+[ -x "$QWEN3TTS" ] || { echo "quickstart: no Qwen3-TTS sample at $QWEN3TTS -- run 'make samples/models/qwen3tts/build' first" >&2; exit 1; }
 
 : "${BRAIN_MODELS_DIR:=$REPO/.quickstart-models}"
 export BRAIN_MODELS_DIR
@@ -296,7 +298,7 @@ step "8. audio LoRA (qwen3tts finetune, synthetic text->codes data)"
 if ! need "$IMG_DIR/qwen3tts-lora.txt"; then
   # seed: reproduces the training data behind the loss line the README quotes
   "$BRAIN" data gen tts --out "$BRAIN_MODELS_DIR/.quickstart-tts-data" --n 4000 --seed 1337
-  "$BRAIN" qwen3tts finetune \
+  "$QWEN3TTS" finetune \
     --data "$BRAIN_MODELS_DIR/.quickstart-tts-data" \
     --save "$BRAIN_MODELS_DIR/.quickstart-talker-lora.safetensors" --steps 200 \
     2>&1 | tail -2 > "$IMG_DIR/qwen3tts-lora.txt"

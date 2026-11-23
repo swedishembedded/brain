@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! The real Qwen3-TTS checkpoint, read as downloaded, is the checkpoint
-//! `brain qwen3tts import` writes from it: for the Talker, the MTP, the codec
+//! `sample-models-qwen3tts import` writes from it: for the Talker, the MTP, the codec
 //! and the speaker encoder, the same tensor names, values and config.
 //! Compares against an imported `brain_tts/` directory beside the download
 //! (`qwen3tts import --out-dir <ckpt>/brain_tts`), one tensor at a time.

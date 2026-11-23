@@ -84,7 +84,7 @@ advances one frame per round and finishes at its own EOS, so a short clip
 is not stuck behind a long one:
 
 ```bash
-brain qwen3tts batch \
+target/release/sample-models-qwen3tts batch \
     --requests '[{"text":"First.","max_frames":40},{"text":"Second.","max_frames":24}]' \
     --out audio_0=a.wav --out audio_1=b.wav
 ```

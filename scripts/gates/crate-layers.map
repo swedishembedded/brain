@@ -222,6 +222,7 @@ sample-fly-interactive	6
 sample-imagegen-batch	6
 sample-imagegen-generate	6
 sample-models-chronos2	6
+sample-models-cosyvoice	6
 sample-models-deepseekocr2	6
 sample-models-diamond	6
 sample-models-fincast	6

@@ -5,8 +5,8 @@
 //! CosyVoice. Resolved through `crates/loader`'s resolver against
 //! `qwen3tts::spec::Qwen3TtsSpec`'s two roles (`weights_dir`, `ckpt`) tried
 //! first, then `cosyvoice::spec::CosyVoiceSpec`'s four (`llm`, `flow`,
-//! `hift`, `tokenizer`) - the same resolver `brain do tts synth`/`clone`/
-//! `design` and `brain do cosyvoice synth` use.
+//! `hift`, `tokenizer`) - the same resolver `sample-models-qwen3tts synth`/`clone`/
+//! `design` and `sample-models-cosyvoice synth` use.
 //!
 //! ONE pipeline type, not two: like [`crate::ImagePipeline`] (flux2 vs.
 //! s3dit), this dispatches on the resolved architecture internally
@@ -231,7 +231,7 @@ impl TtsOptions {
 
     /// `Err` only when `variant` is set to a string neither backend
     /// recognizes - the same vocabulary `cosyvoice::pipeline::Variant::parse`
-    /// (and `brain do cosyvoice synth --variant`) already reject.
+    /// (and `sample-models-cosyvoice synth --variant`) already reject.
     fn to_cosyvoice_gen_opts(&self) -> Result<cosyvoice::pipeline::GenOpts> {
         let variant = match &self.variant {
             Some(v) => cosyvoice::pipeline::Variant::parse(v).map_err(Error::Backend)?,

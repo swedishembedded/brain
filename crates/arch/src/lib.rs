@@ -517,7 +517,7 @@ pub const ARCHS: &[Arch] = &[
     // names a different vendor than this row's `reference` could carry; see
     // the `qwen3` row's comment on why community quantizer repos are omitted.
     // Weight resolution is the model-store resolver (`qwen3tts::spec::
-    // Qwen3TtsSpec`): `brain qwen3tts import`'s own two-role
+    // Qwen3TtsSpec`): `sample-models-qwen3tts import`'s own two-role
     // `brain.manifest.json` (`weights_dir`/`ckpt`) is what `classify()`
     // recognizes.
     arch!("qwen3tts", "Qwen3-TTS (Talker + MTP code predictor)", Audio, LlamaCpp, "brain-qwen3tts", hf: &["Qwen3TTSForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-TTS-12Hz-0.6B-Base"),
