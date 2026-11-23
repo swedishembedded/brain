@@ -15,7 +15,6 @@ path = "src/lib.rs"
 [dependencies]
 brain-gpu-core.workspace = true
 brain-kernels.workspace = true
-brain-data.workspace = true
 brain-capability.workspace = true
 serde_json.workspace = true
 bytemuck.workspace = true
@@ -26,3 +25,5 @@ matroska-demuxer.workspace = true
 [dev-dependencies]
 brain-testutil.workspace = true
 brain-kernels.workspace = true
+# The tests' signal filler (`data::rng::Lcg`).
+brain-data.workspace = true

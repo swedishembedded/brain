@@ -19,7 +19,6 @@ brain-kernels.workspace = true
 brain-audio.workspace = true
 brain-checkpoint.workspace = true
 brain-onnx.workspace = true
-brain-data.workspace = true
 
 [dev-dependencies]
 brain-testutil.workspace = true

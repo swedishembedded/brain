@@ -12,9 +12,8 @@ description = "Model-agnostic diffusion core: flow-matching and discrete DDPM no
 name = "diffusion"
 path = "src/lib.rs"
 
-[dependencies]
-serde_json = { workspace = true }
-
 [dev-dependencies]
+# The schedule parity test reads its reference manifest.
+serde_json = { workspace = true }
 brain-testutil.workspace = true
 brain-checkpoint.workspace = true

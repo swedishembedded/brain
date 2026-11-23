@@ -18,7 +18,6 @@ brain-kernels.workspace = true
 brain-audio.workspace = true
 brain-paramstore.workspace = true
 brain-checkpoint.workspace = true
-brain-data.workspace = true
 serde_json.workspace = true
 bytemuck.workspace = true
 
