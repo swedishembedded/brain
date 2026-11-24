@@ -300,51 +300,9 @@ pub(crate) fn algorithm(params: &crate::request::Params) -> Result<Option<brain:
 /// every setting the request names over it.
 pub(crate) fn policy_gradient_config(params: &crate::request::Params) -> Result<brain::PolicyGradientConfig, String> {
     let mut config = algorithm(params)?.map_or_else(brain::PolicyGradientConfig::default, |a| a.config(params.max_block));
-    if let Some(v) = params.clip_eps {
-        config.clip_eps = v;
-    }
-    config.clip_eps_high = params.clip_eps_high.or(config.clip_eps_high);
-    config.dual_clip = params.dual_clip.or(config.dual_clip);
-    if let Some(v) = &params.importance {
-        config.importance = v.parse().map_err(|e| format!("train: importance: {e}"))?;
-    }
-    config.max_step_kl = params.max_step_kl.or(config.max_step_kl);
-    config.max_step_grad_norm = params.max_step_grad_norm.or(config.max_step_grad_norm);
-    if let Some(v) = params.kl_beta {
-        config.kl_beta = v;
-    }
-    if let Some(v) = &params.reference {
-        config.reference = v.parse().map_err(|e| format!("train: reference: {e}"))?;
-    }
-    if let Some(v) = &params.behaviour {
-        config.behaviour = v.parse().map_err(|e| format!("train: {e}"))?;
-    }
-    config.loss_agg = match (params.loss_agg.as_deref(), params.loss_agg_length) {
-        // The constant is its own setting on the wire; omitted, it is the longest row the run trains.
-        (Some("constant-length"), length) => brain::LossAgg::ConstantLength(length.unwrap_or(params.max_block)),
-        // An algorithm whose aggregation is a constant length (dr-grpo) takes the constant alone.
-        (None, Some(n)) if matches!(config.loss_agg, brain::LossAgg::ConstantLength(_)) => brain::LossAgg::ConstantLength(n),
-        (_, Some(_)) => return Err("train: loss_agg_length is the constant of loss_agg constant-length; name that aggregation".to_string()),
-        (Some(v), None) => v.parse().map_err(|e| format!("train: loss_agg: {e}"))?,
-        (None, None) => config.loss_agg,
-    };
-    if let Some(v) = params.temperature {
-        config.temperature = v;
-    }
-    if let Some(v) = &params.teacher {
-        config.teacher = v.parse().map_err(|e| format!("train: teacher: {e}"))?;
-    }
-    config.advantage_bound = params.advantage_bound.or(config.advantage_bound);
-    config.sequence_advantage_cap = params.sequence_advantage_cap.or(config.sequence_advantage_cap);
-    if let Some(v) = &params.advantage_norm {
-        config.advantage_norm = brain::AdvantageNorm::parse(v).map_err(|e| format!("train: {e}"))?;
-    }
-    if let Some(v) = &params.advantage_floor {
-        config.advantage_floor = brain::AdvantageFloor::parse(v).map_err(|e| format!("train: {e}"))?;
-    }
-    if let Some(v) = &params.truncated {
-        config.truncated = brain::TruncatedRollouts::parse(v).map_err(|e| format!("train: {e}"))?;
-    }
+    params.policy_gradient.apply(&mut config).map_err(|e| format!("train: {e}"))?;
+    // The aggregation and its constant are two params; an omitted constant is the longest row the run trains.
+    config.loss_agg = brain::LossAgg::resolve(params.loss_agg.as_deref(), params.loss_agg_length, Some(params.max_block), config.loss_agg, ("loss_agg", "loss_agg_length", "max_block")).map_err(|e| format!("train: {e}"))?;
     Ok(config)
 }
 

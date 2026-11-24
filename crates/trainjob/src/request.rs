@@ -16,6 +16,7 @@
 //! dataset is either an input blob of the call (a file descriptor over D-Bus)
 //! or a digest in the server's artifact store. A caller never names a path.
 
+use brain::policy_gradient_settings::{PgSetting, Served, SettingKind, SETTINGS};
 use capability::{ActionSpec, BlobSpec, Invocation, Media, ParamSpec, ParamType};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
@@ -45,28 +46,10 @@ pub const MAX_ADAPTER_ID_LEN: usize = 200;
 pub fn implied_defaults() -> Map<String, Value> {
     // An f32 as the decimal it was written as, not its widened binary value (0.2, not 0.20000000298023224).
     let float = |v: f32| v.to_string().parse::<f64>().map(Value::from).unwrap_or(Value::Null);
-    let pg = brain::PolicyGradientConfig::default();
     let declared = [
         ("rank", Some(json!(brain::DEFAULT_LORA_RANK))),
         ("lr", Some(float(brain::DEFAULT_LORA_LR))),
         ("weight_decay", Some(float(brain::LORA_WEIGHT_DECAY))),
-        ("clip_eps", Some(float(pg.clip_eps))),
-        ("clip_eps_high", pg.clip_eps_high.map(float)),
-        ("dual_clip", pg.dual_clip.map(float)),
-        ("importance", Some(json!(pg.importance.to_string()))),
-        ("max_step_kl", pg.max_step_kl.map(float)),
-        ("max_step_grad_norm", pg.max_step_grad_norm.map(float)),
-        ("kl_beta", Some(float(pg.kl_beta))),
-        ("reference", Some(json!(pg.reference.name()))),
-        ("behaviour", Some(json!(pg.behaviour.name()))),
-        ("loss_agg", Some(json!(pg.loss_agg.name()))),
-        ("temperature", Some(float(pg.temperature))),
-        ("teacher", Some(json!(pg.teacher.name()))),
-        ("advantage_bound", pg.advantage_bound.map(float)),
-        ("sequence_advantage_cap", pg.sequence_advantage_cap.map(float)),
-        ("advantage_norm", Some(json!(pg.advantage_norm.name()))),
-        ("truncated", Some(json!(pg.truncated.name()))),
-        ("advantage_floor", Some(json!(pg.advantage_floor.name()))),
         ("beta", Some(float(brain::DEFAULT_DPO_BETA))),
         ("loss", Some(json!(brain::PairLoss::default().name()))),
         ("gamma", Some(float(brain::DEFAULT_SIMPO_GAMMA))),
@@ -76,7 +59,20 @@ pub fn implied_defaults() -> Map<String, Value> {
         ("undesirable_weight", Some(float(brain::DEFAULT_KTO_UNDESIRABLE_WEIGHT))),
         ("top_k", Some(json!(brain::DEFAULT_DISTILL_TOP_K))),
     ];
-    declared.into_iter().filter_map(|(name, v)| Some((name.to_string(), v?))).collect()
+    let pg = brain::PolicyGradientConfig::default();
+    let policy_gradient = SETTINGS.iter().filter_map(|s| {
+        let value = match s.served {
+            Served::Param => s.get(&pg),
+            Served::Own(value) => value(&pg),
+            Served::No(_) => return None,
+        };
+        let value = match (s.kind, value.as_f64()) {
+            (SettingKind::Float { .. }, Some(v)) => float(v as f32),
+            _ => value,
+        };
+        Some((s.name, (!value.is_null()).then_some(value)))
+    });
+    declared.into_iter().chain(policy_gradient).filter_map(|(name, v)| Some((name.to_string(), v?))).collect()
 }
 
 /// What the training action is.
@@ -121,28 +117,15 @@ fn spec_without_defaults() -> ActionSpec {
         .param(optional_f("replay_share", "the share of draws that come from the replay sets in all, in (0, 1)", 0.0, 1.0))
         .param(ParamSpec::new("adapter_id", ParamType::Str, "the id written on the adapter's card"))
         .param(ParamSpec::new("keep_evaluations", ParamType::Bool, "also publish the adapter of every evaluation (needs eval_every > 0)").default(json!(false)))
-        .param(ParamSpec::new("return_adapter", ParamType::Bool, "also return the adapter as an output blob (a file descriptor over D-Bus); over HTTP take it by digest from the artifact store").default(json!(false)))
-        .param(ParamSpec::new("algorithm", ParamType::Enum(brain::PolicyGradientAlgorithm::ALL.iter().map(|a| a.name().to_string()).collect()), "policy gradient: a named algorithm whose settings are the defaults of this run (any setting named beside it overrides it): `grpo` (z-score, seq-mean, symmetric clip, the KL term), `dr-grpo` (mean-centred, constant-length over max_block, no KL), `dapo` (z-score, clip-higher 0.28, token-sum, truncated masked, no KL) or `rloo` (leave-one-out, token-sum); the result records every setting the run trained with"))
-        .param(optional_f("clip_eps", "policy gradient: half-width of the clip band of the importance ratio", 0.0, 1.0))
-        .param(optional_f("clip_eps_high", "policy gradient: the upper edge of the clip band is 1 + this (clip-higher), at least clip_eps; omitted, the band is symmetric", 0.0, 10.0))
-        .param(optional_f("dual_clip", "policy gradient: dual-clip PPO's bound c on a negative advantage's term, max(min(r*A, clip(r)*A), c*A): a token whose ratio ran past c costs at most c*|A| and gives no gradient (each step reports the share as clip_fraction_dual); above 1", 1.0, 1e9))
-        .param(ParamSpec::new("importance", ParamType::Str, "policy gradient: the correction for the sampling engine's gap to the trainer: `none`, `truncate:CAP` or `mask:CAP`; needs recorded behaviour log-probabilities"))
-        .param(optional_f("max_step_kl", "policy gradient: skip (and log) an optimiser step whose mean KL to the reference is over this", 0.0, 1e9))
-        .param(optional_f("max_step_grad_norm", "policy gradient: skip (and log) an optimiser step whose gradient norm is over this", 0.0, 1e12))
-        .param(optional_f("kl_beta", "policy gradient: coefficient of the KL term to the reference policy", 0.0, 1000.0))
-        .param(ParamSpec::new("reference", ParamType::Enum(vec!["base".into(), "start".into()]), "policy gradient: the policy the KL term is taken against"))
-        .param(ParamSpec::new("behaviour", ParamType::Enum(vec!["recorded".into(), "start_of_run_proxy".into()]), "policy gradient: where the behaviour log-probabilities of the importance ratio come from: `recorded` (default) the sampler's own, required on every supervised token; `start_of_run_proxy` the start-of-run policy's where none was recorded, exact only if the rollouts were sampled from it"))
-        .param(ParamSpec::new("loss_agg", ParamType::Enum(vec!["seq-mean".into(), "token-sum".into(), "constant-length".into()]), "policy gradient: how the token terms are normalised: `seq-mean` (each sequence by its own token count), `token-sum` (every token of a step by the step's count) or `constant-length` (each sequence's sum by loss_agg_length, averaged over the sequences: Dr. GRPO)"))
-        .param(ParamSpec::new("loss_agg_length", ParamType::Int, "policy gradient with loss_agg constant-length: the constant, in tokens, every sequence's token sum is divided by (default max_block)").min(1.0).max(1_048_576.0).step(1.0))
-        .param(optional_f("temperature", "policy gradient: the temperature the rollouts were sampled at", 0.0, 100.0))
-        .param(ParamSpec::new("teacher", ParamType::Str, "policy gradient with teacher contexts: the frozen policy that scores the student's tokens in the privileged context, `base` or `start`; distill: the policy of the same base that teaches, `base`, `start` (the start_adapter) or `adapter:<blake3 digest>` (an adapter in the artifact store)"))
-        .param(ParamSpec::new("distill_teacher", ParamType::Str, "policy gradient: on-policy distillation from another model, `<vendor>/<repo>` in the server's model store: the teacher whose scores of the sampled answers the rollout records carry. Its tokenizer is compared with the base's; per-token scores (`teacher_logprobs`) train only for identical tokenizers and are refused otherwise, per-answer scores (`teacher_logprob`, the higher-variance sequence-level estimator) train for any teacher. Only its tokenizer is read"))
-        .param(ParamSpec::new("top_k", ParamType::Int, "distill: the teacher's most likely tokens kept per position (default 16)").min(1.0).max(256.0).step(1.0))
-        .param(optional_f("advantage_bound", "policy gradient with teacher contexts: each token's advantage is clipped to [-bound, bound]", 0.0, 1e6))
-        .param(optional_f("sequence_advantage_cap", "policy gradient with teacher contexts: the most the magnitudes of a sequence's token advantages may sum to", 0.0, 1e9))
-        .param(ParamSpec::new("advantage_floor", ParamType::Enum(brain::AdvantageFloor::ALL.iter().map(|f| f.name().to_string()).collect()), "policy gradient: `none` (default) or `zero`: each advantage clamped at zero after it is computed against its whole group, so a rollout under the baseline sets it but carries no policy gradient (a positive-only run)"))
-        .param(ParamSpec::new("truncated", ParamType::Enum(brain::TruncatedRollouts::ALL.iter().map(|t| t.name().to_string()).collect()), "policy gradient: what a rollout marked `truncated` does: `mask` (never trained, its reward takes no part in its group: DAPO's overlong filtering) or `keep` (trained, its reward counted)"))
-        .param(ParamSpec::new("advantage_norm", ParamType::Enum(brain::AdvantageNorm::ALL.iter().map(|n| n.name().to_string()).collect()), "policy gradient: how each group's rewards become the advantages of its rollouts: `mean-centred` (r - mean), `z-score` ((r - mean) / (std + 1e-4)) or `leave-one-out` (r_i - the mean of the others)"))
+        .param(ParamSpec::new("return_adapter", ParamType::Bool, "also return the adapter as an output blob (a file descriptor over D-Bus); over HTTP take it by digest from the artifact store").default(json!(false)));
+    for p in policy_gradient_params() {
+        let beside_the_teacher_model = p.name == "distill_teacher";
+        spec = spec.param(p);
+        if beside_the_teacher_model {
+            spec = spec.param(ParamSpec::new("top_k", ParamType::Int, "distill: the teacher's most likely tokens kept per position (default 16)").min(1.0).max(256.0).step(1.0));
+        }
+    }
+    spec = spec
         .param(ParamSpec::new("loss", ParamType::Enum(brain::PairLoss::NAMES.iter().map(|n| n.to_string()).collect()), "preference: the pair loss: `dpo` (default), `ipo`, or the reference-free `simpo` and `orpo`, which score no reference"))
         .param(optional_f("gamma", "preference with loss simpo: the target margin (default 0.5)", 0.0, 100.0))
         .param(optional_f("beta", "preference, feedback: the temperature of the preference loss (default 0.1; simpo's beta, orpo's lambda)", 0.0, 100.0))
@@ -162,6 +145,33 @@ fn spec_without_defaults() -> ActionSpec {
         spec = spec.input(blob(name, "a replay dataset"));
     }
     spec.output(BlobSpec::new("adapter", Media::Bytes, "the trained adapter (only when return_adapter is set)")).output(BlobSpec::new("record", Media::Text, "the training record the trainer wrote beside the adapter (JSON); published to the artifact store (record_digest) when there is one, returned when return_adapter is set or there is none"))
+}
+
+/// The params of the policy gradient, in the order the action lists them: `algorithm`, each served setting of the one
+/// declaration ([`brain::policy_gradient_settings`]), and, beside the two settings they complete, the request-level
+/// params that are no field of the configuration: the constant of a constant-length aggregation and the teacher model
+/// of on-policy distillation.
+fn policy_gradient_params() -> Vec<ParamSpec> {
+    let mut params = vec![ParamSpec::new("algorithm", ParamType::Enum(brain::PolicyGradientAlgorithm::ALL.iter().map(|a| a.name().to_string()).collect()), "policy gradient: a named algorithm whose settings are the defaults of this run (any setting named beside it overrides it): `grpo` (z-score, seq-mean, symmetric clip, the KL term), `dr-grpo` (mean-centred, constant-length over max_block, no KL), `dapo` (z-score, clip-higher 0.28, token-sum, truncated masked, no KL) or `rloo` (leave-one-out, token-sum); the result records every setting the run trained with")];
+    for s in SETTINGS.iter().filter(|s| !matches!(s.served, Served::No(_))) {
+        params.push(setting_param(s));
+        match s.name {
+            "loss_agg" => params.push(ParamSpec::new("loss_agg_length", ParamType::Int, "policy gradient with loss_agg constant-length: the constant, in tokens, every sequence's token sum is divided by (default max_block)").min(1.0).max(1_048_576.0).step(1.0)),
+            "teacher" => params.push(ParamSpec::new("distill_teacher", ParamType::Str, "policy gradient: on-policy distillation from another model, `<vendor>/<repo>` in the server's model store: the teacher whose scores of the sampled answers the rollout records carry. Its tokenizer is compared with the base's; per-token scores (`teacher_logprobs`) train only for identical tokenizers and are refused otherwise, per-answer scores (`teacher_logprob`, the higher-variance sequence-level estimator) train for any teacher. Only its tokenizer is read")),
+            _ => {}
+        }
+    }
+    params
+}
+
+/// The param a served setting is, typed and bounded as its row declares.
+fn setting_param(s: &PgSetting) -> ParamSpec {
+    match s.kind {
+        SettingKind::Float { min, max } => ParamSpec::new(s.name, ParamType::Float, s.help).min(min).max(max),
+        SettingKind::Choice(values) => ParamSpec::new(s.name, ParamType::Enum(values().into_iter().map(String::from).collect()), s.help),
+        SettingKind::Switch => ParamSpec::new(s.name, ParamType::Bool, s.help),
+        SettingKind::Text | SettingKind::Document | SettingKind::Computed => ParamSpec::new(s.name, ParamType::Str, s.help),
+    }
 }
 
 /// Where one dataset comes from.
@@ -330,7 +340,9 @@ impl Objective {
     }
 }
 
-/// The scalar settings, exactly the params the spec declares (the invocation was validated against it).
+/// The scalar settings, exactly the params the spec declares (the invocation was validated against it). The settings of
+/// the policy gradient's configuration are in [`Self::policy_gradient`]; `algorithm`, the aggregation with its constant
+/// and the teacher model are the request's own, and `teacher` is also the distill objective's.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Params {
@@ -359,26 +371,11 @@ pub struct Params {
     pub keep_evaluations: bool,
     pub return_adapter: bool,
     pub algorithm: Option<String>,
-    pub clip_eps: Option<f32>,
-    pub clip_eps_high: Option<f32>,
-    pub dual_clip: Option<f32>,
-    pub importance: Option<String>,
-    pub max_step_kl: Option<f32>,
-    pub max_step_grad_norm: Option<f32>,
-    pub kl_beta: Option<f32>,
-    pub reference: Option<String>,
-    pub behaviour: Option<String>,
     pub loss_agg: Option<String>,
     pub loss_agg_length: Option<u32>,
-    pub temperature: Option<f32>,
     pub teacher: Option<String>,
     pub distill_teacher: Option<String>,
     pub top_k: Option<u32>,
-    pub advantage_bound: Option<f32>,
-    pub sequence_advantage_cap: Option<f32>,
-    pub advantage_norm: Option<String>,
-    pub truncated: Option<String>,
-    pub advantage_floor: Option<String>,
     pub beta: Option<f32>,
     pub loss: Option<String>,
     pub gamma: Option<f32>,
@@ -389,7 +386,15 @@ pub struct Params {
     pub allow_cpu: bool,
     pub resume_key: Option<String>,
     pub checkpoint_every: Option<u32>,
+    /// The configuration settings a policy-gradient request names, laid over its algorithm's (empty for another
+    /// objective, whose request names none: the guard refuses them by name).
+    #[serde(skip)]
+    pub policy_gradient: brain::policy_gradient_settings::PgSettingsPatch,
 }
+
+/// The settings of the policy gradient's configuration that `Params` declares too: the distill objective names its
+/// teacher by `teacher`.
+const SHARED_WITH_PARAMS: [&str; 1] = ["teacher"];
 
 /// A request that passed the spec and every check that needs no file and no device.
 #[derive(Debug)]
@@ -405,34 +410,23 @@ impl Request {
     /// belong to the other objective, a `data` document that is malformed or names a blob the call does not
     /// carry (or carries one the document does not use), an adapter id that is not plain text.
     pub fn from_invocation(inv: &Invocation) -> Result<Request, String> {
-        let params: Params = serde_json::from_value(inv.params.clone()).map_err(|e| format!("train: {e}"))?;
+        let named = |name: &str| inv.params.get(name).is_some_and(|v| !v.is_null());
+        let pg_named: Vec<String> = policy_gradient_params().into_iter().map(|p| p.name).filter(|name| named(name)).collect();
+        let pg_named: Vec<&str> = pg_named.iter().map(String::as_str).collect();
+        let mut fields = inv.params.as_object().cloned().ok_or_else(|| "train: the params are not an object".to_string())?;
+        let mut settings = Vec::new();
+        for s in SETTINGS.iter().filter(|s| matches!(s.served, Served::Param)) {
+            let value = if SHARED_WITH_PARAMS.contains(&s.name) { fields.get(s.name).cloned() } else { fields.remove(s.name) };
+            settings.extend(value.filter(|v| !v.is_null()).map(|v| (s.name, v)));
+        }
+        let mut params: Params = serde_json::from_value(Value::Object(fields)).map_err(|e| format!("train: {e}"))?;
+        if params.objective == Objective::PolicyGradient {
+            for (name, value) in settings {
+                params.policy_gradient.insert(name, value).map_err(|e| format!("train: {name}: {e}"))?;
+            }
+        }
         let data = DataRefs::parse(&params.data)?;
         let refused = |what: &str| Err(format!("train: {what}"));
-        let pg_named: Vec<&str> = [
-            (params.algorithm.is_some(), "algorithm"),
-            (params.clip_eps.is_some(), "clip_eps"),
-            (params.clip_eps_high.is_some(), "clip_eps_high"),
-            (params.dual_clip.is_some(), "dual_clip"),
-            (params.importance.is_some(), "importance"),
-            (params.max_step_kl.is_some(), "max_step_kl"),
-            (params.max_step_grad_norm.is_some(), "max_step_grad_norm"),
-            (params.kl_beta.is_some(), "kl_beta"),
-            (params.reference.is_some(), "reference"),
-            (params.behaviour.is_some(), "behaviour"),
-            (params.loss_agg.is_some(), "loss_agg"),
-            (params.loss_agg_length.is_some(), "loss_agg_length"),
-            (params.temperature.is_some(), "temperature"),
-            (params.teacher.is_some(), "teacher"),
-            (params.distill_teacher.is_some(), "distill_teacher"),
-            (params.advantage_bound.is_some(), "advantage_bound"),
-            (params.sequence_advantage_cap.is_some(), "sequence_advantage_cap"),
-            (params.advantage_norm.is_some(), "advantage_norm"),
-            (params.truncated.is_some(), "truncated"),
-            (params.advantage_floor.is_some(), "advantage_floor"),
-        ]
-        .into_iter()
-        .filter_map(|(named, name)| named.then_some(name))
-        .collect();
         if params.objective != Objective::Distill && params.top_k.is_some() {
             return refused(&format!("top_k configures distillation; the objective is {}", params.objective.name()));
         }
@@ -621,6 +615,44 @@ mod tests {
 
     fn request(params: serde_json::Value, blobs: &[&str]) -> Result<Request, String> {
         Request::from_invocation(&validated(params, blobs)?)
+    }
+
+    /// The policy-gradient part of the served contract is the one it was before its settings were declared once
+    /// (EC-1, pinned on 41aec7d47): every param from `algorithm` to `advantage_norm`, with its name, type, help,
+    /// range, default and implied default, in order, and so what `GET /v1/capabilities` shows. The blake3 of their
+    /// debug form.
+    #[test]
+    fn the_served_policy_gradient_params_are_pinned() {
+        let spec = action_spec();
+        let at = |name: &str| spec.params.iter().position(|p| p.name == name).unwrap();
+        let params = &spec.params[at("algorithm")..=at("advantage_norm")];
+        assert_eq!(blake3::hash(format!("{params:?}").as_bytes()).to_hex().to_string(), "7a3d2afbaae44b13306fa2158d9929df9ea9525fc986047355089d16db994b29");
+    }
+
+    /// EC-1: every setting of the policy gradient's one declaration is a param of the action (or says why not), is
+    /// refused by name for an objective it does not configure, and a request setting it to its row's example, a value
+    /// off the default, trains with exactly that value and every other setting at its default.
+    #[test]
+    fn every_policy_gradient_setting_is_served_and_reaches_the_configuration() {
+        let spec = action_spec();
+        let data = json!({"train": {"digest": digest(1)}}).to_string();
+        let default = brain::PolicyGradientConfig::default();
+        for s in SETTINGS {
+            let Served::Param = s.served else {
+                assert!(matches!(s.served, Served::No(_)) || spec.params.iter().any(|p| p.name == s.name), "{}: a served setting is a param", s.name);
+                continue;
+            };
+            assert!(spec.params.iter().any(|p| p.name == s.name && p.help == s.help), "{}: a param with the row's help", s.name);
+            let example: Value = serde_json::from_str(s.example.expect("a served setting has an example")).unwrap();
+            let named = request(json!({"base": "a/b", "data": data, "objective": "policy_gradient", s.name: example}), &[]).unwrap_or_else(|e| panic!("{}: {e}", s.name));
+            let config = crate::job::policy_gradient_config(&named.params).unwrap();
+            let mut want = default;
+            s.set(&mut want, &example).unwrap();
+            assert_ne!(want, default, "{}: the example is off the default", s.name);
+            assert_eq!(config, want, "{}: the request's value is the run's, and nothing else changed", s.name);
+            let e = request(json!({"base": "a/b", "data": data, s.name: example}), &[]).unwrap_err();
+            assert!(e.contains(s.name) && e.contains("sft"), "{}: refused by name for sft: {e}", s.name);
+        }
     }
 
     #[test]

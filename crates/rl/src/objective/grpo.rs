@@ -98,6 +98,26 @@ impl LossAgg {
         }
     }
 
+    /// The aggregation a run names over the configuration's own (`current`, a named algorithm's or the default), where
+    /// the aggregation and its constant are two settings, as on the served action and the CLI: `named` is
+    /// [`Self::name`]'s form (or [`std::fmt::Display`]'s), `length` the constant of `constant-length`, `fallback_length`
+    /// what an unnamed constant is (the run's longest row). A configuration that is already a constant length (Dr.
+    /// GRPO) takes the constant alone. `names` are the surface's own names for the aggregation, its constant and the
+    /// fallback, which the refusals use.
+    ///
+    /// # Errors
+    /// A constant without `constant-length`, `constant-length` with no constant to divide by, or an unknown name.
+    pub fn resolve(named: Option<&str>, length: Option<u32>, fallback_length: Option<u32>, current: LossAgg, names: (&str, &str, &str)) -> Result<LossAgg, String> {
+        let (agg, constant, fallback) = names;
+        match (named, length) {
+            (Some("constant-length"), length) => length.or(fallback_length).map(LossAgg::ConstantLength).ok_or_else(|| format!("{agg} constant-length divides by a constant; give {constant} N or {fallback} N")),
+            (None, Some(n)) if matches!(current, LossAgg::ConstantLength(_)) => Ok(LossAgg::ConstantLength(n)),
+            (_, Some(_)) => Err(format!("{constant} is the constant of {agg} constant-length; name that aggregation")),
+            (Some(v), None) => v.parse().map_err(|e| format!("{agg}: {e}")),
+            (None, None) => Ok(current),
+        }
+    }
+
     /// Refuse an aggregation that has no meaning: a constant length of zero.
     pub fn validate(self) -> Result<(), String> {
         match self {

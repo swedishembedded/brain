@@ -10,32 +10,41 @@ safety nets each item names. Prefer deleting a declaration over adding a layer t
 
 ## Order
 
-EC-1 first (it also closes a resume-identity hazard). EC-2 after EC-1 (it changes the type EC-1 tabulates). EC-3
+EC-1 first (it also closes a resume-identity hazard; done). EC-2 after EC-1 (it changes the type EC-1 tabulates). EC-3
 independently. EC-4 is incremental, by class. EC-5 and EC-6 any time.
 
-## EC-1 One table for the policy-gradient settings (M, open)
+## EC-1 One table for the policy-gradient settings (M, done 2026-11-24)
 
-- **Problem.** `clip_eps_high` (and every sibling: `dual_clip`, `max_step_kl`, `max_step_grad_norm`, `importance`,
-  `advantage_norm`, `loss_agg`, ...) is declared by hand in seven places:
-  1. `rl::PolicyGradientConfig` (`crates/rl/src/objective/external.rs:289`);
-  2. `trainjob` `PgParams` (`crates/trainjob/src/request.rs:356`), its parameter spec with docs and ranges (line 126),
-     its wire list (line 55) and its "policy gradient only" guard list (line 404);
-  3. `trainjob` `job.rs:271-276`, which lays each param over the config field by field;
-  4. the SDK's run identity (`crates/sdk/src/finetune.rs:1303-1324`, every field as bits) and
-  5. its `settings_json` (`finetune.rs:1640-1660`);
-  6. the CLI's `Args`, its hand parser (`crates/cli/src/finetune_cli.rs:254-257`, where `clip_eps_high` is
-     `--ratio-clip-high`) and the struct literal that builds the config (line 420).
-- **Cost.** A field added to the config and missed in one list is silently not settable over the API, not shown in
-  the settings, or, worst, not part of the identity a resume is keyed by, so a resumed run continues under different
-  settings without noticing. The names already drift between the CLI and the API.
-- **Target.** `PolicyGradientConfig` is the one declaration: serde, with a derived patch type (every field `Option`)
-  that the API decodes and `apply`s. The parameter spec (doc, range), the guard, `settings_json` and the CLI flags are
-  generated from one descriptor table beside the config, flag names equal to field names (the CLI's renames go in the
-  major release `cli-to-served.md` plans, with no aliases). The run identity is the canonical JSON of the resolved
-  config, not a hand list.
-- **Safety net (first).** A test that walks every field of `PolicyGradientConfig` and requires it in the spec, the
-  settings, the identity and the CLI, and that a request setting each field to a non-default value round-trips into the
-  resolved config; the existing `trainjob/src/request.rs` and `crates/trainjob/tests/it/run.rs` tests unchanged.
+- **Problem (was).** `clip_eps_high` and every sibling were declared by hand in seven places: the config, the served
+  param spec with its guard list, wire list and field-by-field layering (`trainjob`), the SDK's run identity and
+  `settings_json`, and the CLI's `Args`, hand parser and struct literal. A field missed in one list was silently not
+  settable over the API, not reported, or, worst, not part of the identity a resume is keyed by.
+- **Done.** `rl::objective::pg_settings` (beside `PolicyGradientConfig`, re-exported as `brain::policy_gradient_settings`)
+  holds one row per field: name (= field = wire param = settings key), served help and range or choices, CLI flag,
+  identity and report encoding, and an off-default example. Generated from it: the served params, their implied
+  defaults and the "policy gradient only" guard (`trainjob/src/request.rs`), the layering onto the config (a
+  `PgSettingsPatch` of wire values, `trainjob/src/job.rs`), the SDK's identity and `settings_json`, and the CLI's
+  parser and config (`cli/src/finetune_cli.rs`). `FIELDS` destructures the config without `..`, so a new field does not
+  compile until listed, and the table's test then asks for its row. The aggregation and its constant
+  (`loss_agg_length`) resolve through one `LossAgg::resolve` for both front ends.
+- **Deviations from the target, by the user's constraints.** Flags keep their names (`--ratio-clip` for `clip_eps`,
+  `--ratio-clip-high`); the table maps field to flag, renames wait for the major release. The identity is not the
+  canonical JSON of the config: each existing row keeps its old encoding (`_bits`, the debug form of `loss_agg`,
+  serde of `importance`, `numerics_gate`), so every run that could be started before resumes; a row added later is
+  `WhenNotDefault` in the identity and the report (joins only off its default). There is no derived Option-per-field
+  patch type (the workspace has no proc-macro crate): the patch is the table's own name-to-wire-value list, which is
+  what both front ends read. Explicit exclusions, each with its reason in the row: `log_kl` from the identity and the
+  report, `numerics` from the report and the served action, `kv_roundtrip` and `teacher_tokenizer` from the served
+  action, `reference`, `temperature`, `teacher`, `advantage_bound`, `sequence_advantage_cap` and `log_kl` from the CLI
+  (never offered there; a flag is one row's `Flag::Named`).
+- **What proved it.** Pinned before the change on 41aec7d47 and unchanged after: the SHA-256 of the identity and the
+  settings of the default, an every-field-off-default and the DAPO configuration
+  (`sdk/src/finetune.rs` `the_policy_gradient_identity_and_settings_are_pinned`), and the blake3 of the served params
+  `algorithm`..`advantage_norm` (`trainjob` `the_served_policy_gradient_params_are_pinned`). New: every field has one
+  row and every omission a reason; every row round-trips its example through its own field and moves the identity and
+  the report (`rl` `pg_settings` tests); every served setting's example reaches the resolved config and nothing else,
+  and is refused for sft by name (`trainjob`); every named flag likewise (`cli`). The existing `request.rs` tests and
+  `trainjob/tests/it/run.rs` pass unchanged.
 
 ## EC-2 Online GRPO and the recorded-rollout objective share one loss configuration (M, open; needs EC-1)
 

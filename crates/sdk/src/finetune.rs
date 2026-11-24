@@ -1363,28 +1363,7 @@ impl ChatFineTune {
             "thinking": self.thinking,
             "pack_answers": self.pack_answers,
             "modules_to_save": self.modules_to_save,
-            "policy_gradient": policy_gradient.map(|c| serde_json::json!({
-                "clip_eps_bits": c.clip_eps.to_bits(),
-                "clip_eps_high_bits": c.clip_eps_high.map(f32::to_bits),
-                "dual_clip_bits": c.dual_clip.map(f32::to_bits),
-                "importance": serde_json::to_value(c.importance).unwrap_or_default(),
-                "numerics_gate": c.numerics,
-                "kv_roundtrip": c.kv_roundtrip.map(|e| format!("{e:?}")),
-                "max_step_kl_bits": c.max_step_kl.map(f32::to_bits),
-                "max_step_grad_norm_bits": c.max_step_grad_norm.map(f32::to_bits),
-                "kl_beta_bits": c.kl_beta.to_bits(),
-                "reference": c.reference.name(),
-                "behaviour": c.behaviour.name(),
-                "loss_agg": format!("{:?}", c.loss_agg),
-                "temperature_bits": c.temperature.to_bits(),
-                "teacher": c.teacher.name(),
-                "advantage_bound_bits": c.advantage_bound.map(f32::to_bits),
-                "sequence_advantage_cap_bits": c.sequence_advantage_cap.map(f32::to_bits),
-                "advantage_norm": c.advantage_norm.name(),
-                "advantage_floor": c.advantage_floor.name(),
-                "truncated": c.truncated.name(),
-                "teacher_tokenizer": c.teacher_tokenizer.map(|t| t.to_string()),
-            })),
+            "policy_gradient": policy_gradient.as_ref().map(rl::objective::pg_settings::identity),
         });
         let mut step_work: Vec<model::StepWork> = Vec::new();
         let mut on_step = |s: &model::StepReport| {
@@ -1707,29 +1686,7 @@ impl PolicyGradientOutcome {
     /// Every setting the run trained with, in wire form: what a named algorithm expanded to, with the settings a caller
     /// named over it.
     pub fn settings_json(&self) -> serde_json::Value {
-        let c = &self.config;
-        serde_json::json!({
-            "clip_eps": c.clip_eps,
-            "clip_eps_high": c.clip_eps_high,
-            "dual_clip": c.dual_clip,
-            "importance": c.importance.to_string(),
-            "max_step_kl": c.max_step_kl,
-            "max_step_grad_norm": c.max_step_grad_norm,
-            "kl_beta": c.kl_beta,
-            "reference": c.reference.name(),
-            "behaviour": c.behaviour.name(),
-            "loss_agg": c.loss_agg.to_string(),
-            "temperature": c.temperature,
-            "teacher": c.teacher.name(),
-            "advantage_bound": c.advantage_bound,
-            "sequence_advantage_cap": c.sequence_advantage_cap,
-            "advantage_norm": c.advantage_norm.name(),
-            "advantage_floor": c.advantage_floor.name(),
-            "truncated": c.truncated.name(),
-            "kv_roundtrip": c.kv_roundtrip.map(|e| format!("{e:?}")),
-            "teacher_tokenizer": c.teacher_tokenizer.map(|t| t.to_string()),
-            "distill_estimator": c.teacher_tokenizer.map(|t| rl::objective::onpolicy_distill::DistillEstimator::for_tokenizers(&t).name()),
-        })
+        rl::objective::pg_settings::settings(&self.config)
     }
 }
 
@@ -2727,6 +2684,56 @@ fn check_rollouts_together(dataset: &[ChatSample], replay: &[ChatSample], weight
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A policy-gradient configuration with every setting off its default (the numerics gate and a guard together
+    /// are refused by `validate`, which identity and settings never consult).
+    fn every_setting_off_default() -> PolicyGradientConfig {
+        let tokenizer = br#"{"model": {"type": "BPE", "vocab": {"a": 0, "b": 1}, "merges": []}}"#;
+        PolicyGradientConfig {
+            clip_eps: 0.3,
+            clip_eps_high: Some(0.35),
+            dual_clip: Some(4.0),
+            importance: crate::ImportanceCorrection::Truncate { cap: 2.0 },
+            max_step_kl: Some(0.1),
+            numerics: Some(crate::NumericsBounds { max_abs_gap: Some(1.5), ..Default::default() }),
+            kv_roundtrip: Some(crate::KvElement::Int8),
+            max_step_grad_norm: Some(5.0),
+            kl_beta: 0.05,
+            reference: crate::ReferencePolicy::StartOfRun,
+            behaviour: crate::BehaviourSource::StartOfRunProxy,
+            loss_agg: rl::objective::grpo::LossAgg::ConstantLength(512),
+            temperature: 0.7,
+            log_kl: false,
+            teacher: crate::ReferencePolicy::StartOfRun,
+            advantage_bound: Some(2.0),
+            sequence_advantage_cap: Some(3.0),
+            advantage_norm: crate::AdvantageNorm::ZScore,
+            advantage_floor: crate::AdvantageFloor::Zero,
+            truncated: crate::TruncatedRollouts::Keep,
+            teacher_tokenizer: Some(data::tokenizer_identity::TokenizerIdentity::of_json(tokenizer, tokenizer).unwrap()),
+        }
+    }
+
+    /// Hard constraint: a policy-gradient run's part of the run identity (what an exact resume is keyed by) and its
+    /// settings (on the adapter's card, part of its bytes) are byte-identical to what brain wrote before the settings
+    /// were declared once (EC-1, pinned on 41aec7d47): runs started then resume now. SHA-256 of the compact JSON.
+    #[test]
+    fn the_policy_gradient_identity_and_settings_are_pinned() {
+        use sha2::Digest;
+        let hex = |v: &serde_json::Value| sha2::Sha256::digest(serde_json::to_string(v).unwrap().as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let settings = |config: PolicyGradientConfig| PolicyGradientOutcome { config, stats: Default::default() }.settings_json();
+        let configs = [
+            ("default", PolicyGradientConfig::default(), "6923aeedea381b0ad26ec4b391d93c7b62c4ba4a1891bf03768b04eeb58fe9f5", "f63a988338206144bb2d99b481910657ff40a61da30073d2acd18e2a14e06fd0"),
+            ("every setting off its default", every_setting_off_default(), "da32aa1d11e3562ccb1dc0960629651728d5fd3bb5d6c8c29da6c1245efacf38", "1ed3e7e67f2682faaa1a11dfffb3597722c8db3cc624922c87c00cf364c8a6f3"),
+            ("dapo", crate::PolicyGradientAlgorithm::Dapo.config(4096), "a281d0637d84256d59ec3991dbda2ac5281cce69de0f2047b3ca43e00d27d720", "097729f8d99ddf36efe98eabd7a3d7e5814c20815529b5e08acfe40725f0ac18"),
+        ];
+        for (name, config, identity, settings_hex) in configs {
+            let id = rl::objective::pg_settings::identity(&config);
+            assert_eq!(hex(&id), identity, "{name}: the identity changed: {id}");
+            let s = settings(config);
+            assert_eq!(hex(&s), settings_hex, "{name}: the settings changed: {s}");
+        }
+    }
 
     /// Spec: an architecture whose chat trainer does not declare the policy-gradient objective refuses it by name,
     /// before any file is read; one that declares it passes the check. Every architecture with chat LoRA declares it,

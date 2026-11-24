@@ -197,6 +197,10 @@ pub use model::StepWork;
 /// outside brain.
 #[cfg(feature = "study")]
 pub use rl::objective::external::{BehaviourSource, ImportanceCorrection, DEFAULT_DUAL_CLIP, PolicyGradientConfig, PolicyGradientStats, PolicyGradientStep, PolicyGradientAlgorithm, ReferencePolicy, TruncatedRollouts};
+/// The policy-gradient settings declared once ([`PolicyGradientConfig`]'s table): what the served action, the CLI, the
+/// run identity and the reported settings are generated from.
+#[cfg(feature = "study")]
+pub use rl::objective::pg_settings as policy_gradient_settings;
 /// The KV-cache encodings a trainer can round-trip its attention through ([`PolicyGradientConfig::kv_roundtrip`]); the
 /// same names the serving `--kv-cache` flag takes, via [`KvTier::parse`].
 #[cfg(feature = "study")]

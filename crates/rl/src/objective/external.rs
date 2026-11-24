@@ -125,6 +125,9 @@ pub enum ReferencePolicy {
 }
 
 impl ReferencePolicy {
+    /// Every reference policy, in the order the wire lists them.
+    pub const ALL: [ReferencePolicy; 2] = [ReferencePolicy::Base, ReferencePolicy::StartOfRun];
+
     /// The name the CLI and the adapter's provenance use.
     pub fn name(self) -> &'static str {
         match self {
@@ -231,6 +234,9 @@ pub enum BehaviourSource {
 }
 
 impl BehaviourSource {
+    /// Every behaviour source, in the order the wire lists them.
+    pub const ALL: [BehaviourSource; 2] = [BehaviourSource::Recorded, BehaviourSource::StartOfRunProxy];
+
     /// The name the CLI, the served action and the adapter's provenance use.
     pub fn name(self) -> &'static str {
         match self {

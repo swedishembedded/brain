@@ -17,6 +17,7 @@ pub mod mixture;
 pub mod numerics;
 pub mod onpolicy_distill;
 pub mod pg_batch;
+pub mod pg_settings;
 pub mod score_cache;
 pub mod score_centring;
 pub(crate) mod stream;
