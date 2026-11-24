@@ -208,7 +208,7 @@ impl BatchedDecoder {
 
     /// The Talker positions a prompt with `prefix` rows and `max_frames` frames needs.
     pub fn fits(&self, prefix: usize, max_frames: usize) -> bool {
-        prefix + max_frames + 1 <= self.talker.max_seq_len()
+        prefix + max_frames < self.talker.max_seq_len()
     }
 
     /// `rows` (`[n, e]`) as the code predictor's inputs (`[n, d_mtp]`).
