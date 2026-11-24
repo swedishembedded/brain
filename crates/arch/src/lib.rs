@@ -521,7 +521,10 @@ pub const ARCHS: &[Arch] = &[
     // `brain.manifest.json` (`weights_dir`/`ckpt`) is what `classify()`
     // recognizes.
     arch!("qwen3tts", "Qwen3-TTS (Talker + MTP code predictor)", Audio, LlamaCpp, "brain-qwen3tts", hf: &["Qwen3TTSForConditionalGeneration"], default_ref: Some("Qwen/Qwen3-TTS-12Hz-0.6B-Base"),
-        variants: &[Variant { reference: "Qwen/Qwen3-TTS-12Hz-0.6B-Base", params: 914_643_008, quants: &[], license: None }]),
+        variants: &[
+            Variant { reference: "Qwen/Qwen3-TTS-12Hz-0.6B-Base", params: 914_643_008, quants: &[], license: Some("apache-2.0") },
+            Variant { reference: "Qwen/Qwen3-TTS-12Hz-1.7B-Base", params: 1_928_677_440, quants: &[], license: Some("apache-2.0") },
+        ]),
     arch!("mimi", "Mimi/Moshi-style 12 Hz neural audio codec", Audio, Brain, "brain-mimi"),
     arch!("ecapatdnn", "ECAPA-TDNN speaker encoder", Audio, Brain, "brain-ecapatdnn"),
     // CAM++ and S3Tokenizer are CosyVoice's reference-audio front end: their

@@ -100,9 +100,12 @@ ledger is the engine work it needs.
       and BF16, `config.json` with the trained languages and voices and
       `tts_model_type`, tokenizer and `speech_tokenizer/` carried over; gated
       by a round trip (export, reload in brain, identical tensors).
-- [ ] Store: a Qwen3-TTS repo is recognised by its own signature for any
+- [x] Store: a Qwen3-TTS repo is recognised by its own signature for any
       repo, not by a pin list, so the 1.7B Base and trained releases pull as
-      `qwen3tts`.
+      `qwen3tts` (`modelstore::recipe::select`: at one tier a signature that
+      strictly contains another's wins). A store that already pulled the 1.7B
+      under the old rule keeps its `family: "qwen3asr"` manifest until it is
+      pulled again.
 
 Gates: tiny random configs for the objective's gradients (finite differences
 through Talker, code predictor and the routed tables); teacher-forced rows equal

@@ -25,6 +25,9 @@ CLI use - no env var, no manual `import` step. The checkpoint (including its
 nested `speech_tokenizer/` codec) is served exactly as downloaded: the
 Talker, MTP, codec and speaker encoder are read from its safetensors, bf16
 converted to f32 in memory as they load, and nothing is written beside it.
+`brain pull` recognises any Qwen3-TTS repo by its files (the
+`speech_tokenizer/` codec beside the tokenizer), whatever the repo is called:
+`Qwen/Qwen3-TTS-12Hz-1.7B-Base` and a trained release pull as `qwen3tts` too.
 
 A CustomVoice or VoiceDesign checkpoint, or one you already have locally, is
 resolved from the model store the same way; the standard role flags name one

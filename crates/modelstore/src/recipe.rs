@@ -91,6 +91,15 @@ pub trait ArtifactRecipe: Send + Sync {
     fn specificity(&self) -> Specificity {
         Specificity::Shape
     }
+
+    /// The release filenames this recipe claims a repo by, all of which must
+    /// be in the listing. Empty (the default) for a recipe that does not key
+    /// on a named-file set. [`select`] uses it to break a tie at one
+    /// [`Specificity`] tier: a signature that strictly contains another's is
+    /// the more specific claim.
+    fn signature(&self) -> &'static [&'static str] {
+        &[]
+    }
 }
 
 /// The precedence tier a recipe's [`ArtifactRecipe::matches`] success
@@ -113,8 +122,13 @@ pub trait ArtifactRecipe: Send + Sync {
 ///   there is by construction exactly one recipe at that tier, so it can
 ///   never itself be ambiguous.
 ///
-/// Two recipes at the SAME tier matching the same listing is not resolved by
-/// order at all any more -- see [`crate::plan::PlanError::AmbiguousRecipe`].
+/// Within one tier, a recipe whose [`ArtifactRecipe::signature`] strictly
+/// contains another matching recipe's signature wins over it: it named every
+/// file the other did and more, so it is the narrower description of the same
+/// listing (a Qwen3-TTS repo carries `qwen3asr`'s tokenizer trio AND its codec
+/// directory). Two recipes at the SAME tier whose signatures neither contains
+/// the other are not resolved by order at all -- see
+/// [`crate::plan::PlanError::AmbiguousRecipe`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Specificity {
     RepoPinned,
@@ -151,7 +165,10 @@ pub fn select(candidates: Vec<Box<dyn ArtifactRecipe>>, reference: &ModelRef, li
         .map(|r| r.specificity())
         .min()
         .expect("candidates must include at least one recipe that can match (the real registry's catch-all always does)");
-    let mut winners: Vec<Box<dyn ArtifactRecipe>> = matched.into_iter().filter(|r| r.specificity() == best).collect();
+    let tier: Vec<Box<dyn ArtifactRecipe>> = matched.into_iter().filter(|r| r.specificity() == best).collect();
+    let strictly_contains = |outer: &[&str], inner: &[&str]| !inner.is_empty() && outer.len() > inner.len() && inner.iter().all(|f| outer.contains(f));
+    let dominated: Vec<bool> = tier.iter().map(|r| tier.iter().any(|o| strictly_contains(o.signature(), r.signature()))).collect();
+    let mut winners: Vec<Box<dyn ArtifactRecipe>> = tier.into_iter().zip(dominated).filter(|(_, d)| !d).map(|(r, _)| r).collect();
     match winners.len() {
         1 => Ok(winners.remove(0)),
         _ => Err(Box::new(PlanError::AmbiguousRecipe(reference.clone(), winners.iter().map(|r| r.id()).collect()))),
@@ -267,24 +284,15 @@ const FILES_RECIPES: &[FilesRecipe] = &[
     FilesRecipe {
         id: "qwen3tts",
         family: "qwen3tts",
-        // Nested and distinctive enough that no other repo shape could match
-        // it by accident (unlike a bare `config.json`, which every
-        // transformers-shaped repo has).
-        signature: &["speech_tokenizer/config.json"],
-        // Repo-pinned for PRECEDENCE, not for identification: the signature
-        // above already identifies a TTS repo unambiguously on its own. The
-        // pin exists because `qwen3asr`'s deliberately broad
-        // `vocab.json`+`merges.txt`+`preprocessor_config.json` trio ALSO
-        // matches this repo (it ships all three alongside the codec), and
-        // two `FilesRecipe`s with no `repos` both report
-        // `Specificity::NamedFiles`, tie, and make `select` refuse the pull
-        // outright -- the same collision `qwen35`'s own `repos` row above
-        // resolves against the same over-broad recipe. `matches` ANDs the
-        // repo gate with the signature, so adding a SECOND upstream TTS repo
-        // means adding its name here too; this list is the declared
-        // `default_ref` in `crates/arch`'s `qwen3tts` row, and nothing else
-        // is advertised as pullable today.
-        repos: &["Qwen/Qwen3-TTS-12Hz-0.6B-Base"],
+        // The codec directory identifies a Qwen3-TTS repo; the tokenizer
+        // trio beside it is `qwen3asr`'s whole signature, which every TTS
+        // release also ships. Naming both makes this signature strictly
+        // contain `qwen3asr`'s, so `select` prefers it at their shared tier
+        // for ANY repo of this shape: the upstream 0.6B and 1.7B Base and a
+        // trained release (an export carries the base's files over), with no
+        // list of repo names to keep current.
+        signature: &["speech_tokenizer/config.json", "vocab.json", "merges.txt", "preprocessor_config.json"],
+        repos: &[],
         // Whole repo: `TransformersRecipe`'s curated fetch (config.json,
         // tokenizer.json/tokenizer_config.json, model.safetensors) misses
         // the nested `speech_tokenizer/` codec checkpoint entirely, plus
@@ -566,6 +574,10 @@ impl ArtifactRecipe for FilesRecipe {
         } else {
             Specificity::RepoPinned
         }
+    }
+
+    fn signature(&self) -> &'static [&'static str] {
+        self.signature
     }
 }
 
@@ -2114,19 +2126,13 @@ mod tests {
         assert_eq!(matched.id(), "qwen35", "must not fall through to qwen3asr's broader signature");
     }
 
-    /// `Qwen/Qwen3-TTS-12Hz-0.6B-Base` -- the ONLY repo `arch`'s `qwen3tts`
-    /// row declares as its `default_ref`, and so the one `brain models list`
-    /// advertises as pullable -- ships BOTH recipes' signatures: nested
-    /// `speech_tokenizer/config.json` (qwen3tts) and the
-    /// `vocab.json`+`merges.txt`+`preprocessor_config.json` trio
-    /// (qwen3asr). Both are `FilesRecipe`s with no `repos`, so both reported
-    /// `Specificity::NamedFiles`, tied, and `select` refused the pull with
-    /// `AmbiguousRecipe` -- an advertised model that could not actually be
-    /// fetched. Listing is the real upstream one (13 files, HF API).
-    #[test]
-    fn qwen3tts_repo_is_not_ambiguous_against_qwen3asrs_broader_signature() {
-        let r = ModelRef::new("Qwen", "Qwen3-TTS-12Hz-0.6B-Base", None);
-        let listing: Vec<String> = [
+    /// A Qwen3-TTS release's real upstream listing (13 files, HF API; the
+    /// 0.6B and the 1.7B Base ship the same names). It carries BOTH the TTS
+    /// codec (`speech_tokenizer/config.json`) and the
+    /// `vocab.json`+`merges.txt`+`preprocessor_config.json` trio `qwen3asr`
+    /// keys on.
+    fn qwen3tts_listing() -> Vec<String> {
+        [
             ".gitattributes",
             "README.md",
             "config.json",
@@ -2143,9 +2149,40 @@ mod tests {
         ]
         .into_iter()
         .map(String::from)
-        .collect();
-        let picked = select(recipes(), &r, &listing).expect("a TTS repo must resolve to exactly one recipe");
-        assert_eq!(picked.id(), "qwen3tts", "a repo carrying the speech_tokenizer codec is TTS, not ASR");
+        .collect()
+    }
+
+    /// Every Qwen3-TTS repo is `qwen3tts` by its own files, whatever it is
+    /// called: the two upstream Base sizes and a trained release under a name
+    /// no list in this crate knows. The 1.7B once pulled as `qwen3asr`: the
+    /// `qwen3tts` row was pinned to the 0.6B repo, and `qwen3asr`'s broader
+    /// trio claimed every other TTS repo.
+    #[test]
+    fn every_qwen3tts_repo_resolves_to_qwen3tts_by_its_own_files() {
+        for (vendor, repo) in [("Qwen", "Qwen3-TTS-12Hz-0.6B-Base"), ("Qwen", "Qwen3-TTS-12Hz-1.7B-Base"), ("some-lab", "tts-1.7b-finetuned")] {
+            let r = ModelRef::new(vendor, repo, None);
+            let picked = select(recipes(), &r, &qwen3tts_listing()).unwrap_or_else(|e| panic!("{vendor}/{repo} resolves to one recipe: {e}"));
+            assert_eq!(picked.id(), "qwen3tts", "{vendor}/{repo} carries the speech_tokenizer codec: TTS, not ASR");
+            assert_eq!(files_recipe_roles(picked.id()).map(|(family, _)| family), Some("qwen3tts"));
+        }
+    }
+
+    /// The precedence rule itself: at one tier, a recipe whose signature
+    /// strictly contains another's is the more specific claim and wins; two
+    /// signatures neither of which contains the other still tie.
+    #[test]
+    fn select_prefers_a_signature_that_strictly_contains_another() {
+        let broad = FilesRecipe { id: "broad", family: "broad", signature: &["a.json", "b.txt"], repos: &[], files: &[], roles: &[] };
+        let narrow = FilesRecipe { id: "narrow", family: "narrow", signature: &["a.json", "b.txt", "c/d.json"], repos: &[], files: &[], roles: &[] };
+        let other = FilesRecipe { id: "other", family: "other", signature: &["a.json", "e.bin"], repos: &[], files: &[], roles: &[] };
+        let r = ModelRef::new("v", "r", None);
+        let listing: Vec<String> = ["a.json", "b.txt", "c/d.json", "e.bin"].into_iter().map(String::from).collect();
+        let picked = select(vec![Box::new(broad), Box::new(narrow)], &r, &listing).unwrap();
+        assert_eq!(picked.id(), "narrow");
+        match select(vec![Box::new(narrow), Box::new(other)], &r, &listing) {
+            Err(e) => assert!(matches!(*e, PlanError::AmbiguousRecipe(..)), "{e}"),
+            Ok(p) => panic!("incomparable signatures must tie, picked {}", p.id()),
+        }
     }
 
     /// The fix above must not cost `qwen3asr` its own real repo.
