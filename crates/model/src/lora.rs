@@ -1489,6 +1489,14 @@ pub mod device_adapter {
             })
             .collect::<std::io::Result<_>>()?;
 
+        // The leaf each pair's site answers to, as the model names it: a card's `targets` are leaves, and a site's leaf
+        // is the model's to say (`attn_res.attn_queries.0` is an `attn_queries` site), not its name's last segment.
+        let paired: std::collections::BTreeSet<&str> = tensors.iter().filter_map(|(n, _, _)| n.strip_suffix(LORA_A)).collect();
+        let site_leaves: std::collections::BTreeMap<String, &str> =
+            model.adapter_sites().into_iter().map(|s| (s.name, s.leaf)).chain(model.adapter_expert_sites().into_iter().map(|s| (s.name, s.leaf))).filter(|(name, _)| paired.contains(name.as_str())).collect();
+        // A configuration that names no targets (a snapshot taken by the training loop, which builds no adapter of its
+        // own) writes the leaves the model's pairs answer to, so the card names exactly the linears its tensors correct.
+        let targets: Vec<String> = if targets.is_empty() { site_leaves.values().map(|leaf| leaf.to_string()).collect::<std::collections::BTreeSet<_>>().into_iter().collect() } else { targets.to_vec() };
         let mut card = ModelCard::new(card_id, family);
         card.variant_of = Some(base_id.to_string());
         card.adapter = Some(Adapter {
@@ -1496,7 +1504,7 @@ pub mod device_adapter {
             rank: Some(rank),
             base: Some(base_id.to_string()),
             alpha: Some(alpha),
-            targets: Some(targets.to_vec()),
+            targets: Some(targets.clone()),
             dataset_id: dataset_id.map(str::to_string),
             per_target: None,
             modules_to_save: (!saved_names.is_empty()).then(|| saved_names.clone()),
@@ -1507,11 +1515,6 @@ pub mod device_adapter {
         if !dims.is_empty() {
             config["sites"] = dims.iter().map(|(k, (o, i))| (k.clone(), serde_json::json!([o, i]))).collect::<serde_json::Map<_, _>>().into();
         }
-        // The leaf each pair's site answers to, as the model names it: a card's `targets` are leaves, and a site's leaf
-        // is the model's to say (`attn_res.attn_queries.0` is an `attn_queries` site), not its name's last segment.
-        let paired: std::collections::BTreeSet<&str> = tensors.iter().filter_map(|(n, _, _)| n.strip_suffix(LORA_A)).collect();
-        let site_leaves: std::collections::BTreeMap<String, &str> =
-            model.adapter_sites().into_iter().map(|s| (s.name, s.leaf)).chain(model.adapter_expert_sites().into_iter().map(|s| (s.name, s.leaf))).filter(|(name, _)| paired.contains(name.as_str())).collect();
         if !site_leaves.is_empty() {
             config[LEAVES_KEY] = serde_json::to_value(&site_leaves).expect("a map of strings serializes");
         }
