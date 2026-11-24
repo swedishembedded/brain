@@ -32,7 +32,7 @@ use super::advantage::{AdvantageFloor, AdvantageNorm};
 use super::external::{BehaviourSource, ImportanceCorrection, PolicyGradientConfig, ReferencePolicy};
 use super::grpo::LossAgg;
 use super::numerics::NumericsBounds;
-use super::pg_loss::PgLoss;
+use super::pg_loss::{Estimator, PgLoss};
 use data::chat_rollout::TruncatedRollouts;
 use data::tokenizer_identity::TokenizerIdentity;
 use model::kv_tier::KvElement;
@@ -236,6 +236,7 @@ named_wire!(BehaviourSource, |s: &str| s.parse());
 named_wire!(AdvantageNorm, AdvantageNorm::parse);
 named_wire!(AdvantageFloor, AdvantageFloor::parse);
 named_wire!(TruncatedRollouts, TruncatedRollouts::parse);
+named_wire!(Estimator, Estimator::parse);
 
 /// A type whose wire form is its `Display`, read back by `FromStr`.
 macro_rules! displayed_wire {
@@ -361,6 +362,12 @@ pub static SETTINGS: &[PgSetting] = &[
         report: InReport::Excluded("a measurement: each step's kl is null when it was not measured"), example: Some("false")),
     row!("teacher_tokenizer", teacher_tokenizer, SettingKind::Computed, "policy gradient: how the tokenizer of the teacher model whose scores the records carry compares with the student's",
         served: Served::No("the server compares the tokenizer of distill_teacher, the teacher model a request names"), flag: Flag::No("worked out from the teacher model, which the SDK names"), identity: InIdentity::Wire, report: InReport::Always, example: None),
+    row!("estimator", loss.estimator, SettingKind::Choice(|| Estimator::ALL.map(Estimator::name).to_vec()), "policy gradient: the estimator of the policy term: `clipped` (default) the clipped surrogate over the clip band, `score-centred` the importance-masked score centred over the sampler's top-K (needs records with behavior_top_ids / behavior_top_logprobs from an untruncated sampler; the clip band takes no part)",
+        served: Served::Param, flag: Flag::Named("--estimator"), identity: InIdentity::WhenNotDefault, report: InReport::WhenNotDefault, example: Some("\"score-centred\"")),
+    row!("centring_low", loss.centring_low, SettingKind::Float { min: 0.0, max: 1.0 }, "policy gradient, score-centred: the lower edge of the band of the ratio pi/mu outside which a token and a listed id carry no score, in [0, 1)",
+        served: Served::Param, flag: Flag::Named("--centring-low"), identity: InIdentity::WhenNotDefault, report: InReport::WhenNotDefault, example: Some("0.4")),
+    row!("centring_high", loss.centring_high, SettingKind::Float { min: 1.0, max: 1e6 }, "policy gradient, score-centred: the upper edge of the band of the ratio pi/mu, above 1",
+        served: Served::Param, flag: Flag::Named("--centring-high"), identity: InIdentity::WhenNotDefault, report: InReport::WhenNotDefault, example: Some("4.0")),
 ];
 
 /// Every field of [`PolicyGradientConfig`] and of its [`PgLoss`], by name. `_EVERY_FIELD` destructures the config with
@@ -377,7 +384,7 @@ macro_rules! fields {
 }
 
 fields!(
-    loss { clip_eps, clip_eps_high, dual_clip, kl_beta, log_kl, loss_agg, advantage_norm, advantage_floor, max_step_kl, max_step_grad_norm },
+    loss { clip_eps, clip_eps_high, dual_clip, kl_beta, log_kl, loss_agg, advantage_norm, advantage_floor, max_step_kl, max_step_grad_norm, estimator, centring_low, centring_high },
     importance, numerics, kv_roundtrip, reference, behaviour, temperature, teacher, advantage_bound, sequence_advantage_cap, truncated, teacher_tokenizer,
 );
 

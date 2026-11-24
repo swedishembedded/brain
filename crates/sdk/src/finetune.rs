@@ -2690,7 +2690,7 @@ mod tests {
     fn every_setting_off_default() -> PolicyGradientConfig {
         let tokenizer = br#"{"model": {"type": "BPE", "vocab": {"a": 0, "b": 1}, "merges": []}}"#;
         PolicyGradientConfig {
-            loss: crate::PgLoss { clip_eps: 0.3, clip_eps_high: Some(0.35), dual_clip: Some(4.0), kl_beta: 0.05, log_kl: false, loss_agg: rl::objective::grpo::LossAgg::ConstantLength(512), advantage_norm: crate::AdvantageNorm::ZScore, advantage_floor: crate::AdvantageFloor::Zero, max_step_kl: Some(0.1), max_step_grad_norm: Some(5.0) },
+            loss: crate::PgLoss { clip_eps: 0.3, clip_eps_high: Some(0.35), dual_clip: Some(4.0), kl_beta: 0.05, log_kl: false, loss_agg: rl::objective::grpo::LossAgg::ConstantLength(512), advantage_norm: crate::AdvantageNorm::ZScore, advantage_floor: crate::AdvantageFloor::Zero, max_step_kl: Some(0.1), max_step_grad_norm: Some(5.0), ..crate::PgLoss::RECORDED },
             importance: crate::ImportanceCorrection::Truncate { cap: 2.0 },
             numerics: Some(crate::NumericsBounds { max_abs_gap: Some(1.5), ..Default::default() }),
             kv_roundtrip: Some(crate::KvElement::Int8),

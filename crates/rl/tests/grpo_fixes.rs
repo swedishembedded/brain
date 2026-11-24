@@ -560,12 +560,14 @@ fn a_reference_without_the_stop_token_position_is_complete() {
 #[test]
 fn numeric_settings_no_run_can_honour_are_refused() {
     let base = config(2, 1.0, GrpoOptions::default());
-    let cases: [(&str, GrpoConfig); 5] = [
+    let cases: [(&str, GrpoConfig); 6] = [
         ("kl_beta", GrpoConfig { loss: PgLoss { kl_beta: -0.1, ..base.loss }, ..base }),
         ("kl_beta", GrpoConfig { loss: PgLoss { kl_beta: f32::NAN, ..base.loss }, ..base }),
         ("clip_eps", GrpoConfig { loss: PgLoss { clip_eps: 0.0, ..base.loss }, ..base }),
         ("clip_eps_high", GrpoConfig { loss: PgLoss { clip_eps_high: Some(f32::INFINITY), ..base.loss }, ..base }),
         ("temp", config(2, f32::NAN, GrpoOptions::default())),
+        // Online GRPO's rollouts record the sampled token's log-probability, not the sampler's top-K it centres over.
+        ("estimator", GrpoConfig { loss: PgLoss { estimator: rl::objective::pg_loss::Estimator::ScoreCentred, ..base.loss }, ..base }),
     ];
     for (field, cfg) in cases {
         let (judge, _) = Judge::new(first_wins);

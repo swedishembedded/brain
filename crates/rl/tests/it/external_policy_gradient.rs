@@ -40,11 +40,15 @@ pub(crate) struct Row {
     pub(crate) behavior: Option<Vec<f32>>,
     /// The rollout did not reach an outcome: the record is masked.
     pub(crate) truncated: bool,
+    /// The sampler's top-K at each supervised token, `k` ids and log-probabilities per token.
+    pub(crate) top: Option<(usize, Vec<u32>, Vec<f32>)>,
+    /// The sampling controls the record declares.
+    pub(crate) sampler: Option<data::chat_rollout::SamplerDecl>,
 }
 
 impl Row {
     pub(crate) fn new(ids: &[u32], answer_from: usize, advantage: Option<f32>) -> Row {
-        Row { ids: ids.to_vec(), answer_from, advantage, group: None, behavior: None, truncated: false }
+        Row { ids: ids.to_vec(), answer_from, advantage, group: None, behavior: None, truncated: false, top: None, sampler: None }
     }
 
     /// A row whose `reward` is compared within `group` (the rows of the dataset that name it).
@@ -63,7 +67,14 @@ fn encoded(row: &Row) -> data::chat::EncodedSample {
         assert_eq!(b.len(), row.ids.len() - row.answer_from);
         behavior[row.answer_from..].copy_from_slice(b);
     }
-    data::chat::EncodedSample { ids: row.ids.clone(), mask, behavior, loss_weights: None, teacher: None, truncated: row.truncated, teacher_logprobs: Vec::new(), ..Default::default() }
+    let behavior_top = row.top.as_ref().map(|(k, ids, lps)| {
+        let (mut all_ids, mut all_lps) = (vec![data::chat_rollout::NO_TOP_ID; row.ids.len() * k], vec![f32::NAN; row.ids.len() * k]);
+        all_ids[row.answer_from * k..].copy_from_slice(ids);
+        all_lps[row.answer_from * k..].copy_from_slice(lps);
+        data::chat_rollout::BehaviorTop { k: *k, ids: all_ids, logprobs: all_lps }
+    });
+    let provenance = data::chat_rollout::Provenance { policy_version: None, sampler: row.sampler };
+    data::chat::EncodedSample { ids: row.ids.clone(), mask, behavior, loss_weights: None, teacher: None, truncated: row.truncated, teacher_logprobs: Vec::new(), behavior_top, provenance }
 }
 
 /// The dataset of `rows` as the record contract lays it out. A row with an advantage and no group of its own is a

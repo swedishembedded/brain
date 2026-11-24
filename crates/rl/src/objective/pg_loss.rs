@@ -17,7 +17,8 @@ use model::Model;
 use super::advantage::{AdvantageFloor, AdvantageNorm};
 use super::grpo::LossAgg;
 use super::grpo_term::ClipBand;
-use super::pg_batch::PgSpec;
+use super::pg_batch::{PgEstimator, PgSpec};
+use super::score_centring::CentringBand;
 
 /// Consecutive optimiser steps the step guard may skip before the run is aborted.
 pub const MAX_CONSECUTIVE_GUARD_SKIPS: u32 = 8;
@@ -58,6 +59,45 @@ pub struct PgLoss {
     /// Skip, and log, the optimiser step of a step whose global gradient norm (after averaging over the step's
     /// micro-batches, before the optimiser's clip) exceeds this. `None`: no bound.
     pub max_step_grad_norm: Option<f32>,
+    /// The estimator of the policy term ([`Estimator`]); the clipped surrogate unless a run asks for another.
+    pub estimator: Estimator,
+    /// The score-centred estimator's band `[centring_low, centring_high]` of the ratio `pi / mu`
+    /// ([`super::score_centring::CentringBand`]; TRL's defaults 0.5 and 5.0). Read only by that estimator.
+    pub centring_low: f32,
+    pub centring_high: f32,
+}
+
+/// Which estimator a policy-gradient loss trains its policy term with, by name on the wire (`estimator`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Estimator {
+    /// `-min(r A, clip(r) A)` over the clip band (and its dual clip): PPO's and GRPO's surrogate.
+    #[default]
+    ClippedSurrogate,
+    /// The score-centred estimator over the sampler's top-K ([`super::score_centring`]): needs records that carry it
+    /// (`behavior_top_ids`, `behavior_top_logprobs`) from an untruncated sampler, and a model whose LM head takes
+    /// extra targets.
+    ScoreCentred,
+}
+
+impl Estimator {
+    /// Both, in the order the wire lists them.
+    pub const ALL: [Estimator; 2] = [Estimator::ClippedSurrogate, Estimator::ScoreCentred];
+
+    /// The name on the wire.
+    pub fn name(self) -> &'static str {
+        match self {
+            Estimator::ClippedSurrogate => "clipped",
+            Estimator::ScoreCentred => "score-centred",
+        }
+    }
+
+    /// The estimator a wire name names.
+    ///
+    /// # Errors
+    /// The name is none of [`Self::name`]'s.
+    pub fn parse(name: &str) -> Result<Estimator, String> {
+        Estimator::ALL.into_iter().find(|e| e.name() == name).ok_or_else(|| format!("estimator {name:?} is none of {}", Estimator::ALL.map(Estimator::name).join(", ")))
+    }
 }
 
 /// A loss setting no run can honour: the field, its value and why.
@@ -77,20 +117,29 @@ impl std::fmt::Display for LossRefusal {
 impl PgLoss {
     /// The recorded-rollout objective's recommended loss: GRPO's published aggregation (each sequence's mean), a
     /// symmetric band with the dual clip, a small KL to the reference.
-    pub const RECORDED: PgLoss = PgLoss { clip_eps: 0.2, clip_eps_high: None, dual_clip: Some(DEFAULT_DUAL_CLIP), kl_beta: 0.02, log_kl: true, loss_agg: LossAgg::SeqMean, advantage_norm: AdvantageNorm::MeanCentered, advantage_floor: AdvantageFloor::None, max_step_kl: None, max_step_grad_norm: None };
+    pub const RECORDED: PgLoss = PgLoss { clip_eps: 0.2, clip_eps_high: None, dual_clip: Some(DEFAULT_DUAL_CLIP), kl_beta: 0.02, log_kl: true, loss_agg: LossAgg::SeqMean, advantage_norm: AdvantageNorm::MeanCentered, advantage_floor: AdvantageFloor::None, max_step_kl: None, max_step_grad_norm: None, estimator: Estimator::ClippedSurrogate, centring_low: CentringBand::DEFAULT.low, centring_high: CentringBand::DEFAULT.high };
 
     /// Online GRPO's recommended loss: clip-higher (`[0.8, 1.28]`), every token of a step weighed alike, no KL term,
     /// no dual clip and no step guard (each is a setting of its own).
-    pub const ONLINE: PgLoss = PgLoss { clip_eps: 0.2, clip_eps_high: Some(0.28), dual_clip: None, kl_beta: 0.0, log_kl: true, loss_agg: LossAgg::TokenSum, advantage_norm: AdvantageNorm::MeanCentered, advantage_floor: AdvantageFloor::None, max_step_kl: None, max_step_grad_norm: None };
+    pub const ONLINE: PgLoss = PgLoss { clip_eps: 0.2, clip_eps_high: Some(0.28), dual_clip: None, kl_beta: 0.0, log_kl: true, loss_agg: LossAgg::TokenSum, advantage_norm: AdvantageNorm::MeanCentered, advantage_floor: AdvantageFloor::None, max_step_kl: None, max_step_grad_norm: None, estimator: Estimator::ClippedSurrogate, centring_low: CentringBand::DEFAULT.low, centring_high: CentringBand::DEFAULT.high };
 
     /// The clip band, with the dual clip when one is set.
     pub fn band(&self) -> ClipBand {
         ClipBand { low: self.clip_eps, high: self.clip_eps_high.unwrap_or(self.clip_eps), dual: self.dual_clip }
     }
 
-    /// The clipped surrogate over [`Self::band`] with the KL weight.
+    /// The score-centred estimator's band.
+    pub fn centring(&self) -> CentringBand {
+        CentringBand { low: self.centring_low, high: self.centring_high }
+    }
+
+    /// The loss's estimator over [`Self::band`] (or [`Self::centring`]) with the KL weight.
     pub fn spec(&self) -> PgSpec {
-        PgSpec::clipped(self.band(), self.kl_beta)
+        let estimator = match self.estimator {
+            Estimator::ClippedSurrogate => PgEstimator::ClippedSurrogate,
+            Estimator::ScoreCentred => PgEstimator::ScoreCentred(self.centring()),
+        };
+        PgSpec { estimator, ..PgSpec::clipped(self.band(), self.kl_beta) }
     }
 
     /// Whether the run measures the KL to the reference: a KL term, or a KL logged without one.
@@ -123,6 +172,10 @@ impl PgLoss {
         }
         if let Some(bound) = self.max_step_kl.filter(|_| !self.wants_reference()) {
             return refuse("max_step_kl", bound, "max_step_kl bounds the KL to the reference, which is measured only with log_kl or a positive kl_beta".to_string());
+        }
+        if let Err(why) = self.centring().validate() {
+            let field = if self.centring_low.is_finite() && (0.0..1.0).contains(&self.centring_low) { "centring_high" } else { "centring_low" };
+            return refuse(field, if field == "centring_low" { self.centring_low } else { self.centring_high }, why);
         }
         if let LossAgg::ConstantLength(0) = self.loss_agg {
             return refuse("loss_agg", 0.0, LossAgg::ConstantLength(0).validate().expect_err("a zero constant length is refused"));

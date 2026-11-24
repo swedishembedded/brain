@@ -200,7 +200,7 @@ pub use rl::objective::external::{BehaviourSource, ImportanceCorrection, PolicyG
 /// The policy-gradient loss both policy-gradient objectives train ([`PolicyGradientConfig::loss`]): the clip band with
 /// its dual clip, the KL term, the aggregation, the advantages and the step guards.
 #[cfg(feature = "study")]
-pub use rl::objective::pg_loss::{PgLoss, DEFAULT_DUAL_CLIP, MAX_CONSECUTIVE_GUARD_SKIPS};
+pub use rl::objective::pg_loss::{Estimator, PgLoss, DEFAULT_DUAL_CLIP, MAX_CONSECUTIVE_GUARD_SKIPS};
 /// The policy-gradient settings declared once ([`PolicyGradientConfig`]'s table): what the served action, the CLI, the
 /// run identity and the reported settings are generated from.
 #[cfg(feature = "study")]

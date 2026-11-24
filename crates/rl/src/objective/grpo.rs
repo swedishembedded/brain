@@ -258,6 +258,10 @@ impl GrpoConfig {
             "loss_agg" => BehaviourRefusal::InvalidCount { field: "loss_agg constant-length", got: 0, least: 1 },
             field => BehaviourRefusal::InvalidNumeric { field, value: refusal.value, why: refusal.why },
         })?;
+        if self.loss.estimator != super::pg_loss::Estimator::ClippedSurrogate {
+            // The in-process rollout records the sampled token's log-probability, not the sampler's top-K.
+            return Err(BehaviourRefusal::InvalidNumeric { field: "estimator", value: 0.0, why: format!("estimator {:?} needs the sampler's top-K per token, which online GRPO's rollouts do not record; train it on recorded rollouts (policy_gradient) or use estimator \"clipped\"", self.loss.estimator.name()) });
+        }
         if !(sample.temp.is_finite() && sample.temp >= 0.0) {
             return Err(BehaviourRefusal::InvalidNumeric { field: "temp", value: sample.temp, why: format!("temp must be finite and not negative, got {}", sample.temp) });
         }

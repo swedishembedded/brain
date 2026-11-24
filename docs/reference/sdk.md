@@ -839,6 +839,20 @@ brain-sampled GRPO run and an external-rollout run cannot drift apart.
   (`steps_skipped_guard`, `skipped` on the step) and the run goes on; 8 skipped steps in a row end it. Each step also
   reports `entropy_estimate` (the mean `-log p` of the sampled tokens, an entropy estimate while the rollouts are
   on-policy), `mean_response_tokens`, `grad_norm` and the importance weight statistics.
+- **Estimator** (`PgLoss::estimator`: `Estimator::ClippedSurrogate`, the default, or `Estimator::ScoreCentred`;
+  `centring_low` / `centring_high`, default 0.5 / 5.0; CLI `--estimator score-centred`, `--centring-low`,
+  `--centring-high`; served `estimator`, `centring_low`, `centring_high`). The score-centred estimator ("Score Centering
+  Stabilizes Off-policy RL", the default of TRL's `AsyncGRPOTrainer`) trains each token with
+  `-A (f(r) log pi(a) - sum_j residual_j log pi(v_j))`: the importance ratio masked to `f(r) = r` inside
+  `[centring_low, centring_high]` (0 outside), centred by the sampler's expected score over its top-K ids `v_j` and one
+  bucket for the rest of the vocabulary, in the same LM-head backward. The clip band takes no part. It needs records
+  that carry the sampler's top-K on every answer (`behavior_top_ids`, `behavior_top_logprobs`, from a policy trace with
+  `top_log_probs`) and `behavior_logprobs` (behaviour `recorded`), and refuses, naming the cause, records without a
+  top-K, a record whose `sampler` truncated its distribution (`top_k`, `top_p < 1`, `min_p > 0`), an importance
+  correction, a top-K id past the model's vocabulary, and a model whose LM head takes no extra targets. Online GRPO
+  (in-process rollouts record no top-K) refuses it. Each step reports `sampler_mass` (the mean listed mass of the
+  sampler) and `centred_masked_fraction` (the share of tokens whose ratio left the band). A run at the default
+  estimator keeps the run identity and settings it had.
 - **Numerics gate** (`PolicyGradientConfig::numerics: Some(NumericsBounds { .. })`; CLI `brain finetune BASE --dataset
   RECORDS --lora RANK --policy-gradient --numerics-gate [--gate-max-mean-gap X] [--gate-max-gap X] [--gate-max-mismatch-kl X]
   [--gate-min-sequence-ess X] [--gate-max-grad-norm X] --steps N`). Run it before an RL arm on records collected through a

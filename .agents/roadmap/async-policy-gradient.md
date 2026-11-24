@@ -67,13 +67,13 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
 
 ## Open
 
-- [ ] **One policy-gradient configuration** (A03-A04; `engineering-cleanup.md` EC-1, EC-2): settings declared once
+- [x] **One policy-gradient configuration** (A03-A04; `engineering-cleanup.md` EC-1, EC-2): settings declared once
       for objective, SDK, CLI and the served job; `Grpo` and the external objective share one loss config (dual clip,
       step guards included); the estimator (`ClippedSurrogate | ScoreCentred`) is a variant of the shared `pg_batch`
       path, independent of the experience source and scheduling. Done: EC-1 (`rl::objective::pg_settings`, one row per
-      setting) and EC-2 (`rl::objective::pg_loss::PgLoss` in both configs). Open: the `estimator` setting (wire
-      `clipped` | `score-centred`) and its centring band (0.5 / 5.0) as three `WhenNotDefault` rows over a `PgLoss`
-      field, so they join the run identity only off their defaults.
+      setting) and EC-2 (`rl::objective::pg_loss::PgLoss` in both configs); the `estimator` setting (wire `clipped` |
+      `score-centred`, `PgLoss::estimator`) and its band (`centring_low` / `centring_high`, 0.5 / 5.0) are three
+      `WhenNotDefault` rows, so the identity pins of runs at the default estimator stay green.
 - [ ] **Model-free oracles** (A05-A06). Done: `it::pg_estimator_oracle::sampled_group_estimates_converge_to_their_exact_expectations`
       (four actions, groups of three with z-scored advantages, both estimators' means over 4000 sampled groups within
       5 standard errors of their exact expectations over all 64 groups; under a constant advantage the score-centred
@@ -81,19 +81,23 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       `it::external_policy_gradient_scale::a_token_sum_steps_gradient_does_not_depend_on_how_its_records_are_split_into_micro_batches`
       (four records of 1-5 tokens as 4x1, 2x2, 1x4 micro-batches: one gradient to 1e-4 of the largest). Open: golden
       fixtures from the pinned TRL code for advantages, masks and centring coefficients (an isolated tool, CPU only).
-- [ ] **Score-centred policy-gradient objective** (`rl::objective`). Done: the estimator is a variant of the shared
+- [x] **Score-centred policy-gradient objective** (`rl::objective`): the estimator is a variant of the shared
       path (`pg_batch::PgEstimator::{ClippedSurrogate, ScoreCentred(CentringBand)}`, the term in
       `score_centring::centred_term`: `f(r) = r 1[low <= r <= high]`, head over the sampler's top-K, tail bucket,
-      weights `A f(r_a)` at the token and `-A residual_j` at the listed ids through `SparseTargets`;
-      `install_sampler_ids` before the forward, `install_weights` reads the trainer's log-probabilities at them);
-      `BatchTerms` reports `centred_masked`, `centred_tail`, `sampler_mass_sum` beside the ratio statistics. Tests:
-      `score_centring` unit tests (band edges, tail bucket, refusal of a meaningless band), `it::pg_estimator_oracle`
-      (invariant 5 with the whole vocabulary, exact and on 20000 sampled tokens; truncated top-K centred by its tail),
-      `it::score_centred_gradcheck` (qwen35 and qwen3 LoRA, the full loss and the extra targets alone; the latter fails
-      with the coefficients dropped from the backward). Open: reading the records' top-K into the objectives' batches,
-      `prepare` enabling the extra targets, refusals (no top-K, a truncating `sampler`, an importance correction, ids
-      past the vocabulary), per-step telemetry (sampler mass, masked fraction) and the selection, which lands through
-      the one configuration above (EC-1, EC-2), not as a second declaration.
+      weights `A f(r_a)` at the token and `-A residual_j` at the listed ids through `SparseTargets`), selected by
+      `estimator: score-centred` (served param, `--estimator`, `PgLoss::estimator`). `ExternalPolicyGradient` reads the
+      split's `.btk`/`.btl` into each batch (`Laid::top`), installs the ids after `set_batch` and before the forward,
+      and `prepare` enables the model's extra targets with the records' K. Refused by name: records without a top-K
+      (or a policy example with a supervised token without one), an example whose `sampler` truncates, an importance
+      correction, behaviour other than `recorded`, a top-K id past the vocabulary (`check_data`), a model without
+      extra targets (`Capability::SparseTargets`), and online GRPO (its rollouts record no top-K). Each step reports
+      `sampler_mass` and `centred_masked_fraction` (`metrics()` `pg_sampler_mass`, `pg_centred_masked_fraction`, so
+      the served step frame's `pg` map). Tests: `score_centring` unit tests, `it::pg_estimator_oracle`,
+      `it::score_centred_gradcheck`, `it::score_centred_objective` (a step on the records' top-K with its mass, every
+      refusal), `grpo_fixes::numeric_settings_no_run_can_honour_are_refused` (online GRPO), and the SDK's
+      `it::chat_finetune_score_centred` (tiny qwen3 and qwen35 LoRA trained 10 steps end to end on the CPU: rewarded
+      actions up, penalised down, finite stats, first step unmasked, the setting on the card; refusals through the
+      SDK). Open: a GPU run waits for the decode-sourced top list (the note on the policy-trace item below).
 - [x] **The sampler's top-K in `policy_trace`** (`policy_trace: {"top_log_probs": K}`, K in 1..=20; params `policy_trace` +
       `policy_trace_top_log_probs` over D-Bus): per generated position (stop token included) `generation_top_ids` /
       `generation_top_log_probs`, the K most probable ids and their whole-row log-probabilities at the sampling
