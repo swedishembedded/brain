@@ -14,8 +14,10 @@
 //! A prompt's prefix is one chunked prefill ([`qwen3::serve::Engine::prefill_mixed`]), not one
 //! decode step per position. Codebook 0 is drawn on the host from the device's logits with
 //! the reference's suppression, repetition penalty and filters ([`crate::sampling::sample_cb0`]);
-//! the residual codebooks are drawn where their logits are, each code predictor step computing
-//! only its own head ([`qwen3::serve::Engine::forward_batched_embed_drawn`]).
+//! the residual codebooks are drawn where their logits are, and the code predictor's fifteen steps run
+//! as one chained window ([`qwen3::serve::Engine::forward_batched_embed_chain`]): each step reads its
+//! own head, and each drawn code, offset into the stacked input table, is the next step's input on the
+//! device, so a frame's residual codes cross to the host once.
 //!
 //! Streams join and leave between frames ([`BatchedDecoder::run`]): an engine serving a queue
 //! admits a new request as soon as one finishes, and each finished stream's codes are handed
@@ -31,15 +33,15 @@ use std::sync::Arc;
 use capability::CancelToken;
 use gpu_core::Gpu;
 use model::paged::BlockTable;
-use model::serve::{draw_key, Drawn, RowDraw};
-use qwen3::serve::Engine;
+use model::serve::{draw_key, RowDraw};
+use qwen3::serve::{ChainStep, Engine};
 use qwen3::{Dtype, QwenConfig};
 
 use crate::config::MtpConfig;
 use crate::genconfig::GenerationPlan;
 use crate::npu_gen::TalkerTables;
 use crate::prompt::{MtpHost, Prompt, TalkerHost, TtsSpecials};
-use crate::sampling::{sample_cb0, sample_residual, SamplerCfg};
+use crate::sampling::{sample_cb0, SamplerCfg};
 use crate::{GenOpts, TtsPaths};
 
 /// Codebooks per codec frame.
@@ -108,6 +110,10 @@ pub struct BatchedDecoder {
     /// narrower than the Talker (the 1.7B family).
     projection: Option<(Vec<f32>, Vec<f32>)>,
     d_mtp: usize,
+    /// The code predictor's head of each chain step (step `s` predicts codebook `s + 1`).
+    heads: Vec<String>,
+    /// What each step adds to the code it draws to make the next step's input id ([`qwen3::serve::ChainStep`]).
+    feed_offsets: Vec<u32>,
     max_streams: usize,
     /// Talker KV blocks the live streams may still grow into, so a stream is admitted only
     /// when its whole utterance fits beside them and the pool never runs dry mid-utterance.
@@ -135,6 +141,19 @@ pub fn kv_pool_bytes(paths: &TtsPaths, max_streams: usize) -> Option<u64> {
     Some(qwen3::serve::kv_pool_bytes(&cfg, BLOCK, pool_blocks(max_streams.max(1)), false))
 }
 
+/// `rows` (`[n, e]`) through `small_to_mtp_projection` (`[d_mtp, e]`, bias `[d_mtp]`) when there is one.
+fn project(rows: Vec<f32>, projection: Option<&(Vec<f32>, Vec<f32>)>, e: usize, d_mtp: usize) -> Vec<f32> {
+    let Some((w, b)) = projection else { return rows };
+    let n = rows.len() / e;
+    let mut out = model::hostmath::linear_rows(&rows, w, n, e, d_mtp);
+    for row in out.chunks_mut(d_mtp) {
+        for (x, bias) in row.iter_mut().zip(b) {
+            *x += bias;
+        }
+    }
+    out
+}
+
 impl BatchedDecoder {
     /// Load both decoders on `gpu`'s device for up to `max_streams` streams at once.
     pub fn load_on(gpu: &Gpu, paths: &TtsPaths, max_streams: usize) -> Result<BatchedDecoder, String> {
@@ -148,12 +167,32 @@ impl BatchedDecoder {
         let talker = Engine::from_source_tier_on(gpu, tcfg, &talker_src, BLOCK, pool, max_streams as u32, per_seq, PREFILL_CHUNK, false, Dtype::F32);
         drop(talker_src);
 
+        let tables_host = TalkerTables::load(&paths.talker);
         let mtp_ckpt = crate::import::load_mtp(&paths.mtp);
         let mc = MtpConfig::from_brain_json(&mtp_ckpt.header["config"]);
         let nres = mc.n_residual() as usize;
         let (d_mtp, e) = (mc.d_model as usize, mc.embedding_dim as usize);
+        let tables = (0..nres).map(|i| take(&mtp_ckpt, &format!("codec_embedding.{i}.weight"))).collect::<Result<Vec<_>, _>>()?;
+        let projection = match mtp_ckpt.find("small_to_mtp_projection.weight", "") {
+            Some(w) => Some((w.clone(), take(&mtp_ckpt, "small_to_mtp_projection.bias")?)),
+            None => None,
+        };
+        // Positions 1..=15 of a frame read a row of one of these tables (codebook 0's, then the residual tables of
+        // codebooks 1..14), so they are stacked into the code predictor's input table, already projected to its
+        // width: a drawn code plus its table's offset is the next position's input id, and the whole chain runs on
+        // the device.
+        let cb0_rows = tables_host.vocab();
+        let mut stacked: Vec<f32> = Vec::with_capacity((cb0_rows + (nres - 1) * mc.vocab as usize) * e);
+        for id in 0..cb0_rows as u32 {
+            stacked.extend_from_slice(tables_host.codec_embed(id));
+        }
+        for table in &tables[..nres - 1] {
+            stacked.extend_from_slice(table);
+        }
+        let stacked = project(stacked, projection.as_ref(), e, d_mtp);
+        let feed_offsets: Vec<u32> = (0..nres).map(|s| if s + 1 < nres { (cb0_rows + s * mc.vocab as usize) as u32 } else { 0 }).collect();
         let mcfg = QwenConfig {
-            vocab: mc.vocab,
+            vocab: (stacked.len() / d_mtp) as u32,
             block_size: CODEBOOKS as u32,
             n_layers: mc.n_layers,
             d_model: mc.d_model,
@@ -174,30 +213,27 @@ impl BatchedDecoder {
         for (name, _) in crate::mtp::MtpModel::decoder_param_list(&mc) {
             mtp_map.insert(name.clone(), take(&mtp_ckpt, &name)?);
         }
-        // The decoders read embedding rows, never token ids: the input table is only a placeholder.
-        mtp_map.insert("tok.weight".into(), vec![0.0; mc.vocab as usize * d_mtp]);
-        mtp_map.insert("lm_head.weight".into(), take(&mtp_ckpt, "lm_head.0.weight")?);
-        let extra: Vec<String> = (1..nres).map(|k| format!("lm_head.{k}.weight")).collect();
-        for name in &extra {
+        mtp_map.insert("tok.weight".into(), stacked);
+        // Every head is a named one, read at its own position; the engine's own head is never read.
+        let heads: Vec<String> = (0..nres).map(|k| format!("lm_head.{k}.weight")).collect();
+        for name in &heads {
             mtp_map.insert(name.clone(), take(&mtp_ckpt, name)?);
         }
         let mut mtp = Engine::from_map_tier_on(gpu, mcfg, &mtp_map, BLOCK, max_streams as u32, max_streams as u32, 1, CODEBOOKS as u32, false, Dtype::F32);
-        let names: Vec<&str> = extra.iter().map(String::as_str).collect();
+        let names: Vec<&str> = heads.iter().map(String::as_str).collect();
         mtp.add_heads(&mtp_map, &names, mc.vocab as usize)?;
+        mtp.set_window_capacity(nres);
         drop(mtp_map);
 
-        let tables = (0..nres).map(|i| take(&mtp_ckpt, &format!("codec_embedding.{i}.weight"))).collect::<Result<Vec<_>, _>>()?;
-        let projection = match mtp_ckpt.find("small_to_mtp_projection.weight", "") {
-            Some(w) => Some((w.clone(), take(&mtp_ckpt, "small_to_mtp_projection.bias")?)),
-            None => None,
-        };
         Ok(BatchedDecoder {
             talker,
             mtp,
-            tables: Arc::new(TalkerTables::load(&paths.talker)),
+            tables: Arc::new(tables_host),
             residual: Arc::new(ResidualTables { tables, e }),
             projection,
             d_mtp,
+            heads,
+            feed_offsets,
             max_streams,
             reserved: 0,
             pool,
@@ -232,20 +268,7 @@ impl BatchedDecoder {
 
     /// `rows` (`[n, e]`) as the code predictor's inputs (`[n, d_mtp]`).
     fn to_mtp(&self, rows: Vec<f32>) -> Vec<f32> {
-        match &self.projection {
-            None => rows,
-            Some((w, b)) => {
-                let e = self.residual.e;
-                let n = rows.len() / e;
-                let mut out = model::hostmath::linear_rows(&rows, w, n, e, self.d_mtp);
-                for row in out.chunks_mut(self.d_mtp) {
-                    for (x, bias) in row.iter_mut().zip(b) {
-                        *x += bias;
-                    }
-                }
-                out
-            }
-        }
+        project(rows, self.projection.as_ref(), self.residual.e, self.d_mtp)
     }
 
     /// Start `job` as stream `index`: prefill its prompt and draw its first codebook-0 token.
@@ -291,12 +314,13 @@ impl BatchedDecoder {
         }))
     }
 
-    /// The residual draw of `cfg` for the row of `stream` at `frame`, codebook `k`.
-    fn residual_draw(cfg: &SamplerCfg, seed: u64, frame: usize, k: usize) -> Option<RowDraw> {
+    /// The draw of codebook `k` at `frame` of a stream sampled by `cfg` under `seed`: a keyed draw where the
+    /// logits are, or, unsampled, the one that keeps the best code (the reference's argmax, ties to the lower id).
+    fn residual_draw(cfg: &SamplerCfg, seed: u64, frame: usize, k: usize) -> RowDraw {
         if !cfg.do_sample || cfg.temperature <= 0.0 {
-            return None;
+            return RowDraw { temp: 1.0, min_p: 0.0, top_p: 1.0, top_k: 1, key: 0 };
         }
-        Some(RowDraw { temp: cfg.temperature, min_p: 0.0, top_p: cfg.top_p, top_k: cfg.top_k, key: draw_key(seed, frame as u64, k as u32) })
+        RowDraw { temp: cfg.temperature, min_p: 0.0, top_p: cfg.top_p, top_k: cfg.top_k, key: draw_key(seed, frame as u64, k as u32) }
     }
 
     /// One frame of every stream in `live`: the code predictor's chain for all of them, the
@@ -327,44 +351,30 @@ impl BatchedDecoder {
         let b = live.len();
 
         // The code predictor: position 0 is the Talker's hidden state, position k (1..=15) the
-        // embedding of codebook k-1, read by head k-1 to predict codebook k.
+        // embedding of codebook k-1, read by head k-1 to predict codebook k; the whole chain is one
+        // submission, each drawn code feeding the next position on the device.
         let mut mtp_tables: Vec<BlockTable> = (0..b).map(|_| BlockTable::new()).collect();
         let hidden: Vec<f32> = live.iter().flat_map(|s| s.hidden.iter().copied()).collect();
-        {
+        let first: Vec<u32> = live.iter().map(|s| s.cb0).collect();
+        let draws: Vec<Vec<RowDraw>> = live.iter().map(|s| (1..CODEBOOKS).map(|k| Self::residual_draw(&s.plan.subtalker, s.seed, s.frames.len() / CODEBOOKS, k)).collect()).collect();
+        let chain: Vec<ChainStep<'_>> = self.heads.iter().zip(&self.feed_offsets).map(|(head, &feed_offset)| ChainStep { head, feed_offset }).collect();
+        let drawn = {
+            let input = self.to_mtp(hidden);
             let mut refs: Vec<&mut BlockTable> = mtp_tables.iter_mut().collect();
-            self.mtp.forward_batched_embed(&mut refs, &self.to_mtp(hidden));
+            self.mtp.forward_batched_embed_chain(&mut refs, &input, &first, &chain, &draws)
+        };
+        for t in mtp_tables.iter_mut() {
+            self.mtp.release_table(t);
         }
-        let mut input: Vec<f32> = live.iter().flat_map(|s| self.tables.codec_embed(s.cb0).iter().copied()).collect();
-        let mut feed = input.clone();
+        let mut feed: Vec<f32> = live.iter().flat_map(|s| self.tables.codec_embed(s.cb0).iter().copied()).collect();
         let mut codes = vec![vec![0u32; CODEBOOKS - 1]; b];
-        for k in 1..CODEBOOKS {
-            let draws: Vec<Option<RowDraw>> = live.iter().map(|s| Self::residual_draw(&s.plan.subtalker, s.seed, s.frames.len() / CODEBOOKS, k)).collect();
-            let head = (k > 1).then(|| format!("lm_head.{}.weight", k - 1));
-            let drawn = {
-                let mut refs: Vec<&mut BlockTable> = mtp_tables.iter_mut().collect();
-                self.mtp.forward_batched_embed_drawn(&mut refs, &self.to_mtp(input), head.as_deref(), &draws)
-            };
-            input = Vec::with_capacity(b * d);
-            for (r, dr) in drawn.into_iter().enumerate() {
-                // A draw the device kernels do not cover (a top-k inside the vocabulary) comes back
-                // as the row, drawn here by the same rule the reference uses.
-                let token = match dr {
-                    Drawn::Token(t, _, _) => t,
-                    Drawn::Row(row) => {
-                        let s = &mut live[r];
-                        sample_residual(&row, &s.plan.subtalker, &mut s.rng).token
-                    }
-                };
-                codes[r][k - 1] = token;
-                let row = self.residual.codec_embed(k - 1, token);
-                input.extend_from_slice(row);
-                for (f, x) in feed[r * d..(r + 1) * d].iter_mut().zip(row) {
+        for (r, row) in drawn.iter().enumerate() {
+            for (k, &(code, _)) in row.iter().enumerate() {
+                codes[r][k] = code;
+                for (f, x) in feed[r * d..(r + 1) * d].iter_mut().zip(self.residual.codec_embed(k, code)) {
                     *f += x;
                 }
             }
-        }
-        for t in mtp_tables.iter_mut() {
-            self.mtp.release_table(t);
         }
 
         // Commit the frame, then the feedback row: the frame's codebook sum plus the next text row.

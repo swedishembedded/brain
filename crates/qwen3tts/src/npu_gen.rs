@@ -162,6 +162,11 @@ impl TalkerTables {
         self.cfg.d_model as usize
     }
 
+    /// Rows of the codebook-0 table (the codec vocabulary with its specials).
+    pub fn vocab(&self) -> usize {
+        self.cfg.vocab as usize
+    }
+
     /// Codebook-0 logits (`[vocab]`) for a final-norm hidden row — the same host
     /// head as [`crate::gen::TalkerGen::codec_head_logits`].
     pub fn codec_head_logits(&self, hidden_row: &[f32]) -> Vec<f32> {
