@@ -19,7 +19,7 @@ use qwen35::model::Qwen35;
 use rl::objective::external::{BehaviourSource, ExternalPolicyGradient, PolicyGradientConfig, ReferencePolicy};
 use rl::objective::grpo::LossAgg;
 
-use super::external_policy_gradient::{answer_logprobs, lora_model, opts, write_dataset, Row};
+use super::external_policy_gradient::{answer_logprobs, lora_model, lora_model_rows, opts, write_dataset, Row};
 
 const CLIP_EPS: f64 = 0.2;
 const KL_BETA: f64 = 0.1;
@@ -124,6 +124,41 @@ fn a_steps_gradient_is_the_documented_aggregation_over_unequal_records_of_both_a
         println!("{agg:?}: directional derivative, brain {analytic:+.6e}, FP64 reference {numeric:+.6e}");
         assert!(analytic.abs() > 1e-4, "{agg:?}: the fixture must have a gradient to compare: {analytic}");
         assert!((analytic - numeric).abs() <= 3e-2 * analytic.abs().max(numeric.abs()), "{agg:?}: brain {analytic}, FP64 reference {numeric}");
+    }
+}
+
+/// Invariant 3 of the asynchronous policy-gradient ledger: under a token sum the step's gradient is the sum over its
+/// policy tokens divided by the step's token count however the same records are split into micro-batches: four
+/// records of 1, 2, 3 and 5 tokens as four micro-batches of one row, two of two and one of four give one gradient.
+#[test]
+fn a_token_sum_steps_gradient_does_not_depend_on_how_its_records_are_split_into_micro_batches() {
+    let probe = lora_model(7);
+    let rows = records(&probe);
+    let split = |rows_per_batch: u32| -> Vec<Vec<f32>> {
+        let mut m = lora_model_rows(7, rows_per_batch);
+        let dir = tempfile::tempdir().unwrap();
+        write_dataset(dir.path(), &rows);
+        let micro = rows.len() as u32 / rows_per_batch;
+        let run = FitOpts { batch_size: rows_per_batch, ..opts(1, micro, 1e-2) };
+        let cfg = PolicyGradientConfig { clip_eps: CLIP_EPS as f32, kl_beta: KL_BETA as f32, reference: ReferencePolicy::Base, behaviour: BehaviourSource::Recorded, loss_agg: LossAgg::TokenSum, ..Default::default() };
+        let mut obj = ExternalPolicyGradient::open(dir.path(), &run, cfg).unwrap();
+        Objective::<Qwen35>::prepare(&mut obj, &mut m).unwrap();
+        Objective::<Qwen35>::begin(&mut obj, 17, 0);
+        m.zero_grads();
+        Objective::<Qwen35>::micro_steps(&mut obj, &m, &mut Rng::new(1), micro);
+        m.poll_wait();
+        assert!(matches!(Objective::<Qwen35>::step_verdict(&mut obj), StepVerdict::Apply));
+        assert_eq!(obj.stats().steps[0].tokens, 11, "the step trains every token of the four records once");
+        // The fit loop divides the accumulated gradient by the micro-batch count before the optimiser.
+        adapter_names(&m).iter().map(|n| m.read_grad(n).iter().map(|g| g / micro as f32).collect()).collect()
+    };
+    let whole = split(4);
+    let scale = whole.iter().flatten().fold(0f32, |a, g| a.max(g.abs()));
+    assert!(scale > 1e-4, "the fixture must have a gradient to compare: {scale}");
+    for rows_per_batch in [1u32, 2] {
+        let got = split(rows_per_batch);
+        let off = got.iter().flatten().zip(whole.iter().flatten()).fold(0f32, |a, (g, w)| a.max((g - w).abs()));
+        assert!(off <= 1e-4 * scale, "micro-batches of {rows_per_batch} rows: the gradient is {off:e} from one batch of four (largest {scale:e})");
     }
 }
 

@@ -71,9 +71,12 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       for objective, SDK, CLI and the served job; `Grpo` and the external objective share one loss config (dual clip,
       step guards included); the estimator (`ClippedSurrogate | ScoreCentred`) is a variant of the shared `pg_batch`
       path, independent of the experience source and scheduling.
-- [ ] **Model-free oracles** (A05-A06): a K-action categorical policy on host parameters with fixed rewards, every
-      estimator's sampled gradient against its own exact enumerated expectation (complete groups for group-standardised
-      advantages); repartitioning the same tokens across micro-batches leaves the step's gradient unchanged; golden
+- [ ] **Model-free oracles** (A05-A06). Done: `it::pg_estimator_oracle::sampled_group_estimates_converge_to_their_exact_expectations`
+      (four actions, groups of three with z-scored advantages, both estimators' means over 4000 sampled groups within
+      5 standard errors of their exact expectations over all 64 groups; under a constant advantage the score-centred
+      expectation is zero and the clipped surrogate's is not); invariant 3,
+      `it::external_policy_gradient_scale::a_token_sum_steps_gradient_does_not_depend_on_how_its_records_are_split_into_micro_batches`
+      (four records of 1-5 tokens as 4x1, 2x2, 1x4 micro-batches: one gradient to 1e-4 of the largest). Open: golden
       fixtures from the pinned TRL code for advantages, masks and centring coefficients (an isolated tool, CPU only).
 - [ ] **Score-centred policy-gradient objective** (`rl::objective`). Done: the estimator is a variant of the shared
       path (`pg_batch::PgEstimator::{ClippedSurrogate, ScoreCentred(CentringBand)}`, the term in
@@ -81,7 +84,9 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       weights `A f(r_a)` at the token and `-A residual_j` at the listed ids through `SparseTargets`;
       `install_sampler_ids` before the forward, `install_weights` reads the trainer's log-probabilities at them);
       `BatchTerms` reports `centred_masked`, `centred_tail`, `sampler_mass_sum` beside the ratio statistics. Tests:
-      `score_centring` unit tests (band edges, tail bucket, refusal of a meaningless band), `it::score_centred_gradcheck` (qwen35 and qwen3 LoRA, the full loss and the extra targets alone; the latter fails
+      `score_centring` unit tests (band edges, tail bucket, refusal of a meaningless band), `it::pg_estimator_oracle`
+      (invariant 5 with the whole vocabulary, exact and on 20000 sampled tokens; truncated top-K centred by its tail),
+      `it::score_centred_gradcheck` (qwen35 and qwen3 LoRA, the full loss and the extra targets alone; the latter fails
       with the coefficients dropped from the backward). Open: reading the records' top-K into the objectives' batches,
       `prepare` enabling the extra targets, refusals (no top-K, a truncating `sampler`, an importance correction, ids
       past the vocabulary), per-step telemetry (sampler mass, masked fraction) and the selection, which lands through

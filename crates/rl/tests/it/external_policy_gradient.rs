@@ -106,9 +106,14 @@ pub(crate) fn write_dataset(dir: &Path, rows: &[Row]) {
 }
 
 pub(crate) fn lora_model(seed: u64) -> Qwen35 {
+    lora_model_rows(seed, 1)
+}
+
+/// [`lora_model`] training batches of `rows` rows: the same weights for every `rows`.
+pub(crate) fn lora_model_rows(seed: u64, rows: u32) -> Qwen35 {
     let cfg = Qwen35Config { lora: Some(lora_cfg(3, 6.0)), ..Qwen35Config::tiny() };
     let init = qwen35::init::init_weights(&cfg, seed);
-    let m = Qwen35::new_train_on(gpu_core::Gpu::new(pipelines()), cfg, 1, T as u32, &init);
+    let m = Qwen35::new_train_on(gpu_core::Gpu::new(pipelines()), cfg, rows, T as u32, &init);
     // Factors large enough that the adapter moves the tiny model's distribution measurably off its base.
     let mut rng = Rng::new(seed);
     for name in m.param_names().into_iter().filter(|n| n.contains(".lora_")) {
