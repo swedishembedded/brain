@@ -18,6 +18,7 @@ heading and a `Scope: <one sentence>` line under it, then run `make generate/roa
 | ledger | title | scope |
 |---|---|---|
 | [`asr`](asr.md) | asr | Speech-to-text: Nemotron 3.5 ASR streaming and Qwen3-ASR (`crates/nemotronasr`, `crates/qwen3asr`, `audio::asr_caps`). |
+| [`async-policy-gradient`](async-policy-gradient.md) | Asynchronous policy gradient | Online policy-gradient training while the same process serves the policy: the sampler's top-K and the score-centred objective, a streaming training job that consumes rollout groups as an orchestrator produces them and publishes each new adapter version to the serving bank, bounded staleness and token backpressure, and the invariants that gate it. |
 | [`backend-vulkan`](backend-vulkan.md) | backend-vulkan | The native Vulkan backend (`crates/backend-vulkan`). |
 | [`book-debt`](book-debt.md) | book-debt | Defects, gaps and stale comments in brain's crates that writing the textbook surfaced, fixed in the crates so the chapters describe correct code. |
 | [`book`](book.md) | book | The textbook under `docs/book` (*From First Principles to Intelligent Machines*): its specification, tooling, chapters and their verification. |
