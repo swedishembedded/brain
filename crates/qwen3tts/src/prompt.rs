@@ -713,7 +713,7 @@ mod plan_tests {
 
     impl TinyHost {
         fn new() -> TinyHost {
-            let mut rng = data::rng::Lcg::new(7);
+            let mut rng = data::rng::Lcg::new(7); // seed: fixed fixture
             let (in_dim, inter, out, vocab) = (3, 5, 4, 12);
             let text = TextProjection {
                 text_embedding: Some(rng.vec(vocab * in_dim)),
