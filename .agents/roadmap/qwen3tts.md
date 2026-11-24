@@ -25,11 +25,14 @@ frame in inference and training alike.
 
 Target, in order (each a self-contained change, measured with nsys/ncu before the next):
 
-- [ ] Talker and code predictor on the shared `qwen3::serve::Engine` (paged KV, its kernel
-      selection, bf16 and tensor-core GEMMs past the tuned crossover): the prefix in one
-      `prefill_mixed`, every live stream decoded together (`forward_batched_embed`), the
-      resident instance batching concurrent requests through residency's `run_open`; the
-      per-model decoders (`gen.rs`, `gen_kv.rs`, `gen_kv_mtp.rs`) retired.
+- [x] Talker and code predictor on the shared `qwen3::serve::Engine` (`batched::BatchedDecoder`):
+      the prefix in one `prefill_mixed`, every live stream decoded together, the resident
+      instance batching up to `engine::DEVICE_STREAMS` concurrent requests through residency's
+      `run_open`. Pinned by the batched-vs-per-stream and served-together-vs-alone GPU tests.
+- [ ] Retire `gen.rs`: rollouts and scoring still run on it (loaded on the first rollout), and
+      `set_talker_weights` reaches it but not the served decoder; the shared engine needs a
+      weight-update entry point first. bf16 weights and tensor-core GEMMs on the TTS engines
+      are not on yet (`Dtype::F32`).
 - [ ] Device draws: the residual codebooks through `model::readout::RowDrawer`; cb0 with the
       reference's suppression and repetition penalty as a device logit step.
 - [ ] The code predictor's chain in one submission per frame: per-step head and embedding table

@@ -18,6 +18,7 @@
 use std::path::Path;
 
 /// Decoded reference audio and the digest of its source bytes.
+#[derive(Clone)]
 pub struct Reference {
     pub wav: audio::wav::Wav,
     digest: String,

@@ -33,7 +33,7 @@
 //! can procure our services by sending an email to info@swedishembedded.com.
 
 use capability::{ActionResult, Invocation, Manifest, Progress, Provider};
-use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel};
+use residency::{Device, Instance, InstanceKey, JobFeed, MemCost, ResidentModel};
 use serde_json::json;
 use qwen3tts::TtsPaths;
 
@@ -100,9 +100,16 @@ impl ResidentModel for TtsResident {
             TRAIN_KEY => MemCost::new(self.f32_weights().max(1 << 30) * 4, self.ram()),
             // `batch` gives each request its own host decoder copy.
             HOST_KEY => MemCost::new(0, self.ram() * 2),
-            // The hot engine's weights and working set, on whichever device holds it.
-            _ => MemCost::new(self.ram(), 0),
+            // The hot engine's weights and working set, on whichever device holds it, and on a
+            // card the KV pool its batched decoder serves every stream from.
+            _ => MemCost::new(self.ram() + qwen3tts::batched::kv_pool_bytes(&self.paths, qwen3tts::engine::DEVICE_STREAMS).unwrap_or(0), 0),
         }
+    }
+
+    /// A card decodes this many speech requests at once, so the dispatcher hands the engine
+    /// everything queued up to that.
+    fn batch_limit(&self) -> Option<usize> {
+        Some(qwen3tts::engine::DEVICE_STREAMS)
     }
 
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
@@ -155,49 +162,111 @@ fn pcm_blob(pcm: &[f32], index: u32) -> capability::Blob {
 impl Instance for TtsInstance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let device = self.device;
-        residency::on_device(device, || self.run_here(action, inv, progress))?
+        residency::on_device(device, || {
+            let req = request_from(action, inv)?;
+            let seed = req.opts.seed;
+            let mut chunks = AudioChunks::default();
+            let wav = self.engine.run_request(&req, &mut |pcm, _| progress(chunks.next(pcm)))?;
+            qwen3tts::caps::audio_outcome(wav, seed)
+        })?
+    }
+
+    /// Every speech request queued for this engine joins one open group: on a
+    /// card they are decoded together, a new one admitted as soon as one ends.
+    fn run_open(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress), feed: &mut dyn JobFeed) -> bool {
+        if !qwen3tts::caps::RESIDENT_ACTIONS.contains(&action) {
+            return false;
+        }
+        let device = self.device;
+        let engine = &mut self.engine;
+        residency::on_device(device, || {
+            let feed = std::cell::RefCell::new(feed);
+            let mut first: std::collections::VecDeque<(usize, Invocation)> = invs.iter().cloned().enumerate().collect();
+            let mut joined = invs.len();
+            // Each running request's seed (its outcome reports it) and streamed-chunk count.
+            let running: std::cell::RefCell<std::collections::HashMap<usize, (u64, AudioChunks)>> = std::cell::RefCell::default();
+            loop {
+                engine.serve(
+                    &mut |free| {
+                        let mut taken: Vec<(usize, Invocation)> = first.drain(..free.min(first.len())).collect();
+                        for inv in feed.borrow_mut().take(free - taken.len()) {
+                            taken.push((joined, inv));
+                            joined += 1;
+                        }
+                        let mut reqs = Vec::new();
+                        for (i, inv) in taken {
+                            match request_from(action, &inv) {
+                                Ok(req) => {
+                                    running.borrow_mut().insert(i, (req.opts.seed, AudioChunks::default()));
+                                    reqs.push((i, req));
+                                }
+                                Err(e) => feed.borrow_mut().finish(i, Err(e)),
+                            }
+                        }
+                        reqs
+                    },
+                    &mut |i, pcm, _| {
+                        let chunk = running.borrow_mut().entry(i).or_default().1.next(pcm);
+                        progress(i, chunk);
+                    },
+                    &mut |i, result| {
+                        let seed = running.borrow_mut().remove(&i).map_or(0, |(seed, _)| seed);
+                        feed.borrow_mut().finish(i, result.and_then(|wav| qwen3tts::caps::audio_outcome(wav, seed)));
+                    },
+                );
+                if first.is_empty() && feed.borrow_mut().close() {
+                    return;
+                }
+            }
+        })
+        .is_ok()
     }
 }
 
-impl TtsInstance {
-    fn run_here(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let text = inv.get_str("text").ok_or_else(|| format!("tts {action}: missing required param 'text'"))?;
-        if text.trim().is_empty() {
-            return Err(format!("tts {action}: 'text' must be non-empty"));
-        }
-        let lang = inv.get_str("lang").unwrap_or_else(|| "english".to_string());
-        let opts = qwen3tts::caps::gen_opts_from(inv).map_err(|e| format!("tts {action}: {e}"))?;
-        // The chunk size is per request: one request's must not carry into the next.
-        self.engine.set_chunk_frames(inv.get_i64("stream_chunk").map_or(qwen3tts::engine::DEFAULT_CHUNK_FRAMES, |n| n.max(1) as usize));
+/// Numbers a request's streamed audio: each decoded codec chunk becomes a
+/// `Progress::chunk` named "audio", which `Subscribe` forwards as a real
+/// out-of-band blob frame. `index` counts chunks from 1, matching the omni
+/// resident's convention. A plain `Run` caller sees none of this and still
+/// gets the whole waveform.
+#[derive(Default)]
+struct AudioChunks {
+    n: u32,
+}
 
-        // Every action streams its audio the same way: each decoded codec
-        // chunk becomes a `Progress::chunk` named "audio", which `Subscribe`
-        // forwards as a real out-of-band blob frame. `index` counts chunks
-        // from 1, matching the omni resident's convention. A plain `Run`
-        // caller sees none of this and still gets the whole waveform below.
-        let mut n = 0u32;
-        let mut on_audio = |pcm: &[f32], _seq: u32| {
-            n += 1;
-            progress(Progress::chunk(n, 0, format!("audio chunk {n}"), "audio", pcm_blob(pcm, n)));
-        };
-
-        let wav = match action {
-            "synth" => self.engine.speak(&text, &lang, &opts, &inv.cancel, &mut on_audio)?,
-            "clone" => {
-                let (reference, ref_codes) = qwen3tts::caps::reference_from(inv, action)?;
-                let ref_text = inv.get_str("ref_text").unwrap_or_default();
-                self.engine.clone_voice(&text, &reference, &ref_text, ref_codes.as_deref(), &lang, &opts, &inv.cancel, &mut on_audio)?
-            }
-            // VoiceDesign/CustomVoice: instruct/speaker are per-call params.
-            "design" => {
-                let instruct = inv.get_str("instruct").unwrap_or_default();
-                let speaker = inv.get_str("speaker").filter(|s| !s.is_empty());
-                self.engine.design(&text, &lang, &instruct, speaker.as_deref(), &opts, &inv.cancel, &mut on_audio)?
-            }
-            other => return Err(format!("tts: unsupported action '{other}' (the hot engine runs: {})", qwen3tts::caps::RESIDENT_ACTIONS.join(", "))),
-        };
-        qwen3tts::caps::audio_outcome(wav, opts.seed)
+impl AudioChunks {
+    fn next(&mut self, pcm: &[f32]) -> Progress {
+        self.n += 1;
+        let n = self.n;
+        Progress::chunk(n, 0, format!("audio chunk {n}"), "audio", pcm_blob(pcm, n))
     }
+}
+
+/// The speech request `inv` asks `action` for.
+fn request_from(action: &str, inv: &Invocation) -> Result<qwen3tts::engine::Request, String> {
+    use qwen3tts::engine::Voice;
+    let text = inv.get_str("text").ok_or_else(|| format!("tts {action}: missing required param 'text'"))?;
+    if text.trim().is_empty() {
+        return Err(format!("tts {action}: 'text' must be non-empty"));
+    }
+    let voice = match action {
+        "synth" => Voice::Default,
+        "clone" => {
+            let (reference, ref_codes) = qwen3tts::caps::reference_from(inv, action)?;
+            Voice::Clone { reference, ref_text: inv.get_str("ref_text").unwrap_or_default(), ref_codes }
+        }
+        // VoiceDesign/CustomVoice: instruct/speaker are per-call params.
+        "design" => Voice::Design { instruct: inv.get_str("instruct").unwrap_or_default(), speaker: inv.get_str("speaker").filter(|s| !s.is_empty()) },
+        other => return Err(format!("tts: unsupported action '{other}' (the hot engine runs: {})", qwen3tts::caps::RESIDENT_ACTIONS.join(", "))),
+    };
+    Ok(qwen3tts::engine::Request {
+        text,
+        lang: inv.get_str("lang").unwrap_or_else(|| "english".to_string()),
+        voice,
+        opts: qwen3tts::caps::gen_opts_from(inv).map_err(|e| format!("tts {action}: {e}"))?,
+        cancel: inv.cancel.clone(),
+        // The chunk size is per request: one request's must not carry into the next.
+        chunk_frames: inv.get_i64("stream_chunk").map_or(qwen3tts::engine::DEFAULT_CHUNK_FRAMES, |n| n.max(1) as usize),
+    })
 }
 
 #[cfg(test)]

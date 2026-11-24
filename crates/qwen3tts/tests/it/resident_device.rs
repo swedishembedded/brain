@@ -13,7 +13,7 @@
 use std::time::Instant;
 
 use capability::CancelToken;
-use qwen3tts::engine::{Placement, ResidentEngine};
+use qwen3tts::engine::{Placement, Request, ResidentEngine, Voice};
 use qwen3tts::{GenOpts, SamplingRequest, TtsPaths};
 
 const TEXT: &str = "The people must be taught to value their liberty above their ease.";
@@ -201,4 +201,31 @@ fn the_rows_rebuilt_from_a_rollout_reproduce_the_policy_that_made_it() {
     let total = rows.target_positions().count();
     eprintln!("{checked} of {total} first-codebook targets are the argmax under the rebuilt rows; ended by eos: {}", rollout.ended_by_eos);
     assert!(checked * 10 >= total * 9, "the rebuilt rows must reproduce the policy: {checked} of {total}");
+}
+
+#[test]
+fn requests_served_together_are_each_the_request_served_alone() {
+    let _serial = brain_testutil::env_lock();
+    let Some(paths) = paths() else { return };
+    let mut engine = ResidentEngine::load_with(&paths, Placement::Device).unwrap();
+    let texts = [TEXT, "A short one.", "Tomorrow the board boots on the first try."];
+    let request = |text: &str| Request {
+        text: text.to_string(),
+        lang: "english".to_string(),
+        voice: Voice::Default,
+        opts: greedy(48),
+        cancel: CancelToken::default(),
+        chunk_frames: 16,
+    };
+    let alone: Vec<Vec<f32>> = texts.iter().map(|t| engine.run_request(&request(t), &mut |_, _| {}).unwrap()).collect();
+
+    let mut queue: Vec<(usize, Request)> = texts.iter().map(|t| request(t)).enumerate().collect();
+    let mut together: Vec<Option<Vec<f32>>> = vec![None; texts.len()];
+    let mut pieces = vec![0usize; texts.len()];
+    engine.serve(&mut |free| queue.drain(..free.min(queue.len())).collect(), &mut |i, pcm, _| pieces[i] += pcm.len(), &mut |i, r| together[i] = Some(r.unwrap()));
+    for (i, (t, a)) in together.into_iter().zip(&alone).enumerate() {
+        let t = t.expect("every request is answered");
+        assert_eq!(&t, a, "request {i} served with the others is the request served alone");
+        assert_eq!(pieces[i], t.len(), "request {i}'s streamed pieces make its whole clip");
+    }
 }

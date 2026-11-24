@@ -261,7 +261,7 @@ pub struct Prompt {
 }
 
 /// `text_projection(text_embedding(ids))` -> `[ids.len(), d_model]`.
-fn proj(gen: &impl TalkerHost, ids: &[u32]) -> Vec<f32> {
+fn proj(gen: &(impl TalkerHost + ?Sized), ids: &[u32]) -> Vec<f32> {
     gen.text().project(&gen.text().embed_text(ids))
 }
 
@@ -276,7 +276,7 @@ fn add_into(a: &mut [f32], b: &[f32]) {
 /// the think/language tag tokens, the optional speaker x-vector, and
 /// `[codec_pad, codec_bos]`. Returns `[m, d]`.
 fn codec_prefix(
-    gen: &impl TalkerHost,
+    gen: &(impl TalkerHost + ?Sized),
     sp: &TtsSpecials,
     language_id: Option<u32>,
     speaker: Option<&[f32]>,
@@ -303,7 +303,7 @@ fn codec_prefix(
 /// `[role(3) ; (pad×(m-2), tts_bos) + cie[0..m-1]]`. Returns `(pre, cie)` where
 /// `cie` is the `[m, d]` codec prefix (so callers can reuse `cie[m-1]`).
 fn build_pre(
-    gen: &impl TalkerHost,
+    gen: &(impl TalkerHost + ?Sized),
     sp: &TtsSpecials,
     role_ids: &[u32],
     language_id: Option<u32>,
@@ -332,7 +332,7 @@ fn build_pre(
 /// text content (`input_id[3..len-5]`). `speaker` is the 1024-d x-vector, or
 /// `None` for the speaker-free synth prompt.
 pub fn build_xvector_prompt(
-    gen: &impl TalkerHost,
+    gen: &(impl TalkerHost + ?Sized),
     sp: &TtsSpecials,
     role_ids: &[u32],
     text_ids: &[u32],
@@ -378,7 +378,7 @@ pub fn build_xvector_prompt(
 /// model designs the voice purely from the instruction.
 #[allow(clippy::too_many_arguments)]
 pub fn build_instruct_prompt(
-    gen: &impl TalkerHost,
+    gen: &(impl TalkerHost + ?Sized),
     sp: &TtsSpecials,
     role_ids: &[u32],
     text_ids: &[u32],
@@ -403,8 +403,8 @@ pub fn build_instruct_prompt(
 /// `mtp` provides the residual-codebook embedding tables.
 #[allow(clippy::too_many_arguments)]
 pub fn build_icl_prompt(
-    gen: &impl TalkerHost,
-    mtp: &impl MtpHost,
+    gen: &(impl TalkerHost + ?Sized),
+    mtp: &(impl MtpHost + ?Sized),
     sp: &TtsSpecials,
     role_ids: &[u32],
     text_ids: &[u32],

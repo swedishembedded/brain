@@ -26,6 +26,7 @@
 //! our services by sending an email to info@swedishembedded.com.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use capability::CancelToken;
 use gpu_core::Gpu;
@@ -101,8 +102,8 @@ struct Stream {
 pub struct BatchedDecoder {
     talker: Engine,
     mtp: Engine,
-    tables: TalkerTables,
-    residual: ResidualTables,
+    tables: Arc<TalkerTables>,
+    residual: Arc<ResidualTables>,
     /// `small_to_mtp_projection` (`[d_mtp, e]`, bias `[d_mtp]`) when the code predictor is
     /// narrower than the Talker (the 1.7B family).
     projection: Option<(Vec<f32>, Vec<f32>)>,
@@ -120,6 +121,20 @@ fn take(c: &checkpoint::Container, name: &str) -> Result<Vec<f32>, String> {
     c.find(name, "").cloned().ok_or_else(|| format!("tts: the checkpoint has no {name}"))
 }
 
+/// The Talker KV blocks a decoder for `max_streams` streams holds: every stream at an average
+/// utterance, not each at the worst case (a stream that would not fit waits for one to finish).
+fn pool_blocks(max_streams: usize) -> u32 {
+    let per_seq = MAX_CONTEXT / BLOCK;
+    (max_streams as u32 * per_seq / 2).max(per_seq)
+}
+
+/// The device bytes the Talker's KV pool takes for `max_streams` streams, beside the weights;
+/// `None` when the Talker's config cannot be read.
+pub fn kv_pool_bytes(paths: &TtsPaths, max_streams: usize) -> Option<u64> {
+    let cfg = QwenConfig::from_json_checked(&crate::import::open_talker(&paths.talker).ok()?.config()).ok()?;
+    Some(qwen3::serve::kv_pool_bytes(&cfg, BLOCK, pool_blocks(max_streams.max(1)), false))
+}
+
 impl BatchedDecoder {
     /// Load both decoders on `gpu`'s device for up to `max_streams` streams at once.
     pub fn load_on(gpu: &Gpu, paths: &TtsPaths, max_streams: usize) -> Result<BatchedDecoder, String> {
@@ -129,9 +144,7 @@ impl BatchedDecoder {
         let mut tcfg = QwenConfig::from_json_checked(&talker_src.config())?;
         tcfg.block_size = MAX_CONTEXT;
         let per_seq = MAX_CONTEXT / BLOCK;
-        // The pool holds every stream at an average utterance, not each at the worst case: a
-        // stream that would not fit waits for one to finish (`admit` checks the free blocks).
-        let pool = (max_streams as u32 * per_seq / 2).max(per_seq);
+        let pool = pool_blocks(max_streams);
         let talker = Engine::from_source_tier_on(gpu, tcfg, &talker_src, BLOCK, pool, max_streams as u32, per_seq, PREFILL_CHUNK, false, Dtype::F32);
         drop(talker_src);
 
@@ -181,8 +194,8 @@ impl BatchedDecoder {
         Ok(BatchedDecoder {
             talker,
             mtp,
-            tables: TalkerTables::load(&paths.talker),
-            residual: ResidualTables { tables, e },
+            tables: Arc::new(TalkerTables::load(&paths.talker)),
+            residual: Arc::new(ResidualTables { tables, e }),
             projection,
             d_mtp,
             max_streams,
@@ -199,6 +212,12 @@ impl BatchedDecoder {
     /// The code predictor's residual tables, for the prompt builders.
     pub fn residual_tables(&self) -> &ResidualTables {
         &self.residual
+    }
+
+    /// Both host tables, shared: what a caller building prompts while [`Self::run`] holds the
+    /// decoder keeps.
+    pub fn hosts(&self) -> (Arc<TalkerTables>, Arc<ResidualTables>) {
+        (self.tables.clone(), self.residual.clone())
     }
 
     /// The most streams decoded at once.

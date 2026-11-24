@@ -11,6 +11,7 @@ use std::io::{self, Read, Write};
 use std::path::Path;
 
 /// Decoded mono audio.
+#[derive(Clone)]
 pub struct Wav {
     pub sample_rate: u32,
     pub samples: Vec<f32>,
