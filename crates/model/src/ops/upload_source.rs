@@ -186,7 +186,13 @@ pub fn upload_fused_from_source(ops: &Ops, src: &dyn TensorSource, names: &[&str
         }
         // Parts stored as f32 (a flat 1-D tensor the tiled load declines, say)
         // widen nothing on the f32 route below; a quantized part would.
-        if !descs.iter().all(|d| d.encoding == QuantEncoding::f32()) {
+        // M14: an F32 want IS the widening - decoding every part's blocks and
+        // concatenating is exactly what the caller asked for, so the refusal
+        // (which guards a quantized want against silently mixed part
+        // precisions) does not fire for it. A quantized want with mixed part
+        // encodings still cannot join: I8 converts per part and concatenates
+        // (rows are self-contained), anything else refuses.
+        if want != Dtype::F32 && !descs.iter().all(|d| d.encoding == QuantEncoding::f32()) {
             // M14: a quantized part (a GGUF's Q4_K linears) no longer blocks
             // the fused group. Each part is quantized to `want` on its own
             // (the same per-row group quantization the non-fused linears
