@@ -73,7 +73,7 @@ fn a_prepared_dataset_keeps_the_outcome_of_each_example_and_the_behaviour_log_pr
     let ids = binio::read_u32_bin(&out.join("train.u32.bin")).unwrap();
     let mask = binio::read_mask_bin(&out.join("train.mask.bin")).unwrap();
     let rollout = chat_rollout::read(&out, "train", starts.len(), ids.len()).unwrap().expect("sidecars");
-    let graded = |member, reward| Some(chat_rollout::ExampleRollout { graded: Some(chat_rollout::Graded { group: 0, member, reward, teacher_log_ratio: None }) });
+    let graded = |member, reward| Some(chat_rollout::ExampleRollout { graded: Some(chat_rollout::Graded { group: 0, member, reward, teacher_log_ratio: None }), ..Default::default() });
     assert_eq!(rollout.groups, ["g"]);
     assert_eq!(rollout.examples, [graded(0, -1.5), None, graded(1, 0.5)], "a record without a reward is an imitation example; each record is a rollout of its own");
 
@@ -378,4 +378,215 @@ fn a_baseline_only_rollout_counts_in_its_group_and_is_never_an_example() {
     let (trained, base) = (split.examples[0].unwrap().graded.unwrap(), split.baselines[0]);
     assert_eq!((trained.group, base.group, base.reward), (0, 0, 0.0), "one group");
     assert_ne!(trained.member, base.member, "two rollouts");
+}
+
+/// What a collector that asks its sampler for the top-`k` of every step records on an answer of `tokens` tokens: ids
+/// distinct within a step, whole-row log-probabilities of a distribution whose top-`k` mass is below one.
+fn top_of(tokens: usize, k: usize) -> (Vec<Vec<u32>>, Vec<Vec<f32>>) {
+    let ids = (0..tokens).map(|t| (0..k).map(|j| (100 * t + j) as u32).collect()).collect();
+    let lps = (0..tokens).map(|_| (0..k).map(|j| (0.4 / (j + 1) as f32).ln()).collect()).collect();
+    (ids, lps)
+}
+
+/// A rollout record of group `g` with one supervised answer carrying `behavior_logprobs` and the given top-k fields
+/// (raw JSON, `None` to omit); `extra` is spliced into the record's own keys.
+fn top_record(extra: &str, behavior: usize, ids: Option<serde_json::Value>, lps: Option<serde_json::Value>) -> String {
+    let field = |name: &str, v: Option<serde_json::Value>| v.map(|v| format!(r#","{name}":{v}"#)).unwrap_or_default();
+    let blp = serde_json::to_string(&vec![-0.5f32; behavior]).unwrap();
+    format!(
+        r#"{{"reward": 1.0, "group": "g", {extra} "messages": [{{"role":"user","content":"q","train":false}},{{"role":"assistant","content":"a","train":true,"behavior_logprobs":{blp}{}{}}}]}}"#,
+        field("behavior_top_ids", ids),
+        field("behavior_top_logprobs", lps)
+    )
+}
+
+fn valid_top(tokens: usize, k: usize) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
+    let (ids, lps) = top_of(tokens, k);
+    (Some(serde_json::json!(ids)), Some(serde_json::json!(lps)))
+}
+
+fn refusal(line: &str) -> (chat_rollout::RecordRule, String, String) {
+    let error = ChatSample::from_json_line_with(line, &data::chat::TextOnly::TRAINER).expect_err("refused");
+    let fault = error.fault().cloned().unwrap_or_else(|| panic!("a contract rule: {error}"));
+    (fault.rule, fault.field, error.to_string())
+}
+
+/// The sampler's top-k of each token lands on exactly the tokens its `behavior_logprobs` land on, in the prepared
+/// split's `btk`/`btl` sidecars (`[tokens * k]`, `NO_TOP_ID` and NaN where none was recorded), whatever else the split
+/// holds; a split without any has no sidecar and a stale one is removed.
+#[test]
+fn the_top_k_of_each_token_is_kept_where_its_behaviour_log_prob_is() {
+    use chat_rollout::{read_behavior_top, NO_TOP_ID};
+    let tmp = tempfile::tempdir().unwrap();
+    let k = 3;
+    let (ids, lps) = valid_top(ANSWER_TOKENS, k);
+    let lines = [record(None, None), top_record("", ANSWER_TOKENS, ids, lps), record(Some("0.5"), Some(vec![-0.3; ANSWER_TOKENS]))];
+    let path = write_records(tmp.path(), &lines);
+    let out = tmp.path().join("prepared");
+    prepare(&examples(&path).unwrap(), &out).unwrap();
+
+    let tokens = binio::read_u32_bin(&out.join("train.u32.bin")).unwrap().len();
+    let starts = binio::read_u64_bin(&out.join("train.ex.bin")).unwrap();
+    let rollout = chat_rollout::read(&out, "train", starts.len(), tokens).unwrap().expect("sidecars");
+    let top = read_behavior_top(&out, "train", tokens).unwrap().expect("top-k sidecars");
+    assert_eq!((top.k, top.ids.len(), top.logprobs.len()), (k, tokens * k, tokens * k));
+    let (want_ids, want_lps) = top_of(ANSWER_TOKENS, k);
+    let mut seen = 0;
+    for t in 0..tokens {
+        let (row_ids, row_lps) = (&top.ids[t * k..(t + 1) * k], &top.logprobs[t * k..(t + 1) * k]);
+        if t >= starts[1] as usize && t < starts[2] as usize && !rollout.behavior[t].is_nan() {
+            assert_eq!((row_ids, row_lps), (want_ids[seen].as_slice(), want_lps[seen].as_slice()), "token {t}");
+            seen += 1;
+        } else {
+            assert!(row_ids.iter().all(|&i| i == NO_TOP_ID) && row_lps.iter().all(|l| l.is_nan()), "token {t} has none");
+        }
+    }
+    assert_eq!(seen, ANSWER_TOKENS, "every token with a behaviour log-probability of the record that carries a top-k has its own");
+    assert!(read_behavior_top(&out, "train", tokens + 1).is_err(), "checked against the tokens the split holds");
+
+    let plain = write_records(tmp.path(), &[record(Some("0.5"), Some(vec![-0.3; ANSWER_TOKENS]))]);
+    prepare(&examples(&plain).unwrap(), &out).unwrap();
+    let tokens = binio::read_u32_bin(&out.join("train.u32.bin")).unwrap().len();
+    assert!(read_behavior_top(&out, "train", tokens).unwrap().is_none());
+    assert!(!out.join("train.btk.bin").exists() && !out.join("train.btl.bin").exists(), "stale sidecars are removed");
+}
+
+#[test]
+fn a_packed_record_places_each_answers_top_k_on_that_answers_tokens() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (a, b) = (top_of(ANSWER_TOKENS, 2), top_of(ANSWER_TOKENS, 2));
+    let line = format!(
+        r#"{{"reward": 2.0, "group": "g", "messages": [{{"role":"user","content":"q","train":false}},{{"role":"assistant","content":"a","train":true,"behavior_logprobs":{blp},"behavior_top_ids":{},"behavior_top_logprobs":{}}},{{"role":"user","content":"r","train":false}},{{"role":"assistant","content":"b","train":true,"behavior_logprobs":{blp},"behavior_top_ids":{},"behavior_top_logprobs":{}}}]}}"#,
+        serde_json::json!(a.0),
+        serde_json::json!(a.1),
+        serde_json::json!(b.0),
+        serde_json::json!(b.1),
+        blp = serde_json::to_string(&vec![-0.5f32; ANSWER_TOKENS]).unwrap()
+    );
+    let record = ChatSample::from_jsonl(&write_records(tmp.path(), &[line])).unwrap().remove(0);
+    let packed = record.answers_packed(&template(), true).unwrap().expect("assistant answers");
+    let encoded = packed.encode_rollout(&tokenizer(), &template(), RenderOpts::default()).unwrap();
+    let top = encoded.behavior_top.expect("top-k placed");
+    assert_eq!(top.k, 2);
+    let placed: Vec<u32> = (0..encoded.ids.len()).filter(|&t| !encoded.behavior[t].is_nan()).flat_map(|t| top.ids[t * 2..t * 2 + 2].to_vec()).collect();
+    assert_eq!(placed, [a.0, b.0].concat().concat());
+}
+
+#[test]
+fn a_record_that_misstates_its_top_k_is_refused_by_rule_and_field() {
+    use chat_rollout::RecordRule::{BaselineTrains, BehaviorTop, BehaviorTopCount, MissingReward};
+    let n = ANSWER_TOKENS;
+    type Edit<'a> = &'a dyn Fn(&mut Vec<Vec<u32>>, &mut Vec<Vec<f32>>);
+    let with = |f: Edit| {
+        let (mut ids, mut lps) = top_of(n, 3);
+        f(&mut ids, &mut lps);
+        top_record("", n, Some(serde_json::json!(ids)), Some(serde_json::json!(lps)))
+    };
+    let (ids, lps) = valid_top(n, 3);
+    ChatSample::from_json_line_with(&top_record("", n, ids.clone(), lps.clone()), &data::chat::TextOnly::TRAINER).expect("a valid top-k");
+
+    let cases: Vec<(&str, String, chat_rollout::RecordRule, &str)> = vec![
+        ("ids count", with(&|ids, _| drop(ids.pop())), BehaviorTopCount, "messages[1].behavior_top_ids"),
+        ("logprobs count", with(&|_, lps| lps.push(vec![-1.0; 3])), BehaviorTopCount, "messages[1].behavior_top_logprobs"),
+        ("ragged k in a record", with(&|ids, lps| { ids[4].pop(); lps[4].pop(); }), BehaviorTop, "messages[1].behavior_top_ids"),
+        ("ids and logprobs of a token differ", with(&|_, lps| {
+            lps[2].pop();
+        }), BehaviorTop, "messages[1].behavior_top_logprobs"),
+        ("duplicate id", with(&|ids, _| ids[3][1] = ids[3][0]), BehaviorTop, "messages[1].behavior_top_ids"),
+        ("positive logprob", with(&|_, lps| lps[1][0] = 0.5), BehaviorTop, "messages[1].behavior_top_logprobs"),
+        ("mass above one", with(&|_, lps| lps[0] = vec![-0.1; 3]), BehaviorTop, "messages[1].behavior_top_logprobs"),
+        ("empty k", with(&|ids, lps| { ids.iter_mut().for_each(Vec::clear); lps.iter_mut().for_each(Vec::clear); }), BehaviorTop, "messages[1].behavior_top_ids"),
+        ("ids without logprobs", top_record("", n, ids.clone(), None), BehaviorTop, "messages[1].behavior_top_logprobs"),
+        ("logprobs without ids", top_record("", n, None, lps.clone()), BehaviorTop, "messages[1].behavior_top_ids"),
+        (
+            "without behavior_logprobs",
+            format!(r#"{{"reward": 1.0, "group": "g", "messages": [{{"role":"user","content":"q","train":false}},{{"role":"assistant","content":"a","train":true,"behavior_top_ids":{},"behavior_top_logprobs":{}}}]}}"#, ids.clone().unwrap(), lps.clone().unwrap()),
+            BehaviorTop,
+            "messages[1].behavior_top_ids",
+        ),
+        ("on a baseline", top_record(r#""baseline_only": true,"#, n, ids.clone(), lps.clone()), BaselineTrains, "messages[1].train"),
+        ("without a reward", top_record("", n, ids.clone(), lps.clone()).replace(r#""reward": 1.0, "group": "g","#, ""), MissingReward, "messages[1].behavior_logprobs"),
+    ];
+    for (what, line, rule, field) in cases {
+        let (got_rule, got_field, why) = refusal(&line);
+        assert_eq!((got_rule, got_field.as_str()), (rule, field), "{what}: {why}");
+    }
+    // Ragged K across the messages of one record.
+    let (a, b) = (top_of(n, 2), top_of(n, 3));
+    let blp = serde_json::to_string(&vec![-0.5f32; n]).unwrap();
+    let line = format!(
+        r#"{{"reward": 1.0, "group": "g", "messages": [{{"role":"user","content":"q","train":false}},{{"role":"assistant","content":"a","train":true,"behavior_logprobs":{blp},"behavior_top_ids":{},"behavior_top_logprobs":{}}},{{"role":"user","content":"r","train":false}},{{"role":"assistant","content":"b","train":true,"behavior_logprobs":{blp},"behavior_top_ids":{},"behavior_top_logprobs":{}}}]}}"#,
+        serde_json::json!(a.0),
+        serde_json::json!(a.1),
+        serde_json::json!(b.0),
+        serde_json::json!(b.1)
+    );
+    let (rule, field, _) = refusal(&line);
+    assert_eq!((rule, field.as_str()), (BehaviorTop, "messages[3].behavior_top_ids"));
+    assert_eq!(chat_rollout::RecordRule::BehaviorTop.name(), "behavior_top");
+    assert_eq!(chat_rollout::RecordRule::BehaviorTopCount.name(), "behavior_top_count");
+}
+
+#[test]
+fn a_split_that_mixes_top_k_widths_is_refused_naming_the_example() {
+    let tmp = tempfile::tempdir().unwrap();
+    let line = |k| {
+        let (ids, lps) = valid_top(ANSWER_TOKENS, k);
+        top_record("", ANSWER_TOKENS, ids, lps)
+    };
+    let path = write_records(tmp.path(), &[line(2), line(3)]);
+    let why = prepare(&examples(&path).unwrap(), &tmp.path().join("prepared")).expect_err("refused");
+    assert!(why.contains("behavior_top") && why.contains("example 1") && why.contains('2') && why.contains('3'), "{why}");
+}
+
+/// `policy_version` (the oldest policy version behind the record) and `sampler` (the controls the decoder applied)
+/// are rollout fields: validated, and kept per example in the prepared split.
+#[test]
+fn policy_version_and_sampler_are_validated_and_kept_per_example() {
+    let tmp = tempfile::tempdir().unwrap();
+    let extra = r#""policy_version": 7, "sampler": {"temperature": 0.8, "top_p": 0.95},"#;
+    let path = write_records(tmp.path(), &[top_record(extra, ANSWER_TOKENS, None, None), top_record("", ANSWER_TOKENS, None, None), record(None, None)]);
+    let out = tmp.path().join("prepared");
+    prepare(&examples(&path).unwrap(), &out).unwrap();
+    let starts = binio::read_u64_bin(&out.join("train.ex.bin")).unwrap();
+    let tokens = binio::read_u32_bin(&out.join("train.u32.bin")).unwrap().len();
+    let split = chat_rollout::read(&out, "train", starts.len(), tokens).unwrap().expect("sidecars");
+    let stamped = split.examples[0].unwrap();
+    assert_eq!(stamped.policy_version, Some(7));
+    let sampler = stamped.sampler.expect("sampler");
+    assert_eq!((sampler.temperature, sampler.top_k, sampler.top_p, sampler.min_p), (Some(0.8), None, Some(0.95), None));
+    assert!(sampler.truncates());
+    assert_eq!((split.examples[1].unwrap().policy_version, split.examples[1].unwrap().sampler), (None, None));
+
+    use chat_rollout::SamplerDecl;
+    let decl = |temperature, top_k, top_p, min_p| SamplerDecl { temperature, top_k, top_p, min_p };
+    assert!(!decl(Some(1.0), None, None, None).truncates() && !decl(None, None, Some(1.0), Some(0.0)).truncates());
+    assert!(decl(None, Some(40), None, None).truncates() && decl(None, None, None, Some(0.05)).truncates());
+
+    // An older sidecar without the fields reads as before.
+    let old = r#"{"groups":["g"],"examples":[{"graded":{"group":0,"member":0,"reward":1.0}}]}"#;
+    let older = tmp.path().join("older");
+    std::fs::create_dir_all(&older).unwrap();
+    std::fs::write(older.join("train.rollouts.json"), old).unwrap();
+    let again = chat_rollout::read(&older, "train", 1, 0).unwrap_or_else(|e| panic!("{e}"));
+    let example = again.expect("sidecar").examples[0].unwrap();
+    assert_eq!((example.policy_version, example.sampler), (None, None));
+
+    for (extra, needle) in [
+        (r#""policy_version": -1,"#, "policy_version"),
+        (r#""policy_version": 1.5,"#, "policy_version"),
+        (r#""policy_version": "3","#, "policy_version"),
+        (r#""sampler": {"temperature": 0},"#, "temperature"),
+        (r#""sampler": {"top_k": 0},"#, "top_k"),
+        (r#""sampler": {"top_p": 0},"#, "top_p"),
+        (r#""sampler": {"top_p": 1.5},"#, "top_p"),
+        (r#""sampler": {"min_p": 1},"#, "min_p"),
+        (r#""sampler": {"seed": 1},"#, "seed"),
+    ] {
+        let why = ChatSample::from_json_line_with(&top_record(extra, ANSWER_TOKENS, None, None), &data::chat::TextOnly::TRAINER).expect_err(extra).to_string();
+        assert!(why.contains(needle) && why.contains("sampler") == extra.contains("sampler"), "{extra}: {why}");
+    }
+    let alone = record(None, None).replacen("{", r#"{"policy_version": 3,"#, 1);
+    let (rule, field, _) = refusal(&alone);
+    assert_eq!((rule, field.as_str()), (chat_rollout::RecordRule::MissingReward, "policy_version"));
 }

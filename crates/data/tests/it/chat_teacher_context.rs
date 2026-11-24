@@ -66,7 +66,7 @@ fn a_prepared_dataset_keeps_the_teachers_rendering_whose_supervised_tokens_are_t
     let ids = binio::read_u32_bin(&out.join("train.u32.bin")).unwrap();
     let mask = binio::read_mask_bin(&out.join("train.mask.bin")).unwrap();
     let rollout = chat_rollout::read(&out, "train", starts.len(), ids.len()).unwrap().expect("sidecars");
-    assert_eq!(rollout.examples[0], Some(chat_rollout::ExampleRollout { graded: None }), "a teacher-only record is a rollout without a reward of its own");
+    assert_eq!(rollout.examples[0], Some(chat_rollout::ExampleRollout { graded: None, ..Default::default() }), "a teacher-only record is a rollout without a reward of its own");
     assert!(rollout.examples[1].is_none(), "a record without rollout data stays an imitation example");
 
     let teacher = chat_rollout::read_teacher(&out, "train", starts.len()).unwrap().expect("teacher sidecar");
@@ -91,7 +91,7 @@ fn a_teacher_context_may_come_with_a_reward_and_behaviour_log_probs() {
     let ids = binio::read_u32_bin(&out.join("train.u32.bin")).unwrap();
     let rollout = chat_rollout::read(&out, "train", 1, ids.len()).unwrap().unwrap();
     assert_eq!(rollout.groups, ["g"]);
-    assert_eq!(rollout.examples, [Some(chat_rollout::ExampleRollout { graded: Some(chat_rollout::Graded { group: 0, member: 0, reward: 0.75, teacher_log_ratio: None }) })]);
+    assert_eq!(rollout.examples, [Some(chat_rollout::ExampleRollout { graded: Some(chat_rollout::Graded { group: 0, member: 0, reward: 0.75, teacher_log_ratio: None }), ..Default::default() })]);
     assert_eq!(rollout.behavior.iter().filter(|b| !b.is_nan()).count(), 1 + "<|im_end|>".len());
 }
 

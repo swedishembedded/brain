@@ -23,6 +23,22 @@
 //!   each token of that answer, one per token of the answer as the chat template renders it after the prompt (the
 //!   answer's text and its closing end-of-turn marker; the whitespace the template writes after the marker, such as the newline after Qwen's
 //!   `<|im_end|>`, is context: the sampler stops at the marker and never chose it). A value above zero is not a log-probability.
+//! * `"behavior_top_ids": [[<id>, ...K], ...]` and `"behavior_top_logprobs": [[<number>, ...K], ...]` on a supervised
+//!   assistant message, beside `behavior_logprobs` (which they require; the two come together): the sampler's `K`
+//!   most likely tokens at each step and their log-probabilities, one inner list per token, exactly as many as
+//!   `behavior_logprobs` holds (rule `behavior_top_count`, naming `messages[i].behavior_top_ids`, otherwise). `K >= 1`
+//!   is the same for every token of the record; the ids of one token are distinct; the log-probabilities are finite,
+//!   at most 0, and whole-row log-probabilities of the sampler's distribution at its temperature, so the
+//!   probabilities of one token sum to at most one (rule `behavior_top`, naming the field). The sampled token need
+//!   not be among them. A `baseline_only` record carries none (`baseline_trains`) and neither does a record without a
+//!   reward or teacher (`missing_reward`). The data crate does not know the vocabulary of the model a dataset is
+//!   trained on, so an id that is not in it is refused by the trainer, not here.
+//! * `"policy_version": <u64>` on the record: the oldest policy version among the requests behind it (a non-negative
+//!   integer). Kept per example in the prepared split.
+//! * `"sampler": {"temperature": <number>?, "top_k": <u32>?, "top_p": <number>?, "min_p": <number>?}` on the record:
+//!   the sampling controls the decoder applied (`temperature` finite and above 0, `top_k` at least 1, `top_p` in
+//!   (0, 1], `min_p` in [0, 1)). Kept per example in the prepared split ([`SamplerDecl::truncates`] says whether the
+//!   sampled distribution is a truncation of the model's).
 //! * `"token_ids": [<id>, ...]` on a supervised assistant message (beside `behavior_logprobs`): the ids the sampler
 //!   generated for the answer, end-of-turn marker included. The trainer trains these ids, never the ids the answer's
 //!   text renders to again: a model writes a call's arguments, its whitespace and its think block its own way, and the
@@ -77,8 +93,11 @@
 //! A prepared dataset keeps all of it beside its token files, per split: `<split>.rollouts.json` (the groups' keys and,
 //! per example, whether it is a rollout and its group, rollout and reward; absent when no example is a rollout),
 //! `<split>.blp.bin` (`f32` per token of the stream, NaN where no behaviour log-probability was recorded) and
-//! `<split>.trn.bin` (a flag per example, written only when some example is truncated). Preparing a split removes a
-//! stale sidecar. The teacher's renderings are kept as `<split>.tch.u32.bin`, `<split>.tch.mask.bin` and
+//! `<split>.trn.bin` (a flag per example, written only when some example is truncated). A sampler's top-k is kept as
+//! `<split>.btk.bin` (header-free `u32` ids, `[tokens * K]`, [`NO_TOP_ID`] where none was recorded) and
+//! `<split>.btl.bin` (`f32` log-probabilities, `[tokens * K]`, NaN where none), `K` as `behavior_top_k` in
+//! `<split>.rollouts.json` ([`read_behavior_top`]); one split holds one `K`. Preparing a split removes a stale
+//! sidecar. The teacher's renderings are kept as `<split>.tch.u32.bin`, `<split>.tch.mask.bin` and
 //! `<split>.tch.ex.bin` (an example without a teacher context holds none of its own: an empty range). A teacher model's
 //! per-token scores are kept as `<split>.tlp.bin` (`f32` per token, NaN where none was recorded), a rollout's
 //! sequence-level signal with its outcome in `<split>.rollouts.json`.
@@ -116,7 +135,7 @@ pub enum RecordRule {
     /// The record's `tokenizer_digest` differs from the one the job's other records name.
     MixedTokenizerDigest,
     /// A record marked `baseline_only` supervises a message, carries the per-token fields of a trained answer
-    /// (`behavior_logprobs`, `token_ids`), a `teacher_context`, or is `truncated`: a baseline only sets its group's
+    /// (`behavior_logprobs`, `behavior_top_ids`, `token_ids`), a `teacher_context`, or is `truncated`: a baseline only sets its group's
     /// baseline.
     BaselineTrains,
     /// The record's `tokenizer_digest` is not the digest of the tokenizer of the base the run trains.
@@ -126,6 +145,14 @@ pub enum RecordRule {
     LossWeight,
     /// `teacher_logprobs` does not hold one value per token of its answer as the template renders it.
     TeacherLogprobCount,
+    /// `behavior_top_ids` or `behavior_top_logprobs` does not hold one list per value of the answer's
+    /// `behavior_logprobs`.
+    BehaviorTopCount,
+    /// `behavior_top_ids` and `behavior_top_logprobs` stated so that they are not a sampler's top-k: one without the
+    /// other or without `behavior_logprobs`, an empty or ragged list (a `K` that differs between tokens, answers of a
+    /// record, or the examples of a split), a repeated id, an id that is [`NO_TOP_ID`], or log-probabilities that are
+    /// not finite, above 0 or sum (as probabilities) to more than one.
+    BehaviorTop,
     /// A teacher model's scores (`teacher_logprobs`, `teacher_logprob`) stated so that no distillation estimator can
     /// use them: both forms in one record, a score on some supervised answers and not on others, beside a
     /// `teacher_context`, a value that is not a log-probability, or a per-answer score without what the
@@ -151,6 +178,8 @@ impl RecordRule {
             RecordRule::TokenizerMismatch => "tokenizer_mismatch",
             RecordRule::LossWeight => "loss_weight",
             RecordRule::TeacherLogprobCount => "teacher_logprob_count",
+            RecordRule::BehaviorTopCount => "behavior_top_count",
+            RecordRule::BehaviorTop => "behavior_top",
             RecordRule::TeacherScores => "teacher_scores",
         }
     }
@@ -211,6 +240,202 @@ impl From<RecordError> for String {
 /// A log-probability can be at most zero; this much above it is rounding of the collector's own arithmetic.
 const LOGPROB_SLACK: f32 = 1e-3;
 
+/// The id a `<split>.btk.bin` holds where no top-k was recorded for a token (no vocabulary has that many ids).
+pub const NO_TOP_ID: u32 = u32::MAX;
+
+/// The sampler's `k` most likely tokens at each step and their log-probabilities (`"behavior_top_ids"`,
+/// `"behavior_top_logprobs"`): of one answer, one example, or a split's whole token stream, row-major `[tokens * k]`,
+/// with [`NO_TOP_ID`] and NaN at a token that has none.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BehaviorTop {
+    pub k: usize,
+    pub ids: Vec<u32>,
+    pub logprobs: Vec<f32>,
+}
+
+impl BehaviorTop {
+    /// How many tokens the table holds rows for.
+    pub fn tokens(&self) -> usize {
+        self.ids.len().checked_div(self.k).unwrap_or(0)
+    }
+
+    /// `tokens` rows with nothing recorded.
+    fn none(k: usize, tokens: usize) -> BehaviorTop {
+        BehaviorTop { k, ids: vec![NO_TOP_ID; tokens * k], logprobs: vec![f32::NAN; tokens * k] }
+    }
+
+    /// Append `tokens` rows with nothing recorded.
+    pub(crate) fn extend_none(&mut self, tokens: usize) {
+        self.ids.resize(self.ids.len() + tokens * self.k, NO_TOP_ID);
+        self.logprobs.resize(self.logprobs.len() + tokens * self.k, f32::NAN);
+    }
+
+    /// Append the rows of `other`, which has the same `k`.
+    pub(crate) fn extend(&mut self, other: &BehaviorTop) {
+        assert_eq!(self.k, other.k, "BehaviorTop::extend: tables of different k");
+        self.ids.extend_from_slice(&other.ids);
+        self.logprobs.extend_from_slice(&other.logprobs);
+    }
+
+    /// The rows of consecutive stretches of tokens, `None` for a stretch with no table: `parts` are `(tokens, table)`.
+    /// `None` when no stretch has one.
+    pub(crate) fn assemble(parts: &[(usize, Option<&BehaviorTop>)]) -> Result<Option<BehaviorTop>, String> {
+        let Some(k) = parts.iter().find_map(|(_, top)| top.map(|t| t.k)) else { return Ok(None) };
+        let mut out = BehaviorTop::none(k, 0);
+        for (tokens, top) in parts {
+            match top {
+                Some(top) if top.k != k => return Err(format!("the answers of one example carry top-{k} and top-{} tables; one example holds one K", top.k)),
+                Some(top) => out.extend(top),
+                None => out.extend_none(*tokens),
+            }
+        }
+        Ok(Some(out))
+    }
+}
+
+/// The sampling controls a decoder applied (`"sampler"`): what the record's tokens were drawn from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SamplerDecl {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_p: Option<f64>,
+}
+
+impl SamplerDecl {
+    /// A sampler as the wire gives it: `temperature` finite and above 0, `top_k` at least 1, `top_p` in (0, 1],
+    /// `min_p` in [0, 1).
+    pub(crate) fn from_wire(value: &serde_json::Value) -> Result<SamplerDecl, String> {
+        let decl: SamplerDecl = serde_json::from_value(value.clone()).map_err(|e| format!("\"sampler\": {e}"))?;
+        if decl.temperature.is_some_and(|t| !t.is_finite() || t <= 0.0) {
+            return Err("\"sampler\": \"temperature\" is not a finite number above 0".to_string());
+        }
+        if decl.top_k == Some(0) {
+            return Err("\"sampler\": \"top_k\" is 0; it is at least 1".to_string());
+        }
+        if decl.top_p.is_some_and(|p| !(p > 0.0 && p <= 1.0)) {
+            return Err("\"sampler\": \"top_p\" is not in (0, 1]".to_string());
+        }
+        if decl.min_p.is_some_and(|p| !(0.0..1.0).contains(&p)) {
+            return Err("\"sampler\": \"min_p\" is not in [0, 1)".to_string());
+        }
+        Ok(decl)
+    }
+
+    /// Whether the decoder drew from a truncation of the model's distribution (`top_k`, `top_p` below 1 or `min_p`
+    /// above 0) rather than from its whole row at the temperature.
+    pub fn truncates(&self) -> bool {
+        self.top_k.is_some() || self.top_p.is_some_and(|p| p < 1.0) || self.min_p.is_some_and(|p| p > 0.0)
+    }
+}
+
+/// Where a rollout's tokens came from: the oldest policy version among the requests behind them and the sampling
+/// controls the decoder applied, as far as the record states them.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Provenance {
+    pub policy_version: Option<u64>,
+    pub sampler: Option<SamplerDecl>,
+}
+
+/// A record's `policy_version` as the wire gives it: a non-negative integer that fits `u64`.
+pub(crate) fn check_policy_version(value: &serde_json::Value) -> Result<u64, String> {
+    value.as_u64().ok_or_else(|| format!("\"policy_version\" is {value}, which is not a non-negative integer that fits in 64 bits"))
+}
+
+/// One message's top-k as the wire gives it: the two lists, either of which may be absent (a fault when only one is).
+pub(crate) struct WireTop {
+    pub(crate) ids: Option<serde_json::Value>,
+    pub(crate) logprobs: Option<serde_json::Value>,
+}
+
+/// Slack on the mass of one token's top-k probabilities, which are one row of a distribution: rounding of the
+/// collector's own arithmetic.
+const TOP_MASS_SLACK: f64 = 1e-3;
+
+/// The top-k tables of a record's messages, checked against the `behavior_logprobs` they sit beside (`supervised[i]`:
+/// message `i` is a supervised assistant message). One `K` for the whole record.
+pub(crate) fn check_behavior_top(wire: &[WireTop], supervised: &[bool], behavior: &[Option<Vec<f32>>]) -> Result<Vec<Option<BehaviorTop>>, RecordError> {
+    let refuse = |rule: RecordRule, i: usize, name: &str, why: String| {
+        let field = format!("messages[{i}].{name}");
+        RecordError::of(RecordFault::new(rule, &field), format!("{field}: {why}"))
+    };
+    let mut record_k: Option<usize> = None;
+    let mut out = Vec::with_capacity(wire.len());
+    for (i, top) in wire.iter().enumerate() {
+        let (ids, lps) = match (&top.ids, &top.logprobs) {
+            (None, None) => {
+                out.push(None);
+                continue;
+            }
+            (Some(ids), Some(lps)) => (ids, lps),
+            (Some(_), None) => return Err(refuse(RecordRule::BehaviorTop, i, "behavior_top_logprobs", "\"behavior_top_ids\" comes with \"behavior_top_logprobs\"".to_string())),
+            (None, Some(_)) => return Err(refuse(RecordRule::BehaviorTop, i, "behavior_top_ids", "\"behavior_top_logprobs\" comes with \"behavior_top_ids\"".to_string())),
+        };
+        if !supervised[i] {
+            return Err(refuse(RecordRule::BehaviorTop, i, "behavior_top_ids", "only a supervised \"assistant\" message carries a top-k (its \"train\" is true)".to_string()));
+        }
+        let Some(behavior) = &behavior[i] else {
+            return Err(refuse(RecordRule::BehaviorTop, i, "behavior_top_ids", "a top-k sits beside the \"behavior_logprobs\" of the same answer, which this message does not carry".to_string()));
+        };
+        let rows = |name: &str, value: &serde_json::Value| -> Result<Vec<serde_json::Value>, RecordError> {
+            let list = value.as_array().ok_or_else(|| refuse(RecordRule::BehaviorTop, i, name, format!("\"{name}\" is not a list of lists")))?;
+            if list.len() != behavior.len() {
+                return Err(refuse(RecordRule::BehaviorTopCount, i, name, format!("\"{name}\" holds {} lists, and \"behavior_logprobs\" {} values; a top-k is one list per token", list.len(), behavior.len())));
+            }
+            Ok(list.clone())
+        };
+        let (id_rows, lp_rows) = (rows("behavior_top_ids", ids)?, rows("behavior_top_logprobs", lps)?);
+        let mut table: Option<BehaviorTop> = None;
+        for (t, (id_row, lp_row)) in id_rows.iter().zip(&lp_rows).enumerate() {
+            let bad = |name: &str, why: String| refuse(RecordRule::BehaviorTop, i, name, format!("token {t}: {why}"));
+            let id_list = id_row.as_array().ok_or_else(|| bad("behavior_top_ids", "not a list of ids".to_string()))?;
+            let lp_list = lp_row.as_array().ok_or_else(|| bad("behavior_top_logprobs", "not a list of numbers".to_string()))?;
+            if id_list.is_empty() {
+                return Err(bad("behavior_top_ids", "no ids; a top-k holds at least one".to_string()));
+            }
+            let k = *record_k.get_or_insert(id_list.len());
+            if id_list.len() != k {
+                return Err(bad("behavior_top_ids", format!("{} ids, and the record's top-k holds {k} per token", id_list.len())));
+            }
+            if lp_list.len() != k {
+                return Err(bad("behavior_top_logprobs", format!("{} values for {k} ids", lp_list.len())));
+            }
+            let table = table.get_or_insert_with(|| BehaviorTop::none(k, 0));
+            let mut row_ids = Vec::with_capacity(k);
+            for v in id_list {
+                let id = v.as_u64().and_then(|n| u32::try_from(n).ok()).filter(|&n| n != NO_TOP_ID).ok_or_else(|| bad("behavior_top_ids", format!("{v} is not a token id (a non-negative integer below {NO_TOP_ID})")))?;
+                if row_ids.contains(&id) {
+                    return Err(bad("behavior_top_ids", format!("id {id} is listed twice")));
+                }
+                row_ids.push(id);
+            }
+            let mut mass = 0.0f64;
+            let mut row_lps = Vec::with_capacity(k);
+            for v in lp_list {
+                let number = v.as_f64().filter(|n| n.is_finite() && (*n as f32).is_finite()).ok_or_else(|| bad("behavior_top_logprobs", format!("{v} is not a finite number")))?;
+                if number as f32 > LOGPROB_SLACK {
+                    return Err(bad("behavior_top_logprobs", format!("{number} is above 0; a log-probability is at most 0")));
+                }
+                let clamped = (number as f32).min(0.0);
+                mass += f64::from(clamped).exp();
+                row_lps.push(clamped);
+            }
+            if mass > 1.0 + TOP_MASS_SLACK {
+                return Err(bad("behavior_top_logprobs", format!("the probabilities of its {k} entries sum to {mass:.4}; they are entries of one distribution, so at most 1")));
+            }
+            table.ids.extend(row_ids);
+            table.logprobs.extend(row_lps);
+        }
+        out.push(table);
+    }
+    Ok(out)
+}
+
 /// The longest `group` or `rollout` key, in bytes.
 pub const MAX_KEY_BYTES: usize = 512;
 
@@ -270,6 +495,13 @@ pub struct Rollout {
     /// The record only sets its group's baseline (`"baseline_only": true`): its reward counts among the group's, and
     /// nothing of it is trained.
     pub baseline_only: bool,
+    /// One entry per message of the record: the sampler's top-k at each token of that answer
+    /// (`"behavior_top_ids"`, `"behavior_top_logprobs"`), on a supervised assistant message that carries them.
+    pub behavior_top: Vec<Option<BehaviorTop>>,
+    /// The oldest policy version among the requests behind the record (`"policy_version"`).
+    pub policy_version: Option<u64>,
+    /// The sampling controls the decoder applied (`"sampler"`).
+    pub sampler: Option<SamplerDecl>,
 }
 
 /// What the sampler generated for one answer and what it was given before it, as the collector recorded them.
@@ -305,13 +537,30 @@ impl Rollout {
     /// The rollout of a sample derived from this record's (a prefix, one answer, a packing): the same outcome, with
     /// the derived sample's per-message data (`sampled`) and teacher view.
     pub(crate) fn derived(&self, sampled: PerMessage, teacher: Option<Teacher>) -> Rollout {
-        let PerMessage { behavior_logprobs, token_ids, teacher_logprobs } = sampled;
-        Rollout { outcome: self.outcome.clone(), truncated: self.truncated, behavior_logprobs, token_ids, teacher, teacher_logprobs, tokenizer_digest: self.tokenizer_digest.clone(), baseline_only: self.baseline_only }
+        let PerMessage { behavior_logprobs, behavior_top, token_ids, teacher_logprobs } = sampled;
+        Rollout {
+            outcome: self.outcome.clone(),
+            truncated: self.truncated,
+            behavior_logprobs,
+            token_ids,
+            teacher,
+            teacher_logprobs,
+            tokenizer_digest: self.tokenizer_digest.clone(),
+            baseline_only: self.baseline_only,
+            behavior_top,
+            policy_version: self.policy_version,
+            sampler: self.sampler,
+        }
+    }
+
+    /// Where the rollout's tokens came from.
+    pub fn provenance(&self) -> Provenance {
+        Provenance { policy_version: self.policy_version, sampler: self.sampler }
     }
 
     /// The per-message data of the first `len` messages.
     pub(crate) fn first_messages(&self, len: usize) -> PerMessage {
-        PerMessage { behavior_logprobs: self.behavior_logprobs[..len].to_vec(), token_ids: self.token_ids[..len].to_vec(), teacher_logprobs: self.teacher_logprobs[..len].to_vec() }
+        PerMessage { behavior_logprobs: self.behavior_logprobs[..len].to_vec(), behavior_top: self.behavior_top[..len].to_vec(), token_ids: self.token_ids[..len].to_vec(), teacher_logprobs: self.teacher_logprobs[..len].to_vec() }
     }
 }
 
@@ -321,6 +570,7 @@ impl Rollout {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PerMessage {
     pub(crate) behavior_logprobs: Vec<Option<Vec<f32>>>,
+    pub(crate) behavior_top: Vec<Option<BehaviorTop>>,
     pub(crate) token_ids: Vec<Option<SampledIds>>,
     pub(crate) teacher_logprobs: Vec<Option<Vec<f32>>>,
 }
@@ -563,11 +813,17 @@ pub struct Graded {
 }
 
 /// What a prepared example says about its rollout; an imitation example has none.
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExampleRollout {
     /// `None` for a rollout that trains on a teacher context alone.
     pub graded: Option<Graded>,
+    /// The oldest policy version among the requests behind the example's record, when the record named it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_version: Option<u64>,
+    /// The sampling controls the record's decoder applied, when the record stated them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampler: Option<SamplerDecl>,
 }
 
 /// The `<split>.rollouts.json` sidecar.
@@ -579,24 +835,29 @@ struct RolloutsFile {
     /// The outcomes of baseline-only records: counted in their groups, never trained.
     #[serde(default)]
     baselines: Vec<Graded>,
+    /// `K` of the split's top-k sidecars (`<split>.btk.bin`, `<split>.btl.bin`), when it has them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    behavior_top_k: Option<usize>,
 }
 
-fn names(dir: &Path, split: &str) -> (PathBuf, PathBuf, PathBuf) {
-    (dir.join(format!("{split}.rollouts.json")), dir.join(format!("{split}.blp.bin")), dir.join(format!("{split}.trn.bin")))
+fn names(dir: &Path, split: &str) -> [PathBuf; 5] {
+    ["rollouts.json", "blp.bin", "trn.bin", "btk.bin", "btl.bin"].map(|suffix| dir.join(format!("{split}.{suffix}")))
 }
 
 /// Whether `split` of the prepared dataset in `dir` holds rollouts (its rollout sidecar is there).
 pub fn holds_rollouts(dir: &Path, split: &str) -> bool {
-    names(dir, split).0.exists()
+    names(dir, split)[0].exists()
 }
 
 /// Write a split's sidecars: `rollouts[i]` is example `i`'s rollout (`None`: an imitation example; `Some(None)`: a
 /// rollout without a reward of its own), `behavior[t]` token `t`'s log-probability (NaN for none), `truncated[i]`
-/// whether example `i`'s rollout did not reach an outcome. Groups and rollouts are numbered in the order first seen.
+/// whether example `i`'s rollout did not reach an outcome, `provenance[i]` where it came from, `top` the sampler's top-k
+/// per token of the stream (`None`: none recorded). Groups and rollouts are numbered in the order first seen.
 /// Nothing is written, and a stale sidecar is removed, when no example is a rollout.
-pub fn write(dir: &Path, split: &str, rollouts: &[Option<Option<Outcome>>], baselines: &[Outcome], behavior: &[f32], truncated: &[bool]) -> io::Result<()> {
-    let (outcomes, blp, trn) = names(dir, split);
-    for stale in [&outcomes, &blp, &trn] {
+#[allow(clippy::too_many_arguments)]
+pub fn write(dir: &Path, split: &str, rollouts: &[Option<Option<Outcome>>], baselines: &[Outcome], behavior: &[f32], truncated: &[bool], provenance: &[Provenance], top: Option<&BehaviorTop>) -> io::Result<()> {
+    let [outcomes, blp, trn, btk, btl] = names(dir, split);
+    for stale in [&outcomes, &blp, &trn, &btk, &btl] {
         match std::fs::remove_file(stale) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
             _ => {}
@@ -620,15 +881,25 @@ pub fn write(dir: &Path, split: &str, rollouts: &[Option<Option<Outcome>>], base
         let member = *member_index.entry((group, o.member.clone())).or_insert(next);
         Graded { group, member, reward: o.reward, teacher_log_ratio: o.teacher_log_ratio }
     };
-    let examples: Vec<Option<ExampleRollout>> = rollouts.iter().map(|rollout| rollout.as_ref().map(|outcome| ExampleRollout { graded: outcome.as_ref().map(&mut grade) })).collect();
+    assert_eq!(rollouts.len(), provenance.len(), "chat_rollout::write: one provenance per example");
+    let examples: Vec<Option<ExampleRollout>> = rollouts
+        .iter()
+        .zip(provenance)
+        .map(|(rollout, from)| rollout.as_ref().map(|outcome| ExampleRollout { graded: outcome.as_ref().map(&mut grade), policy_version: from.policy_version, sampler: from.sampler }))
+        .collect();
     let baselines: Vec<Graded> = baselines.iter().map(&mut grade).collect();
-    let file = RolloutsFile { groups, examples, baselines };
+    let top = top.filter(|t| t.logprobs.iter().any(|l| !l.is_nan()));
+    let file = RolloutsFile { groups, examples, baselines, behavior_top_k: top.map(|t| t.k) };
     std::fs::write(&outcomes, serde_json::to_vec(&file).map_err(io::Error::other)?)?;
     if behavior.iter().any(|b| !b.is_nan()) {
         binio::write_f32_bin(&blp, behavior)?;
     }
     if truncated.iter().any(|t| *t) {
         binio::write_mask_bin(&trn, truncated)?;
+    }
+    if let Some(top) = top {
+        binio::write_u32_bin(&btk, &top.ids)?;
+        binio::write_f32_bin(&btl, &top.logprobs)?;
     }
     Ok(())
 }
@@ -652,7 +923,7 @@ pub struct SplitRollouts {
 /// The sidecars of `split` in `dir`, checked against the `examples` and `tokens` the split holds; `None` when the
 /// split has no rollout data.
 pub fn read(dir: &Path, split: &str, examples: usize, tokens: usize) -> io::Result<Option<SplitRollouts>> {
-    let (outcomes, blp, trn) = names(dir, split);
+    let [outcomes, blp, trn, ..] = names(dir, split);
     let bad = |why: String| io::Error::new(io::ErrorKind::InvalidData, why);
     if !outcomes.exists() {
         return Ok(None);
@@ -685,6 +956,33 @@ pub fn read(dir: &Path, split: &str, examples: usize, tokens: usize) -> io::Resu
         vec![false; examples]
     };
     Ok(Some(SplitRollouts { groups: file.groups, examples: file.examples, behavior, truncated, baselines: file.baselines }))
+}
+
+/// The sampler's top-k of each token of `split` in `dir`, checked against the `tokens` the split holds; `None` when the
+/// split has none (an older dataset, or no record carried a top-k).
+pub fn read_behavior_top(dir: &Path, split: &str, tokens: usize) -> io::Result<Option<BehaviorTop>> {
+    let [outcomes, _, _, btk, btl] = names(dir, split);
+    let bad = |why: String| io::Error::new(io::ErrorKind::InvalidData, why);
+    if !outcomes.exists() {
+        return Ok(None);
+    }
+    let file: RolloutsFile = serde_json::from_slice(&std::fs::read(&outcomes)?).map_err(|e| bad(format!("{}: {e}", outcomes.display())))?;
+    let Some(k) = file.behavior_top_k else {
+        return Ok(None);
+    };
+    if k == 0 || !btk.exists() || !btl.exists() {
+        return Err(bad(format!("{}: top-{k} recorded, and {} or {} is missing", outcomes.display(), btk.display(), btl.display())));
+    }
+    let (ids, logprobs) = (binio::read_u32_bin(&btk)?, binio::read_f32_bin(&btl)?);
+    for (file, len) in [(&btk, ids.len()), (&btl, logprobs.len())] {
+        if len != tokens * k {
+            return Err(bad(format!("{}: {len} values, the split holds {tokens} tokens of top-{k}", file.display())));
+        }
+    }
+    if let Some(t) = logprobs.iter().position(|v| v.is_infinite() || *v > LOGPROB_SLACK) {
+        return Err(bad(format!("{}: entry {t} is {}, which is not a log-probability", btl.display(), logprobs[t])));
+    }
+    Ok(Some(BehaviorTop { k, ids, logprobs }))
 }
 
 /// The teacher renderings of a split: every example's tokens and supervision mask, back to back.

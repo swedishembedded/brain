@@ -28,7 +28,7 @@ use std::io;
 use std::path::Path;
 
 use crate::binio;
-use crate::chat_rollout::{self, PerMessage, RecordError, RecordFault, RecordRule, Rollout, SampledIds, Teacher};
+use crate::chat_rollout::{self, BehaviorTop, PerMessage, Provenance, RecordError, RecordFault, RecordRule, Rollout, SampledIds, Teacher, WireTop};
 use crate::chat_template::{ChatTemplate, TemplateError};
 use crate::tokenizer::Tokenizer;
 
@@ -231,6 +231,8 @@ pub struct RenderedSegment {
     pub supervised: bool,
     /// The log-probabilities the sampler gave the tokens of this supervised answer, when the collector recorded them.
     pub behavior_logprobs: Option<Vec<f32>>,
+    /// The sampler's top-k at each token of this supervised answer, when the collector recorded it.
+    pub behavior_top: Option<BehaviorTop>,
     /// The ids the sampler generated for this supervised answer (trained instead of the text's encoding) and the ids
     /// it was given before it ([`crate::chat_rollout`]).
     pub token_ids: Option<SampledIds>,
@@ -245,7 +247,7 @@ pub struct RenderedSegment {
 
 impl RenderedSegment {
     fn context(text: &str) -> RenderedSegment {
-        RenderedSegment { text: text.to_string(), supervised: false, behavior_logprobs: None, token_ids: None, teacher_logprobs: None, message: 0, loss_weight: 1.0 }
+        RenderedSegment { text: text.to_string(), supervised: false, behavior_logprobs: None, behavior_top: None, token_ids: None, teacher_logprobs: None, message: 0, loss_weight: 1.0 }
     }
 }
 
@@ -291,6 +293,7 @@ fn check_sampled(tok: &dyn Tokenizer, tmpl: &ChatTemplate, before: &[u32], text:
 #[derive(Clone)]
 struct Sampled {
     behavior_logprobs: Option<Vec<f32>>,
+    behavior_top: Option<BehaviorTop>,
     token_ids: Option<SampledIds>,
     teacher_logprobs: Option<Vec<f32>>,
     /// The index of the message the answer is.
@@ -301,7 +304,7 @@ struct Sampled {
 
 impl Rendered {
     fn answer(prompt: &str, completion: &str, sampled: Sampled) -> Self {
-        Self { segments: vec![RenderedSegment::context(prompt), RenderedSegment { text: completion.to_string(), supervised: true, behavior_logprobs: sampled.behavior_logprobs, token_ids: sampled.token_ids, teacher_logprobs: sampled.teacher_logprobs, message: sampled.message, loss_weight: sampled.loss_weight }] }
+        Self { segments: vec![RenderedSegment::context(prompt), RenderedSegment { text: completion.to_string(), supervised: true, behavior_logprobs: sampled.behavior_logprobs, behavior_top: sampled.behavior_top, token_ids: sampled.token_ids, teacher_logprobs: sampled.teacher_logprobs, message: sampled.message, loss_weight: sampled.loss_weight }] }
     }
 
     /// [`Self::answer`] for a rollout: the whitespace the template writes after the end-of-turn marker (Qwen's
@@ -410,6 +413,7 @@ impl ChatSample {
         let (prompt, completion) = full.split_at(answer.start);
         let sampled = Sampled {
             behavior_logprobs: self.rollout.as_ref().and_then(|r| r.behavior_logprobs.last().cloned().flatten()),
+            behavior_top: self.rollout.as_ref().and_then(|r| r.behavior_top.last().cloned().flatten()),
             token_ids: self.rollout.as_ref().and_then(|r| r.token_ids.last().cloned().flatten()),
             teacher_logprobs: self.rollout.as_ref().and_then(|r| r.teacher_logprobs.last().cloned().flatten()),
             message: self.messages.len().saturating_sub(1), loss_weight: self.messages.last().map_or(1.0, |m| m.loss_weight) };
@@ -475,18 +479,19 @@ impl ChatSample {
             };
             segments.push(RenderedSegment::context(context));
             let behavior = self.rollout.as_ref().and_then(|r| r.behavior_logprobs[at].clone());
+            let behavior_top = self.rollout.as_ref().and_then(|r| r.behavior_top[at].clone());
             let token_ids = self.rollout.as_ref().and_then(|r| r.token_ids[at].clone());
             let teacher_logprobs = self.rollout.as_ref().and_then(|r| r.teacher_logprobs[at].clone());
             if self.rollout.is_some() {
                 // The text after the marker is context (see `Rendered::rollout_answer`).
                 let tail = &end[end.trim_end().len()..];
                 let sampled = completion.strip_suffix(tail).unwrap_or(completion);
-                segments.push(RenderedSegment { text: sampled.to_string(), supervised: true, behavior_logprobs: behavior, token_ids, teacher_logprobs, message: at, loss_weight: self.messages[at].loss_weight });
+                segments.push(RenderedSegment { text: sampled.to_string(), supervised: true, behavior_logprobs: behavior, behavior_top: behavior_top.clone(), token_ids, teacher_logprobs, message: at, loss_weight: self.messages[at].loss_weight });
                 if !tail.is_empty() {
                     segments.push(RenderedSegment::context(tail));
                 }
             } else {
-                segments.push(RenderedSegment { text: completion.to_string(), supervised: true, behavior_logprobs: behavior, token_ids, teacher_logprobs, message: at, loss_weight: self.messages[at].loss_weight });
+                segments.push(RenderedSegment { text: completion.to_string(), supervised: true, behavior_logprobs: behavior, behavior_top: behavior_top.clone(), token_ids, teacher_logprobs, message: at, loss_weight: self.messages[at].loss_weight });
             }
             previous_prompt = prompt.to_string();
         }
@@ -573,7 +578,7 @@ impl ChatSample {
             rebuilt.push_str(context);
             rebuilt.push_str(content);
             segments.push(RenderedSegment::context(context));
-            segments.push(RenderedSegment { text: content.clone(), supervised: true, behavior_logprobs: None, token_ids: None, teacher_logprobs: None, message: at, loss_weight: messages[at].loss_weight });
+            segments.push(RenderedSegment { text: content.clone(), supervised: true, behavior_logprobs: None, behavior_top: None, token_ids: None, teacher_logprobs: None, message: at, loss_weight: messages[at].loss_weight });
             from = start + sentinel.len();
         }
         rebuilt.push_str(&probe[from..]);
@@ -693,9 +698,10 @@ impl ChatSample {
     fn encode_own(&self, tok: &dyn Tokenizer, tmpl: &ChatTemplate, opts: RenderOpts) -> Result<EncodedSample, TemplateError> {
         if let Some(Rendered { segments }) = &self.rendered {
             let (mut ids, mut mask, mut behavior, mut weights, mut teacher) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            let mut top_parts: Vec<(usize, Option<&BehaviorTop>)> = Vec::new();
             let mut answer = 0;
             let mut context = "";
-            for RenderedSegment { text, supervised, behavior_logprobs, token_ids, teacher_logprobs, message, loss_weight } in segments {
+            for RenderedSegment { text, supervised, behavior_logprobs, behavior_top, token_ids, teacher_logprobs, message, loss_weight } in segments {
                 let encoded = match token_ids {
                     Some(sampled) => {
                         let thinking_open = context.ends_with("<think>\n");
@@ -717,6 +723,8 @@ impl ChatSample {
                     }
                     None => behavior.extend(std::iter::repeat_n(f32::NAN, encoded.len())),
                 }
+                // The top-k numbers the same tokens as `behavior_logprobs`, which were just checked against them.
+                top_parts.push((encoded.len(), behavior_top.as_ref()));
                 match teacher_logprobs {
                     Some(lps) if lps.len() == encoded.len() => teacher.extend_from_slice(lps),
                     Some(lps) => {
@@ -739,7 +747,8 @@ impl ChatSample {
             }
             let loss_weights = weights.iter().any(|&w| w != 1.0).then_some(weights);
             let teacher_logprobs = if teacher.iter().any(|t| !t.is_nan()) { teacher } else { Vec::new() };
-            return Ok(EncodedSample { ids, mask, behavior, loss_weights, teacher: None, teacher_logprobs, truncated: self.rollout.as_ref().is_some_and(|r| r.truncated) });
+            let behavior_top = BehaviorTop::assemble(&top_parts).map_err(TemplateError::new)?;
+            return Ok(EncodedSample { ids, mask, behavior, loss_weights, teacher: None, teacher_logprobs, truncated: self.rollout.as_ref().is_some_and(|r| r.truncated), behavior_top, provenance: self.provenance() });
         }
         if self.rollout.as_ref().is_some_and(|r| r.has_behavior() || r.has_teacher_logprobs()) {
             return Err(TemplateError::new("\"behavior_logprobs\" and \"teacher_logprobs\" are placed on an answer rendered as the model is asked for it; this sample still holds whole messages (render it with answers_as_asked or answers_packed)".to_string()));
@@ -769,7 +778,12 @@ impl ChatSample {
         }
         let behavior = vec![f32::NAN; ids.len()];
         let loss_weights = weights.iter().any(|&w| w != 1.0).then_some(weights);
-        Ok(EncodedSample { ids, mask, behavior, loss_weights, teacher: None, teacher_logprobs: Vec::new(), truncated: self.rollout.as_ref().is_some_and(|r| r.truncated) })
+        Ok(EncodedSample { ids, mask, behavior, loss_weights, teacher: None, teacher_logprobs: Vec::new(), truncated: self.rollout.as_ref().is_some_and(|r| r.truncated), behavior_top: None, provenance: self.provenance() })
+    }
+
+    /// Where the sample's rollout came from (nothing for an imitation sample).
+    fn provenance(&self) -> Provenance {
+        self.rollout.as_ref().map(Rollout::provenance).unwrap_or_default()
     }
 
     /// Whether any message carries behaviour log-probabilities, which only an answer rendered as asked can place.
@@ -888,6 +902,12 @@ struct WireRecord {
     /// Messages only the teacher of a self-distillation run is shown ([`crate::chat_rollout`]).
     #[serde(default)]
     teacher_context: Option<WireTeacherContext>,
+    /// The oldest policy version behind the record ([`crate::chat_rollout`]).
+    #[serde(default)]
+    policy_version: Option<serde_json::Value>,
+    /// The sampling controls the decoder applied ([`crate::chat_rollout`]).
+    #[serde(default)]
+    sampler: Option<serde_json::Value>,
 }
 
 #[derive(serde::Deserialize)]
@@ -937,6 +957,12 @@ pub(crate) struct WireMessage {
     /// ([`crate::chat_rollout`]).
     #[serde(default)]
     pub(crate) behavior_logprobs: Option<serde_json::Value>,
+    /// Only beside `behavior_logprobs`: the sampler's top-k ids and log-probabilities at each token of the answer
+    /// ([`crate::chat_rollout`]).
+    #[serde(default)]
+    pub(crate) behavior_top_ids: Option<serde_json::Value>,
+    #[serde(default)]
+    pub(crate) behavior_top_logprobs: Option<serde_json::Value>,
     /// Only on a supervised assistant message: the ids the sampler generated for the answer ([`crate::chat_rollout`]).
     #[serde(default)]
     pub(crate) token_ids: Option<Vec<u32>>,
@@ -998,7 +1024,7 @@ fn sample_from_wire(record: WireRecord, reader: &dyn ImageReader) -> Result<Chat
         return Err("\"messages\" is empty".to_string().into());
     }
     let weighted = check_loss_weights(&record.messages)?;
-    let WireConversation { messages, media, sampled, teacher_logprob } = messages_from_wire_with(record.messages, reader)?;
+    let WireConversation { messages, media, top, mut sampled, teacher_logprob } = messages_from_wire_with(record.messages, reader)?;
     reader.check_record(&media)?;
     let teacher = record.teacher_context.map(|context| teacher_view(&messages, &record.tools, &media, context)).transpose()?;
     if record.advantage.is_some() {
@@ -1029,6 +1055,8 @@ fn sample_from_wire(record: WireRecord, reader: &dyn ImageReader) -> Result<Chat
     if let Some(digest) = &record.tokenizer_digest {
         chat_rollout::check_tokenizer_digest(digest)?;
     }
+    let policy_version = record.policy_version.as_ref().map(chat_rollout::check_policy_version).transpose()?;
+    let sampler = record.sampler.as_ref().map(chat_rollout::SamplerDecl::from_wire).transpose()?;
     let token_scores = check_teacher_scores(&messages, &sampled, &teacher_logprob, teacher.is_some(), outcome.as_mut(), named_rollout)?;
     let truncated = record.truncated;
     if record.baseline_only {
@@ -1045,6 +1073,9 @@ fn sample_from_wire(record: WireRecord, reader: &dyn ImageReader) -> Result<Chat
         if let Some(at) = sampled.token_ids.iter().position(Option::is_some) {
             return baseline(format!("messages[{at}].token_ids"), "it carries no sampled answer's ids");
         }
+        if let Some(at) = top.iter().position(|t| t.ids.is_some() || t.logprobs.is_some()) {
+            return baseline(format!("messages[{at}].behavior_top_ids"), "it carries no sampled answer's top-k");
+        }
         if teacher.is_some() {
             return baseline("teacher_context".to_string(), "no teacher scores it");
         }
@@ -1052,11 +1083,15 @@ fn sample_from_wire(record: WireRecord, reader: &dyn ImageReader) -> Result<Chat
             return baseline("truncated".to_string(), "a truncated rollout's reward says nothing about its group; leave the record out");
         }
     }
+    let supervised: Vec<bool> = messages.iter().map(|m| m.role == "assistant" && m.train).collect();
+    sampled.behavior_top = chat_rollout::check_behavior_top(&top, &supervised, &sampled.behavior_logprobs)?;
     // A rollout field on a record with no outcome: the record cannot say what its tokens earned.
     let without_outcome = |field: String, what: &str| Err(RecordError::of(RecordFault::new(RecordRule::MissingReward, &field), format!("{field}: {what} to a rollout, and the record has no \"reward\" and \"group\", \"teacher_context\" or \"teacher_logprobs\"")));
     let rollout = match (outcome, teacher) {
         (None, None) if !token_scores && truncated => return without_outcome("truncated".to_string(), "\"truncated\" belongs"),
         (None, None) if !token_scores && record.tokenizer_digest.is_some() => return without_outcome("tokenizer_digest".to_string(), "\"tokenizer_digest\" belongs"),
+        (None, None) if !token_scores && policy_version.is_some() => return without_outcome("policy_version".to_string(), "\"policy_version\" belongs"),
+        (None, None) if !token_scores && sampler.is_some() => return without_outcome("sampler".to_string(), "\"sampler\" belongs"),
         (None, None) if !token_scores => match (sampled.token_ids.iter().position(Option::is_some), sampled.behavior_logprobs.iter().position(Option::is_some)) {
             (Some(at), _) => return without_outcome(format!("messages[{at}].token_ids"), "\"token_ids\" belong"),
             (None, Some(at)) => return without_outcome(format!("messages[{at}].behavior_logprobs"), "\"behavior_logprobs\" belong"),
@@ -1065,8 +1100,8 @@ fn sample_from_wire(record: WireRecord, reader: &dyn ImageReader) -> Result<Chat
         // A teacher context, or a teacher model's per-token scores, alone trains on its per-token advantage: the
         // scalar part is 0.
         (outcome, teacher) => {
-            let PerMessage { behavior_logprobs, token_ids, teacher_logprobs } = sampled;
-            Some(Rollout { outcome, truncated, behavior_logprobs, token_ids, teacher, teacher_logprobs, tokenizer_digest: record.tokenizer_digest, baseline_only: record.baseline_only })
+            let PerMessage { behavior_logprobs, behavior_top, token_ids, teacher_logprobs } = sampled;
+            Some(Rollout { outcome, truncated, behavior_logprobs, token_ids, teacher, teacher_logprobs, tokenizer_digest: record.tokenizer_digest, baseline_only: record.baseline_only, behavior_top, policy_version, sampler })
         }
     };
     if let (Some(_), Some(at)) = (&rollout, weighted) {
@@ -1189,6 +1224,8 @@ pub(crate) fn messages_from_wire(wire: Vec<WireMessage>) -> Result<Vec<ChatMessa
 /// A record's messages as [`messages_from_wire_with`] reads them.
 struct WireConversation {
     messages: Vec<ChatMessage>,
+    /// What each message carried of a top-k, unchecked ([`chat_rollout::check_behavior_top`]).
+    top: Vec<WireTop>,
     /// The images, in the order the text places them.
     media: Vec<ImageBytes>,
     /// What each message carried of its sampling and of a teacher's per-token scores.
@@ -1203,12 +1240,13 @@ struct WireConversation {
 fn messages_from_wire_with(wire: Vec<WireMessage>, reader: &dyn ImageReader) -> Result<WireConversation, String> {
     let mut messages = Vec::with_capacity(wire.len());
     let mut behavior = Vec::with_capacity(wire.len());
+    let mut top = Vec::with_capacity(wire.len());
     let mut token_ids = Vec::with_capacity(wire.len());
     let mut teacher_logprobs = Vec::with_capacity(wire.len());
     let mut teacher_logprob = Vec::with_capacity(wire.len());
     let mut media = Vec::new();
 
-    for (i, m) in wire.into_iter().enumerate() {
+    for (i, mut m) in wire.into_iter().enumerate() {
         let role = match m.role {
             WireRole::System => "system",
             WireRole::User => "user",
@@ -1236,6 +1274,7 @@ fn messages_from_wire_with(wire: Vec<WireMessage>, reader: &dyn ImageReader) -> 
             None => None,
         };
         behavior.push(lps);
+        top.push(WireTop { ids: m.behavior_top_ids.take(), logprobs: m.behavior_top_logprobs.take() });
         let answer = matches!(m.role, WireRole::Assistant) && m.train;
         for (name, given) in [("teacher_logprobs", m.teacher_logprobs.is_some()), ("teacher_logprob", m.teacher_logprob.is_some())] {
             if given && !answer {
@@ -1261,7 +1300,7 @@ fn messages_from_wire_with(wire: Vec<WireMessage>, reader: &dyn ImageReader) -> 
         messages.push(ChatMessage { role: role.to_string(), content, tool_calls, tool_call_id: m.tool_call_id, reasoning_content: m.reasoning_content, train: m.train, loss_weight: m.loss_weight.unwrap_or(1.0) });
     }
     check_tool_pairing(&messages)?;
-    Ok(WireConversation { messages, media, sampled: PerMessage { behavior_logprobs: behavior, token_ids, teacher_logprobs }, teacher_logprob })
+    Ok(WireConversation { messages, media, top, sampled: PerMessage { behavior_logprobs: behavior, behavior_top: Vec::new(), token_ids, teacher_logprobs }, teacher_logprob })
 }
 
 /// The lengths of the runs of `token` in `ids`, in order: how many images a text places, and how many rows each takes.
@@ -1494,6 +1533,11 @@ pub struct EncodedSample {
     pub teacher_logprobs: Vec<f32>,
     /// The rollout the example came from did not reach an outcome ([`crate::chat_rollout`]).
     pub truncated: bool,
+    /// The sampler's top-k at each token, aligned with `ids` (`NO_TOP_ID` and NaN where none was recorded); `None` when
+    /// no answer of the sample carries one ([`crate::chat_rollout`]).
+    pub behavior_top: Option<BehaviorTop>,
+    /// Where the rollout came from ([`crate::chat_rollout`]).
+    pub provenance: Provenance,
 }
 
 /// A split's token stream, supervision mask and the start offset of each
@@ -1520,6 +1564,10 @@ pub struct EncodedSplit {
     pub truncated: Vec<bool>,
     /// The outcomes of the baseline-only records the split read: in their groups, never examples.
     pub baselines: Vec<chat_rollout::Outcome>,
+    /// The sampler's top-k at each token, aligned with `ids`; `None` when no example carries one. One `K` per split.
+    pub behavior_top: Option<BehaviorTop>,
+    /// Where each example's rollout came from, aligned with `starts`.
+    pub provenance: Vec<Provenance>,
 }
 
 impl EncodedSplit {
@@ -1537,11 +1585,13 @@ impl EncodedSplit {
     /// [`Self::push_with_media`] for an example of a rollout: its `rollout` (`None` for an imitation example,
     /// `Some(None)` for one without a reward of its own) and the behaviour log-probabilities `encoded` carries.
     pub fn push_rollout(&mut self, encoded: &EncodedSample, media: &[ImageBytes], rollout: Option<Option<chat_rollout::Outcome>>) {
-        let EncodedSample { ids, mask, behavior, loss_weights, teacher, teacher_logprobs, truncated } = encoded;
+        let EncodedSample { ids, mask, behavior, loss_weights, teacher, teacher_logprobs, truncated, behavior_top, provenance } = encoded;
         assert_eq!(ids.len(), mask.len(), "EncodedSplit::push: ids and mask differ in length");
         assert!(teacher_logprobs.is_empty() || teacher_logprobs.len() == ids.len(), "EncodedSplit::push: ids and teacher log-probabilities differ in length");
         assert_eq!(ids.len(), behavior.len(), "EncodedSplit::push: ids and behaviour log-probabilities differ in length");
         assert!(loss_weights.as_ref().is_none_or(|w| w.len() == ids.len()), "EncodedSplit::push: ids and loss weights differ in length");
+        assert!(behavior_top.as_ref().is_none_or(|t| t.tokens() == ids.len()), "EncodedSplit::push: ids and top-k rows differ in length");
+        assert!(behavior_top.as_ref().zip(self.behavior_top.as_ref()).is_none_or(|(a, b)| a.k == b.k), "EncodedSplit::push: a split holds one top-k width");
         if ids.is_empty() {
             return;
         }
@@ -1549,6 +1599,19 @@ impl EncodedSplit {
         self.rollouts.push(rollout);
         self.teacher.push(teacher.clone());
         self.truncated.push(*truncated);
+        self.provenance.push(*provenance);
+        if let (Some(top), None) = (behavior_top, &self.behavior_top) {
+            // The tokens pushed so far have none.
+            let mut earlier = BehaviorTop { k: top.k, ids: Vec::new(), logprobs: Vec::new() };
+            earlier.extend_none(self.ids.len());
+            self.behavior_top = Some(earlier);
+        }
+        if let Some(own) = &mut self.behavior_top {
+            match behavior_top {
+                Some(top) => own.extend(top),
+                None => own.extend_none(ids.len()),
+            }
+        }
         self.starts.push(self.ids.len());
         self.ids.extend_from_slice(ids);
         self.mask.extend_from_slice(mask);
@@ -1584,6 +1647,15 @@ pub fn encode_sample_split_while(samples: &[ChatSample], tok: &dyn Tokenizer, tm
             continue;
         }
         let encoded = s.encode_rollout(tok, tmpl, opts)?;
+        if let (Some(top), Some(split)) = (&encoded.behavior_top, &out.behavior_top) {
+            if top.k != split.k {
+                let example = out.starts.len();
+                return Err(TemplateError::of_record(RecordFault::new(RecordRule::BehaviorTop, "behavior_top_ids"), format!(
+                    "behavior_top_ids: example {example} carries a top-{} and the split's earlier examples a top-{}; the examples of one split are trained together, so they share one K",
+                    top.k, split.k
+                )));
+            }
+        }
         out.push_rollout(&encoded, &s.media, s.rollout.as_ref().map(|r| r.outcome.clone()));
     }
     Ok(Some(out))
@@ -1597,7 +1669,7 @@ pub fn write_split(dir: &Path, split: &str, data: &EncodedSplit) -> io::Result<(
     binio::write_mask_bin(&dir.join(format!("{split}.mask.bin")), &data.mask)?;
     let starts: Vec<u64> = data.starts.iter().map(|&s| s as u64).collect();
     binio::write_u64_bin(&dir.join(format!("{split}.ex.bin")), &starts)?;
-    chat_rollout::write(dir, split, &data.rollouts, &data.baselines, &data.behavior, &data.truncated)?;
+    chat_rollout::write(dir, split, &data.rollouts, &data.baselines, &data.behavior, &data.truncated, &data.provenance, data.behavior_top.as_ref())?;
     // A split whose every weight is 1.0 writes no weight file, so its run trains the plain loss, as before weights.
     let weighted = data.loss_weights.iter().any(|&w| w != 1.0);
     crate::loader::write_split_weights(dir, split, weighted.then_some(data.loss_weights.as_slice()))?;

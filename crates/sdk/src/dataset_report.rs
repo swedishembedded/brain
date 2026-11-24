@@ -205,7 +205,7 @@ pub fn check_dataset(model_dir: impl AsRef<Path>, path: impl AsRef<Path>, check:
             }
             let rollout = ChatSample::from_json_line_with(line.trim(), &*images).ok().and_then(|r| r.rollout);
             // Only the outcome is read between records; the per-token data is not kept.
-            rollouts.push(rollout.map(|r| data::chat_rollout::Rollout { behavior_logprobs: Vec::new(), token_ids: Vec::new(), teacher: None, ..r }));
+            rollouts.push(rollout.map(|r| data::chat_rollout::Rollout { behavior_logprobs: Vec::new(), behavior_top: Vec::new(), token_ids: Vec::new(), teacher: None, ..r }));
         }
         let refs: Vec<Option<&data::chat_rollout::Rollout>> = rollouts.iter().map(Option::as_ref).collect();
         between.extend(data::chat_rollout::check_records(&refs, check.truncated, tok.digest()));

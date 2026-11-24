@@ -56,6 +56,14 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       registered model (one backward with extra targets equals the sum of label-equivalent weighted backwards to 1e-4
       of the largest gradient; read-back log-probabilities equal the label path's to 1e-5; verified to fail with the
       qwen35 backward wiring removed, where a finite-difference form at the conformance tolerances did not).
+- [x] **Rollout record fields** (`data::chat_rollout`, contract v2, additive): `behavior_top_ids` /
+      `behavior_top_logprobs` (K per sampled token beside `behavior_logprobs`, one K per record and per prepared split,
+      distinct ids, whole-row log-probabilities of mass at most one; rules `behavior_top_count`, `behavior_top`),
+      kept as `<split>.btk.bin` / `<split>.btl.bin` at the positions of `<split>.blp.bin` (`read_behavior_top`);
+      `policy_version` (oldest version among the record's requests) and `sampler` (`SamplerDecl`, `truncates()`) per
+      example. Ids are checked against the vocabulary by the trainer, which knows it. Tests: `data`
+      `it::chat_rollout_records` (positions, packing, a 14-case refusal table, mixed K, provenance) and the v2
+      fixtures.
 
 ## Open
 
@@ -71,9 +79,6 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       `f(r) = r 1[low <= r <= high]`, centring over the sampler's top-K plus a tail bucket), a separate algorithm next
       to the clipped surrogate, sharing `pg_batch`. Analytic tests on a tiny vocabulary against the exact expectation,
       a finite-difference gradcheck, the sampler-mass and masked-fraction telemetry.
-- [ ] **Rollout record fields** (`data::chat_rollout`, contract v2, additive): `behavior_top_ids` /
-      `behavior_top_logprobs` (K per sampled token) and `policy_version` (oldest version among the requests that
-      produced the record).
 - [x] **The sampler's top-K in `policy_trace`** (`policy_trace: {"top_log_probs": K}`, K in 1..=20; params `policy_trace` +
       `policy_trace_top_log_probs` over D-Bus): per generated position (stop token included) `generation_top_ids` /
       `generation_top_log_probs`, the K most probable ids and their whole-row log-probabilities at the sampling

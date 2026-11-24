@@ -655,6 +655,14 @@ lowers the probability of its action, a positive one raises it.
 - `"tokenizer_digest"` (record, optional): `sha256:<hex>`, the tokenizer the sampler encoded the rollout with, as a
   `policy_trace` names it; it must be the trained base's own `tokenizer.json` digest (refused by rule
   `tokenizer_mismatch`, naming both, before a device is claimed).
+- `"policy_version"` (record, optional, a rollout record only): a non-negative integer, the oldest policy version among
+  the requests behind the record (a float or a negative number is refused naming the field). A prepared split keeps it
+  per example (`policy_version` in `<split>.rollouts.json`).
+- `"sampler"` (record, optional, a rollout record only): `{"temperature": <number>, "top_k": <integer>, "top_p":
+  <number>, "min_p": <number>}`, each optional, the sampling controls the decoder applied: `temperature` finite and
+  above 0, `top_k` at least 1, `top_p` in (0, 1], `min_p` in [0, 1), nothing else. A prepared split keeps it per
+  example (`sampler`; `SamplerDecl::truncates()` is true when `top_k` is set, `top_p` is below 1 or `min_p` is above
+  0), so a trainer can refuse an objective that needs the untruncated distribution on data a truncating sampler drew.
 - Version 1's precomputed `"advantage"` is refused, naming the field and its replacement (`reward` and `group`).
 - `"behavior_logprobs"` (supervised assistant message, optional, needs a `"reward"`): the log-probability the sampler
   gave each token of the answer, one per token of the answer as the chat template renders it after its prompt: the
@@ -671,6 +679,19 @@ lowers the probability of its action, a positive one raises it.
   rollout sampled from the run's starting policy; a first-step ratio far from one names the figures (in a toy model, one draw,
   log-probabilities shifted by one token read ratios 0.75 to 1.17, a temperature the trainer was not told 0.95 to 1.08,
   a greedy sampler's zeros 0.03 to 0.04).
+- `"behavior_top_ids"` and `"behavior_top_logprobs"` (supervised assistant message, optional, together, beside
+  `"behavior_logprobs"`, which they require): the sampler's `K` most likely tokens at each step, `[[<id>, ...K], ...]`,
+  and their log-probabilities `[[<number>, ...K], ...]`, one inner list per token, as many as `behavior_logprobs` holds
+  (otherwise rule `behavior_top_count`, naming `messages[i].behavior_top_ids`). `K` is at least 1 and the same for the
+  whole record; the ids of one token are distinct; the values are finite and at most 0 and, as whole-row
+  log-probabilities of the sampler's distribution at its temperature, the probabilities of one token sum to at most 1
+  (rule `behavior_top`, naming the field). The sampled token need not be among them. A `baseline_only` record carries
+  none (`baseline_trains`) and a record without a reward or teacher neither (`missing_reward`). The dataset check does
+  not know the vocabulary, so an id outside it is refused by the trainer. A prepared split keeps them as
+  `<split>.btk.bin` (header-free `u32` ids, `[tokens * K]`, `u32::MAX` where none was recorded) and `<split>.btl.bin`
+  (`f32`, `[tokens * K]`, NaN where none), aligned with `<split>.blp.bin`, and `K` as `behavior_top_k` in
+  `<split>.rollouts.json`; the examples of one split share one `K` (a split that mixes them is refused naming the
+  example); `data::chat_rollout::read_behavior_top` reads them.
 - `"token_ids"` (supervised assistant message, optional, beside `"behavior_logprobs"`): the ids the sampler generated
   for the answer, end-of-turn marker included. The trainer trains these ids, never the ids the answer's text renders
   to again (a model writes a call's arguments, its whitespace, its think block its own way; the parsed message renders

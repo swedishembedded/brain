@@ -68,7 +68,7 @@ fn per_token_teacher_scores_are_kept_aligned_with_the_answers_tokens() {
     let ids = binio::read_u32_bin(&out.join("train.u32.bin")).unwrap();
     let mask = binio::read_mask_bin(&out.join("train.mask.bin")).unwrap();
     let rollout = chat_rollout::read(&out, "train", 1, ids.len()).unwrap().expect("a rollout sidecar");
-    assert_eq!(rollout.examples, [Some(chat_rollout::ExampleRollout { graded: None })], "a rollout without a reward of its own");
+    assert_eq!(rollout.examples, [Some(chat_rollout::ExampleRollout { graded: None, ..Default::default() })], "a rollout without a reward of its own");
     let placed = chat_rollout::read_teacher_logprobs(&out, "train", ids.len()).unwrap().expect("the per-token sidecar");
     let supervised: Vec<f32> = placed.iter().zip(&mask).filter(|(_, m)| **m).map(|(t, _)| *t).collect();
     assert_eq!(supervised, teacher, "one teacher log-probability per supervised token, in order");

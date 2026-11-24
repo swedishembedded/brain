@@ -12,8 +12,8 @@
   {
    "path": "chat_rollout.jsonl",
    "kind": "chat",
-   "records": 7,
-   "valid_records": 7,
+   "records": 8,
+   "valid_records": 8,
    "refusals": []
   },
   {
@@ -66,6 +66,32 @@
      "line": 1,
      "rule": "prompt_token_ids_mismatch",
      "field": "messages[1].prompt_token_ids"
+    }
+   ]
+  },
+  {
+   "path": "invalid/behavior_top.jsonl",
+   "kind": "chat",
+   "records": 3,
+   "valid_records": 2,
+   "refusals": [
+    {
+     "line": 1,
+     "rule": "behavior_top",
+     "field": "messages[1].behavior_top_ids"
+    }
+   ]
+  },
+  {
+   "path": "invalid/behavior_top_count.jsonl",
+   "kind": "chat",
+   "records": 3,
+   "valid_records": 2,
+   "refusals": [
+    {
+     "line": 1,
+     "rule": "behavior_top_count",
+     "field": "messages[1].behavior_top_ids"
     }
    ]
   },

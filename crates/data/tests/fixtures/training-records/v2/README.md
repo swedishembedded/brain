@@ -26,12 +26,14 @@ rollouts) and in its guide to training as a served job.
 |---|---|---|
 | `model/` | tokenizer | the tokenizer (letters `a` to `w` as ids 0 to 22, `<|endoftext|>` 151643, `<|im_start|>` 151644, `<|im_end|>` 151645) and the chat template every `token_ids` here is computed with; `check_dataset` reads nothing else of a model |
 | `chat.jsonl` | `generic-messages-v2` | supervised records: per-message `train` masks, a record with two supervised answers, an assistant turn that is context |
-| `chat_rollout.jsonl` | `generic-messages-v2` with rollout fields | group `cab`: two rollouts named by `rollout`, one of them two records (two calls) that share its reward, line 1's answer carrying the `prompt_token_ids` it was sampled after, each record naming the `tokenizer_digest` (the sha256 of `model/tokenizer.json`); group `fed`: three records that are a rollout each, one of them `truncated` (it takes no part in the group); an imitation record (no `reward`) in the same file |
+| `chat_rollout.jsonl` | `generic-messages-v2` with rollout fields | group `cab`: two rollouts named by `rollout`, one of them two records (two calls) that share its reward, line 1's answer carrying the `prompt_token_ids` it was sampled after, each record naming the `tokenizer_digest`; line 8 a third rollout of group `cab` with the sampler's top-2 per token, a `policy_version` and a `sampler` (the sha256 of `model/tokenizer.json`); group `fed`: three records that are a rollout each, one of them `truncated` (it takes no part in the group); an imitation record (no `reward`) in the same file |
 | `preference.jsonl` | `generic-preference-v1` | a prompt and its `chosen` and `rejected` answers; line 3's `chosen` is a continuation (a tool call, its result, the answer) against a single `rejected` turn |
 | `feedback.jsonl` | `generic-feedback-v1` | a desirable and an undesirable judged `completion`, and a desirable continuation |
 | `invalid/behavior_logprob_count.jsonl` | line 1 refused | `behavior_logprobs` holds three values for an answer of four tokens |
 | `invalid/token_ids_mismatch.jsonl` | line 1 refused | `token_ids` that are not the tokens the answer's text renders to (this template's replies are not read back, so only exact ids belong to the answer) |
 | `invalid/prompt_token_ids_mismatch.jsonl` | line 1 refused | `prompt_token_ids` that are not the context the template renders before the answer (they differ at position 5) |
+| `invalid/behavior_top_count.jsonl` | line 1 refused | `behavior_top_ids` holds three lists for an answer of four tokens |
+| `invalid/behavior_top.jsonl` | line 1 refused | a token whose top-k lists one id twice |
 | `invalid/missing_reward.jsonl` | refused | `behavior_logprobs` on a record with no `reward` |
 | `invalid/missing_group.jsonl` | refused | a `reward` without a `group` |
 | `invalid/advantage_removed.jsonl` | refused | version 1's `advantage` |
@@ -67,13 +69,21 @@ rollouts) and in its guide to training as a served job.
 - `tokenizer_digest` (`sha256:` and 64 lowercase hex digits, as a `policy_trace` names it), when present, is the
   digest of the trained base's own `tokenizer.json` (`tokenizer_mismatch`, naming both), and where the base's is not
   known, the same on every record of one run that names one (`mixed_tokenizer_digest`).
+- `behavior_top_ids` and `behavior_top_logprobs` (a supervised message, together, beside `behavior_logprobs`): the
+  sampler's top-K per token, one inner list each per token of the answer (`behavior_top_count` when the count differs
+  from `behavior_logprobs`). `K` is at least 1 and the same on every token of the record, the ids of a token are
+  distinct, the log-probabilities finite and at most 0 and the probabilities of one token sum to at most 1 (they are
+  whole-row log-probabilities at the sampling temperature); the sampled token need not be listed (`behavior_top`).
+  A prepared split holds one `K` and keeps them as `btk.bin`/`btl.bin`.
+- `policy_version` (a non-negative integer) and `sampler` (`temperature` above 0, `top_k` at least 1, `top_p` in
+  (0, 1], `min_p` in [0, 1)) belong to a rollout; the prepared split keeps them per example.
 - `baseline_only: true` (with `reward` and `group`) marks a rollout that sets its group's baseline and is never
   trained: no message `"train": true`, no `behavior_logprobs`, `token_ids`, `teacher_context` or `truncated`
   (`baseline_trains`).
 - `loss_weight` (message, optional, default 1.0): a finite number above 0 on a supervised message (`"train": true`),
   the weight of its tokens in the loss; on any other message, out of range, or on a rollout record it is refused
   (`loss_weight`).
-- `behavior_logprobs`, `token_ids`, `truncated`, `rollout` and `tokenizer_digest` belong to a rollout: a record
+- `behavior_logprobs`, `behavior_top_ids`, `token_ids`, `truncated`, `rollout`, `tokenizer_digest`, `policy_version` and `sampler` belong to a rollout: a record
   carrying any of them carries a `reward` and `group` (or a `teacher_context`).
 - A preference candidate (`chosen`, `rejected`) and a feedback `completion` is one assistant turn or a continuation: a
   non-empty array of turns that starts and ends with an assistant turn. Its assistant turns are supervised, every
@@ -82,7 +92,7 @@ rollouts) and in its guide to training as a served job.
 - Every other field and message rule (roles, tool calls, `deny_unknown_fields`) is that of `generic-messages-v2`.
 
 A refusal of one of these rules is reported typed: `rule` and `field` (a JSON path into the record, such as
-`messages[1].behavior_logprobs`), beside the message. The rules: `behavior_logprob_count`, `token_ids_mismatch`,
+`messages[1].behavior_logprobs`), beside the message. The rules: `behavior_logprob_count`, `behavior_top_count`, `behavior_top`, `token_ids_mismatch`,
 `missing_reward`, `missing_group`, `advantage_removed`, `baseline_trains`, `loss_weight`, `rollout_mismatch`, `group_of_one`,
 `mixed_tokenizer_digest`, `tokenizer_mismatch`. A record that breaks a rule of its own is refused for that; the last
 four hold between records, over the whole file
