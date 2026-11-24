@@ -1688,8 +1688,19 @@ impl Engine {
                 panic!("serve: {name} ({} x {}) does not fit one storage binding at {:?}", w.n(), w.k(), w.dtype());
             }
         }
-        // The tier reported for the engine: the one most leaves take, after the int8 fallback.
-        let tier = leaf_tier("");
+        // The tier reported for the engine: the one most linears are held in, after the int8 fallback (a policy
+        // that names each tensor has fp32 as its default and the stored tier on every linear); the policy's
+        // default when there are none.
+        let tier = {
+            let mut counts: Vec<(Dtype, usize)> = Vec::new();
+            for w in lin_weights.values() {
+                match counts.iter_mut().find(|(d, _)| *d == w.dtype()) {
+                    Some((_, n)) => *n += 1,
+                    None => counts.push((w.dtype(), 1)),
+                }
+            }
+            counts.into_iter().max_by_key(|&(_, n)| n).map_or_else(|| leaf_tier(""), |(d, _)| d)
+        };
         gpu_core::profile::stage_time("qwen engine build: per-layer linear weight quantize+upload", stage_t0);
         let stage_t0 = std::time::Instant::now();
         // Int8 activation-quantization scratch (`model::dispatch::I8Scratch`,
