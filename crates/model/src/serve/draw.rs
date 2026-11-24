@@ -41,13 +41,30 @@ pub struct RowDraw {
     pub top_k: usize,
     /// The row's noise key ([`draw_key`]).
     pub key: u32,
+    /// How many of the row's most probable tokens to report with the draw, as whole-row log-probabilities at the
+    /// draw's temperature ([`Drawn::Traced`]); `0` for none. Only a draw over the whole row (no `top_k`, nucleus or
+    /// min-p cut) carries one: a cut draw's list would be of a distribution it did not draw from.
+    pub top: usize,
 }
 
 impl RowDraw {
     /// The keyed draw of a request sampled with `params` at `position` (the number of tokens before the one drawn)
     /// under its `seed`, or `None` when `params` is not drawable this way ([`SampleParams::row_drawable`]).
     pub fn of(params: &SampleParams, seed: u64, position: usize) -> Option<RowDraw> {
-        params.row_drawable().then(|| RowDraw { temp: params.temp.max(1e-6), min_p: params.min_p.clamp(0.0, 1.0), top_p: params.top_p, top_k: params.top_k, key: draw_key(seed, position as u64, 0) })
+        params.row_drawable().then(|| RowDraw {
+            temp: params.temp.max(1e-6),
+            min_p: params.min_p.clamp(0.0, 1.0),
+            top_p: params.top_p,
+            top_k: params.top_k,
+            key: draw_key(seed, position as u64, 0),
+            top: if params.draws_from_whole_distribution() { params.trace_top } else { 0 },
+        })
+    }
+
+    /// Whether the draw reports the row's top list: it asks for one ([`Self::top`]), draws over the whole row, and the
+    /// list fits what a device keeps ([`crate::readout::MAX_DRAW_CANDIDATES`]) and the row.
+    pub fn carries_top_list(&self, vocab: usize) -> bool {
+        self.top > 0 && self.top <= vocab && self.top <= crate::readout::MAX_DRAW_CANDIDATES as usize && !self.truncates(vocab) && self.min_p <= 0.0
     }
 
     /// Whether the draw keeps the best `top_k` of a `vocab`-wide row.
@@ -78,6 +95,11 @@ pub enum Drawn {
     /// its log-probability under the whole row at the request temperature, `log_softmax(logits / temp)[token]`: the
     /// behaviour policy's own figure for a draw that is cut (see [`draw_row_whole`]).
     Token(u32, f32, f32),
+    /// [`Self::Token`] for a row that asked for its top list ([`RowDraw::top`]): the token, its two log-probabilities,
+    /// and the row's `top` most probable `(token, whole-row log-probability)` pairs, most probable first, from the
+    /// arithmetic of the draw. The third figure is the drawn token's entry in that list whenever it is among them (the
+    /// same number, bit for bit).
+    Traced(u32, f32, f32, Vec<(u32, f32)>),
     /// The row's whole `[vocab]` logits, for the host sampler.
     Row(Vec<f32>),
 }
@@ -155,6 +177,15 @@ pub fn draw_row_whole(row: &[f32], d: RowDraw) -> (u32, f32, f32) {
     (token, lp, if whole.is_nan() { lp } else { whole })
 }
 
+/// [`draw_row_whole`] for a row that asks for its top list ([`RowDraw::top`]): the answer as [`Drawn::Traced`]. The row's
+/// figures come from [`crate::logprobs::scored_position`], the arithmetic a scoring pass uses, so a decode-time list and a
+/// scored one are the same numbers for the same row.
+pub fn draw_row_traced(row: &[f32], d: RowDraw) -> Drawn {
+    let (token, lp) = draw_row(row, d);
+    let scored = crate::logprobs::scored_position(row, token, d.top, d.temp.max(1e-6));
+    Drawn::Traced(token, lp, if scored.log_prob.is_nan() { lp } else { scored.log_prob }, scored.top)
+}
+
 /// [`draw_row`] for a draw whose survivors are a best-first list: the row's best `top_k`, or the shortest sorted
 /// prefix that holds the nucleus (the row sampler's own prefix search, [`super::fullrow`]).
 fn draw_truncated_row(row: &[f32], d: RowDraw) -> (u32, f32) {
@@ -197,6 +228,14 @@ pub fn draw_list(list: &[(u32, f32)], d: RowDraw, full_mass: Option<f32>) -> (u3
 /// `Some`, the row handed back where it is `None`. The rows are drawn in parallel on the CPU pool.
 pub fn draw_rows_host(rows: Vec<Vec<f32>>, draws: &[Option<RowDraw>]) -> Vec<Drawn> {
     assert_eq!(rows.len(), draws.len(), "draw_rows_host: {} rows for {} draws", rows.len(), draws.len());
-    let drawn = backend_cpu::par::map(rows.len(), |i| draws[i].map(|d| draw_row_whole(&rows[i], d)));
-    rows.into_iter().zip(drawn).map(|(row, t)| t.map_or(Drawn::Row(row), |(t, lp, whole)| Drawn::Token(t, lp, whole))).collect()
+    let drawn = backend_cpu::par::map(rows.len(), |i| {
+        draws[i].map(|d| match d.top {
+            0 => {
+                let (t, lp, whole) = draw_row_whole(&rows[i], d);
+                Drawn::Token(t, lp, whole)
+            }
+            _ => draw_row_traced(&rows[i], d),
+        })
+    });
+    rows.into_iter().zip(drawn).map(|(row, t)| t.unwrap_or(Drawn::Row(row))).collect()
 }

@@ -82,11 +82,11 @@ fn run(plans: bool) -> (Trace, usize) {
                 // Keyed draws, the last row read back whole, every other ten steps with a min-p floor.
                 let n = refs.len();
                 let floor = if (step / 30) % 2 == 0 { 0.0 } else { 0.1 };
-                let draws: Vec<Option<RowDraw>> = (0..n).map(|i| (i + 1 < n).then(|| RowDraw { temp: 1.0, min_p: floor, top_p: [1.0, 0.9][i % 2], top_k: 0, key: draw_key(i as u64, step as u64, 0) })).collect();
+                let draws: Vec<Option<RowDraw>> = (0..n).map(|i| (i + 1 < n).then(|| RowDraw { temp: 1.0, min_p: floor, top_p: [1.0, 0.9][i % 2], top_k: 0, top: 0, key: draw_key(i as u64, step as u64, 0) })).collect();
                 e.forward_batched_drawn(&mut refs, &next, &draws)
                     .into_iter()
                     .map(|d| match d {
-                        Drawn::Token(t, lp, _) => vec![(t, lp)],
+                        Drawn::Token(t, lp, _) | Drawn::Traced(t, lp, _, _) => vec![(t, lp)],
                         Drawn::Row(row) => vec![best_of(&row)],
                     })
                     .collect()

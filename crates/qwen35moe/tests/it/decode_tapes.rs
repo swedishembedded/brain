@@ -252,7 +252,7 @@ fn a_sampled_step_replays_its_recording_and_draws_what_the_built_step_draws() {
             .collect()
     };
     let (mut ta, mut tb) = (mk(&mut taped), mk(&mut built));
-    let draw = |row: usize, step: usize| RowDraw { temp: 0.9, min_p: 0.0, top_p: 1.0, top_k: 0, key: draw_key(row as u64 + 1, step as u64, 0) };
+    let draw = |row: usize, step: usize| RowDraw { temp: 0.9, min_p: 0.0, top_p: 1.0, top_k: 0, top: 0, key: draw_key(row as u64 + 1, step as u64, 0) };
     let mut toks = vec![4u32, 9, 2];
     for step in 0..6 {
         if step == 3 {
@@ -269,7 +269,7 @@ fn a_sampled_step_replays_its_recording_and_draws_what_the_built_step_draws() {
         let bits = |d: &[Drawn]| -> Vec<(u32, Vec<u32>)> {
             d.iter()
                 .map(|x| match x {
-                    Drawn::Token(t, lp, _) => (*t, vec![lp.to_bits()]),
+                    Drawn::Token(t, lp, _) | Drawn::Traced(t, lp, _, _) => (*t, vec![lp.to_bits()]),
                     Drawn::Row(row) => (u32::MAX, row.iter().map(|v| v.to_bits()).collect()),
                 })
                 .collect()
@@ -278,7 +278,7 @@ fn a_sampled_step_replays_its_recording_and_draws_what_the_built_step_draws() {
         toks = a
             .iter()
             .map(|x| match x {
-                Drawn::Token(t, ..) => *t,
+                Drawn::Token(t, ..) | Drawn::Traced(t, ..) => *t,
                 Drawn::Row(row) => model::hostmath::argmax_row(row),
             })
             .collect();

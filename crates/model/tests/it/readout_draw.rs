@@ -91,6 +91,7 @@ fn draws_as_the_host_does(g: &gpu_core::Gpu) {
                         min_p: [0.0, 0.0, 0.0, 0.2, 0.0, 0.0, 0.0, 0.1][k],
                         top_p: [1.0, 1.0, 1.0, 1.0, 0.9, 0.5, 1.0, 0.7][k],
                         top_k: [0, 0, 0, 0, 0, 0, 40, 2000][k],
+                        top: 0,
                         key: draw_key(round * 1000 + r as u64, round, 0),
                     }),
                 })
@@ -139,7 +140,7 @@ fn follows_the_exact_distribution(g: &gpu_core::Gpu) {
         let z: f64 = w.iter().sum();
         let mut counts = vec![0u64; vocab];
         for round in 0..640u64 {
-            let draws: Vec<Option<RowDraw>> = (0..rows).map(|r| Some(RowDraw { temp, min_p, top_p, top_k, key: draw_key(r as u64, round, 0) })).collect();
+            let draws: Vec<Option<RowDraw>> = (0..rows).map(|r| Some(RowDraw { temp, min_p, top_p, top_k, top: 0, key: draw_key(r as u64, round, 0) })).collect();
             let logits = g.storage_init("logits", &row.repeat(rows));
             let shape = drawer.shape(&draws, vocab as u32);
             g.submit(&[], &drawer.steps(g, &logits, &draws, vocab as u32));
@@ -161,4 +162,63 @@ fn follows_the_exact_distribution(g: &gpu_core::Gpu) {
         let dof = w.iter().filter(|&&w| w > 0.0).count() - 1;
         assert!(stat < (3 * dof + 30) as f64, "{temp} {min_p} {top_p} {top_k}: chi-square {stat:.1} over {dof} dof: {counts:?}");
     }
+}
+
+/// SPEC: a row that asks for the top of its distribution (`RowDraw::top`) and draws over the whole row is answered with
+/// its `top` largest logits as whole-row log-probabilities (`logit / temp - best - ln(mass)`, the figures the draw
+/// itself used), equal to an independent f64 softmax, the drawn token's own figure the same bits as its entry when it is
+/// among them. The extraction is one set of launches for the whole batch: it costs the same number of steps for 3 rows
+/// as for 12, and a batch that asks for none dispatches none.
+#[test]
+fn a_whole_row_draw_answers_the_top_of_its_row_from_the_launches_the_batch_shares() {
+    let kernels: &'static [(&'static str, &'static str)] = Box::leak(DRAW_KERNELS.iter().chain(&model::readout::READOUT_KERNELS).copied().collect::<Vec<_>>().into_boxed_slice());
+    let g = gpu_core::testgpu::dev(kernels);
+    let (vocab, top) = (211usize, 5usize);
+    let mut rng = Lcg::new(7); // seed: fixed fixture so a failure reproduces on the same rows
+    let mut steps_for = Vec::new();
+    for rows in [3usize, 12] {
+        let drawer = RowDrawer::new(&g, rows as u32).expect("the kernels are registered");
+        let host: Vec<f32> = (0..rows * vocab).map(|_| (uniform(&mut rng) * 20.0 - 10.0).round() / 4.0).collect();
+        let draws: Vec<Option<RowDraw>> = (0..rows)
+            .map(|r| match r % 4 {
+                0 | 1 => Some(RowDraw { temp: [0.8, 1.3][r % 2], min_p: 0.0, top_p: 1.0, top_k: 0, top, key: draw_key(r as u64, 3, 0) }),
+                2 => Some(RowDraw { temp: 1.0, min_p: 0.0, top_p: 1.0, top_k: 0, top: 0, key: draw_key(r as u64, 3, 0) }),
+                _ => Some(RowDraw { temp: 1.0, min_p: 0.0, top_p: 1.0, top_k: 3, top: 0, key: draw_key(r as u64, 3, 0) }),
+            })
+            .collect();
+        let logits = g.storage_init("logits", &host);
+        let shape = drawer.shape(&draws, vocab as u32);
+        let steps = drawer.steps(&g, &logits, &draws, vocab as u32);
+        steps_for.push(steps.len());
+        g.submit(&[], &steps);
+        let got = drawer.answer(&g, &logits, &draws, vocab as u32, shape);
+        for (r, (d, got)) in draws.iter().zip(&got).enumerate() {
+            let row = &host[r * vocab..(r + 1) * vocab];
+            let d = d.expect("a keyed row");
+            if d.top == 0 {
+                assert!(matches!(got, Drawn::Token(..)), "row {r}: a row that did not ask carries no list");
+                continue;
+            }
+            let Drawn::Traced(token, _, whole, list) = got else { panic!("row {r}: {got:?}") };
+            let scaled: Vec<f64> = row.iter().map(|&l| f64::from(l) / f64::from(d.temp)).collect();
+            let max = scaled.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let lse = max + scaled.iter().map(|z| (z - max).exp()).sum::<f64>().ln();
+            let mut ranked: Vec<(usize, f64)> = scaled.iter().map(|z| z - lse).enumerate().collect();
+            ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+            assert_eq!(list.iter().map(|e| e.0 as usize).collect::<Vec<_>>(), ranked[..top].iter().map(|e| e.0).collect::<Vec<_>>(), "row {r}: ids");
+            for (got, want) in list.iter().zip(&ranked) {
+                assert!((f64::from(got.1) - want.1).abs() < 1e-4, "row {r}: {got:?} against {want:?}");
+            }
+            assert!((f64::from(*whole) - ranked.iter().find(|e| e.0 == *token as usize).unwrap().1).abs() < 1e-4, "row {r}: the drawn token's figure");
+            if let Some(entry) = list.iter().find(|e| e.0 == *token) {
+                assert_eq!(entry.1.to_bits(), whole.to_bits(), "row {r}: the drawn token's figure is its entry");
+            }
+        }
+    }
+    assert_eq!(steps_for[0], steps_for[1], "the extraction launches do not grow with the rows: {steps_for:?}");
+    // A batch that asks for no list dispatches none of the extraction.
+    let drawer = RowDrawer::new(&g, 3).unwrap();
+    let plain: Vec<Option<RowDraw>> = (0..3).map(|r| Some(RowDraw { temp: 1.0, min_p: 0.0, top_p: 1.0, top_k: 0, top: 0, key: draw_key(r, 3, 0) })).collect();
+    let logits = g.storage_init("logits", &vec![0.5f32; 3 * vocab]);
+    assert!(drawer.steps(&g, &logits, &plain, vocab as u32).len() < steps_for[0], "the candidate extraction is only dispatched for a batch that asks");
 }

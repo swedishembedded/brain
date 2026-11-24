@@ -113,6 +113,12 @@ fn the_engine_passes_the_serving_conformance_suite() {
     conformance::run_all(&Conformance { make: conformance_engine, prefix_reuse: false, prefix_prompt_tokens: 24, load_adapter: None });
 }
 
+/// The decode step answers a whole-row keyed draw's top list from the device candidates ([`model::serve::RowDraw::top`]).
+#[test]
+fn ouro_answers_the_top_list_of_a_whole_row_draw_from_its_decode_step() {
+    conformance::keyed_draws_answer_the_top_list_they_are_asked_for(&Conformance { make: conformance_engine, prefix_reuse: false, prefix_prompt_tokens: 24, load_adapter: None });
+}
+
 /// A teacher-forced score is the log-probability the model's own full-sequence forward gives each continuation
 /// token, at the temperature asked, and it leaves the pool as it found it.
 #[test]

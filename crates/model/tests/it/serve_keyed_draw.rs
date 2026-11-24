@@ -79,7 +79,7 @@ fn the_keyed_draw_follows_the_row_samplers_distribution_and_reports_its_logprob(
         let probs = exact(&row, temp, min_p);
         let mut counts = vec![0u64; row.len()];
         for pos in 0..n {
-            let (t, lp) = draw_row(&row, RowDraw { temp, min_p, top_p: 1.0, top_k: 0, key: draw_key(seed, pos, 0) });
+            let (t, lp) = draw_row(&row, RowDraw { temp, min_p, top_p: 1.0, top_k: 0, top: 0, key: draw_key(seed, pos, 0) });
             counts[t as usize] += 1;
             assert!((lp as f64 - probs[t as usize].ln()).abs() < 1e-4, "temp {temp} min_p {min_p}: token {t} logprob {lp} vs {}", probs[t as usize].ln());
         }
@@ -102,7 +102,7 @@ fn the_keyed_draw_follows_the_truncated_distributions() {
         let probs = exact_truncated(&row, temp, min_p, top_p, top_k);
         let mut counts = vec![0u64; row.len()];
         for pos in 0..n {
-            let (t, lp) = draw_row(&row, RowDraw { temp, min_p, top_p, top_k, key: draw_key(seed, pos, 0) });
+            let (t, lp) = draw_row(&row, RowDraw { temp, min_p, top_p, top_k, top: 0, key: draw_key(seed, pos, 0) });
             counts[t as usize] += 1;
             assert!((lp as f64 - probs[t as usize].ln()).abs() < 1e-4, "{temp} {min_p} {top_p} {top_k}: token {t} logprob {lp} vs {}", probs[t as usize].ln());
         }
@@ -348,4 +348,58 @@ fn rows_the_keyed_draw_does_not_cover_are_sampled_on_the_host_beside_drawn_ones(
     let dec = s.decoder();
     // The first token of each request comes from its prefill row; the five after it from decode steps.
     assert_eq!((dec.drawn, dec.returned), (4 * 5, 5), "keyed rows drawn by the decoder, the others returned");
+}
+
+/// `log softmax(row / temp)` in f64, the oracle a decode-time top list is read against.
+fn host_log_softmax(row: &[f32], temp: f32) -> Vec<f64> {
+    let scaled: Vec<f64> = row.iter().map(|&l| f64::from(l) / f64::from(temp)).collect();
+    let max = scaled.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let lse = max + scaled.iter().map(|z| (z - max).exp()).sum::<f64>().ln();
+    scaled.iter().map(|z| z - lse).collect()
+}
+
+/// SPEC: a request that asks for the sampler's top list (`SampleParams::trace_top`) and draws over the whole row gets,
+/// from the decode steps that drew its tokens, the `trace_top` most probable ids of each row and their whole-row
+/// log-probabilities at the request temperature (the stop token's included), with the drawn token's own figure the same
+/// number as its entry in the list when it is among them. A request without the option, and one whose draw is cut
+/// (`top_k`), report no list, and a mixed batch gives each its own fields.
+#[test]
+fn a_whole_row_draw_reports_the_top_of_the_row_it_drew_from_and_the_others_report_none() {
+    const TOP: usize = 4;
+    const TEMP: f32 = 0.9;
+    let params = SampleParams { temp: TEMP, ..SampleParams::greedy() };
+    let request = |prompt: u32| Request { prompt: vec![prompt], max_new: 12, stop: vec![3] };
+    let mut s = echo(false);
+    let asking = s.submit_sampled(request(5), SampleParams { trace_top: TOP, ..params }, 21);
+    let plain = s.submit_sampled(request(6), params, 22);
+    let cut = s.submit_sampled(request(7), SampleParams { trace_top: TOP, top_k: 5, ..params }, 23);
+    let mut tokens = std::collections::HashMap::new();
+    let (mut figures, mut lists) = (std::collections::HashMap::new(), std::collections::HashMap::new());
+    while s.pending() {
+        let report = s.step_report();
+        tokens.extend(report.completed.clone());
+        figures.extend(report.completed_traces);
+        lists.extend(report.completed_top_lists);
+    }
+    assert!(!lists.contains_key(&plain) && !lists.contains_key(&cut), "only the whole-row draw that asked has a list: {:?}", lists.keys());
+    assert!(figures.contains_key(&plain), "a request that did not ask keeps its whole-row figures");
+    let (generated, list, figure) = (&tokens[&asking], &lists[&asking], &figures[&asking]);
+    // One entry per generated token, and one more when a stop token ended the request.
+    assert!(list.len() == figure.len() && (generated.len()..=generated.len() + 1).contains(&list.len()), "{} lists for {} tokens", list.len(), generated.len());
+    let mut previous = 5u32;
+    for (i, (entries, own)) in list.iter().zip(figure).enumerate() {
+        let oracle = host_log_softmax(&row_for(previous), TEMP);
+        let mut ranked: Vec<(usize, f64)> = oracle.iter().copied().enumerate().collect();
+        ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        assert_eq!(entries.iter().map(|e| e.0 as usize).collect::<Vec<_>>(), ranked[..TOP].iter().map(|e| e.0).collect::<Vec<_>>(), "position {i}: the top ids");
+        for (got, want) in entries.iter().zip(&ranked) {
+            assert!((f64::from(got.1) - want.1).abs() < 1e-5, "position {i}: {got:?} against {want:?}");
+        }
+        let token = generated.get(i).copied().unwrap_or(3);
+        if let Some(entry) = entries.iter().find(|e| e.0 == token) {
+            assert_eq!(entry.1.to_bits(), own.to_bits(), "position {i}: the drawn token's figure is its entry");
+        }
+        assert!((f64::from(*own) - oracle[token as usize]).abs() < 1e-5, "position {i}: the figure of the drawn token");
+        previous = token;
+    }
 }

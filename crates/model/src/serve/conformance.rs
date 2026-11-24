@@ -480,10 +480,24 @@ pub fn full_rows_rank_what_the_candidate_list_ranks<D: PagedDecoder>(c: &Conform
 /// decoder draws it, and the row whose draw is `None` comes back as the row. A decoder without row readback passes
 /// trivially.
 pub fn keyed_draws_are_the_rows_draws<D: PagedDecoder>(c: &Conformance<D>) {
+    keyed_draws(c);
+}
+
+/// A decoder that reads its rows back and has the candidate extraction answers a whole-row keyed draw that asks for its top
+/// list ([`RowDraw::top`]) with it ([`Drawn::Traced`]), equal to the row's own top, so a trace served from its decode steps needs
+/// no scoring pass. The engines the trace is served from must pass it ([`keyed_draws_are_the_rows_draws`] lets a decoder
+/// without the extraction answer the token alone, and the scheduler then scores its list).
+pub fn keyed_draws_answer_the_top_list_they_are_asked_for<D: PagedDecoder>(c: &Conformance<D>) {
+    assert!(keyed_draws(c), "the decoder answered no top list for a whole-row keyed draw that asked for one");
+}
+
+/// [`keyed_draws_are_the_rows_draws`]'s checks; whether a row that asked for its top list was answered with it.
+fn keyed_draws<D: PagedDecoder>(c: &Conformance<D>) -> bool {
     use super::{draw_key, draw_row, Drawn, RowDraw};
+    let mut answered_a_list = false;
     let (mut by_row, mut by_draw) = ((c.make)(), (c.make)());
     if !by_row.full_row_readback() {
-        return;
+        return false;
     }
     let vocab = by_row.vocab();
     let prompts: Vec<Vec<u32>> = (0..4).map(|s| tokens(vocab, 3 + s, 9)).collect();
@@ -494,19 +508,34 @@ pub fn keyed_draws_are_the_rows_draws<D: PagedDecoder>(c: &Conformance<D>) {
         by_row.prefill(a, p);
         by_draw.prefill(b, p);
     }
-    let draws = [Some(RowDraw { temp: 1.0, min_p: 0.0, top_p: 1.0, top_k: 0, key: draw_key(1, 9, 0) }), None, Some(RowDraw { temp: 0.7, min_p: 0.05, top_p: 0.9, top_k: 0, key: draw_key(2, 9, 0) }), Some(RowDraw { temp: 1.0, min_p: 0.0, top_p: 1.0, top_k: 5, key: draw_key(3, 9, 0) })];
+    let draws = [Some(RowDraw { temp: 1.0, min_p: 0.0, top_p: 1.0, top_k: 0, top: 4, key: draw_key(1, 9, 0) }), None, Some(RowDraw { temp: 0.7, min_p: 0.05, top_p: 0.9, top_k: 0, top: 0, key: draw_key(2, 9, 0) }), Some(RowDraw { temp: 1.0, min_p: 0.0, top_p: 1.0, top_k: 5, top: 0, key: draw_key(3, 9, 0) })];
     let rows = by_row.forward_batched_logit_rows(&mut row_tables.iter_mut().collect::<Vec<_>>(), &next);
     let drawn = by_draw.forward_batched_drawn(&mut draw_tables.iter_mut().collect::<Vec<_>>(), &next, &draws);
     assert_eq!(drawn.len(), draws.len(), "a keyed step answers every row");
     for (i, (d, got)) in draws.iter().zip(&drawn).enumerate() {
         match (d, got) {
-            (Some(d), Drawn::Token(t, lp, whole)) => {
+            (Some(d), Drawn::Token(t, lp, whole) | Drawn::Traced(t, lp, whole, _)) => {
                 let (want, want_lp) = draw_row(&rows[i], *d);
                 assert_eq!(*t, want, "row {i}: the keyed draw is not the row's draw");
                 assert!((lp - want_lp).abs() <= 1e-3 * want_lp.abs().max(1.0), "row {i}: logprob {lp} against the row's {want_lp}");
                 // The figure a policy trace carries of a draw that cut the row: its token's log-softmax at the temperature.
                 let want_whole = crate::logprobs::row_logprob_at(&rows[i], want as usize, d.temp);
                 assert!((whole - want_whole).abs() <= 1e-3 * want_whole.abs().max(1.0), "row {i}: whole-row logprob {whole} against the row's {want_whole}");
+                // A row that asked for its top list and draws over the whole row is answered with it where the decoder can
+                // (a decoder without the candidate extraction answers the token alone): the row's own top, the drawn
+                // token's figure its entry, bit for bit.
+                if let Drawn::Traced(_, _, _, list) = got {
+                    answered_a_list = true;
+                    assert!(d.carries_top_list(vocab), "row {i}: a list for a draw that does not carry one");
+                    let want_list = crate::logprobs::row_top_logprobs_at(&rows[i], d.top, d.temp);
+                    assert_eq!(list.iter().map(|e| e.0).collect::<Vec<_>>(), want_list.iter().map(|e| e.0).collect::<Vec<_>>(), "row {i}: the top ids");
+                    for (got, want) in list.iter().zip(&want_list) {
+                        assert!((got.1 - want.1).abs() <= 1e-3 * want.1.abs().max(1.0), "row {i}: {got:?} against {want:?}");
+                    }
+                    if let Some(entry) = list.iter().find(|e| e.0 == *t) {
+                        assert_eq!(entry.1.to_bits(), whole.to_bits(), "row {i}: the drawn token's figure is its entry");
+                    }
+                }
             }
             (None, Drawn::Row(row)) => assert_eq!(row, &rows[i], "row {i}: the row handed back is not the step's row"),
             other => panic!("row {i}: {other:?} for draw {d:?}"),
@@ -518,6 +547,7 @@ pub fn keyed_draws_are_the_rows_draws<D: PagedDecoder>(c: &Conformance<D>) {
     for t in &mut draw_tables {
         by_draw.release_table(t);
     }
+    answered_a_list
 }
 
 /// `row` holds every candidate's logit at its token and no token outside `candidates` outranks the last of them.

@@ -73,6 +73,12 @@ fn qwen3_with_fp32_kv_conforms() {
     conformance::run_all(&Conformance { make: || engine(false), prefix_reuse: true, prefix_prompt_tokens: 24, load_adapter: Some(load_adapter) });
 }
 
+/// A decoder's decode steps answer a whole-row keyed draw's top list from the device candidates ([`model::serve::RowDraw::top`]).
+#[test]
+fn qwen3_answers_the_top_list_of_a_whole_row_draw_from_its_decode_step() {
+    conformance::keyed_draws_answer_the_top_list_they_are_asked_for(&Conformance { make: || engine(false), prefix_reuse: true, prefix_prompt_tokens: 24, load_adapter: Some(load_adapter) });
+}
+
 #[test]
 fn qwen3_with_int8_kv_conforms() {
     conformance::run_all(&Conformance { make: || engine(true), prefix_reuse: true, prefix_prompt_tokens: 24, load_adapter: Some(load_adapter) });

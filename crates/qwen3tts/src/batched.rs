@@ -363,9 +363,9 @@ impl BatchedDecoder {
     /// logits are, or, unsampled, the one that keeps the best code (the reference's argmax, ties to the lower id).
     fn residual_draw(cfg: &SamplerCfg, seed: u64, frame: usize, k: usize) -> RowDraw {
         if !cfg.do_sample || cfg.temperature <= 0.0 {
-            return RowDraw { temp: 1.0, min_p: 0.0, top_p: 1.0, top_k: 1, key: 0 };
+            return RowDraw { temp: 1.0, min_p: 0.0, top_p: 1.0, top_k: 1, top: 0, key: 0 };
         }
-        RowDraw { temp: cfg.temperature, min_p: 0.0, top_p: cfg.top_p, top_k: cfg.top_k, key: draw_key(seed, frame as u64, k as u32) }
+        RowDraw { temp: cfg.temperature, min_p: 0.0, top_p: cfg.top_p, top_k: cfg.top_k, top: 0, key: draw_key(seed, frame as u64, k as u32) }
     }
 
     /// One frame of every stream in `live`: the code predictor's chain for all of them, the

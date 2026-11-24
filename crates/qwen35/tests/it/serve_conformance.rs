@@ -21,6 +21,12 @@ fn engine() -> Engine {
     Engine::from_map_on(&gpu_core::Gpu::new_cpu(pipelines()), cfg, &weights, MIN_SEQ_TOKENS as u32, 4)
 }
 
+/// The decode step answers a whole-row keyed draw's top list from the device candidates ([`model::serve::RowDraw::top`]).
+#[test]
+fn qwen35_answers_the_top_list_of_a_whole_row_draw_from_its_decode_step() {
+    conformance::keyed_draws_answer_the_top_list_they_are_asked_for(&Conformance { make: engine, prefix_reuse: false, prefix_prompt_tokens: 24, load_adapter: None });
+}
+
 #[test]
 fn qwen35_engine_conforms() {
     conformance::run_all(&Conformance { make: engine, prefix_reuse: false, prefix_prompt_tokens: 24, load_adapter: None });
