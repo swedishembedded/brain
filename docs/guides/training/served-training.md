@@ -577,10 +577,12 @@ POST /v1/jobs
 | `step_tokens` | policy tokens (supervised tokens of rollouts) one optimiser step trains: a step takes whole groups, in arrival order, until it holds at least this many |
 | `queue_tokens` | policy tokens the queue holds, at least `step_tokens` |
 | `max_staleness` | optional: a group whose oldest record's `policy_version` is more than this many versions behind the last published one is dropped, not trained |
-| `max_steps` | optional: the job ends after this many steps; the learning-rate schedule spans it (1,000,000 when unset) |
+| `max_steps` | optional: the job ends after this many steps and the learning rate decays over them; unset, the job runs until `finish` and keeps its peak rate after a warmup of at most 10 steps |
+| `top_k` | with `estimator: score-centred` (required then, refused otherwise): the sampler top-K every record carries (`behavior_top_ids`, `behavior_top_logprobs`), at most 256 |
 | `start_adapter` | optional: `{"digest": ...}` or `{"blob": "adapter"}`, the adapter the run continues |
 
-The estimator and its settings are the request's policy-gradient params, as for a dataset. A step is normalised over
+The estimator and its settings are the request's policy-gradient params, as for a dataset: the clipped surrogate,
+or `score-centred` over the records' sampler top-K. A step is normalised over
 its own tokens, so `loss_agg` is `token-sum` or `constant-length`; `behaviour` is `recorded` (every policy token
 carries the sampler's `behavior_logprobs`); importance correction, teacher contexts, images, `cards`, `job`,
 `grad_accum` above 1, evaluations and `adapter_id` are refused.

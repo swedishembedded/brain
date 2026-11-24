@@ -68,7 +68,7 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
 - [x] **Streaming policy-gradient job** (lane agrpo-stream, 2026-11-24; `crates/trainjob/src/stream.rs`,
       `rl::objective::stream_pg`, `brain::RolloutStream`, `capability::inbox`, `trainjob::bank`): `brain/train` with
       `stream` (a JSON document: `publish_adapter`, `publish_every`, `step_tokens`, `queue_tokens`, `max_staleness`?,
-      `max_steps`?, `start_adapter`?) instead of `data`, exactly one of them. Records reach the running job as job input
+      `max_steps`?, `top_k`?, `start_adapter`?) instead of `data`, exactly one of them. Records reach the running job as job input
       (`POST /v1/jobs/{id}/records[?epoch=N]` / `finish`, D-Bus `Input(job, kind, query, fd)`), checked as a dataset
       is (`Asked::samples`, `check_rollouts_together` with the base's tokenizer digest), each group's advantages
       computed on arrival by the batch path's own `external::advantages` over `SplitRollouts::of_split`; a step takes
@@ -82,7 +82,8 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       step. Tests: `trainjob` `it::stream` (lifecycle over HTTP incl. a reply from the published version and
       `/v1/models`, duplicate, stale drop, `410` after finish; the queue's allowance and no refusal below a step;
       one-POST vs many-POST first version byte-identical; a resumed run takes again exactly the applied-but-uncommitted
-      group, `410` to the old id, `409` naming the new epoch; door refusals), `it::dbus`
+      group, `410` to the old id, `409` naming the new epoch; the score-centred estimator over a top-2; door refusals),
+      `apiserve` `a_jobs_input_is_its_owners_alone_and_a_job_that_reads_none_says_so`, `it::dbus`
       `a_stream_job_over_the_bus_takes_its_records_by_input_and_finishes`, `model` `a_fed_objective_ends_the_run_complete_or_stops_it_resumable`,
       `rl` `stream_pg` unit tests, `capability` `inbox`.
       Decisions: (1) the job inbox is generic (`capability::inbox`, beside `CancelToken`): an `Inbox` on the
@@ -97,10 +98,15 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       document param like `data`; the estimator's settings stay the `pg_settings` table's params, and
       `check_streamable` refuses what the stream does not train: `behaviour start_of_run_proxy` (the versions that
       sampled are not the run's start), importance correction, the numerics gate, kv round trip, `seq-mean` (a step's
-      sequence count varies), the score-centred estimator (pass the sampler top-K through when the settings lane
-      exposes it), teacher contexts and teacher scores, images, `cards`/`job`, `grad_accum` > 1, evaluations,
-      `adapter_id` (the card is `publish_adapter`).
-      Open: score-centred estimator through the stream (lay out `behavior_top` into `PgBatch::top`); a group whose
+      sequence count varies), teacher contexts and teacher scores, images, `cards`/`job`, `grad_accum` > 1,
+      evaluations, `adapter_id` (the card is `publish_adapter`). The score-centred estimator trains through the stream
+      over the records' sampler top-K: its K is a stream setting (`top_k`), since the head's extra targets are sized
+      before the first record arrives; a record of another K is refused, as is a truncating sampler
+      (`external::check_centrable`, shared with the batch path). (5) Records sent before the learner is positioned wait
+      (a resumed run must restore its consumed keys before it can call one a duplicate); an answer not given within two
+      minutes is 503, never 429, so a full-queue 429 means exactly that. (6) A stream's warmup is at most 10 steps; an
+      open-ended stream (no `max_steps`) keeps its peak rate.
+      Open: a group whose
       oldest record has no `policy_version` is never stale (unmeasurable); the consumed-key list grows with the run
       (in the state's cursor); the published adapter is a snapshot card without base digest (it binds by base id);
       a `--serve-adapters` file of the same id would fight the stream for it (refuse an id the directory owns);

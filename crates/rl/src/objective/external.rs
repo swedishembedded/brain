@@ -308,6 +308,15 @@ fn score_centred_rows(dir: &Path, examples: &[Option<data::chat_rollout::Example
     let top = data::chat_rollout::read_behavior_top(dir, "train", tokens).map_err(|e| e.to_string())?.ok_or_else(|| {
         "estimator \"score-centred\" centres over the sampler's top-K, and the records carry none (behavior_top_ids / behavior_top_logprobs on every supervised answer, from a policy trace with top_log_probs)".to_string()
     })?;
+    check_centrable(&top, examples, advantage, eligible, starts, ends, mask)?;
+    Ok(top)
+}
+
+/// Refuse a split the score-centred estimator cannot centre over its sampler's top-K `top` (per token of the split):
+/// a policy example whose sampler truncated its distribution (the recorded log-probabilities are then not the
+/// distribution that drew the token: support replay is not implemented), or one a supervised token of which carries no
+/// top-K. The message names the example.
+pub(crate) fn check_centrable(top: &data::chat_rollout::BehaviorTop, examples: &[Option<data::chat_rollout::ExampleRollout>], advantage: &[f32], eligible: &[usize], starts: &[usize], ends: &[usize], mask: &[bool]) -> Result<(), String> {
     for &e in eligible.iter().filter(|&&e| !advantage[e].is_nan()) {
         if let Some(sampler) = examples[e].and_then(|r| r.sampler).filter(data::chat_rollout::SamplerDecl::truncates) {
             return Err(format!("example {e}: its sampler truncated the distribution ({sampler:?}); estimator \"score-centred\" needs the whole-row distribution that drew the token (top_k unset, top_p 1, min_p 0)"));
@@ -316,7 +325,7 @@ fn score_centred_rows(dir: &Path, examples: &[Option<data::chat_rollout::Example
             return Err(format!("example {e}: supervised token {} carries no sampler top-K (behavior_top_ids); estimator \"score-centred\" needs it on every answer of a rollout", t - starts[e]));
         }
     }
-    Ok(top)
+    Ok(())
 }
 
 /// What a run would leave unread: a step draws `grad_accum` batches of `batch_size` records, so a run of `steps`

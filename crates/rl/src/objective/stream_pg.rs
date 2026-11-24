@@ -34,25 +34,29 @@
 //! The behaviour log-probabilities are the sampler's own (`behavior_logprobs` on every policy token): a stream's
 //! records were drawn by served versions this run cannot replay, so the start-of-run proxy has no meaning here and is
 //! refused, as are what this objective does not yet train (importance correction, teacher contexts, images, the
-//! score-centred estimator, the numerics gate, a per-sequence mean).
+//! numerics gate, a per-sequence mean). The estimator is the configuration's: the clipped surrogate, or the
+//! score-centred one over the sampler's top-K, whose K the stream fixes before the run ([`StreamSettings::top_k`]).
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use data::chat::EncodedSplit;
-use data::chat_rollout::SplitRollouts;
+use data::chat_rollout::{SplitRollouts, NO_TOP_ID};
 use data::loader::{BatchConfig, TokenDataset};
 use data::rng::Rng;
 use model::training::{self, Capability, Unsupported};
-use model::{Batch, Model, Objective, StepVerdict, StepWork, Supply, IGNORE};
+use model::{Batch, Model, ModelConfig, Objective, StepVerdict, StepWork, Supply, IGNORE};
 use serde_json::{json, Value};
 
 use super::external::{advantages, BehaviourSource, ImportanceCorrection, PolicyGradientConfig, PolicyGradientStats, ReferencePolicy, StepAccumulator};
 use super::grpo::LossAgg;
 use super::grpo_stats::{NonFiniteSteps, MAX_CONSECUTIVE_NONFINITE};
-use super::pg_batch::{adapters_are_zero, adapters_can_be_disabled, backward_weighted_lp, with_adapters_disabled, AdapterState, PgBatch};
+use super::pg_batch::{adapters_are_zero, adapters_can_be_disabled, backward_weighted_lp, install_sampler_ids, with_adapters_disabled, AdapterState, PgBatch, SamplerTop};
 use super::pg_loss::{gradient_scan, GuardVerdict, StepGuard};
+
+/// The widest sampler top-K a stream centres over.
+pub const MAX_TOP_K: usize = 256;
 
 /// How often a learner waiting for records checks whether it was stopped.
 const STOP_POLL: Duration = Duration::from_millis(100);
@@ -69,6 +73,9 @@ pub struct StreamSettings {
     pub max_staleness: Option<u64>,
     /// The longest record, in tokens: the training row.
     pub block: usize,
+    /// The sampler's top-K every record carries, which the score-centred estimator centres over; `None` for the
+    /// clipped surrogate. Fixed before the run, since the model's head is sized to it.
+    pub top_k: Option<usize>,
 }
 
 impl StreamSettings {
@@ -82,12 +89,15 @@ impl StreamSettings {
         if self.block < 2 {
             return Err("the training row must hold at least two tokens".to_string());
         }
+        if self.top_k.is_some_and(|k| !(1..=MAX_TOP_K).contains(&k)) {
+            return Err(format!("top_k must be 1 to {MAX_TOP_K}"));
+        }
         Ok(())
     }
 }
 
-/// The settings a stream cannot train with, refused before the run starts.
-pub fn check_streamable(cfg: &PolicyGradientConfig) -> Result<(), String> {
+/// The settings a stream cannot train with, refused before the run starts; `top_k` is the stream's sampler top-K.
+pub fn check_streamable(cfg: &PolicyGradientConfig, top_k: Option<usize>) -> Result<(), String> {
     let refuse = |what: &str| Err(format!("a streamed policy gradient {what}"));
     if cfg.behaviour != BehaviourSource::Recorded {
         return refuse("takes the behaviour log-probabilities its records carry (behaviour recorded): the versions that sampled them are not the run's start");
@@ -104,8 +114,10 @@ pub fn check_streamable(cfg: &PolicyGradientConfig) -> Result<(), String> {
     if cfg.loss.loss_agg == LossAgg::SeqMean {
         return refuse("normalises each step over its own tokens; name loss_agg token-sum (or constant-length): a per-sequence mean needs one sequence per micro-batch and a fixed count of them per step");
     }
-    if cfg.loss.spec().estimator.needs_sampler_top() {
-        return refuse("trains the clipped surrogate only so far");
+    match (cfg.loss.spec().estimator.needs_sampler_top(), top_k) {
+        (true, None) => return refuse("with estimator score-centred centres over the sampler's top-K: name its K (stream.top_k), which every record carries"),
+        (false, Some(_)) => return refuse("reads a sampler top-K only with estimator score-centred; drop stream.top_k"),
+        _ => {}
     }
     Ok(())
 }
@@ -119,6 +131,9 @@ pub struct StreamExample {
     pub behavior: Vec<f32>,
     pub advantage: f32,
     pub policy_version: Option<u64>,
+    /// The sampler's top-K at each token (`[tokens * k]` ids, `NO_TOP_ID` where none, and log-probabilities), for the
+    /// score-centred estimator.
+    pub top: Option<(Vec<u32>, Vec<f32>)>,
 }
 
 impl StreamExample {
@@ -158,11 +173,26 @@ impl StreamGroup {
 /// The record contract's group rules, and what a stream does not train: a record without a reward (imitation), a
 /// teacher context or a teacher's scores, images, a supervised token without a recorded behaviour log-probability, a
 /// record longer than the row. The message names the example.
-pub fn groups_of_split(split: &EncodedSplit, cfg: &PolicyGradientConfig, block: usize) -> Result<Vec<StreamGroup>, String> {
+pub fn groups_of_split(split: &EncodedSplit, cfg: &PolicyGradientConfig, settings: &StreamSettings) -> Result<Vec<StreamGroup>, String> {
+    let block = settings.block;
     let rollouts = SplitRollouts::of_split(split)?;
     let advantage = advantages(&rollouts, cfg.loss.advantage_norm, cfg.loss.advantage_floor, cfg.truncated)?;
     let mut groups: Vec<StreamGroup> = rollouts.groups.iter().map(|key| StreamGroup { key: key.clone(), examples: Vec::new() }).collect();
     let ends: Vec<usize> = (0..split.starts.len()).map(|e| split.starts.get(e + 1).copied().unwrap_or(split.ids.len())).collect();
+    // The score-centred estimator: every policy token carries the sampler's top-K, of the stream's K, from a sampler
+    // that drew from the whole row (the recorded-rollout objective's own check).
+    let top = match settings.top_k {
+        None => None,
+        Some(k) => {
+            let top = split.behavior_top.as_ref().ok_or_else(|| "estimator \"score-centred\" centres over the sampler's top-K, and the records carry none (behavior_top_ids / behavior_top_logprobs on every supervised answer)".to_string())?;
+            if top.k != k {
+                return Err(format!("behavior_top_ids: the records carry a top-{} and the stream centres over a top-{k} (stream.top_k)", top.k));
+            }
+            let eligible: Vec<usize> = (0..split.starts.len()).filter(|&e| cfg.truncated.counts(split.truncated[e])).collect();
+            super::external::check_centrable(top, &rollouts.examples, &advantage, &eligible, &split.starts, &ends, &split.mask).map_err(|why| format!("record {why}"))?;
+            Some(top)
+        }
+    };
     for (e, example) in rollouts.examples.iter().enumerate() {
         let (start, end) = (split.starts[e], ends[e]);
         let refuse = |why: &str| Err(format!("record example {e}: {why}"));
@@ -190,6 +220,7 @@ pub fn groups_of_split(split: &EncodedSplit, cfg: &PolicyGradientConfig, block: 
             behavior: split.behavior[start..end].to_vec(),
             advantage: advantage[e],
             policy_version: example.and_then(|r| r.policy_version),
+            top: top.map(|t| (t.ids[start * t.k..end * t.k].to_vec(), t.logprobs[start * t.k..end * t.k].to_vec())),
         });
     }
     // A group whose every rollout was truncated and masked trains nothing; it is still a group the client sent.
@@ -473,7 +504,7 @@ impl StreamedPolicyGradient {
     /// The objective over `feed`, training micro-batches of `batch_size` rows.
     pub fn new(feed: Arc<RolloutFeed>, cfg: PolicyGradientConfig, batch_size: usize) -> Result<StreamedPolicyGradient, String> {
         cfg.validate()?;
-        check_streamable(&cfg)?;
+        check_streamable(&cfg, feed.settings.top_k)?;
         let stats = PolicyGradientStats { behaviour: cfg.behaviour, ..Default::default() };
         Ok(StreamedPolicyGradient { cfg, feed, batch_size: batch_size.max(1), start: None, wants_reference: cfg.loss.wants_reference(), weights_moved: false, step: Vec::new(), step_extra: StreamStep::default(), trained: Vec::new(), applied: None, uncommitted: Vec::new(), committed: Vec::new(), stats, work: None, verdict: None, guard: StepGuard::default(), consecutive_nonfinite: 0 })
     }
@@ -510,16 +541,29 @@ impl StreamedPolicyGradient {
                 let (tokens, y) = dataset.example_batch(&cfg, &picks).expect("the dataset indexes its examples");
                 let targets: Vec<u32> = y.iter().map(|&v| if v < 0 { IGNORE } else { v as u32 }).collect();
                 let (mut old_lp, mut advantage) = (vec![0.0; targets.len()], vec![f32::NAN; targets.len()]);
+                let k = self.feed.settings.top_k;
+                let mut top = k.map(|k| (vec![IGNORE; targets.len() * k], vec![f32::NAN; targets.len() * k]));
                 for (b, e) in rows.iter().enumerate() {
                     for t in 0..block.min(e.ids.len() - 1) {
                         let at = b * block + t;
-                        if targets[at] != IGNORE {
-                            old_lp[at] = e.behavior[t + 1];
-                            advantage[at] = e.advantage;
+                        if targets[at] == IGNORE {
+                            continue;
+                        }
+                        // Row position t predicts token t + 1: its behaviour log-probability and its sampler's top-K.
+                        old_lp[at] = e.behavior[t + 1];
+                        advantage[at] = e.advantage;
+                        if let (Some(k), Some((ids, lps)), Some((own_ids, own_lps))) = (k, top.as_mut(), e.top.as_ref()) {
+                            for j in 0..k {
+                                let id = own_ids[(t + 1) * k + j];
+                                if id != NO_TOP_ID {
+                                    ids[at * k + j] = id;
+                                    lps[at * k + j] = own_lps[(t + 1) * k + j];
+                                }
+                            }
                         }
                     }
                 }
-                Laid { tokens, targets, old_lp, advantage, ref_lp: None, rows: rows.len() }
+                Laid { tokens, targets, old_lp, advantage, ref_lp: None, rows: rows.len(), top }
             })
             .collect()
     }
@@ -577,6 +621,15 @@ struct Laid {
     advantage: Vec<f32>,
     ref_lp: Option<Vec<f32>>,
     rows: usize,
+    /// The sampler's top-K at each position, `[rows * block * k]`, under the score-centred estimator.
+    top: Option<(Vec<u32>, Vec<f32>)>,
+}
+
+impl Laid {
+    fn batch(&self, k: Option<usize>) -> PgBatch<'_> {
+        let top = self.top.as_ref().zip(k).map(|((ids, logprobs), k)| SamplerTop { k, ids, logprobs });
+        PgBatch { targets: &self.targets, old_lp: &self.old_lp, ref_lp: self.ref_lp.as_deref(), advantage: &self.advantage, is_weight: None, top }
+    }
 }
 
 impl<M: Model> Objective<M> for StreamedPolicyGradient {
@@ -588,6 +641,9 @@ impl<M: Model> Objective<M> for StreamedPolicyGradient {
         let objectives = training::require_token_objectives(model)?;
         objectives.enable_weighted_loss();
         objectives.set_logit_scale(1.0 / self.cfg.temperature);
+        if let Some(k) = self.feed.settings.top_k {
+            objectives.enable_sparse_targets(k as u32).map_err(|_| Unsupported::of::<M>(Capability::SparseTargets))?;
+        }
         let start = if adapters_are_zero(model) { StartPolicy::Base } else { StartPolicy::Frozen(AdapterState::capture(model)) };
         let base_is_read = self.wants_reference && (matches!(start, StartPolicy::Base) || self.cfg.reference == ReferencePolicy::Base);
         if base_is_read && !adapters_can_be_disabled(model) {
@@ -649,13 +705,20 @@ impl<M: Model> Objective<M> for StreamedPolicyGradient {
         let spec = self.cfg.loss.spec();
         let mut acc = StepAccumulator::default();
         let (mut loss, mut finite) = (0.0, true);
+        // A sampler id the model has no row for is a record this run cannot train: the run stops naming it.
+        let vocab = model.config().vocab();
+        if let Some(id) = laid.iter().filter_map(|l| l.top.as_ref()).flat_map(|(ids, _)| ids.iter().copied()).filter(|&id| id != IGNORE).find(|&id| id >= vocab) {
+            self.verdict = Some(StepVerdict::Abort(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("behavior_top_ids: a record of this step names token id {id} but the model's vocabulary is {vocab}"))));
+            return 0.0;
+        }
         for l in &laid {
             model.set_batch(Batch::Lm { tokens: &l.tokens, targets: &l.targets });
+            let batch = l.batch(self.feed.settings.top_k);
+            install_sampler_ids(model, &batch, &spec).expect("prepare enabled the extra targets and every sampler id is in the vocabulary");
             let pass = Instant::now();
             let _ = model.forward();
             work.forward_secs += pass.elapsed().as_secs_f64();
             work.computed_tokens += model.computed_tokens().unwrap_or(l.tokens.len() as u64);
-            let batch = PgBatch { targets: &l.targets, old_lp: &l.old_lp, ref_lp: l.ref_lp.as_deref(), advantage: &l.advantage, is_weight: None, top: None };
             let pass = Instant::now();
             let (terms, _) = backward_weighted_lp(model, &batch, &spec, denominator);
             work.backward_secs += pass.elapsed().as_secs_f64();
@@ -783,6 +846,9 @@ impl<M: Model> Objective<M> for StreamedPolicyGradient {
         if let Some(kl) = last.kl {
             m.push(("pg_kl", kl));
         }
+        if self.feed.settings.top_k.is_some() {
+            m.extend([("pg_sampler_mass", last.sampler_mass), ("pg_centred_masked_fraction", last.centred_masked_fraction)]);
+        }
         m
     }
 }
@@ -792,7 +858,7 @@ mod tests {
     use super::*;
 
     fn example(tokens: usize, version: Option<u64>) -> StreamExample {
-        StreamExample { ids: vec![1; tokens], mask: vec![true; tokens], behavior: vec![-1.0; tokens], advantage: 1.0, policy_version: version }
+        StreamExample { ids: vec![1; tokens], mask: vec![true; tokens], behavior: vec![-1.0; tokens], advantage: 1.0, policy_version: version, top: None }
     }
 
     fn group(key: &str, tokens: usize, version: Option<u64>) -> StreamGroup {
@@ -800,7 +866,7 @@ mod tests {
     }
 
     fn feed(step: usize, queue: usize, staleness: Option<u64>) -> Arc<RolloutFeed> {
-        let feed = RolloutFeed::new(StreamSettings { step_tokens: step, queue_tokens: queue, max_staleness: staleness, block: 64 }, || true).unwrap();
+        let feed = RolloutFeed::new(StreamSettings { step_tokens: step, queue_tokens: queue, max_staleness: staleness, block: 64, top_k: None }, || true).unwrap();
         assert_eq!(feed.offer(vec![group("early", 1, None)]), Err(FeedRefusal::Starting), "nothing is taken before the learner is ready");
         feed.open();
         feed

@@ -199,7 +199,7 @@ fn a_full_queue_names_its_allowance_and_never_refuses_below_a_step() {
     let base = rig.dir.join("models").join("local").join("toy");
     let config = brain::PolicyGradientConfig { loss: brain::PgLoss { loss_agg: brain::LossAgg::TokenSum, ..brain::PolicyGradientConfig::default().loss }, ..Default::default() };
     // No learner takes from this stream: what is queued stays queued.
-    let stream = brain::ChatFineTune::from_pretrained(base.to_str().unwrap()).policy_gradient(config).max_block(128).open_rollout_stream(2 * tokens, 2 * tokens, None, || true).expect("a stream");
+    let stream = brain::ChatFineTune::from_pretrained(base.to_str().unwrap()).policy_gradient(config).max_block(128).open_rollout_stream(2 * tokens, 2 * tokens, None, None, || true).expect("a stream");
     let answer = |key: &str| trainjob::stream::answer(&stream, 3, "records", &json!({}), &group(sizes, key, 0));
     assert_eq!(answer("a").unwrap()["queued_tokens"], json!(tokens));
     // Below one step the offer is taken even though it passes the queue's bound.
@@ -320,4 +320,38 @@ fn a_stream_job_is_refused_where_it_could_not_publish_or_be_fed() {
     seq["loss_agg"] = json!("seq-mean");
     let refused = crate::support::run(&rig, seq, &[], &Frames::default()).unwrap_err();
     assert!(refused.contains("token-sum"), "{refused}");
+}
+
+/// The stream trains whatever estimator the job's policy-gradient settings select: the score-centred one centres over
+/// the sampler's top-K the records carry, of the K the stream names, and a record of another K is refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stream_trains_the_score_centred_estimator_over_the_records_top_k() {
+    let rig = rig_stream("stream-centred");
+    let app = router(AppState::new(rig.exec.clone(), KEY, Provider::OpenAI).with_training(true));
+    let sizes = sizes(&rig);
+    let tokens = (sizes[0] + sizes[1]) as u64;
+    let with_top = |key: &str, k: usize| -> Vec<u8> {
+        let lines: Vec<String> = String::from_utf8(group(sizes, key, 0)).unwrap().lines().map(|line| {
+            let mut record: Value = serde_json::from_str(line).unwrap();
+            let n = record["messages"][1]["behavior_logprobs"].as_array().unwrap().len();
+            record["messages"][1]["behavior_top_ids"] = json!(vec![(0..k as u32).collect::<Vec<_>>(); n]);
+            record["messages"][1]["behavior_top_logprobs"] = json!(vec![vec![-3.0; k]; n]);
+            record.to_string()
+        }).collect();
+        lines.join("\n").into_bytes()
+    };
+    let doc = json!({"publish_adapter": ADAPTER, "publish_every": 1, "step_tokens": tokens, "queue_tokens": 2 * tokens, "top_k": 2, "max_steps": 1});
+    let (status, refused) = call(&app, Method::POST, "/v1/jobs", Some(("application/json", stream_job(json!({"publish_adapter": ADAPTER, "publish_every": 1, "step_tokens": tokens, "queue_tokens": tokens}), json!({"estimator": "score-centred"})).to_string().into_bytes()))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "score-centred names its K: {refused}");
+    assert!(refused.to_string().contains("top_k"), "{refused}");
+    let id = create(&app, stream_job(doc, json!({"estimator": "score-centred"}))).await;
+    let (status, wrong) = post(&app, &id, "", with_top("k3", 3)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{wrong}");
+    assert!(wrong.to_string().contains("top-3"), "{wrong}");
+    assert_eq!(post(&app, &id, "", with_top("g1", 2)).await.0, StatusCode::OK);
+    let (frames, _) = frames_until(&app, &id, 0, |_| false).await;
+    let steps = of_type(&frames, "step");
+    assert_eq!(steps.len(), 1, "{frames:?}");
+    assert!(steps[0]["pg"]["sampler_mass"].as_f64().is_some_and(|m| m > 0.0), "{}", steps[0]);
+    assert_eq!(of_type(&frames, "published").len(), 1);
 }

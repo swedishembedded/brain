@@ -103,7 +103,7 @@ impl RolloutStream {
         let samples = asked.samples(&records, "the records").map_err(|e| invalid(e.to_string()))?;
         crate::finetune::check_rollouts_together(&samples, &[], &[], self.config.truncated, self.tok.digest()).map_err(|e| invalid(e.to_string()))?;
         let split = data::chat::encode_sample_split_while(&samples, &self.tok, &self.tmpl, self.render, &mut || true).map_err(|e| invalid(e.to_string()))?.expect("encoding is not stopped");
-        let groups = groups_of_split(&split, &self.config, self.feed.settings().block).map_err(invalid)?;
+        let groups = groups_of_split(&split, &self.config, self.feed.settings()).map_err(invalid)?;
         self.feed.offer(groups).map_err(|refusal| match refusal {
             FeedRefusal::Full { queued_tokens, allowance, offered_tokens } => StreamRefusal::Full { queued_tokens, allowance, offered_tokens },
             FeedRefusal::Closed => StreamRefusal::Closed,
@@ -143,17 +143,18 @@ impl RolloutStream {
 
 impl ChatFineTune {
     /// The stream this fine-tune would train from: its base's tokenizer and template and its policy-gradient settings,
-    /// checked now. `step_tokens` policy tokens make one optimiser step, the queue holds `queue_tokens`, and a record
-    /// more than `max_staleness` published versions old is dropped; the training row is [`ChatFineTune::max_block`],
-    /// which a stream must name. The learner waiting for records stops once `keep_going` says no.
+    /// checked now. `step_tokens` policy tokens make one optimiser step, the queue holds `queue_tokens`, a record more
+    /// than `max_staleness` published versions old is dropped, and `top_k` is the sampler top-K every record carries
+    /// for the score-centred estimator; the training row is [`ChatFineTune::max_block`], which a stream must name. The
+    /// learner waiting for records stops once `keep_going` says no.
     ///
     /// # Errors
     /// The base is not found, its architecture does not declare the policy-gradient objective, the settings are ones a
     /// stream cannot train with ([`rl::objective::stream_pg::check_streamable`]), or no `max_block` is set.
-    pub fn open_rollout_stream(&self, step_tokens: usize, queue_tokens: usize, max_staleness: Option<u64>, keep_going: impl Fn() -> bool + Send + Sync + 'static) -> Result<RolloutStream> {
-        let (located, config) = self.stream_setup()?;
+    pub fn open_rollout_stream(&self, step_tokens: usize, queue_tokens: usize, max_staleness: Option<u64>, top_k: Option<usize>, keep_going: impl Fn() -> bool + Send + Sync + 'static) -> Result<RolloutStream> {
+        let (located, config) = self.stream_setup(top_k)?;
         let block = self.max_block.ok_or_else(|| Error::InvalidRequest("ChatFineTune: a rollout stream trains rows of max_block tokens; set max_block".to_string()))?;
-        let settings = StreamSettings { step_tokens, queue_tokens, max_staleness, block: block as usize };
+        let settings = StreamSettings { step_tokens, queue_tokens, max_staleness, block: block as usize, top_k };
         let feed = RolloutFeed::new(settings, keep_going).map_err(|e| Error::InvalidRequest(format!("ChatFineTune: rollout stream: {e}")))?;
         // A run with no saved state has no consumed keys to restore: it takes records at once. A resumed one takes them
         // once its learner has restored the state.

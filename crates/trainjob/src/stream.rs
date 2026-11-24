@@ -62,6 +62,7 @@ struct StreamDoc {
     queue_tokens: u64,
     max_staleness: Option<u64>,
     max_steps: Option<u32>,
+    top_k: Option<u64>,
     start_adapter: Option<SourceDoc>,
 }
 
@@ -75,6 +76,8 @@ pub struct StreamRefs {
     pub queue_tokens: usize,
     pub max_staleness: Option<u64>,
     pub max_steps: Option<u32>,
+    /// The sampler top-K every record carries, for the score-centred estimator.
+    pub top_k: Option<usize>,
     pub start_adapter: Option<Source>,
 }
 
@@ -104,13 +107,16 @@ impl StreamRefs {
         if doc.max_steps.is_some_and(|n| !(1..=MAX_STREAM_STEPS).contains(&n)) {
             return refuse(format!("max_steps must be 1 to {MAX_STREAM_STEPS}"));
         }
+        if doc.top_k.is_some_and(|k| !(1..=brain::MAX_STREAM_TOP_K as u64).contains(&k)) {
+            return refuse(format!("top_k must be 1 to {}", brain::MAX_STREAM_TOP_K));
+        }
         let start_adapter = doc.start_adapter.map(|s| s.resolve("start_adapter").map_err(|e| format!("stream: {}", e.trim_start_matches("data.")))).transpose()?;
         if let Some(Source::Blob(name)) = &start_adapter {
             if name != "adapter" {
                 return refuse(format!("start_adapter names the input blob {name:?}; the starting adapter is the input \"adapter\""));
             }
         }
-        Ok(StreamRefs { publish_adapter: doc.publish_adapter, publish_every: doc.publish_every, step_tokens: doc.step_tokens as usize, queue_tokens: doc.queue_tokens as usize, max_staleness: doc.max_staleness, max_steps: doc.max_steps, start_adapter })
+        Ok(StreamRefs { publish_adapter: doc.publish_adapter, publish_every: doc.publish_every, step_tokens: doc.step_tokens as usize, queue_tokens: doc.queue_tokens as usize, max_staleness: doc.max_staleness, max_steps: doc.max_steps, top_k: doc.top_k.map(|k| k as usize), start_adapter })
     }
 
     pub fn digests(&self) -> Vec<Digest> {
@@ -133,7 +139,7 @@ impl StreamRefs {
 }
 
 /// The settings of the request a stream cannot honour, refused before a job exists.
-pub(crate) fn check_request(params: &Params) -> Result<(), String> {
+pub(crate) fn check_request(params: &Params, refs: &StreamRefs) -> Result<(), String> {
     let refuse = |why: &str| Err(format!("train: stream: {why}"));
     if params.objective != Objective::PolicyGradient {
         return refuse(&format!("a stream trains the policy gradient; the objective is {}", params.objective.name()));
@@ -154,7 +160,7 @@ pub(crate) fn check_request(params: &Params) -> Result<(), String> {
         return refuse("the adapter is written under stream.publish_adapter; drop adapter_id");
     }
     let config = crate::job::policy_gradient_config(params)?;
-    brain::check_streamable(&config).map_err(|why| format!("train: stream: {why}"))
+    brain::check_streamable(&config, refs.top_k).map_err(|why| format!("train: stream: {why}"))
 }
 
 /// What a stream job needs of the server beyond the request: a bank to publish to and a surface that delivers input.
@@ -206,7 +212,7 @@ pub(crate) fn train(env: &JobEnv, request: &Request, inputs: &Inputs<'_>, files:
         ft = ft.continue_from(path);
     }
     let cancel = inv.cancel.clone();
-    let stream = Arc::new(ft.open_rollout_stream(refs.step_tokens, refs.queue_tokens, refs.max_staleness, move || !cancel.is_cancelled()).map_err(job::trainer_failure)?);
+    let stream = Arc::new(ft.open_rollout_stream(refs.step_tokens, refs.queue_tokens, refs.max_staleness, refs.top_k, move || !cancel.is_cancelled()).map_err(job::trainer_failure)?);
     let ft = ft.rollout_stream(&stream);
     let published_at_start = bank.identity(&refs.publish_adapter).map_or(0, |identity| identity.version);
     stream.set_version(published_at_start);

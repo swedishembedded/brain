@@ -893,7 +893,7 @@ impl ChatFineTune {
     }
 
     /// The base and the policy-gradient configuration a stream trains with, every setting checked.
-    pub(crate) fn stream_setup(&self) -> Result<(Located, PolicyGradientConfig)> {
+    pub(crate) fn stream_setup(&self, top_k: Option<usize>) -> Result<(Located, PolicyGradientConfig)> {
         let named = self.arch.as_deref().map(crate::study::arch).transpose()?;
         if let Some(arch) = named {
             arch.require(Capability::ChatLoraFineTune)?;
@@ -901,7 +901,7 @@ impl ChatFineTune {
         let located = self.locate_base(named)?;
         self.check_policy_gradient_setup(located.arch.id)?;
         let config = self.policy_gradient_for(&located.model_dir)?.ok_or_else(|| Error::InvalidRequest("ChatFineTune: a rollout stream trains the policy gradient; call .policy_gradient(..)".to_string()))?;
-        rl::objective::stream_pg::check_streamable(&config).map_err(|e| Error::InvalidRequest(format!("ChatFineTune: policy_gradient: {e}")))?;
+        rl::objective::stream_pg::check_streamable(&config, top_k).map_err(|e| Error::InvalidRequest(format!("ChatFineTune: policy_gradient: {e}")))?;
         Ok((located, config))
     }
 
@@ -1304,8 +1304,8 @@ impl ChatFineTune {
             ("held-out text", carries(held_out_text.as_deref())),
             ("monitoring", carries(monitor.as_deref())),
         ])?; }
-        if let (Some(_), Some(config)) = (stream, &policy_gradient) {
-            rl::objective::stream_pg::check_streamable(config).map_err(|e| Error::InvalidRequest(format!("ChatFineTune: policy_gradient: {e}")))?;
+        if let (Some(feed), Some(config)) = (stream, &policy_gradient) {
+            rl::objective::stream_pg::check_streamable(config, feed.settings().top_k).map_err(|e| Error::InvalidRequest(format!("ChatFineTune: policy_gradient: {e}")))?;
         }
         if let Some(config) = &policy_gradient {
             check_rollouts_together(&train_samples, &replay_samples, &weighted_samples, config.truncated, tok.digest())?;
