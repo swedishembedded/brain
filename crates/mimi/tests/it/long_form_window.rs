@@ -29,9 +29,9 @@ use mimi::{Codec, CodecConfig};
 /// one ConvNeXt upsample stage, a 2-rate SEANet decoder), at widths small
 /// enough to decode instantly. `sliding_window` is 4 so a 40-frame clip is 10
 /// windows deep.
-const WINDOW: u32 = 4;
+pub(crate) const WINDOW: u32 = 4;
 
-fn tiny_cfg() -> CodecConfig {
+pub(crate) fn tiny_cfg() -> CodecConfig {
     CodecConfig {
         num_quantizers: 4,
         num_semantic_quantizers: 1,
@@ -64,7 +64,7 @@ fn tiny_cfg() -> CodecConfig {
 /// `clamp(-1, 1)` - a saturated waveform would compare equal no matter what
 /// the attention mask did, which is exactly the vacuous pass this test must
 /// not be able to produce (`assert_not_saturated` enforces it).
-fn tiny_weights(cfg: &CodecConfig) -> HashMap<String, Vec<f32>> {
+pub(crate) fn tiny_weights(cfg: &CodecConfig) -> HashMap<String, Vec<f32>> {
     let mut r = Lcg::random();
     let mut w: HashMap<String, Vec<f32>> = HashMap::new();
     let mut put = |w: &mut HashMap<String, Vec<f32>>, name: &str, n: usize, a: f32| {
@@ -163,7 +163,7 @@ fn tiny_weights(cfg: &CodecConfig) -> HashMap<String, Vec<f32>> {
     w
 }
 
-fn codes_for(cfg: &CodecConfig, t: usize) -> Vec<u32> {
+pub(crate) fn codes_for(cfg: &CodecConfig, t: usize) -> Vec<u32> {
     let nq = cfg.num_quantizers as usize;
     let mut r = Lcg::random();
     (0..t * nq).map(|_| r.next_u64() as u32 % cfg.codebook_size).collect()
@@ -175,7 +175,7 @@ fn max_abs(a: &[f32], b: &[f32]) -> f32 {
 
 /// A waveform that has been clamped flat carries no information about the
 /// attention mask, so a comparison over one would pass vacuously.
-fn assert_not_saturated(wav: &[f32], what: &str) {
+pub(crate) fn assert_not_saturated(wav: &[f32], what: &str) {
     let interior = wav.iter().filter(|x| x.abs() < 0.99).count();
     assert!(
         interior * 2 > wav.len(),

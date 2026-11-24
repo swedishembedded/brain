@@ -8,6 +8,7 @@
 //! others run beside it.
 
 mod decode;
+mod decode_device_parity;
 mod decode_omni_chunked;
 mod decode_stream_parity;
 mod encode;

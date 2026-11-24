@@ -11,6 +11,7 @@ mod asr_roundtrip;
 mod batched;
 mod bench_inference;
 mod cached_parity;
+mod codec_decode_timing;
 mod mtp;
 mod parity;
 mod recompute;
