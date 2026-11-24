@@ -76,7 +76,10 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       Decision: a request with a top list takes its figures from the scoring pass (`log_prob_source: "score"`), not the
       decode steps: the device readout only keeps a candidate list for truncated draws, so a whole-row top-K from the
       decode would need a device top-k over every row. Open (profile first): serve the top list from the decode steps for
-      whole-row draws, which removes the extra prefill (knowledge #528).
+      whole-row draws, which removes the extra prefill (knowledge #528). This gates the score-centred estimator on a card:
+      with a top list the sampled token's own figure is the prefill's too, and on a card a prefill rounds differently from
+      the decode that drew the token (knowledge #520), so the behaviour invariant holds only up to that gap. The
+      clipped-surrogate path keeps the decode-sourced trace.
 - [x] **Adapter routes refresh under load**: an open group refreshed its adapter routes only when its lane went idle
       (`OpenGroup::Refresh`), so a lane that never drained kept routing a re-published id to the old version. Verified
       first (the new test failed: the first request after the swap named version 1). Now `run_open_scheduled` refreshes the
