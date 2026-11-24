@@ -11,6 +11,10 @@
 
 use serde_json::Value;
 
+/// The token table of a decoder whose every input row is spliced in: never
+/// read, so it holds the fewest rows a training build allocates without waste.
+pub const SPLICED_VOCAB: u32 = 64;
+
 /// Talker (Qwen3-style multi-codebook decoder) configuration.
 #[derive(Clone, Debug)]
 pub struct TalkerConfig {
@@ -190,6 +194,33 @@ impl MtpConfig {
     }
     pub fn kv_dim(&self) -> u32 {
         self.n_kv_heads * self.head_dim
+    }
+
+    /// The code predictor's decoder as a Qwen3 decoder over `block` positions
+    /// (one frame's `num_code_groups`): the same block (RMSNorm, GQA with
+    /// per-head QK-norm, half-split RoPE, SwiGLU) under the same tensor names.
+    /// Its token table is never read: every input row is spliced in (see
+    /// [`crate::speech_sft`]), so it is the smallest one the decoder takes.
+    pub fn to_qwen(&self, block: u32) -> qwen3::QwenConfig {
+        qwen3::QwenConfig {
+            vocab: SPLICED_VOCAB,
+            block_size: block,
+            n_layers: self.n_layers,
+            d_model: self.d_model,
+            n_heads: self.n_heads,
+            n_kv_heads: self.n_kv_heads,
+            head_dim: self.head_dim,
+            d_ff: self.d_ff,
+            rope_theta: self.rope_theta,
+            rms_eps: self.rms_norm_eps,
+            max_position_embeddings: block,
+            tie_embeddings: true,
+            qk_norm: true,
+            attn_bias: false,
+            lora: None,
+            rope_scaling: None,
+        }
+        .with_defaults()
     }
 
     /// Number of residual codebooks the MTP fills (and the number of input/output

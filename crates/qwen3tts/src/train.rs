@@ -21,9 +21,7 @@
 //! from the frozen code predictor given it, and are treated as part of the
 //! environment.
 
-use crate::gen::TalkerGen;
-use crate::mtp::MtpModel;
-use crate::prompt::Prompt;
+use crate::prompt::{MtpHost, Prompt, TalkerHost};
 
 /// The training rows of one rollout and what each position should predict.
 #[derive(Clone, Debug)]
@@ -61,11 +59,14 @@ impl PolicyRows {
 /// generation ended on it (the last row then predicts it), `None` when it ended
 /// at the length cap.
 ///
-/// The rows mirror `pipeline::generate_codes`: after the prompt, frame `t`'s row
-/// is `codec_embed(cb0_t) + sum_k codec_embedding[k-1][cb_k,t]` plus the `t`-th
-/// trailing text row, or the pad row once those run out.
+/// The rows mirror `pipeline::generate_codes` term for term, so a row here has
+/// the bits generation fed: after the prompt, frame `t`'s row is
+/// `codec_embed(cb0_t) + (sum_k codec_embedding[k-1][cb_k,t])` (the residuals
+/// summed first, as the code predictor returns them) plus the `t`-th trailing
+/// text row, or the pad row once those run out. Any host of the tables serves:
+/// the inference engine's, or a trainer's own copy of the tables it trains.
 #[must_use]
-pub fn policy_rows(gen: &TalkerGen, mtp: &MtpModel, prompt: &Prompt, codes: &[u32], num_q: usize, eos: Option<u32>) -> PolicyRows {
+pub fn policy_rows(gen: &(impl TalkerHost + ?Sized), mtp: &(impl MtpHost + ?Sized), prompt: &Prompt, codes: &[u32], num_q: usize, eos: Option<u32>) -> PolicyRows {
     let d = gen.d();
     assert_eq!(codes.len() % num_q, 0, "codes are not whole frames");
     let frames = codes.len() / num_q;
@@ -76,20 +77,19 @@ pub fn policy_rows(gen: &TalkerGen, mtp: &MtpModel, prompt: &Prompt, codes: &[u3
     rows.reserve(frames * d);
     // One target per row: row `prefix - 1 + t` predicts frame `t`'s first codebook.
     let mut targets = vec![crate::sft::IGNORE; prefix + frames];
+    let mut residual = vec![0.0f32; d];
     for t in 0..frames {
         let frame = &codes[t * num_q..(t + 1) * num_q];
         // The row that predicts this frame's first codebook is the one before it.
         targets[prefix - 1 + t] = frame[0];
-        let mut row = gen.codec_embed(frame[0]).to_vec();
+        residual.fill(0.0);
         for (k, code) in frame.iter().enumerate().skip(1) {
-            for (a, b) in row.iter_mut().zip(mtp.codec_embed(k - 1, *code)) {
-                *a += b;
-            }
+            add_into(&mut residual, mtp.codec_embed(k - 1, *code));
         }
+        let mut row = gen.codec_embed(frame[0]).to_vec();
+        add_into(&mut row, &residual);
         let text = if t < n_trailing { &prompt.trailing[t * d..(t + 1) * d] } else { &prompt.tts_pad[..] };
-        for (a, b) in row.iter_mut().zip(text) {
-            *a += b;
-        }
+        add_into(&mut row, text);
         rows.extend_from_slice(&row);
     }
     // The last row (after the final frame) predicts the end of speech when that
@@ -98,6 +98,13 @@ pub fn policy_rows(gen: &TalkerGen, mtp: &MtpModel, prompt: &Prompt, codes: &[u3
         targets[prefix + frames - 1] = eos;
     }
     PolicyRows { rows, d, targets }
+}
+
+/// Elementwise `a += b`.
+fn add_into(a: &mut [f32], b: &[f32]) {
+    for (x, y) in a.iter_mut().zip(b) {
+        *x += y;
+    }
 }
 
 // ---------------------------------------------------------------------------

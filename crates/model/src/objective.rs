@@ -71,10 +71,14 @@ pub trait Objective<M: Model> {
         Ok(())
     }
 
-    /// The run is about to take its first step, `draws_done` micro-steps
-    /// into its data (more than 0 on a resume), seeded by `seed`: an
-    /// objective that orders its data by epochs positions itself here, so a
-    /// resumed run continues the order a straight run would have followed.
+    /// The run is about to take its first step, `draws_done` RECORDS into its
+    /// data (more than 0 on a resume: the steps completed times
+    /// [`crate::train::FitOpts::grad_accum`] times
+    /// [`crate::train::FitOpts::batch_size`]), seeded by `seed`: an objective
+    /// that orders its data by epochs positions itself here, so a resumed run
+    /// continues the order a straight run would have followed. An objective
+    /// that draws its own batches of another size than `batch_size` divides by
+    /// it, or the run sets `batch_size` to its batch (knowledge #576).
     fn begin(&mut self, _seed: u64, _draws_done: u64) {}
 
     /// Restrict this objective's training stream to one rank's shard of it:
