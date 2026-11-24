@@ -89,8 +89,10 @@ impl Placement {
 }
 
 /// The largest context (prompt plus generated frames) a device engine's KV
-/// cache is built for; about 80 seconds of speech.
-pub const DEVICE_CONTEXT: u32 = 1024;
+/// cache is built for: room for a 30 s reference and its transcript in the
+/// prompt beside the most frames a served request may ask for (about 80 s of
+/// speech), with margin.
+pub const DEVICE_CONTEXT: u32 = 2048;
 
 /// The Talker and the MTP, on whichever placement the engine was built for.
 #[allow(clippy::large_enum_variant)] // one engine per process; boxing the variant buys nothing
@@ -141,7 +143,10 @@ impl Core {
             Core::Device { talker, mtp } => {
                 let prefix = prompt.embeds.len() / talker.d();
                 if prefix + opts.max_frames + 1 > DEVICE_CONTEXT as usize {
-                    return Err(format!("a device engine holds {DEVICE_CONTEXT} positions; a prompt of {prefix} with up to {} frames does not fit", opts.max_frames));
+                    return Err(capability::failure::tag(
+                        capability::failure::FailureClass::InvalidRequest,
+                        format!("a device engine holds {DEVICE_CONTEXT} positions; a prompt of {prefix} with up to {} frames does not fit", opts.max_frames),
+                    ));
                 }
                 pipeline::generate_codes_hooked(talker, mtp, sp, prompt, opts, cancel, on_frames)
             }

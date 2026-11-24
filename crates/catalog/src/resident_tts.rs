@@ -16,10 +16,12 @@
 //! own ([`qwen3tts::caps::provider`]'s), run on the device the scheduler
 //! assigned.
 //!
-//! Decode is CPU-side by construction (`CpuTalker`/`CpuMtp` + the pure-CPU
-//! streaming codec back), so the hot instance's footprint is RAM, not VRAM,
-//! and `activate` ignores the assigned `device` - which is what makes
-//! [`TtsResident::estimate`]'s zero-VRAM cost honest.
+//! The hot engine runs where the scheduler places it: on a GPU the Talker,
+//! MTP and codec are the KV-cached device engine
+//! ([`qwen3tts::engine::Placement::Device`]), on the host tier the host
+//! decoder (`CpuTalker`/`CpuMtp`), which beats the CPU JIT. Its cost is
+//! declared as device memory, so a GPU is chosen when one is budgeted and the
+//! host otherwise.
 //!
 //! The checkpoint is the model store's (`qwen3tts::spec::Qwen3TtsSpec`), under
 //! the same `weights_dir` and `ckpt` roles the command line names; nothing is
@@ -98,7 +100,8 @@ impl ResidentModel for TtsResident {
             TRAIN_KEY => MemCost::new(self.f32_weights().max(1 << 30) * 4, self.ram()),
             // `batch` gives each request its own host decoder copy.
             HOST_KEY => MemCost::new(0, self.ram() * 2),
-            _ => MemCost::new(0, self.ram()),
+            // The hot engine's weights and working set, on whichever device holds it.
+            _ => MemCost::new(self.ram(), 0),
         }
     }
 
@@ -113,7 +116,12 @@ impl ResidentModel for TtsResident {
         // weights from disk. A missing/unreadable checkpoint fails here, at
         // activation, rather than on the first request.
         self.paths.require(false).map_err(|e| format!("tts: {e} (pull a Qwen3-TTS checkpoint, or name it with --weights-dir and --ckpt)"))?;
-        Ok(Box::new(TtsInstance { engine: qwen3tts::ResidentEngine::load(&self.paths)? }))
+        let placement = match device {
+            Device::Gpu(_) => qwen3tts::engine::Placement::Device,
+            Device::Cpu | Device::Npu(_) => qwen3tts::engine::Placement::Host,
+        };
+        let engine = residency::on_device(device, || qwen3tts::ResidentEngine::load_with(&self.paths, placement))??;
+        Ok(Box::new(TtsInstance { engine, device }))
     }
 }
 
@@ -132,6 +140,9 @@ impl Instance for ProviderInstance {
 
 struct TtsInstance {
     engine: qwen3tts::ResidentEngine,
+    /// Where the engine was built: every request runs scoped to it, so what a
+    /// request builds (a new reference's speaker encoder) lands there too.
+    device: Device,
 }
 
 /// Raw mono f32 little-endian PCM as a capability [`Blob`]: what a mid-run
@@ -143,6 +154,13 @@ fn pcm_blob(pcm: &[f32], index: u32) -> capability::Blob {
 
 impl Instance for TtsInstance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        let device = self.device;
+        residency::on_device(device, || self.run_here(action, inv, progress))?
+    }
+}
+
+impl TtsInstance {
+    fn run_here(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let text = inv.get_str("text").ok_or_else(|| format!("tts {action}: missing required param 'text'"))?;
         if text.trim().is_empty() {
             return Err(format!("tts {action}: 'text' must be non-empty"));
@@ -211,8 +229,9 @@ mod tests {
         assert_ne!(key("synth"), key("finetune"));
         assert_ne!(key("synth"), key("batch"));
         let cost = |a: &str| r.estimate(&key(a));
-        assert!(cost("finetune").vram > 0 && cost("synth").vram == 0, "only training needs card memory");
-        assert!(cost("batch").ram > cost("synth").ram, "a batch holds one host decoder per request");
+        assert!(cost("synth").vram > 0, "the hot engine goes on a card when one is budgeted");
+        assert!(cost("finetune").vram >= cost("synth").vram, "training holds the weights four times over");
+        assert!(cost("batch").ram > 0 && cost("batch").vram == 0, "a batch holds host decoders, one per request");
     }
 
     /// The resident manifest is the provider's, with the hot actions streaming.
