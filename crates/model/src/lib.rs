@@ -335,6 +335,18 @@ pub trait Model {
     where
         Self: Sized;
 
+    /// [`Model::new`] with the arithmetic of the frozen-weight GEMMs chosen: what the shared trainer builds a run's
+    /// model with ([`train::build_for`], from [`train::FitOpts::gemm_precision`]). A model that runs its GEMMs through
+    /// [`ops::Ops`] records the products the choice names (its passes are recorded at construction, so the choice is
+    /// made here, not afterwards); the default is [`Model::new`], for a model whose GEMMs have one arithmetic, as
+    /// `FitOpts::gemm_precision` documents.
+    fn new_with_gemm(cfg: Self::Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, _gemm: gpu_core::provider::library::GemmPrecision) -> Self
+    where
+        Self: Sized,
+    {
+        Self::new(cfg, b, t, init)
+    }
+
     /// Build for FORWARD passes only, sized for batch `b` x seq `t`.
     ///
     /// [`Model::new`] builds the TRAINING shape: backward scratch, and one

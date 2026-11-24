@@ -4614,6 +4614,10 @@ impl model::Model for Qwen {
     fn new(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
         Qwen::new(cfg, b, t, init)
     }
+    /// The training build of [`Self::new`] with its GEMMs at `gemm` (the run's `FitOpts::gemm_precision`).
+    fn new_with_gemm(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, gemm: GemmPrecision) -> Self {
+        Qwen::new_shard_gemm(cfg.clone(), b, t, init, true, Shard::whole(cfg.n_layers as usize), gemm)
+    }
     /// The same weights and the same forward arithmetic as [`Self::new`],
     /// without the backward scratch or the per-layer copies of every
     /// activation that only a backward pass reads. `new_impl` shares one set

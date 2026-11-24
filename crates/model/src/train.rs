@@ -663,13 +663,14 @@ pub fn build_or_warm_start<M: Model>(cfg: M::Config, opts: &FitOpts, out: Option
 
 /// Build `M` sized for `opts`: with its layers streaming from the start when the run asks for f32 layers through a
 /// window (`weights=f32`, [`Model::new_resident`]), so a model larger than the device is built for training at all;
-/// a plain build otherwise, the run's other precision applied by the fit loop.
+/// a plain build at the run's GEMM arithmetic otherwise ([`Model::new_with_gemm`]), the run's other precision applied
+/// by the fit loop.
 pub fn build_for<M: Model>(cfg: M::Config, opts: &FitOpts, init: &std::collections::HashMap<String, Vec<f32>>) -> std::io::Result<M> {
     match opts.resident_config().map_err(std::io::Error::other)? {
         Some(resident) if resident.value == crate::resident_ft::ResidentValue::F32 => {
             M::new_resident(cfg, opts.batch_size, opts.block_size, init, &resident).map_err(std::io::Error::other)
         }
-        _ => Ok(M::new(cfg, opts.batch_size, opts.block_size, init)),
+        _ => Ok(M::new_with_gemm(cfg, opts.batch_size, opts.block_size, init, opts.gemm_precision)),
     }
 }
 

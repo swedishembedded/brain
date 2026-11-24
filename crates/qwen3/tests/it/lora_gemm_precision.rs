@@ -111,3 +111,22 @@ fn the_default_tier_trains_a_qwen3_wide_head_like_the_fp32_reference() {
         assert!(cosine(g, w) > 0.999, "{name}: gradient cosine {} against the fp32 tier", cosine(g, w));
     }
 }
+
+/// The run's `FitOpts::gemm_precision` reaches the model the shared trainer builds (`model::train::build_for`): a run
+/// that asks for the pinned fp32 tier gets it, and one that takes the default records tensor-core products where the
+/// device has them, exactly as the direct constructor with the same choice does.
+#[test]
+fn the_fit_options_gemm_precision_reaches_the_built_model() {
+    if brain_testutil::gpu_tests_skipped() {
+        return;
+    }
+    let cfg = QwenConfig { lora: None, ..config() };
+    let init = weights(&cfg);
+    let built = |gemm: GemmPrecision| {
+        let opts = model::FitOpts { batch_size: 1, block_size: 12, gemm_precision: gemm, ..model::FitOpts::default() };
+        model::train::build_for::<Qwen>(cfg.clone(), &opts, &init).expect("a plain build")
+    };
+    assert!(!built(GemmPrecision::Fp32Reference).gemm_report().1, "a run pinned to the fp32 tier must not record TF32 products");
+    let direct = Qwen::new_shard_gemm(cfg.clone(), 1, 12, &init, true, qwen3::Shard::whole(cfg.n_layers as usize), GemmPrecision::Auto);
+    assert_eq!(built(GemmPrecision::Auto).gemm_report(), direct.gemm_report(), "the default run must record what the direct build with the same choice records");
+}
