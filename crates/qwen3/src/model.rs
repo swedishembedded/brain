@@ -263,9 +263,6 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     // `enable_weighted_loss`) - appended here (and only here) is the whole
     // opt-in, same convention as `gradnorm_part`/`clip_coef_wg` above.
     ("scale_row", kernels::SCALE_ROW),
-    // Extra targets per position beside the label (`model::head_ce::SparseTargets`), resolved by name by `HeadCe`.
-    ("ce_sparse_targets", kernels::CE_SPARSE_TARGETS),
-    ("ce_gather_logprob", kernels::CE_GATHER_LOGPROB),
     // Coalesced RMSNorm backward-x - `block::rmsnorm_bwd` selects it over
     // `rmsnorm_dx` through the same `block::rms_variant` policy the forward
     // half uses for `rmsnorm_rows`. Registering it here is the whole opt-in;
@@ -285,6 +282,10 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     ("paged_flash_prefill", kernels::PAGED_FLASH_PREFILL),
     ("kv_roundtrip_i8", kernels::KV_ROUNDTRIP_I8),
     ("kv_roundtrip_fp8", kernels::KV_ROUNDTRIP_FP8),
+    // Extra targets per position beside the label (`model::head_ce::SparseTargets`), resolved by
+    // name by `HeadCe`: appended after every entry an index constant above names.
+    ("ce_sparse_targets", kernels::CE_SPARSE_TARGETS),
+    ("ce_gather_logprob", kernels::CE_GATHER_LOGPROB),
 ];
 
 /// This model's FULL kernel set: `STATIC_PIPELINES` (every hand-numbered
@@ -4781,6 +4782,83 @@ impl model::Model for Qwen {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every kernel index constant names the pipeline it is meant to: an entry
+    /// inserted into [`STATIC_PIPELINES`] before them shifts the list under the
+    /// constants, and the steps then dispatch the wrong kernel.
+    #[test]
+    fn every_kernel_index_names_its_pipeline() {
+        let named = [
+            (EMBED, "embed"),
+            (MATMUL, "matmul"),
+            (RMSNORM, "rmsnorm"),
+            (RMS_INV, "rms_inv"),
+            (RMSNORM_DX, "rmsnorm_dx"),
+            (RMSNORM_DW, "rmsnorm_dw"),
+            (ROPE, "rope_base"),
+            (ROPE_BWD, "rope_base_bwd"),
+            (GQA_SCORES, "gqa_scores"),
+            (ATTN_SOFTMAX, "attn_softmax"),
+            (GQA_APPLY, "gqa_apply"),
+            (GQA_DSCORES, "gqa_bwd_dscores"),
+            (GQA_DV, "gqa_bwd_dv"),
+            (GQA_DQ, "gqa_bwd_dq"),
+            (GQA_DK, "gqa_bwd_dk"),
+            (SILU_MUL, "silu_mul"),
+            (SILU_DA, "silu_bwd_da"),
+            (SILU_DB, "silu_bwd_db"),
+            (ADD2, "add2"),
+            (CE_VALUE, "ce_value"),
+            (CE_GRAD, "ce_grad"),
+            (MATMUL_DX, "matmul_dx"),
+            (MATMUL_DW, "matmul_dw"),
+            (ADAMW, "adamw"),
+            (GRADNORM_SQ, "gradnorm_sq"),
+            (GRAD_SCALE, "grad_scale"),
+            (CLIP_COEF, "clip_coef"),
+            (GRAD_SCALE_BUF, "grad_scale_buf"),
+            (EMBED_TILE, "embed_tile"),
+            (MATMUL_DX_REG, "matmul_dx_reg"),
+            (MATMUL_DW_REG, "matmul_dw_reg"),
+            (CE_STATS, "ce_stats"),
+            (CE_GRAD_STATS, "ce_grad_stats"),
+            (ATTN_DECODE_SCORES, "attn_decode_scores"),
+            (DECODE_SOFTMAX, "decode_softmax"),
+            (ATTN_DECODE_APPLY, "attn_decode_apply"),
+            (KV_APPEND, "kv_append"),
+            (ROPE_AT, "rope_at"),
+            (SPLICE, "splice"),
+            (SPLICE_BWD, "splice_bwd"),
+            (ROPE2D, "rope2d"),
+            (SPLICE_ADD, "splice_add"),
+            (BIAS_ADD, "bias_add"),
+            (BIAS_GRAD, "bias_grad"),
+            (RMSNORM_ROWS, "rmsnorm_rows"),
+            (GQA_SCORES_KMASK, "gqa_scores_kmask"),
+            (SOFTMAX_ROWS, "softmax_rows"),
+            (MATMUL_REG3, "matmul_reg3"),
+            (SPLICE_ADD_OFFSET_SRC, "splice_add_offset_src"),
+            (SCALE_ROW, "scale_row"),
+            (RMSNORM_DX_ROWS, "rmsnorm_dx_rows"),
+            (ROPE_TABLE, "rope_base_yarn"),
+            (ROPE_TABLE_BWD, "rope_base_yarn_bwd"),
+            (ROPE_TABLE_AT, "rope_paged_yarn"),
+            (FLASH_GQA_FWD, "flash_attn_causal_gqa"),
+            (FLASH_GQA_BWD_DQ, "flash_attn_causal_gqa_bwd_dq"),
+            (FLASH_GQA_BWD_DKV, "flash_attn_causal_gqa_bwd_dkv"),
+            (CE_VALUE_STATS_ROWS, "ce_value_stats_rows"),
+            (COPY_COLS, "copy_cols"),
+            (PAGED_DECODE_SCORES_BATCHED, "paged_decode_scores_batched"),
+            (DECODE_SOFTMAX_BATCHED, "decode_softmax_batched"),
+            (PAGED_DECODE_APPLY_BATCHED, "paged_decode_apply_batched"),
+            (PAGED_FLASH_PREFILL, "paged_flash_prefill"),
+            (KV_ROUNDTRIP_I8, "kv_roundtrip_i8"),
+            (KV_ROUNDTRIP_FP8, "kv_roundtrip_fp8"),
+        ];
+        for (index, name) in named {
+            assert_eq!(STATIC_PIPELINES[index].0, name, "kernel index {index}");
+        }
+    }
 
     /// Spec: a resident full fine-tune accepts the documented resident precisions. The run's `grad`/`master`/`value`
     /// govern the resident linears and tables; the norms left in the store train f32 with no master, the tables are
