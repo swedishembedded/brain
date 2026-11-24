@@ -144,6 +144,16 @@ fn add_discovery(card: &mut Value, provider: Provider, info: &ModelInfo, adapter
     if let Some(max) = info.max_output_tokens {
         card["max_output_tokens"] = json!(max);
     }
+    if !info.speech_modes.is_empty() {
+        // What `/audio/speech` takes for this model: the containers it answers in, how long a reference voice may
+        // be, and per speech action whether it imitates a recording (and needs its transcript), takes
+        // `instructions`, preset voices or a seed. A field no mode takes is refused, so a client can tell first.
+        card["speech"] = json!({
+            "response_formats": crate::speech::RESPONSE_FORMATS,
+            "max_reference_seconds": crate::speech::MAX_REFERENCE_SECONDS,
+            "modes": info.speech_modes,
+        });
+    }
     if let Some(adapter) = adapter {
         card["adapter"] = json!({ "id": adapter.id, "digest": adapter.digest, "version": adapter.version });
     }
@@ -181,9 +191,10 @@ const OPENROUTER_PARAMETERS: [&str; 26] = [
 ];
 
 /// What a model takes in and gives out, in OpenRouter's modality names: text
-/// for chat and embeddings, audio in for a transcription model and audio out for a speech one, and image output
-/// for an image generator, video output for a video generator. A model that
-/// does several lists the union.
+/// for chat and embeddings, audio in and `transcription` out for a transcription model, `speech` out for a
+/// text-to-speech one (OpenRouter's own names for the two, distinct from `text` and from the `audio` a chat model
+/// writes, so a client picks the right endpoint from the card), image output for an image generator, video output
+/// for a video generator. A model that does several lists the union.
 fn modalities(caps: CapSet) -> (Vec<&'static str>, Vec<&'static str>) {
     let mut input = Vec::new();
     let mut output = Vec::new();
@@ -193,14 +204,17 @@ fn modalities(caps: CapSet) -> (Vec<&'static str>, Vec<&'static str>) {
     if caps.vision() {
         input.push("image");
     }
-    if caps.transcription || caps.audio_input {
+    if caps.transcription || caps.audio_input || caps.speech_reference {
         input.push("audio");
     }
-    if caps.chat || caps.transcription {
+    if caps.chat {
         output.push("text");
     }
+    if caps.transcription {
+        output.push("transcription");
+    }
     if caps.speech {
-        output.push("audio");
+        output.push("speech");
     }
     if caps.embeddings {
         output.push("embeddings");

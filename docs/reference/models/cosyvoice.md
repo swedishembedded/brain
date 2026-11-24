@@ -387,6 +387,11 @@ silently skipped. The export is validated structurally rather than against a
 running NPU or its CPU/GPU OpenVINO fallback, because no OpenVINO runtime was
 available where it was checked.
 
+Over HTTP, `POST /v1/audio/speech` reaches `synth` with the reference
+recording as an `input_audio` part of `input_references` and its transcript
+as a `text` part, which CosyVoice requires; the recording arrives at its own
+rate.
+
 Roles, all resolved from the model store by `cosyvoice::spec::CosyVoiceSpec`
 (content-classified) or pinned with `brain serve --pin cosyvoice.ROLE=PATH`:
 

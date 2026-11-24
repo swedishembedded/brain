@@ -146,8 +146,8 @@ async fn a_speech_model_is_listed_from_its_manifest_alone() {
     let list = models(&app(Provider::OpenRouter), Provider::OpenRouter).await;
     let asr = card(&list, "brain-asr").expect("listed on OpenRouter too");
     assert_eq!(asr["architecture"]["input_modalities"], json!(["audio"]));
-    assert_eq!(asr["architecture"]["output_modalities"], json!(["text"]));
-    assert_eq!(asr["architecture"]["modality"], "audio->text");
+    assert_eq!(asr["architecture"]["output_modalities"], json!(["transcription"]));
+    assert_eq!(asr["architecture"]["modality"], "audio->transcription");
     let chat = card(&list, "brain-chat").unwrap();
     assert_eq!(chat["architecture"]["modality"], "text->text");
 

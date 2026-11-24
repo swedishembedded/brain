@@ -76,6 +76,7 @@
 use std::sync::Arc;
 
 use capability::{Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType, Progress, Provider};
+use capability::speech::{SpeechContract, Transcript};
 use serde_json::json;
 
 use crate::pipeline::{generate, CosyVoicePaths, GenOpts, Variant};
@@ -114,6 +115,7 @@ fn synth_spec() -> ActionSpec {
             .max(50.0),
     )
     .param(ParamSpec::new("profile", ParamType::Bool, "print each stage's wall-clock time to the host's stderr").default(json!(false)))
+    .speech(SpeechContract::new("text").reference("ref_audio", Transcript::Required("ref_text".into())).seed("seed"))
     .input(BlobSpec::new("ref_audio", Media::Audio, "reference audio clip for zero-shot cloning: a WAV container at its own sample rate, or raw mono f32 little-endian PCM (meta.sample_rate, defaulting to 16 kHz when absent)").required())
     .output(BlobSpec::new("audio", Media::Audio, "the synthesized speech: a complete 24 kHz mono WAV"))
 }

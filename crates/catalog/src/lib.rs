@@ -1488,6 +1488,26 @@ mod tests {
         }
     }
 
+    /// A speech contract is how `/audio/speech` fills an action's params and
+    /// inputs, so every name it gives must be one the action declares, on the
+    /// direct manifest and on the one `brain serve` schedules. The two
+    /// text-to-speech models each declare one, so the route reaches them.
+    #[test]
+    fn every_speech_contract_names_what_its_action_declares() {
+        let resident = [qwen3tts::caps::resident_manifest(), cosyvoice::caps::resident_manifest()];
+        for m in manifests().iter().chain(resident.iter()) {
+            for a in &m.actions {
+                if let Some(contract) = &a.speech {
+                    let missing = contract.undeclared(a);
+                    assert!(missing.is_empty(), "{}/{}: the speech contract names undeclared {missing:?}", m.model, a.name);
+                }
+            }
+        }
+        for m in &resident {
+            assert!(m.actions.iter().any(|a| a.speech.is_some()), "{} declares no speech contract, so /audio/speech cannot reach it", m.model);
+        }
+    }
+
     /// A declared range is enforced on every caller's value, so a default
     /// outside it would be refused the moment a UI sent it back.
     #[test]

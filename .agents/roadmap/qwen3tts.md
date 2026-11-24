@@ -9,6 +9,30 @@ fine-tuning. Parity against the reference is verified.
 
 ## Not yet done
 
+### Voice cloning and control across the API (2026-11-24)
+
+Done: `/audio/speech` routes by `capability::speech::SpeechContract` (reference
+recording at its own rate, transcript, `instructions`, preset `voice`, `seed`),
+and the checkpoint kind is enforced (knowledge #573). Open, in order:
+
+- [ ] A fine-tune from a speaker's own recordings: no command builds the
+      Talker's training data from WAVs and transcripts (`data::gen_tts` is a
+      synthetic smoke), `sft::run_finetune` trains a plain causal LM over a flat
+      stream rather than the Talker's prompt (speaker row, text projection,
+      summed codebook rows), the code predictor is not trained, and
+      `synth`/`clone`/`design` load no adapter.
+- [ ] Emotion: no model in brain recognises emotion or measures prosody, so
+      "the take sounds as instructed" cannot be gated; only timbre (`sim`) and
+      a recogniser's word error rate are measured.
+- [ ] CosyVoice's instruction mode (the reference's `inference_instruct2`) and
+      its inline tags are not served: its one action clones zero-shot.
+- [ ] Stored custom voices (OpenAI's `/audio/voices` with consent recordings,
+      `voice: {"id"}`): refused today; a reference travels with each request.
+- [ ] Streaming over HTTP (`stream_format`): the resident engine streams codec
+      chunks to D-Bus, the HTTP route answers the whole clip.
+- [ ] `--in ref_audio=FILE` on the command line resamples a reference to 16 kHz
+      (`invoke`'s shared audio loader); HTTP and D-Bus keep its rate.
+
 This list used to duplicate its items against the "Completion plan"'s own
 phases and its "Carried over" section below, and the two copies drifted
 (one got checked off, the other didn't). Removed the duplication instead of

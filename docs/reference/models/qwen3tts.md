@@ -103,6 +103,12 @@ Resident serving for repeated calls without reloading weights each time:
 brain serve --dbus
 ```
 
+Over HTTP, `POST /v1/audio/speech` reaches the same actions: a request with
+a reference recording in `input_references` runs `clone` (in context when it
+carries the transcript too), one with `instructions` or a preset `voice` runs
+`design`, and a plain one `synth`; `seed` picks the take and comes back in
+`X-Seed` (see the HTTP API reference).
+
 `brain serve` serves the checkpoint the model store resolves. Its `synth`,
 `clone` and `design` actions run on a hot engine and are streaming: each
 decoded codec chunk (`stream_chunk` codec frames, 16 by default)

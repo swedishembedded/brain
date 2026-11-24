@@ -43,6 +43,7 @@ use capability::{
     Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType,
     Progress, Provider,
 };
+use capability::speech::{SpeechContract, Transcript};
 use serde_json::json;
 
 use crate::reference::Reference;
@@ -167,20 +168,29 @@ pub fn audio_outcome(wav: Vec<f32>, seed: u64) -> ActionResult {
         .blob("audio", Blob::new(Media::Audio, bytes).with_meta(json!({"sample_rate": SAMPLE_RATE, "format": "wav", "channels": 1}))))
 }
 
+/// Where a generic speech request's words, length cap and seed go: the same
+/// params on every speech action.
+fn speech_contract() -> SpeechContract {
+    SpeechContract::new("text").length("max_frames").seed("seed")
+}
+
 pub fn synth_spec() -> ActionSpec {
     speech_params(ActionSpec::new("synth", "speaker-free text-to-speech (Talker + MTP + codec, 24 kHz wav)").cancellable())
+        .speech(speech_contract())
         .output(BlobSpec::new("audio", Media::Audio, "the synthesized speech as a 24 kHz mono WAV"))
 }
 
 pub fn clone_spec() -> ActionSpec {
     reference_inputs(speech_params(ActionSpec::new("clone", "voice cloning from a reference wav (x-vector-only, or in-context when ref_text is given)").cancellable()))
         .param(ref_text_param())
+        .speech(speech_contract().reference("ref", Transcript::Optional("ref_text".into())))
         .input(BlobSpec::new("ref_codes", Media::Bytes, "the reference's [frames,16] codec codes, encoded elsewhere (an 8-byte little-endian count, then u32 little-endian codes); overrides the in-tree encode of the reference"))
         .output(BlobSpec::new("audio", Media::Audio, "the cloned-voice speech as a 24 kHz mono WAV"))
 }
 
 pub fn design_spec() -> ActionSpec {
     instruct_params(speech_params(ActionSpec::new("design", "VoiceDesign (instruct) and/or CustomVoice preset speakers - needs a CustomVoice/VoiceDesign checkpoint").cancellable()))
+        .speech(speech_contract().instructions("instruct").voice("speaker"))
         .output(BlobSpec::new("audio", Media::Audio, "the designed-voice speech as a 24 kHz mono WAV"))
 }
 

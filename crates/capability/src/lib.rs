@@ -42,6 +42,7 @@ pub mod scratch;
 pub mod hot;
 pub mod pixels;
 pub mod presentation;
+pub mod speech;
 pub mod video;
 
 pub use failure::{ReplyError, classify, tag, FailureClass};
@@ -312,6 +313,9 @@ pub struct ActionSpec {
     /// What a video action promises about its clips, so a generic video request
     /// maps onto its params - see [`video`]. `None` for every other action.
     pub video: Option<video::VideoContract>,
+    /// What a text-to-speech action takes, so a generic speech request maps
+    /// onto its params - see [`speech`]. `None` for every other action.
+    pub speech: Option<speech::SpeechContract>,
     /// The action trains: it holds a device for minutes to hours and writes
     /// weights. A serving surface runs it only for a caller the operator let
     /// train (`brain serve --training`), so a client that can merely infer -
@@ -336,9 +340,15 @@ impl ActionSpec {
             cancellable: false,
             presentation: ActionPresentation::default(),
             video: None,
+            speech: None,
             training: false,
             from_scratch: false,
         }
+    }
+    /// Builder setter for [`Self::speech`].
+    pub fn speech(mut self, contract: speech::SpeechContract) -> ActionSpec {
+        self.speech = Some(contract);
+        self
     }
     /// Builder setter for [`Self::video`].
     pub fn video(mut self, contract: video::VideoContract) -> ActionSpec {
@@ -399,6 +409,9 @@ impl ActionSpec {
         }
         if let Some(contract) = &self.video {
             v["video"] = contract.to_json();
+        }
+        if let Some(contract) = &self.speech {
+            v["speech"] = contract.to_json();
         }
         if self.training {
             v["training"] = json!(true);

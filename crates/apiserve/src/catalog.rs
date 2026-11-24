@@ -63,8 +63,11 @@ pub struct CapSet {
     pub image: bool,
     /// Speech to text, served on `/audio/transcriptions`.
     pub transcription: bool,
-    /// Text to speech, served on `/audio/speech`: a `speak` action that takes `text` and returns an `audio` blob.
+    /// Text to speech, served on `/audio/speech`: an action declaring a [`capability::speech::SpeechContract`] and
+    /// returning an `audio` blob.
     pub speech: bool,
+    /// Text to speech that imitates a recorded voice: one of its speech actions reads a reference recording.
+    pub speech_reference: bool,
     /// Video generation offered as a product, served on `/videos`: a sellable
     /// action declaring a `capability::video::VideoContract` with no input clip.
     pub video: bool,
@@ -128,6 +131,9 @@ pub struct ModelInfo {
     /// The request fields the model's `generate` action honours ([`crate::sampling::honoured`]): the sampling
     /// parameters a client may send it. Empty for a model without one.
     pub sampling_parameters: Vec<&'static str>,
+    /// What each of the model's speech actions takes, in `/audio/speech`'s own terms
+    /// ([`capability::speech::SpeechContract::listing`]), in manifest order. Empty for a model that does not speak.
+    pub speech_modes: Vec<serde_json::Value>,
 }
 
 impl ModelInfo {
@@ -140,7 +146,8 @@ impl ModelInfo {
             .filter(|max| max.is_finite() && *max >= 1.0)
             .map(|max| max as u64);
         let support = m.architecture.as_deref().map_or(Support::Preview, serving_support);
-        ModelInfo { name: m.model.clone(), caps: api_caps(m), max_context_tokens: m.max_context_tokens, max_output_tokens, support, sampling_parameters }
+        let speech_modes = speech_actions(m).filter_map(|a| a.speech.as_ref()).map(|c| c.listing()).collect();
+        ModelInfo { name: m.model.clone(), caps: api_caps(m), max_context_tokens: m.max_context_tokens, max_output_tokens, support, sampling_parameters, speech_modes }
     }
 }
 
@@ -165,9 +172,10 @@ pub fn api_caps(m: &Manifest) -> CapSet {
             && a.inputs.iter().any(|b| b.name == "audio" && b.media == Media::Audio)
             && a.outputs.iter().any(|o| o.media == Media::Text)
     });
-    let speech = speak_action(m).is_some();
+    let speech = speech_actions(m).next().is_some();
+    let speech_reference = speech_actions(m).any(|a| a.speech.as_ref().is_some_and(|c| c.reference.is_some()));
     let video = m.actions.iter().any(|a| a.video.as_ref().is_some_and(|c| c.sellable && c.clip_input.is_none()));
-    CapSet { chat, tools, max_images, audio_input, embeddings, image, transcription, speech, video }
+    CapSet { chat, tools, max_images, audio_input, embeddings, image, transcription, speech, speech_reference, video }
 }
 
 /// Does `provider` expose a model with capabilities `caps`?
@@ -233,15 +241,57 @@ pub fn resolve_transcription(manifests: &[Manifest], model: &str) -> Option<bool
     Some(m.actions.iter().any(|a| a.name == "transcribe" && a.params.iter().any(|p| p.name == "language")))
 }
 
-/// The action that realises text to speech: a `speak` action with a `text` param and an `audio` output.
-fn speak_action(m: &Manifest) -> Option<&capability::ActionSpec> {
-    m.actions.iter().find(|a| a.name == "speak" && a.params.iter().any(|p| p.name == "text") && a.outputs.iter().any(|o| o.name == "audio" && o.media == Media::Audio))
+/// The actions that realise text to speech, in manifest order: each declares where a speech request's fields go
+/// (its [`capability::speech::SpeechContract`]) and returns an `audio` blob.
+pub fn speech_actions(m: &Manifest) -> impl Iterator<Item = &capability::ActionSpec> {
+    m.actions.iter().filter(|a| a.speech.is_some() && a.outputs.iter().any(|o| o.name == "audio" && o.media == Media::Audio))
 }
 
-/// Resolve a speech request's `model` string to the name of the action to invoke, when a manifest whose
-/// `model == id` advertises speech. Snapshot-taking - see [`resolve_chat`].
+/// Resolve a speech request's `model` string to the model id, when a manifest whose `model == id` advertises speech.
+/// Which of its actions serves the request is [`speech_action_for`]'s answer. Snapshot-taking - see [`resolve_chat`].
 pub fn resolve_speech(manifests: &[Manifest], model: &str) -> Option<String> {
-    manifests.iter().find(|m| m.model == model).and_then(speak_action).map(|a| a.name.clone())
+    manifests.iter().find(|m| m.model == model).filter(|m| speech_actions(m).next().is_some()).map(|m| m.model.clone())
+}
+
+/// The speech action of `m` that serves `request`: of those whose contract has a place for everything the request
+/// carries, the one that leaves the fewest of its own ways of steering the voice unused, the first in manifest order
+/// on a tie. `Err` says, in the request's terms, what the model's speech actions can take instead.
+pub fn speech_action_for(m: &Manifest, request: capability::speech::SpeechRequest) -> Result<&capability::ActionSpec, String> {
+    let fitting = speech_actions(m).filter(|a| a.speech.as_ref().is_some_and(|c| c.fits(request)));
+    if let Some(best) = fitting.min_by_key(|a| a.speech.as_ref().map_or(usize::MAX, |c| c.unused(request))) {
+        return Ok(best);
+    }
+    Err(speech_refusal(m, request))
+}
+
+/// Why no speech action of `m` fits `request`, in the request's own field names: the first thing the request
+/// carries that none of them takes, or the first thing they all need that it lacks.
+fn speech_refusal(m: &Manifest, request: capability::speech::SpeechRequest) -> String {
+    use capability::speech::Transcript;
+    let contracts: Vec<&capability::speech::SpeechContract> = speech_actions(m).filter_map(|a| a.speech.as_ref()).collect();
+    let model = &m.model;
+    let any = |f: &dyn Fn(&capability::speech::SpeechContract) -> bool| contracts.iter().any(|c| f(c));
+    if request.instructions && !any(&|c| c.instructions.is_some()) {
+        return format!("'instructions' is not supported by model '{model}': none of its speech actions takes a description of the voice");
+    }
+    if request.voice && !any(&|c| c.voice.is_some()) {
+        return format!("'voice' is not supported by model '{model}': it has no preset voices to choose from");
+    }
+    if request.reference && !any(&|c| c.reference.is_some()) {
+        return format!("'input_references' is not supported by model '{model}': it does not imitate a recorded voice");
+    }
+    if !request.reference && !any(&|c| c.reference.is_none()) {
+        return format!("model '{model}' speaks only in a recorded voice: send the recording to imitate as an input_audio part of 'input_references'");
+    }
+    let reads_transcript = |c: &capability::speech::SpeechContract| c.reference.as_ref().is_some_and(|r| r.transcript != Transcript::None);
+    if request.transcript && !any(&reads_transcript) {
+        return format!("model '{model}' does not read a reference transcript: send 'input_references' without its text part");
+    }
+    let needs_transcript = |c: &capability::speech::SpeechContract| c.reference.as_ref().is_some_and(|r| matches!(r.transcript, Transcript::Required(_)));
+    if request.reference && !request.transcript && any(&needs_transcript) {
+        return format!("model '{model}' needs the recording's transcript: add what it says as a text part of 'input_references'");
+    }
+    format!("model '{model}' has no speech action that takes this combination of 'input_references', 'instructions' and 'voice'; send them separately")
 }
 
 /// Resolve an image request's `model` string to the **action name** to invoke: is

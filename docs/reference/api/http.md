@@ -67,14 +67,27 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   `{"text", "usage": {"type": "duration", "seconds"}}`, where `seconds` is the
   decoded duration. `language` reaches a model only if its `transcribe` action
   takes one.
-- **Speech** (`POST /v1/audio/speech`, also without `/v1`): `{"model", "input", "response_format"?}` and nothing
-  else. `input` is 1 to 4096 characters; `response_format` is `wav` (default, 16-bit mono) or `pcm` (raw 16-bit
-  signed little-endian mono); the reply is the audio itself, with `Content-Type` `audio/wav` or `audio/pcm` and
-  `X-Sample-Rate` (the model's own rate, 24000 for Qwen3-TTS). A compressed format, `voice`, `speed`,
-  `instructions`, `stream_format` and any unknown field are a 400 naming it: brain's speech models take the text and
-  nothing that steers the voice (Qwen3-TTS's voice is fixed by the operator's configuration). The model is any one
-  whose `speak` action takes `text` and returns `audio`, listed as capability `speech`; the call is held to that
-  action's own contract before it runs and its length is capped at 1024 codec frames (about a minute and a half).
+- **Speech** (`POST /v1/audio/speech`, also without `/v1`): `{"model", "input", "response_format"?,
+  "input_references"?, "instructions"?, "voice"?, "seed"?}`. `input` is 1 to 4096 characters; `response_format` is
+  `wav` (default, 16-bit mono) or `pcm` (raw 16-bit signed little-endian mono); the reply is the audio itself, with
+  `Content-Type` `audio/wav` or `audio/pcm`, `X-Sample-Rate` (the model's own rate, 24000 for Qwen3-TTS and
+  CosyVoice) and `X-Seed` (the seed the take was drawn with; send it back as `seed` for the same take).
+  - `input_references` is the voice to imitate: one `input_audio` part (`{"type": "input_audio", "input_audio":
+    {"data": "data:audio/wav;base64,..."}}`, bare base64 and a `format` of `wav`, `ogg`, `opus` or `webm` also
+    accepted) and, optionally, one `text` part with what the recording says. The recording may be WAV (any rate),
+<!-- perf-number: the endpoint's own reference length limit, an API constant -->
+    Ogg/Opus or WebM/Opus, at most 30 s; it reaches the model at its own rate (Opus at 48 kHz), never cut to 16 kHz.
+    With a transcript, Qwen3-TTS clones in context (timbre, pitch, pace and room); without, from the speaker vector
+    alone. CosyVoice needs the transcript.
+  - `instructions` (1 to 4096 characters) describes the voice and delivery, and `voice` names a preset voice; both
+    need a checkpoint that has them (Qwen3-TTS VoiceDesign and CustomVoice). A custom voice object
+    (`{"id": ...}`) is refused: brain keeps no stored voices.
+  - The request goes to the model's speech action whose declared contract takes everything it carries; anything no
+    action of the model takes (`voice` on a model with no presets, a reference on one that does not clone, a missing
+    transcript where one is required), a compressed `response_format`, `speed`, `stream_format` and any unknown field
+    are a 400 naming it. The model is any one with such an action, listed as capability `speech`; the call is held to
+    the action's own contract before it runs and its length is capped at 1024 codec frames (about a minute and a
+    half) where the model counts frames.
 - **Video** (`/v1/videos`, also without `/v1`), OpenRouter's asynchronous
   video contract. `POST /videos` takes `{"model", "prompt", "duration"?,
   "resolution"?, "aspect_ratio"?, "size"?, "generate_audio"?, "seed"?,
@@ -518,7 +531,8 @@ The Anthropic entry carries only `supported_parameters` of them.
 
 | Field | Meaning |
 |---|---|
-| `capabilities` | Names derived from the model's manifest: `chat`, `tools` (chat whose `generate` accepts `tools`), `vision` (chat whose `generate` reads `image` inputs; image parts sent to any other model are refused with 400), `embeddings`, `images`, `transcription` (a `transcribe` action taking `audio`), `speech` (a `speak` action taking `text` and returning `audio`). On OpenRouter the card's `architecture` modalities follow from the same set, e.g. `audio->text` for a speech model. |
+| `capabilities` | Names derived from the model's manifest: `chat`, `tools` (chat whose `generate` accepts `tools`), `vision` (chat whose `generate` reads `image` inputs; image parts sent to any other model are refused with 400), `embeddings`, `images`, `transcription` (a `transcribe` action taking `audio`), `speech` (an action that declares a speech contract and returns `audio`). On OpenRouter the card's `architecture` modalities follow from the same set in OpenRouter's names: `audio->transcription` for a transcription model, `text->speech` for a speech model. |
+| `speech` | On a `speech` model: `response_formats` (`wav`, `pcm`), `max_reference_seconds`, and `modes`, one per speech action, each saying whether it imitates a recording (`reference_voice`), whether that recording's transcript is `none`, `optional` or `required`, and whether it takes `instructions`, preset voices (`preset_voices`) and a `seed`. A request that needs a mode the model lacks is refused with 400. |
 | `max_images_per_request`, `max_image_pixels_per_request` | On a `vision` model: the most images (the `image`, `image1`, ... inputs its `generate` action declares), and pixels over all of them, one request may carry; a request past either is refused with 400. |
 | `architecture.input_modalities` | On a chat model: `"text"`, then `"image"` for a `vision` model and `"audio"` for one whose `generate` takes an `audio` clip (the field an agent runtime reads to decide what it may attach). |
 | `supported_parameters` | On a model that generates text, on every dialect: the request fields its `generate` action honours - `max_tokens`, then the sampling parameters among `temperature`, `top_p`, `top_k`, `seed`, `presence_penalty`, `frequency_penalty`, `min_p`, `repetition_penalty`, the DRY fields, the thinking-budget names and `ignore_eos`, then the token-capture fields (`logprobs`, `return_token_ids`, `policy_trace`). A field not listed is refused with 400 naming it. |
