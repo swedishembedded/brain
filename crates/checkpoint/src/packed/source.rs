@@ -362,13 +362,17 @@ impl TensorSource for PackedSource {
 }
 
 /// Does the file hold tensors a plain f32 read cannot interpret: reduced floats, FP8 with scale sidecars, or brain's
-/// packed int8 words? A file of f32 tensors alone has nothing packed to preserve.
+/// packed int8 words? A file of f32 tensors alone has nothing packed to preserve. A view that only renames another
+/// reader's tensors is asked about the tensors it renames: it reports them as f32, the file it reads holds them packed.
 fn holds_packed_tensors(reader: &WeightReader) -> bool {
-    reader.names().any(|n| match reader.dtype(n) {
-        Some("BF16" | "F16") => true,
-        Some(d) if d.starts_with("F8_") => true,
-        Some("U32") => reader.dtype(&format!("{n}{INT8_SCALE_SUFFIX}")).is_some(),
-        _ => false,
+    reader.names().any(|name| {
+        let (holder, n) = reader.resolve(name);
+        match holder.dtype(&n) {
+            Some("BF16" | "F16") => true,
+            Some(d) if d.starts_with("F8_") => true,
+            Some("U32") => holder.dtype(&format!("{n}{INT8_SCALE_SUFFIX}")).is_some(),
+            _ => false,
+        }
     })
 }
 
@@ -390,6 +394,21 @@ mod tests {
     use crate::packed::reader::PackedReader;
     use crate::packed::testfix::{bf16_bytes, e4m3_bytes, write_safetensors, RawTensor, TmpDir};
     use crate::safetensors::e4m3fn_to_f32;
+
+    /// A view that only renames a bf16 file's tensors is served in their stored encoding: the packed view answers
+    /// under the new name, so a tier policy built from it keeps the tensor bf16.
+    #[test]
+    fn a_renaming_view_of_a_bf16_file_is_served_as_stored() {
+        let dir = TmpDir::new("renamed");
+        let vals: Vec<f32> = (0..64).map(|i| i as f32 * 0.25 - 4.0).collect();
+        write_safetensors(&dir.join("m.safetensors"), &[RawTensor { name: "hf.weight", dtype: "BF16", shape: vec![8, 8], bytes: bf16_bytes(&vals) }]);
+        let file = WeightReader::open(dir.join("m.safetensors").to_str().unwrap()).unwrap();
+        let view = WeightReader::derived(Box::new(crate::weightio::Renamed::new(file, vec![("brain.weight".into(), "hf.weight".into())], serde_json::Value::Null).unwrap()));
+        let src = stored_source(view);
+        let desc = src.packed_descriptor("brain.weight").expect("the renamed tensor keeps its packed view");
+        assert_eq!(desc.encoding, crate::packed::QuantEncoding::bf16());
+        assert!(src.with_tensor("brain.weight", &mut |d| assert_eq!(d, vals.as_slice())));
+    }
 
     #[test]
     fn fp8_and_plain_tensors_decode_through_a_name_map_with_bounded_chunks() {
