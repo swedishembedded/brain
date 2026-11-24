@@ -160,13 +160,32 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       within 2e-3, entries == trainer), `apiserve/tests/it/api.rs` (shape, bounds, names). API audit: one integer param
       bounded by the action's spec (1..=20, refused by name), an object with no other key, no path or secret; the reply
       grows by at most 20 ids and 20 figures per generated token, within the existing `max_new`/body limits.
-      Decision: a request with a top list takes its figures from the scoring pass (`log_prob_source: "score"`), not the
-      decode steps: the device readout only keeps a candidate list for truncated draws, so a whole-row top-K from the
-      decode would need a device top-k over every row. Open (profile first): serve the top list from the decode steps for
-      whole-row draws, which removes the extra prefill (knowledge #528). This gates the score-centred estimator on a card:
-      with a top list the sampled token's own figure is the prefill's too, and on a card a prefill rounds differently from
-      the decode that drew the token (knowledge #520), so the behaviour invariant holds only up to that gap. The
-      clipped-surrogate path keeps the decode-sourced trace.
+      Decision (landed, superseded below): the first cut took every top list from the scoring pass.
+      Served from the decode (2026-11-24, `agrpo-topk`): a request whose draw is over the whole row (sampler `top_k` 0,
+      `top_p` 1, `min_p` 0, no processor or thinking budget, `temp` above 0) and whose decoder reads rows back gets
+      the sampled token's figure and the top list from the decode step that drew the token: `log_prob_source: "decode"`,
+      no scoring pass, so the figures are the draw's own arithmetic and not a prefill's (knowledge #520, #528). The
+      scheduler asks per row (`SampleParams::trace_top` -> `RowDraw::top`) and every decoder answers through the generic
+      readout: `RowDrawer` extracts the best `K` candidates of the whole batch in the step's one extraction (`topk_rows_steps`
+      over all rows: one launch on CUDA, `3K` on the portable path, whatever the row count) and a row's list is
+      `logit / temp - best - ln(mass)` from the statistics the draw reduced; the host fallback (`draw_rows_host`) uses
+      `model::logprobs::scored_position`, so a decode list and a scored list are the same numbers for the same row.
+      The drawn token's figure is computed with the list's own formula (bit-equal to its entry). Per step it costs
+      the extraction for the batch and `rows x K` (id, logit) readbacks, only on steps with a row that asked (measured on
+      the portable CPU path: 2 draw launches without a list, 2 + 3K with, for 3 and for 12 rows alike; on a card the figure
+      is a profile's to give). A row that asked takes single steps (no keyed decode window), since a window reads back
+      tokens only.
+      What stays on the score path, by name: a draw that cuts the row (`top_k`, nucleus, min-p: a list under the
+      survivors would be of a distribution the token was not drawn from), greedy, speculated and host-sampled rows
+      (processor, thinking budget), a decoder without row readback or without the candidate extraction kernels (the model
+      must register `READOUT_KERNELS` beside `DRAW_KERNELS`), and a list wider than the device keeps
+      (`MAX_DRAW_CANDIDATES`). For those `log_prob_source` is `"score"`, and the request is still refused by name where
+      the decoder cannot score a top list. Tests: `model/tests/it/{readout_draw,serve_keyed_draw}.rs`,
+      `llmserve/tests/it/outcome_report.rs` (mixed batch, scoring passes counted), `catalog/tests/it/scheduled_batch.rs`
+      (tiny qwen35 end to end vs the trainer), `serve::conformance::keyed_draws_answer_the_top_list_they_are_asked_for`
+      on qwen3, qwen35 and ouro. For a card: measure the extraction launch per step (nsys), the readback bytes, and that
+      the decode figures equal the scoring pass's within the gap of knowledge #520 on the production engines; no speedup
+      is claimed here.
 - [x] **Adapter routes refresh under load**: an open group refreshed its adapter routes only when its lane went idle
       (`OpenGroup::Refresh`), so a lane that never drained kept routing a re-published id to the old version. Verified
       first (the new test failed: the first request after the swap named version 1). Now `run_open_scheduled` refreshes the

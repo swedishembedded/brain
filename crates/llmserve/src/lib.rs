@@ -427,9 +427,10 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
         match parsed {
             Ok((mut req, embeds)) => {
                 let max_new = req.bound_to(self.sched.sequence_capacity());
-                let sample = req.sampler;
                 let seed = req.seed;
                 job.capture = Capture::of(&inv, &req.ids);
+                // The decode steps report the top lists a trace asks for, where the draw is over the whole row.
+                let sample = model::serve::SampleParams { trace_top: job.capture.top, ..req.sampler };
                 if let Some(why) = Capture::trace_refusal(&inv, &sample, self.sched.scores_continuations(), self.sched.scores_top_log_probs()) {
                     self.set_job(bi, job);
                     return (bi, Some(Err(why)));
@@ -558,7 +559,7 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
 
     /// [`Self::conclude`] for job `bi`. A request that asked for a policy trace is not final yet: it waits in
     /// [`Self::awaiting`] until [`Self::score_awaiting`] has scored its prompt and generation (`None`).
-    fn conclude_scored(&mut self, bi: usize, seq: SeqState, toks: &[u32], logprobs: &[f32], trace: Option<Vec<f32>>, completion: model::serve::Completion, progress: &mut dyn FnMut(usize, Progress)) -> Option<ActionResult> {
+    fn conclude_scored(&mut self, bi: usize, seq: SeqState, toks: &[u32], logprobs: &[f32], trace: Option<Vec<f32>>, top_lists: Option<Vec<Vec<(u32, f32)>>>, completion: model::serve::Completion, progress: &mut dyn FnMut(usize, Progress)) -> Option<ActionResult> {
         let tok = self.front.tok();
         let outcome = match Self::conclude(&self.jobs[bi], self.front.label(), seq, tok, toks, logprobs, completion, &mut |p| progress(bi, p)) {
             Ok(outcome) => outcome,
@@ -576,9 +577,14 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
         // other kernels and another batch shape, which round differently on a card (knowledge #446) and, run
         // serially for every reply, left a loaded lane host-bound (knowledge #528).
         let wants_top = self.jobs[bi].capture.top > 0;
-        if let Some(traced) = trace.filter(|t| !wants_top && t.len() == generated.len()) {
-            let prompt = self.jobs[bi].capture.prompt.clone();
-            return Some(Ok(self.with_trace(bi, outcome, prompt, generated, traced, None, "decode")));
+        if let Some(traced) = trace.filter(|t| t.len() == generated.len()) {
+            // A request that asked for the top lists takes the decode's only when the decode reported every row's list
+            // (a draw over the whole row): the figures and the lists are then one arithmetic, and no scoring pass runs.
+            let lists = top_lists.filter(|l| l.len() == generated.len());
+            if !wants_top || lists.is_some() {
+                let prompt = self.jobs[bi].capture.prompt.clone();
+                return Some(Ok(self.with_trace(bi, outcome, prompt, generated, traced, lists, "decode")));
+            }
         }
         // A whole-distribution draw whose steps did not all report it still has the sampler's own figures, which are the
         // whole row's when nothing cut it.
@@ -685,9 +691,10 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
             let id = self.jobs[bi].id.expect("an open job is scheduled");
             let completion = self.sched.completion_of(id);
             let trace = self.sched.trace_logprobs_of(id);
+            let top_lists = self.sched.trace_top_lists_of(id);
             let (toks, logprobs) = self.sched.cancel_detailed(id).unwrap_or_default();
             let seq = self.jobs[bi].seq.take().expect("checked above");
-            let result = self.conclude_scored(bi, seq, &toks, &logprobs, trace, completion, progress);
+            let result = self.conclude_scored(bi, seq, &toks, &logprobs, trace, top_lists, completion, progress);
             self.open.remove(&bi);
             finished.extend(result.map(|r| (bi, r)));
         }
@@ -722,12 +729,13 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
         let mut logprobs_of: std::collections::HashMap<u64, Vec<f32>> = report.completed_logprobs.into_iter().collect();
         let mut meta_of: std::collections::HashMap<u64, model::serve::Completion> = report.completed_meta.into_iter().collect();
         let mut trace_of: std::collections::HashMap<u64, Vec<f32>> = report.completed_traces.into_iter().collect();
+        let mut top_of: std::collections::HashMap<u64, Vec<Vec<(u32, f32)>>> = report.completed_top_lists.into_iter().collect();
         for (id, toks) in report.completed {
             let bi = job_of(&self.jobs, id);
             let logprobs = logprobs_of.remove(&id).unwrap_or_default();
             if let Some(seq) = self.jobs[bi].seq.take() {
                 let completion = meta_of.remove(&id).unwrap_or_default();
-                let result = self.conclude_scored(bi, seq, &toks, &logprobs, trace_of.remove(&id), completion, progress);
+                let result = self.conclude_scored(bi, seq, &toks, &logprobs, trace_of.remove(&id), top_of.remove(&id), completion, progress);
                 finished.extend(result.map(|r| (bi, r)));
             }
             self.open.remove(&bi);

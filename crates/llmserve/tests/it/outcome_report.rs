@@ -335,3 +335,59 @@ fn a_top_log_probs_request_is_bounded_and_refused_by_name_where_it_cannot_be_ser
     let error = run(toy().scoring(), base().set("policy_trace_top_log_probs", json!(3))).expect_err("this decoder reports no top list");
     assert!(error.starts_with("[unsupported-capability]") && error.contains("policy_trace_top_log_probs"), "{error}");
 }
+
+/// SPEC: a top list asked of a draw over the whole row (no `top_k`, nucleus or min-p cut) comes from the decode steps that
+/// drew the tokens, at the request temperature: `log_prob_source` is `decode`, no scoring pass runs, the lists equal an
+/// independent f64 softmax of the row each token was drawn from, and the sampled token's figure is its entry bit for
+/// bit. In one batch a request with a list, one traced without, one untraced and one whose draw is cut each get their own
+/// fields: only the cut one is scored (its list is of a distribution it did not draw from).
+#[test]
+fn a_whole_row_draw_reports_its_top_list_from_the_decode_and_a_mixed_batch_keeps_each_requests_fields() {
+    let spec = chat_spec();
+    let (temperature, k) = (0.9f64, 4usize);
+    let request = |seed: u64, extra: &[(&str, serde_json::Value)]| {
+        let inv = Invocation::new().set("prompt", json!("t1t2t3t4")).set("chat", json!(false)).set("max_new", json!(12)).set("ignore_eos", json!(true)).set("seed", json!(seed)).set("temp", json!(temperature)).set("top_k", json!(0)).set("top_p", json!(1.0)).set("min_p", json!(0.0));
+        spec.validate(extra.iter().fold(inv, |inv, (key, value)| inv.set(key, value.clone()))).expect("a valid request")
+    };
+    let batch = [
+        request(1, &[("policy_trace", json!(true)), ("policy_trace_top_log_probs", json!(k))]),
+        request(2, &[("policy_trace", json!(true))]),
+        request(3, &[]),
+        request(4, &[("policy_trace", json!(true)), ("policy_trace_top_log_probs", json!(k)), ("top_k", json!(5))]),
+    ];
+    let front = Parsed { tok: tokenizer() };
+    let mut sched = Scheduler::new(Toy::new(BlockAllocator::new(256, 8), 0).sampling().scoring_top(), 4);
+    let outs: Vec<_> = run_batch_scheduled(&mut sched, &front, &batch, &mut |_, _| {}).into_iter().map(|r| r.expect("served").outputs).collect();
+    assert_eq!(sched.decoder_mut().scores_run, 1, "only the cut draw is scored: the whole-row draws carry their figures and lists from the decode");
+
+    let trace = &outs[0]["policy_trace"];
+    assert_eq!(trace["log_prob_source"], json!("decode"));
+    assert_eq!(trace["top_log_probs"], json!(k));
+    let prompt: Vec<u32> = serde_json::from_value(trace["prompt_token_ids"].clone()).unwrap();
+    let generated: Vec<u32> = serde_json::from_value(trace["generation_token_ids"].clone()).unwrap();
+    let traced: Vec<f32> = serde_json::from_value(trace["generation_log_probs"].clone()).unwrap();
+    let top_ids: Vec<Vec<u32>> = serde_json::from_value(trace["generation_top_ids"].clone()).unwrap();
+    let top_lps: Vec<Vec<f32>> = serde_json::from_value(trace["generation_top_log_probs"].clone()).unwrap();
+    assert_eq!((top_ids.len(), top_lps.len(), traced.len()), (generated.len(), generated.len(), generated.len()));
+    let mut previous = *prompt.last().unwrap();
+    for (j, &token) in generated.iter().enumerate() {
+        let oracle = host_log_softmax(previous, temperature);
+        let mut ranked = oracle.clone();
+        ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        assert_eq!(top_ids[j], ranked[..k].iter().map(|e| e.0).collect::<Vec<_>>(), "position {j}");
+        for (lp, want) in top_lps[j].iter().zip(&ranked) {
+            assert!((f64::from(*lp) - want.1).abs() < 1e-5, "position {j}: {lp} against {}", want.1);
+        }
+        assert!((f64::from(traced[j]) - oracle.iter().find(|e| e.0 == token).unwrap().1).abs() < 1e-5, "position {j}");
+        if let Some(i) = top_ids[j].iter().position(|&t| t == token) {
+            assert_eq!(top_lps[j][i].to_bits(), traced[j].to_bits(), "position {j}: the sampled token's figure is its entry");
+        }
+        previous = token;
+    }
+    // Traced without a list: the decode's figures, no list fields. Untraced: no trace. Cut: scored, with its own list.
+    assert_eq!(outs[1]["policy_trace"]["log_prob_source"], json!("decode"));
+    assert!(outs[1]["policy_trace"].get("generation_top_ids").is_none());
+    assert!(outs[2].get("policy_trace").is_none());
+    assert_eq!(outs[3]["policy_trace"]["log_prob_source"], json!("score"));
+    assert_eq!(outs[3]["policy_trace"]["top_log_probs"], json!(k));
+}

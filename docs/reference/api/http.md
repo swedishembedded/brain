@@ -348,9 +348,11 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   including the stop token, `generation_top_ids[i]` and `generation_top_log_probs[i]`: the K most probable token ids of
   the row position `i` was drawn from (most probable first, ties to the lower id) and their log-probabilities under the
   whole row at `log_prob_temperature`, with the same arithmetic as `generation_log_probs[i]`, which is the entry of the
-  sampled token bit for bit when it is among them. All of it comes from one scoring pass (`log_prob_source: "score"`, the
-  extra prefill above), under the adapter the request ran with; a model whose scoring pass cannot report a top list
-  fails with `unsupported-capability` naming `policy_trace_top_log_probs`. The reply grows by at most 20 ids and 20
+  sampled token bit for bit when it is among them. For a draw over the whole row (no `top_k`, nucleus or min-p cut, no penalty or thinking budget, temperature above 0) the
+  figures and the lists come from the decode steps that drew the tokens (`log_prob_source: "decode"`, no extra
+  prefill); any other request (a cut, greedy or speculated draw) gets them from one scoring pass (`log_prob_source:
+  "score"`, the extra prefill above), under the adapter the request ran with, and a model whose scoring pass cannot report a
+  top list fails with `unsupported-capability` naming `policy_trace_top_log_probs`. The reply grows by at most 20 ids and 20
   figures per generated token. Over D-Bus the same two params are `policy_trace: true` and `policy_trace_top_log_probs: K`.
 - **Scoring given text (`score`).** A served Qwen3 or Qwen3.8 chat model (the Qwen3.8-27B served from a released FP8
   or GGUF checkpoint included), and each adapter id riding on it, has a
