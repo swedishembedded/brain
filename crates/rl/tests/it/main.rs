@@ -24,6 +24,7 @@ mod external_policy_gradient_gradcheck_qwen3;
 mod external_policy_gradient_scale;
 mod pg_behaviour;
 mod pg_conformance;
+mod score_centred_gradcheck;
 #[cfg(feature = "qwen3")]
 mod pg_learning;
 mod policy_gradient_stability;

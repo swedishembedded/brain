@@ -939,7 +939,7 @@ impl ExternalPolicyGradient {
     }
 
     fn spec(&self) -> PgSpec {
-        PgSpec { band: ClipBand { low: self.cfg.clip_eps, high: self.cfg.clip_eps_high.unwrap_or(self.cfg.clip_eps), dual: self.cfg.dual_clip }, kl_beta: self.cfg.kl_beta }
+        PgSpec::clipped(ClipBand { low: self.cfg.clip_eps, high: self.cfg.clip_eps_high.unwrap_or(self.cfg.clip_eps), dual: self.cfg.dual_clip }, self.cfg.kl_beta)
     }
 
     fn upload<M: Model>(&self, model: &M, tokens: &[u32], targets: &[u32], picks: &[Option<usize>]) {
@@ -1442,7 +1442,7 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
             let _ = model.forward();
             work.forward_secs += pass.elapsed().as_secs_f64();
             work.computed_tokens += model.computed_tokens().unwrap_or(l.tokens.len() as u64);
-            let batch = PgBatch { targets: &l.targets, old_lp: &l.old_lp, ref_lp: l.has_ref.then_some(&l.ref_lp[..]), advantage: &l.advantage, is_weight: l.is_weight.as_deref() };
+            let batch = PgBatch { targets: &l.targets, old_lp: &l.old_lp, ref_lp: l.has_ref.then_some(&l.ref_lp[..]), advantage: &l.advantage, is_weight: l.is_weight.as_deref(), top: None };
             let pass = std::time::Instant::now();
             let (terms, new_lp) = backward_weighted_lp(model, &batch, &spec, denominator);
             work.backward_secs += pass.elapsed().as_secs_f64();
@@ -1498,8 +1498,8 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
         let laid = self.lay_out(&picks);
         self.upload(model, &laid.tokens, &laid.targets, &laid.picks);
         let _ = model.forward();
-        let batch = PgBatch { targets: &laid.targets, old_lp: &laid.old_lp, ref_lp: laid.has_ref.then_some(&laid.ref_lp[..]), advantage: &laid.advantage, is_weight: laid.is_weight.as_deref() };
-        let (_, terms) = weigh(&training::objectives(model).batch_token_logprobs(), &batch, &self.spec());
+        let batch = PgBatch { targets: &laid.targets, old_lp: &laid.old_lp, ref_lp: laid.has_ref.then_some(&laid.ref_lp[..]), advantage: &laid.advantage, is_weight: laid.is_weight.as_deref(), top: None };
+        let (_, terms) = weigh(&training::objectives(model).batch_token_logprobs(), None, &batch, &self.spec());
         terms.normalised_loss(self.cfg.loss_agg.denominator(self.batch_cfg.batch_size, terms.supervised, 1))
     }
 

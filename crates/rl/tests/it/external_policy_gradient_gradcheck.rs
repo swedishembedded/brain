@@ -139,7 +139,7 @@ impl Harness {
     }
 
     fn spec(&self) -> PgSpec {
-        PgSpec { band: self.band, kl_beta: KL_BETA }
+        PgSpec::clipped(self.band, KL_BETA)
     }
 
     fn load(&self) {
@@ -150,7 +150,7 @@ impl Harness {
     }
 
     fn batch(&self) -> PgBatch<'_> {
-        PgBatch { targets: &self.targets, old_lp: &self.old_lp, ref_lp: Some(&self.ref_lp), advantage: &self.advantage, is_weight: self.is_weight.as_deref() }
+        PgBatch { targets: &self.targets, old_lp: &self.old_lp, ref_lp: Some(&self.ref_lp), advantage: &self.advantage, is_weight: self.is_weight.as_deref(), top: None }
     }
 
     fn assert_base_point_is_clear_of_the_clip_boundaries(&self) {
@@ -187,8 +187,8 @@ impl CheckModel for Harness {
         let _ = self.m.forward();
         self.forwarded.set(true);
         let objectives = training::objectives(&self.m);
-        let (weights, terms) = weigh(&objectives.batch_token_logprobs(), &self.batch(), &self.spec());
-        objectives.set_loss_weights(&weights);
+        let (weights, terms) = weigh(&objectives.batch_token_logprobs(), None, &self.batch(), &self.spec());
+        objectives.set_loss_weights(&weights.label);
         terms.loss / terms.supervised as f32
     }
 
@@ -247,7 +247,7 @@ fn the_adapters_match_finite_differences_under_a_dual_clip() {
     let h = Harness::new(23, &[1.2, -1.1, -0.7], false).with_dual_clip(1.5);
     h.load();
     let _ = h.m.forward();
-    let (_, terms) = weigh(&training::objectives(&h.m).batch_token_logprobs(), &h.batch(), &h.spec());
+    let (_, terms) = weigh(&training::objectives(&h.m).batch_token_logprobs(), None, &h.batch(), &h.spec());
     assert!(terms.dual_clipped > 0, "the base point exercises the dual clip: {terms:?}");
     check(&h, "dual clip");
 }

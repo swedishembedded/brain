@@ -26,7 +26,7 @@ use rl::objective::pg_batch::{install_weights, with_adapters_disabled, PgBatch, 
 
 const T: usize = 12;
 const ROWS: usize = 2;
-const SPEC: PgSpec = PgSpec { band: ClipBand::new(0.2, 0.2), kl_beta: 0.0 };
+const SPEC: PgSpec = PgSpec::clipped(ClipBand::new(0.2, 0.2), 0.0);
 
 struct Harness {
     m: Qwen,
@@ -111,7 +111,7 @@ impl CheckModel for Harness {
     fn loss(&self) -> f32 {
         self.load();
         let _ = self.m.forward();
-        let batch = PgBatch { targets: &self.targets, old_lp: &self.old_lp, ref_lp: None, advantage: &self.advantage, is_weight: None };
+        let batch = PgBatch { targets: &self.targets, old_lp: &self.old_lp, ref_lp: None, advantage: &self.advantage, is_weight: None, top: None };
         let denominator = self.denominator();
         let (terms, _) = install_weights(&self.m, &batch, &SPEC, denominator);
         assert!(terms.finite);

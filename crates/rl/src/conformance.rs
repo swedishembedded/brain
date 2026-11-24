@@ -170,11 +170,11 @@ fn policy_gradient_step<M: Model>(name: &str, regime: &str, config: &PolicyGradi
     let advantage: Vec<f32> = (0..tokens.len()).map(|i| by_row[i / row] as f32).collect();
     let supervised = targets.iter().filter(|&&t| t != IGNORE).count();
     let denominator = config.loss_agg.denominator(BATCH as usize, supervised, 1);
-    let spec = PgSpec { band: ClipBand { low: config.clip_eps, high: config.clip_eps_high.unwrap_or(config.clip_eps), dual: config.dual_clip }, kl_beta: config.kl_beta };
+    let spec = PgSpec::clipped(ClipBand { low: config.clip_eps, high: config.clip_eps_high.unwrap_or(config.clip_eps), dual: config.dual_clip }, config.kl_beta);
     lowers(name, regime, m, &mut || {
         m.set_batch(Batch::Lm { tokens, targets });
         m.forward();
-        let batch = PgBatch { targets, old_lp: &start, ref_lp: Some(&start), advantage: &advantage, is_weight: None };
+        let batch = PgBatch { targets, old_lp: &start, ref_lp: Some(&start), advantage: &advantage, is_weight: None, top: None };
         backward_weighted(m, &batch, &spec, denominator).normalised_loss(denominator)
     })
 }

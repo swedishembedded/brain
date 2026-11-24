@@ -13,18 +13,68 @@
 //! (the clipped surrogate and the k3 KL, one function), installs the weights and runs the backward. A token whose
 //! advantage is NaN has none: it is an imitation token, trained with the plain cross-entropy weight `1.0` and no KL
 //! (what a supervised record in a mixed dataset is).
+//!
+//! The policy term is one of two estimators ([`PgEstimator`]), whatever produced the rows: the clipped surrogate of
+//! PPO/GRPO, or the score-centred estimator of [`super::score_centring`], which also weighs the sampler's top-K ids of
+//! each token as extra targets of the same backward ([`model::head_ce::SparseTargets`]). The KL term, the importance
+//! correction and the imitation tokens are the same under both.
 
 use model::{adapter, training};
 use model::{Model, IGNORE};
 
 use super::grpo_term::{k3_kl, token_term_weighted, ClipBand};
+use super::score_centring::{centred_term, CentringBand};
 
-/// The objective's two knobs besides the data: the clip band and the weight of the KL term.
+/// The estimator of the policy term of a token with an advantage.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum PgEstimator {
+    /// `-min(r A, clip(r) A)` over the spec's clip band (and its dual clip): PPO's and GRPO's surrogate.
+    #[default]
+    ClippedSurrogate,
+    /// `-A (f(r_a) log pi(a) - sum_j residual_j log pi(v_j))` over the sampler's top-K ([`super::score_centring`]).
+    /// Needs the batch's [`SamplerTop`] and a model with [`model::training::Capability::SparseTargets`]; the clip band
+    /// takes no part.
+    ScoreCentred(CentringBand),
+}
+
+impl PgEstimator {
+    /// Whether the estimator reads the sampler's top-K.
+    pub fn needs_sampler_top(self) -> bool {
+        matches!(self, PgEstimator::ScoreCentred(_))
+    }
+}
+
+/// The objective's knobs besides the data: the estimator, its clip band and the weight of the KL term.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PgSpec {
     pub band: ClipBand,
     /// k3 KL-to-reference coefficient; `0.0` puts no KL term in the loss.
     pub kl_beta: f32,
+    pub estimator: PgEstimator,
+}
+
+impl PgSpec {
+    /// The clipped surrogate over `band` with the KL weight `kl_beta`.
+    pub const fn clipped(band: ClipBand, kl_beta: f32) -> PgSpec {
+        PgSpec { band, kl_beta, estimator: PgEstimator::ClippedSurrogate }
+    }
+}
+
+/// The sampler's top-K of every position of a batch, `[b * t * k]` row-major: the ids ([`IGNORE`] where none) and
+/// their log-probabilities under the distribution that drew the token (NaN where none).
+#[derive(Clone, Copy, Debug)]
+pub struct SamplerTop<'a> {
+    pub k: usize,
+    pub ids: &'a [u32],
+    pub logprobs: &'a [f32],
+}
+
+/// The per-position CE-gradient weights of one batch: one per position at its target and, under the score-centred
+/// estimator, `k` extra-target coefficients per position at the sampler's ids.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TokenWeights {
+    pub label: Vec<f32>,
+    pub extra: Option<Vec<f32>>,
 }
 
 /// The per-position inputs of one batch, flat over the batch's `b * t` positions.
@@ -41,6 +91,8 @@ pub struct PgBatch<'a> {
     /// The importance-sampling weight each position's policy term is scaled by (`None`: one everywhere), a constant
     /// the parameters do not move: the engine-versus-trainer correction of [`super::external::ImportanceCorrection`].
     pub is_weight: Option<&'a [f32]>,
+    /// The sampler's top-K at each position, which the score-centred estimator needs.
+    pub top: Option<SamplerTop<'a>>,
 }
 
 /// What one batch measured.
@@ -85,6 +137,11 @@ pub struct BatchTerms {
     pub ratio_max: f32,
     /// The largest `|ratio - 1|` over the policy tokens.
     pub max_ratio_dev: f32,
+    /// Score-centred estimator: the policy tokens whose ratio left the centring band (no score of their own), those
+    /// whose unlisted mass was centred as a bucket, and the sum of the sampler's listed mass `sum_j q_j`.
+    pub centred_masked: usize,
+    pub centred_tail: usize,
+    pub sampler_mass_sum: f64,
     /// Every log-probability, weight and loss was finite.
     pub finite: bool,
 }
@@ -119,14 +176,31 @@ impl Default for BatchTerms {
             ratio_min: f32::INFINITY,
             ratio_max: f32::NEG_INFINITY,
             max_ratio_dev: 0.0,
+            centred_masked: 0,
+            centred_tail: 0,
+            sampler_mass_sum: 0.0,
             finite: true,
         }
     }
 }
 
-/// The per-position CE-gradient weights for `new_lp` (the forward's log-probabilities) and what they measured.
-pub fn weigh(new_lp: &[f32], batch: &PgBatch<'_>, spec: &PgSpec) -> (Vec<f32>, BatchTerms) {
+/// The per-position CE-gradient weights for `new_lp` (the forward's log-probabilities) and `new_top` (the forward's
+/// log-probabilities at the sampler's top-K ids, which the score-centred estimator reads), and what they measured.
+///
+/// # Panics
+/// The score-centred estimator without the batch's [`SamplerTop`] or `new_top`.
+pub fn weigh(new_lp: &[f32], new_top: Option<&[f32]>, batch: &PgBatch<'_>, spec: &PgSpec) -> (TokenWeights, BatchTerms) {
     let mut weights = vec![0f32; new_lp.len()];
+    let centring = match spec.estimator {
+        PgEstimator::ScoreCentred(band) => {
+            let top = batch.top.expect("the score-centred estimator needs the batch's sampler top-K");
+            let trainer = new_top.expect("the score-centred estimator needs the trainer's log-probabilities at the sampler's ids");
+            assert!(top.ids.len() == new_lp.len() * top.k && top.logprobs.len() == top.ids.len() && trainer.len() == top.ids.len(), "the sampler top-K covers {} of {} positions x {}", top.ids.len(), new_lp.len(), top.k);
+            Some((band, top, trainer))
+        }
+        PgEstimator::ClippedSurrogate => None,
+    };
+    let mut extra = centring.map(|(_, top, _)| vec![0f32; top.ids.len()]);
     let mut terms = BatchTerms::default();
     for i in (0..new_lp.len()).filter(|&i| batch.targets[i] != IGNORE) {
         terms.supervised += 1;
@@ -140,15 +214,33 @@ pub fn weigh(new_lp: &[f32], batch: &PgBatch<'_>, spec: &PgSpec) -> (Vec<f32>, B
         }
         let ref_lp = batch.ref_lp.map(|r| r[i]);
         let is_weight = batch.is_weight.map_or(1.0, |w| w[i]);
-        let term = token_term_weighted(batch.old_lp[i], new_lp[i], advantage, spec.band, ref_lp.filter(|_| spec.kl_beta > 0.0), spec.kl_beta, is_weight);
-        weights[i] = term.weight;
-        terms.loss += term.loss;
+        let kl = ref_lp.filter(|_| spec.kl_beta > 0.0);
+        match (centring, extra.as_mut()) {
+            (Some((band, top, trainer)), Some(extra)) => {
+                let k = top.k;
+                let slots = i * k..(i + 1) * k;
+                let term = centred_term(batch.old_lp[i], new_lp[i], advantage * is_weight, band, &top.logprobs[slots.clone()], &trainer[slots.clone()], &mut extra[slots]);
+                terms.finite &= trainer[i * k..(i + 1) * k].iter().all(|l| l.is_finite());
+                // The KL term is the clipped path's with no advantage: the same k3 under either estimator.
+                let kl_term = token_term_weighted(batch.old_lp[i], new_lp[i], 0.0, spec.band, kl, spec.kl_beta, 1.0);
+                weights[i] = term.weight + kl_term.weight;
+                terms.loss += term.loss + kl_term.loss;
+                terms.centred_masked += usize::from(term.masked);
+                terms.centred_tail += usize::from(term.tail);
+                terms.sampler_mass_sum += f64::from(term.sampler_mass);
+            }
+            _ => {
+                let term = token_term_weighted(batch.old_lp[i], new_lp[i], advantage, spec.band, kl, spec.kl_beta, is_weight);
+                weights[i] = term.weight;
+                terms.loss += term.loss;
+                terms.clipped += usize::from(term.clipped);
+                terms.clipped_high += usize::from(term.clipped && advantage > 0.0);
+                terms.dual_clipped += usize::from(term.dual_clipped);
+                terms.clipped_low += usize::from(term.clipped && advantage < 0.0);
+            }
+        }
         terms.policy_tokens += 1;
         terms.signed_tokens += usize::from(advantage != 0.0);
-        terms.clipped += usize::from(term.clipped);
-        terms.clipped_high += usize::from(term.clipped && advantage > 0.0);
-        terms.dual_clipped += usize::from(term.dual_clipped);
-        terms.clipped_low += usize::from(term.clipped && advantage < 0.0);
         terms.weight_masked += usize::from(is_weight == 0.0);
         terms.weight_truncated += usize::from(is_weight > 0.0 && is_weight < 1.0);
         terms.weight_sum += f64::from(is_weight);
@@ -166,8 +258,22 @@ pub fn weigh(new_lp: &[f32], batch: &PgBatch<'_>, spec: &PgSpec) -> (Vec<f32>, B
         terms.ratio_max = terms.ratio_max.max(ratio);
         terms.max_ratio_dev = terms.max_ratio_dev.max((ratio - 1.0).abs());
     }
-    terms.finite &= terms.loss.is_finite() && weights.iter().all(|w| w.is_finite());
-    (weights, terms)
+    terms.finite &= terms.loss.is_finite() && weights.iter().chain(extra.iter().flatten()).all(|w| w.is_finite());
+    (TokenWeights { label: weights, extra }, terms)
+}
+
+/// Install the sampler's top-K ids of the batch just set as the model's extra targets, so the forward reads the
+/// trainer's log-probability at them; nothing for an estimator that does not read them. Call after `set_batch`,
+/// before the forward.
+///
+/// # Errors
+/// The model refuses the ids (an id past its vocabulary, extra targets not enabled).
+pub fn install_sampler_ids<M: Model>(model: &M, batch: &PgBatch<'_>, spec: &PgSpec) -> Result<(), String> {
+    if !spec.estimator.needs_sampler_top() {
+        return Ok(());
+    }
+    let top = batch.top.ok_or("the score-centred estimator needs the batch's sampler top-K")?;
+    training::objectives(model).set_sparse_target_ids(top.ids)
 }
 
 /// Backward the objective of the batch just forwarded. `denominator` replaces the batch's own supervised-token count
@@ -198,9 +304,13 @@ pub fn install_weights<M: Model>(model: &M, batch: &PgBatch<'_>, spec: &PgSpec, 
         objectives.set_loss_denominator(d);
     }
     let new_lp = objectives.batch_token_logprobs();
-    let (weights, terms) = weigh(&new_lp, batch, spec);
+    let new_top = if spec.estimator.needs_sampler_top() { Some(objectives.batch_sparse_target_logprobs().expect("the score-centred estimator's prepare enabled the model's extra targets")) } else { None };
+    let (weights, terms) = weigh(&new_lp, new_top.as_deref(), batch, spec);
     if terms.finite {
-        objectives.set_loss_weights(&weights);
+        objectives.set_loss_weights(&weights.label);
+        if let Some(extra) = &weights.extra {
+            objectives.set_sparse_target_weights(extra).expect("the coefficients are one per sampler id and finite");
+        }
     }
     (terms, new_lp)
 }
@@ -281,16 +391,21 @@ impl AdapterState {
 mod tests {
     use super::*;
 
-    const SPEC: PgSpec = PgSpec { band: ClipBand::new(0.2, 0.2), kl_beta: 0.0 };
+    const SPEC: PgSpec = PgSpec::clipped(ClipBand::new(0.2, 0.2), 0.0);
 
     fn batch<'a>(targets: &'a [u32], old: &'a [f32], advantage: &'a [f32]) -> PgBatch<'a> {
-        PgBatch { targets, old_lp: old, ref_lp: None, advantage, is_weight: None }
+        PgBatch { targets, old_lp: old, ref_lp: None, advantage, is_weight: None, top: None }
+    }
+
+    fn weigh_clipped(new_lp: &[f32], batch: &PgBatch<'_>, spec: &PgSpec) -> (Vec<f32>, BatchTerms) {
+        let (w, t) = weigh(new_lp, None, batch, spec);
+        (w.label, t)
     }
 
     /// An imitation token weighs 1 and costs its cross-entropy, whatever its old log-probability.
     #[test]
     fn a_token_without_an_advantage_is_plain_cross_entropy() {
-        let (w, t) = weigh(&[-0.7, -1.2], &batch(&[3, IGNORE], &[0.0, 0.0], &[f32::NAN, f32::NAN]), &SPEC);
+        let (w, t) = weigh_clipped(&[-0.7, -1.2], &batch(&[3, IGNORE], &[0.0, 0.0], &[f32::NAN, f32::NAN]), &SPEC);
         assert_eq!(w, [1.0, 0.0]);
         assert!((t.loss - 0.7).abs() < 1e-6 && t.imitation_tokens == 1 && t.policy_tokens == 0 && t.supervised == 1, "{t:?}");
     }
@@ -300,7 +415,7 @@ mod tests {
     fn clip_fraction_counts_signed_tokens_outside_the_band_on_their_side() {
         let (new, old) = ([1.5f32.ln(), 1.5f32.ln(), 0.0, 0.0], [0.0; 4]);
         // Positive advantage past the upper edge: clipped. Negative advantage there: not. Zero advantage: unsigned.
-        let (w, t) = weigh(&new, &batch(&[1, 1, 1, 1], &old, &[1.0, -1.0, 0.0, 1.0]), &SPEC);
+        let (w, t) = weigh_clipped(&new, &batch(&[1, 1, 1, 1], &old, &[1.0, -1.0, 0.0, 1.0]), &SPEC);
         assert_eq!((t.signed_tokens, t.clipped), (3, 1), "{t:?}");
         assert_eq!(w[0], 0.0);
         assert!((w[1] + 1.5).abs() < 1e-5);
@@ -326,13 +441,13 @@ mod tests {
         let (old_lp, new_lp) = (lp(&old), lp(&new));
         let targets = vec![1u32; token.len()];
         let advantage = vec![0.0f32; token.len()];
-        let b = PgBatch { targets: &targets, old_lp: &old_lp, ref_lp: Some(&old_lp), advantage: &advantage, is_weight: None };
-        let (_, t) = weigh(&new_lp, &b, &SPEC);
+        let b = PgBatch { targets: &targets, old_lp: &old_lp, ref_lp: Some(&old_lp), advantage: &advantage, is_weight: None, top: None };
+        let (_, t) = weigh_clipped(&new_lp, &b, &SPEC);
         let reported = f64::from(t.kl_sum) / t.kl_tokens as f64;
         assert!((reported - kl_exact).abs() < 1e-3 * kl_exact, "reported {reported}, KL(pi || ref) {kl_exact}");
         assert!(t.ratio_min < 3e-8, "the fixture moved a drawn token by 17.5 nats: {t:?}");
         // On-policy (nothing moved) the weight is one and the estimate is the plain k3, zero against itself.
-        let (_, t) = weigh(&old_lp, &b, &SPEC);
+        let (_, t) = weigh_clipped(&old_lp, &b, &SPEC);
         assert_eq!(t.kl_sum, 0.0);
     }
 
@@ -363,15 +478,15 @@ mod tests {
         // (not), under the lower edge with A < 0 (clipped) and A > 0 (not), and a zero advantage (KL only).
         let tokens = [(0.05f64, 1.3f64, 1.0f64), (0.5, 0.7, 1.0), (0.5, -0.7, 0.6), (-0.6, -1.1, 1.0), (-0.6, 0.9, 1.0), (0.1, 0.0, 1.0), (-0.1, -0.4, 0.0)];
         for kl_beta in [0.0f32, 0.3] {
-            let spec = PgSpec { band, kl_beta };
+            let spec = PgSpec::clipped(band, kl_beta);
             let new_lp: Vec<f32> = (0..tokens.len()).map(|i| -0.9 - 0.2 * i as f32).collect();
             let old_lp: Vec<f32> = tokens.iter().zip(&new_lp).map(|(&(lr, _, _), &n)| (f64::from(n) - lr) as f32).collect();
             let ref_lp: Vec<f32> = new_lp.iter().map(|n| n - 0.3).collect();
             let advantage: Vec<f32> = tokens.iter().map(|&(_, a, _)| a as f32).collect();
             let is_weight: Vec<f32> = tokens.iter().map(|&(_, _, w)| w as f32).collect();
             let targets = vec![1u32; tokens.len()];
-            let b = PgBatch { targets: &targets, old_lp: &old_lp, ref_lp: Some(&ref_lp), advantage: &advantage, is_weight: Some(&is_weight) };
-            let (weights, terms) = weigh(&new_lp, &b, &spec);
+            let b = PgBatch { targets: &targets, old_lp: &old_lp, ref_lp: Some(&ref_lp), advantage: &advantage, is_weight: Some(&is_weight), top: None };
+            let (weights, terms) = weigh_clipped(&new_lp, &b, &spec);
             let mut total = 0.0f64;
             for i in 0..tokens.len() {
                 let at = |x: f64| oracle(x, f64::from(old_lp[i]), f64::from(advantage[i]), band, Some(f64::from(ref_lp[i])), f64::from(kl_beta), f64::from(is_weight[i]));
@@ -391,7 +506,7 @@ mod tests {
 
     #[test]
     fn a_non_finite_loss_is_reported_not_hidden() {
-        let (_, t) = weigh(&[f32::NAN], &batch(&[1], &[0.0], &[1.0]), &SPEC);
+        let (_, t) = weigh_clipped(&[f32::NAN], &batch(&[1], &[0.0], &[1.0]), &SPEC);
         assert!(!t.finite);
     }
 }

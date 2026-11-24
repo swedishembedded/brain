@@ -75,10 +75,17 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       estimator's sampled gradient against its own exact enumerated expectation (complete groups for group-standardised
       advantages); repartitioning the same tokens across micro-batches leaves the step's gradient unchanged; golden
       fixtures from the pinned TRL code for advantages, masks and centring coefficients (an isolated tool, CPU only).
-- [ ] **Score-centred policy-gradient objective** (`rl::objective`): TRL's estimator (masked importance weight
-      `f(r) = r 1[low <= r <= high]`, centring over the sampler's top-K plus a tail bucket), a separate algorithm next
-      to the clipped surrogate, sharing `pg_batch`. Analytic tests on a tiny vocabulary against the exact expectation,
-      a finite-difference gradcheck, the sampler-mass and masked-fraction telemetry.
+- [ ] **Score-centred policy-gradient objective** (`rl::objective`). Done: the estimator is a variant of the shared
+      path (`pg_batch::PgEstimator::{ClippedSurrogate, ScoreCentred(CentringBand)}`, the term in
+      `score_centring::centred_term`: `f(r) = r 1[low <= r <= high]`, head over the sampler's top-K, tail bucket,
+      weights `A f(r_a)` at the token and `-A residual_j` at the listed ids through `SparseTargets`;
+      `install_sampler_ids` before the forward, `install_weights` reads the trainer's log-probabilities at them);
+      `BatchTerms` reports `centred_masked`, `centred_tail`, `sampler_mass_sum` beside the ratio statistics. Tests:
+      `score_centring` unit tests (band edges, tail bucket, refusal of a meaningless band), `it::score_centred_gradcheck` (qwen35 and qwen3 LoRA, the full loss and the extra targets alone; the latter fails
+      with the coefficients dropped from the backward). Open: reading the records' top-K into the objectives' batches,
+      `prepare` enabling the extra targets, refusals (no top-K, a truncating `sampler`, an importance correction, ids
+      past the vocabulary), per-step telemetry (sampler mass, masked fraction) and the selection, which lands through
+      the one configuration above (EC-1, EC-2), not as a second declaration.
 - [x] **The sampler's top-K in `policy_trace`** (`policy_trace: {"top_log_probs": K}`, K in 1..=20; params `policy_trace` +
       `policy_trace_top_log_probs` over D-Bus): per generated position (stop token included) `generation_top_ids` /
       `generation_top_log_probs`, the K most probable ids and their whole-row log-probabilities at the sampling

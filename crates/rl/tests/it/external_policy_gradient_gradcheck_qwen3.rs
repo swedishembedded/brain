@@ -84,7 +84,7 @@ impl Harness {
     }
 
     fn batch(&self) -> PgBatch<'_> {
-        PgBatch { targets: &self.targets, old_lp: &self.old_lp, ref_lp: Some(&self.ref_lp), advantage: &self.advantage, is_weight: None }
+        PgBatch { targets: &self.targets, old_lp: &self.old_lp, ref_lp: Some(&self.ref_lp), advantage: &self.advantage, is_weight: None, top: None }
     }
 
     fn assert_base_point_is_clear_of_the_clip_boundaries(&self) {
@@ -119,8 +119,8 @@ impl CheckModel for Harness {
         let _ = self.m.forward();
         self.forwarded.set(true);
         let objectives = training::objectives(&self.m);
-        let (weights, terms) = weigh(&objectives.batch_token_logprobs(), &self.batch(), &PgSpec { band: ClipBand::symmetric(CLIP_EPS), kl_beta: KL_BETA });
-        objectives.set_loss_weights(&weights);
+        let (weights, terms) = weigh(&objectives.batch_token_logprobs(), None, &self.batch(), &PgSpec::clipped(ClipBand::symmetric(CLIP_EPS), KL_BETA));
+        objectives.set_loss_weights(&weights.label);
         terms.loss / terms.supervised as f32
     }
 

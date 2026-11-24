@@ -826,8 +826,8 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
         }
         model.set_batch(Batch::Lm { tokens: &row.tokens, targets: &row.targets });
         let _ = model.forward();
-        let batch = PgBatch { targets: &row.targets, old_lp: &row.old_lp, ref_lp: row.has_ref.then_some(&row.ref_lp[..]), advantage: &row.advantage, is_weight: None };
-        let spec = PgSpec { band: self.band(), kl_beta: self.cfg.kl_beta };
+        let batch = PgBatch { targets: &row.targets, old_lp: &row.old_lp, ref_lp: row.has_ref.then_some(&row.ref_lp[..]), advantage: &row.advantage, is_weight: None, top: None };
+        let spec = PgSpec::clipped(self.band(), self.cfg.kl_beta);
         let terms = backward_weighted(model, &batch, &spec, denominator);
         if replay.is_some() {
             set_replay(model, None);

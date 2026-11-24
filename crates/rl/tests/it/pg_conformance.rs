@@ -79,9 +79,9 @@ struct Term {
 /// The objective as a training step runs it: one supervised position through [`weigh`].
 fn brain_term(t: &Token) -> Term {
     let (targets, old, refs, adv, w) = ([1u32], [t.old], [t.ref_lp.unwrap_or(0.0)], [t.adv], [t.w]);
-    let batch = PgBatch { targets: &targets, old_lp: &old, ref_lp: t.ref_lp.map(|_| &refs[..]), advantage: &adv, is_weight: Some(&w) };
-    let (weights, terms) = weigh(&[t.new], &batch, &PgSpec { band: t.band, kl_beta: t.beta });
-    Term { ratio: terms.ratio_sum, kl: (terms.kl_tokens > 0).then_some(f64::from(terms.kl_sum)), loss: f64::from(terms.loss), weight: f64::from(weights[0]), clipped: terms.clipped == 1, dual_clipped: terms.dual_clipped == 1 }
+    let batch = PgBatch { targets: &targets, old_lp: &old, ref_lp: t.ref_lp.map(|_| &refs[..]), advantage: &adv, is_weight: Some(&w), top: None };
+    let (weights, terms) = weigh(&[t.new], None, &batch, &PgSpec::clipped(t.band, t.beta));
+    Term { ratio: terms.ratio_sum, kl: (terms.kl_tokens > 0).then_some(f64::from(terms.kl_sum)), loss: f64::from(terms.loss), weight: f64::from(weights.label[0]), clipped: terms.clipped == 1, dual_clipped: terms.dual_clipped == 1 }
 }
 
 fn close(got: f64, want: f64) -> bool {
@@ -165,11 +165,11 @@ fn brain_step(agg: LossAgg, spec: &PgSpec, rows: &[AggRow]) -> (f64, Vec<Vec<f64
     for row in rows {
         let targets: Vec<u32> = row.supervised.iter().map(|&s| if s { 1 } else { IGNORE }).collect();
         let adv = vec![row.adv; targets.len()];
-        let batch = PgBatch { targets: &targets, old_lp: &row.old, ref_lp: Some(&row.ref_lp), advantage: &adv, is_weight: None };
-        let (weights, terms) = weigh(&row.new, &batch, spec);
+        let batch = PgBatch { targets: &targets, old_lp: &row.old, ref_lp: Some(&row.ref_lp), advantage: &adv, is_weight: None, top: None };
+        let (weights, terms) = weigh(&row.new, None, &batch, spec);
         let den = f64::from(agg.denominator(1, total, k).unwrap_or(terms.supervised.max(1) as f32));
         loss += f64::from(terms.loss) / den / k as f64;
-        grads.push(weights.iter().map(|w| -f64::from(*w) / den / k as f64).collect());
+        grads.push(weights.label.iter().map(|w| -f64::from(*w) / den / k as f64).collect());
     }
     (loss, grads)
 }
@@ -178,7 +178,7 @@ fn check_aggregation(fx: &Value, step: &StepFn) -> Result<(), String> {
     for case in fx["aggregation"].as_array().expect("aggregation") {
         let name = case["name"].as_str().unwrap();
         let agg: LossAgg = case["agg"].as_str().unwrap().parse().expect("an aggregation the fixture names");
-        let spec = PgSpec { band: ClipBand::new(f(&case["low"]), f(&case["high"])), kl_beta: f(&case["beta"]) };
+        let spec = PgSpec::clipped(ClipBand::new(f(&case["low"]), f(&case["high"])), f(&case["beta"]));
         let floats = |v: &Value| v.as_array().unwrap().iter().map(f).collect::<Vec<f32>>();
         let rows: Vec<AggRow> = case["rows"]
             .as_array()

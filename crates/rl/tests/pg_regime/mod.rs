@@ -95,7 +95,7 @@ impl Harness {
     }
 
     fn spec(&self) -> PgSpec {
-        PgSpec { band: self.regime.band, kl_beta: self.regime.kl_beta }
+        PgSpec::clipped(self.regime.band, self.regime.kl_beta)
     }
 
     fn denominator(&self) -> Option<f32> {
@@ -142,7 +142,7 @@ impl CheckModel for Harness {
     fn loss(&self) -> f32 {
         self.load();
         let _ = self.m.forward();
-        let batch = PgBatch { targets: &self.targets, old_lp: &self.old_lp, ref_lp: Some(&self.ref_lp), advantage: &self.advantage, is_weight: None };
+        let batch = PgBatch { targets: &self.targets, old_lp: &self.old_lp, ref_lp: Some(&self.ref_lp), advantage: &self.advantage, is_weight: None, top: None };
         let denominator = self.denominator();
         let (terms, _) = install_weights(&self.m, &batch, &self.spec(), denominator);
         assert!(terms.finite);
