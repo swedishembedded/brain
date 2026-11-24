@@ -9,6 +9,42 @@ fine-tuning. Parity against the reference is verified.
 
 ## Not yet done
 
+### Batched GPU inference and training (plan of 2026-11-24)
+
+Measured on a GH200 shared with another tenant (60-96 % busy from it, so absolute times run
+long), one warm in-context clone of 8.6 s of speech through `/v1/audio/speech` after the
+resident engine was moved onto the GPU: 10.2 s, and four concurrent requests serialise (43 s).
+nsys with graph-node tracing over about 230 frames: 652,656 kernels, about 2,800 per frame, mean
+12 us; the GPU busy 38 % of the generation span; `matmul_f32_gemv` 230k calls at 14.8 us
+(43 % of GPU time, about 10x a 1024x1024 fp32 weight's HBM time); 4,771 `cuStreamSynchronize`.
+Every stage is fp32, batch 1 and host-sampled: the prefix goes one position at a time, each
+frame samples cb0 on the host and runs the code predictor's 15 positions with a readback and a
+host draw each (its build evaluates all 15 heads every step), and the codec convolutions have
+no native or GEMM-lowered kernel. The code predictor is about three quarters of the FLOPs per
+frame in inference and training alike.
+
+Target, in order (each a self-contained change, measured with nsys/ncu before the next):
+
+- [ ] Talker and code predictor on the shared `qwen3::serve::Engine` (paged KV, its kernel
+      selection, bf16 and tensor-core GEMMs past the tuned crossover): the prefix in one
+      `prefill_mixed`, every live stream decoded together (`forward_batched_embed`), the
+      resident instance batching concurrent requests through residency's `run_open`; the
+      per-model decoders (`gen.rs`, `gen_kv.rs`, `gen_kv_mtp.rs`) retired.
+- [ ] Device draws: the residual codebooks through `model::readout::RowDrawer`; cb0 with the
+      reference's suppression and repetition penalty as a device logit step.
+- [ ] The code predictor's chain in one submission per frame: per-step head and embedding table
+      on the device, the drawn code fed to the next step without a host round trip; one readback
+      of `[B, 16]` codes per frame; the decode step tape-cached as a CUDA graph per batch bucket.
+- [ ] Codec: Conv1d/ConvTranspose1d through the GEMM-lowering seam and a native candidate,
+      LayerNorm/GELU/RVQ on the device, encode off the CPU pin, batched streaming decode.
+- [ ] Training data: wav to `[T, 16]` codes, x-vector and text ids, packed shards.
+- [ ] Training objective: the inference prompt teacher-forced, cb0 next-frame CE on the Talker
+      and same-frame residual CE on the code predictor batched as `[frames, 16]`, bf16 tensor
+      cores, packed rows, through `model::fit_controlled_sync` with NCCL data parallel.
+
+Gates: teacher-forced cb0/residual KL against the fp32 reference, codec PCM SNR, and end to end
+speaker similarity and recogniser WER on held-out text with matched seeds.
+
 ### Voice cloning and control across the API (2026-11-24)
 
 Done: `/audio/speech` routes by `capability::speech::SpeechContract` (reference

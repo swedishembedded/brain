@@ -522,7 +522,7 @@ pub fn generate_codes_cached(
 
 /// Split the assistant chat-template ids into the 3-token role header and the
 /// target text content (`input_id[3..len-5]`).
-pub(crate) fn split_input_ids(ids: &[u32]) -> Result<(Vec<u32>, Vec<u32>), String> {
+pub fn split_input_ids(ids: &[u32]) -> Result<(Vec<u32>, Vec<u32>), String> {
     // The prompt builders feed the first text token beside the codec rows and
     // the rest as the trailing text, so a text of fewer than two tokens has
     // nothing to trail: refuse it here rather than panic in a builder.
@@ -539,7 +539,7 @@ pub(crate) fn split_input_ids(ids: &[u32]) -> Result<(Vec<u32>, Vec<u32>), Strin
 /// Fewest target-text tokens a prompt can be built from.
 const MIN_TEXT_TOKENS: usize = 2;
 
-pub(crate) fn assistant_text(text: &str) -> String {
+pub fn assistant_text(text: &str) -> String {
     format!("<|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n")
 }
 

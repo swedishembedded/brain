@@ -8,6 +8,7 @@
 //! others run beside it.
 
 mod asr_roundtrip;
+mod batched;
 mod bench_inference;
 mod cached_parity;
 mod mtp;

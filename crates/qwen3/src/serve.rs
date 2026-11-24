@@ -2291,6 +2291,94 @@ impl Engine {
         })
     }
 
+    /// Upload more output heads beside the LM head, each `[n, d_model]` and read from `src` by
+    /// name: a decoder whose positions each predict from their own head (a multi-codebook audio
+    /// model's code predictor) keeps them on the device, so a step computes only the head it
+    /// needs. Each is held at the tier the LM head is held at. `n` may not exceed the
+    /// configured vocabulary, the width the logits buffer is sized for.
+    pub fn add_heads(&mut self, src: &dyn checkpoint::TensorSource, names: &[&str], n: usize) -> Result<(), String> {
+        let vocab = self.cfg.vocab as usize;
+        if n == 0 || n > vocab {
+            return Err(format!("a head of {n} rows does not fit the engine's logits width of {vocab}"));
+        }
+        let tier = self.lin_weights[self.cfg.head_weight()].dtype();
+        let staging = checkpoint::packed::BoundedWorkspace::new(checkpoint::packed::MemoryBudget::new(64 << 20, 0));
+        let side;
+        let ops = match &self.packed_ops {
+            Some(ops) => ops,
+            None => {
+                side = Ops::new(self.gpu.new_like(model::ops::kernel_list())).map_err(|e| format!("add_heads: {e}"))?;
+                &side
+            }
+        };
+        for name in names {
+            if self.lin_weights.contains_key(*name) {
+                return Err(format!("the engine already holds a weight named {name}"));
+            }
+            let w = model::ops::upload_from_source(ops, src, name, n, self.cfg.d_model as usize, tier, &staging).ok_or_else(|| format!("add_heads: no tensor {name} of [{n}, {}]", self.cfg.d_model))?;
+            self.lin_weights.insert((*name).to_string(), w);
+        }
+        Ok(())
+    }
+
+    /// Advance every sequence by one step from a ready-made embedding per sequence
+    /// (`[bsz, d_model]`) and answer the logits of `head` (the LM head when `None`, else one
+    /// [`Self::add_heads`] uploaded), `[bsz, n]` with `n` that head's rows.
+    pub fn forward_batched_embed_logits(&mut self, tables: &mut [&mut BlockTable], embeds: &[f32], head: Option<&str>) -> Vec<f32> {
+        self.embed_head_submit(tables, embeds, head).1
+    }
+
+    /// [`Self::forward_batched_embed_logits`] that also answers each row's final-norm hidden
+    /// state (`[bsz, d_model]`), for a decoder whose next input is built from it.
+    pub fn forward_batched_embed_hidden_logits(&mut self, tables: &mut [&mut BlockTable], embeds: &[f32], head: Option<&str>) -> (Vec<f32>, Vec<f32>) {
+        let (bsz, logits) = self.embed_head_submit(tables, embeds, head);
+        (self.gpu.read(&self.sc.xn_final, bsz * self.cfg.d_model as usize), logits)
+    }
+
+    /// One batched embedding-input step with `head`'s logits computed: the row count and the logits.
+    fn embed_head_submit(&mut self, tables: &mut [&mut BlockTable], embeds: &[f32], head: Option<&str>) -> (usize, Vec<f32>) {
+        let meta = self.append_meta(tables);
+        assert_eq!(embeds.len(), meta.bsz as usize * self.cfg.d_model as usize);
+        let n = self.head_rows(head);
+        self.run_batched_submit(&meta, Input::Embeds(embeds), false);
+        let mut steps: Vec<Step> = Vec::new();
+        self.head_steps_with(&mut steps, meta.bsz, head);
+        self.gpu.submit(&[], &steps);
+        (meta.bsz as usize, self.gpu.read(&self.logits_dev, meta.bsz as usize * n))
+    }
+
+    /// [`Self::forward_batched_embed_logits`] with each row's draw made where the logits are
+    /// (`draws[i]` `None` for the greedy token): only the drawn tokens come back. Without the
+    /// device draw kernels the logits are read and drawn on the host, the same draw.
+    pub fn forward_batched_embed_drawn(&mut self, tables: &mut [&mut BlockTable], embeds: &[f32], head: Option<&str>, draws: &[Option<RowDraw>]) -> Vec<Drawn> {
+        assert_eq!(draws.len(), tables.len(), "one draw per row");
+        if self.drawer.is_none() {
+            let n = self.head_rows(head);
+            let flat = self.forward_batched_embed_logits(tables, embeds, head);
+            return model::serve::draw_rows_host(flat.chunks(n).map(<[f32]>::to_vec).collect(), draws);
+        }
+        let meta = self.append_meta(tables);
+        assert_eq!(embeds.len(), meta.bsz as usize * self.cfg.d_model as usize);
+        let n = self.head_rows(head) as u32;
+        self.run_batched_submit(&meta, Input::Embeds(embeds), false);
+        let mut steps: Vec<Step> = Vec::new();
+        self.head_steps_with(&mut steps, meta.bsz, head);
+        let drawer = self.drawer.as_ref().expect("checked above");
+        let shape = drawer.shape(draws, n);
+        drawer.upload(&self.gpu, draws, n);
+        steps.extend(drawer.dispatch(&self.gpu, &self.logits_dev, meta.bsz, n, shape));
+        self.gpu.submit(&[], &steps);
+        drawer.answer(&self.gpu, &self.logits_dev, draws, n, shape)
+    }
+
+    /// The rows of `head`: the vocabulary for the LM head, else the extra head's.
+    fn head_rows(&self, head: Option<&str>) -> usize {
+        match head {
+            None => self.cfg.vocab as usize,
+            Some(name) => self.lin_weights.get(name).unwrap_or_else(|| panic!("no head named {name} (add_heads uploads them)")).n() as usize,
+        }
+    }
+
     /// Advance every sequence by one token from a ready-made embedding per sequence
     /// (`[bsz, d_model]`) - the tts Talker multi-stream path: concurrent voice
     /// streams decode together on the shared paged pool.
@@ -3614,13 +3702,20 @@ impl Engine {
     /// [`Self::submit_greedy_head`] and [`Self::submit_topk_head`], which
     /// otherwise diverge only in what they do with the resulting logits.
     fn head_steps(&self, steps: &mut Vec<Step>, bsz: u32) {
+        self.head_steps_with(steps, bsz, None);
+    }
+
+    /// [`Self::head_steps`] for `head` (the LM head when `None`, else one [`Self::add_heads`]
+    /// uploaded), writing `[bsz, rows]` into `logits_dev`.
+    fn head_steps_with(&self, steps: &mut Vec<Step>, bsz: u32, head: Option<&str>) {
         let d = self.cfg.d_model;
         // The head is just one more `Weight` in `lin_weights` (B7) - int8 or
         // fp32, whichever `weights_int8`/the device's capability landed on -
         // dispatched through the SAME `Self::quant_once`/`Self::linear` pair
         // every per-layer projection uses, no separate int8-head branch.
         self.quant_once(steps, &self.sc.xn_final, d, bsz);
-        self.linear(steps, &self.lin_weights[self.cfg.head_weight()], &self.sc.xn_final, &self.logits_dev, bsz, self.exact.as_ref());
+        let name = head.unwrap_or(self.cfg.head_weight());
+        self.linear(steps, &self.lin_weights[name], &self.sc.xn_final, &self.logits_dev, bsz, self.exact.as_ref());
     }
 
     /// Record + submit the greedy head (logits + row argmax into
@@ -4183,7 +4278,8 @@ impl Engine {
     pub fn blocks_for(&self, tokens: u32) -> u32 {
         tokens.div_ceil(self.block_size)
     }
-    pub(crate) fn release_table(&mut self, t: &mut BlockTable) {
+    /// Give a finished sequence's blocks back to the pool, leaving `t` empty for a new one.
+    pub fn release_table(&mut self, t: &mut BlockTable) {
         if let Some(lsa) = self.lsa.as_mut() {
             lsa.release(t);
         }

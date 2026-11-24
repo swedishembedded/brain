@@ -13,6 +13,7 @@
 //! text-projection embeddings, a dual-track step graph, and a KV-cache seam.
 
 pub mod batch;
+pub mod batched;
 pub mod caps;
 pub mod config;
 pub mod engine;
