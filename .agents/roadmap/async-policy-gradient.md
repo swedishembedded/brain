@@ -25,8 +25,31 @@ mathematics first, then provenance, then the streaming job, then performance dri
 5. Score centring: with the sampler's full distribution as its top-K, the centred gradient equals the exact
    expectation `-A (f(r_a) grad log pi(a) - E_{v~mu}[f(r_v) grad log pi(v)])` on a tiny vocabulary.
 
+## Findings that shape the order
+
+- A truncated sampler makes the policy trace the wrong behaviour denominator: the trace is the token's whole-row
+  log-probability at the temperature (knowledge 520, 528), while agent runs sample with top_k/top_p cuts. The real
+  behaviour probability is `p / mass(support)`, so the clipped surrogate on such records starts from a ratio of
+  `mass < 1`, not 1. Online runs therefore sample untruncated (top_k 0, top_p 1, min_p 0) until the trainer's
+  probabilities can be renormalised over the sampler's support (support replay, below); the score-centred estimator
+  refuses truncated records by name.
+- Leases mostly exist: a reply's adapter identity is captured at admission, a replaced adapter drains, each release has
+  its own KV namespace. The gap is the route refresh under load.
+- The in-process `Grpo` stays the synchronous reference; asynchrony serves externally produced experience first.
+
+The cross-repository plan, its package numbering (A01-A53) and its review are kept by the orchestrating application
+that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A32-A33, A37-A49 and are the items below.
+
 ## Open
 
+- [ ] **One policy-gradient configuration** (A03-A04; `engineering-cleanup.md` EC-1, EC-2): settings declared once
+      for objective, SDK, CLI and the served job; `Grpo` and the external objective share one loss config (dual clip,
+      step guards included); the estimator (`ClippedSurrogate | ScoreCentred`) is a variant of the shared `pg_batch`
+      path, independent of the experience source and scheduling.
+- [ ] **Model-free oracles** (A05-A06): a K-action categorical policy on host parameters with fixed rewards, every
+      estimator's sampled gradient against its own exact enumerated expectation (complete groups for group-standardised
+      advantages); repartitioning the same tokens across micro-batches leaves the step's gradient unchanged; golden
+      fixtures from the pinned TRL code for advantages, masks and centring coefficients (an isolated tool, CPU only).
 - [ ] **Sparse extra targets in the LM-head loss** (`model::head_ce`, `model::training::TokenObjectives`): per
       position up to K `(id, weight)` pairs added to the weighted cross-entropy gradient
       (`d logits = W softmax - w e_y - sum_j c_j e_{v_j}`, `W = w + sum_j c_j`) and the trainer's log-probability at
@@ -51,9 +74,20 @@ mathematics first, then provenance, then the streaming job, then performance dri
       id as the next version; records older than `max_staleness` versions are dropped and counted; `finish` drains
       and ends. Events: `step`, `published {version, digest, step}`, `consumed {groups, tokens, dropped_stale}`, queue
       depth. Resume: the job reports the group keys it consumed; a client re-sends the rest.
+      Receipts separate applied (the group's gradient is in an update) from committed (that update is in a durable
+      checkpoint); a client re-sends every group not committed, and the job deduplicates by key.
+      Design notes from the paused lane: a generic job inbox beside the cancel token (a worker-process job refuses it by
+      name); a streaming objective that lays out a whole step before its first backward; a publisher seam implemented
+      in-process by the serving binary; `finish` ends a run as completed, not cancelled.
+- [ ] **Run-level policy identity** (A16): training run, committed update, base and adapter digests beside the serving
+      version, in every reply and every `published` event.
 - [ ] Per-step telemetry for async runs: staleness mean/max, trained tokens per step, time the learner waited for
       records, records' time in queue.
 - [ ] End-to-end on Qwen3-4B (one card): serving and the streaming job in one process, rollouts from an orchestrator;
       profile (nsys) before optimising anything.
-- [ ] Later, each driven by a profile: group-prefix packing in training, token-budget micro-batches, support-set replay
-      for truncated samplers.
+- [ ] **Support replay for truncated samplers**: the sampler's support per position in the trace, the trainer's
+      log-probabilities renormalised over it, so cut samplers can train without bias.
+- [ ] Later, each driven by a profile and recorded as a knowledge entry (bottleneck, baseline, evidence, change,
+      oracle, result, decision): colocated serve-and-train scheduling and whether the frozen base can be shared
+      (A37-A39); merging append-only calls of one session and group-prefix packing in training, against the per-call
+      reference (A40-A43); head and coefficient cost (A44-A45); multi-actor publication (A46-A48).
