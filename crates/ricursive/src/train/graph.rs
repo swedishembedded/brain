@@ -475,6 +475,7 @@ pub(super) fn build_shard(cfg: TrainConfig, b: u32, t: u32, src: &dyn checkpoint
         opt,
         nlsa: None,
         weighted: None,
+        sparse: None,
         logit_scale: 1.0,
     };
     model.record();
@@ -719,7 +720,7 @@ impl Ripple {
         let Some(head) = &self.head else { return pass };
         s.push(self.rmsnorm_fwd(&self.res[layers], "model.norm.weight", &self.hs, d, n));
         if let Some(chunked) = &self.head_ce {
-            chunked.forward_steps(&self.ops, &mut s, &self.hs, n, &self.targets, &self.ce_rows, self.logit_scale);
+            chunked.forward_steps_with(&self.ops, &mut s, &self.hs, n, &self.targets, &self.ce_rows, None, self.sparse.as_ref(), self.logit_scale);
             pass.segment(&mut s, None);
             return pass;
         }
@@ -768,7 +769,7 @@ impl Ripple {
             let dw = self.table_grad(&head.name);
             let dw = dw.as_ref().map(|(buf, dtype)| model::head_ce::HeadGrad { buf, dtype: *dtype });
             let row_weights = self.weighted.as_ref().map(|w| RowWeights { weights: w.weights(), scratch: w.scratch() });
-            chunked.backward_steps(&self.ops, &mut s, &HeadBackward { hidden: &self.hs, d_hidden: &g.d_hs, n, labels: &self.targets, grad_scale: GradScale::Buf(&self.inv_count), logit_scale: self.logit_scale, row_weights, dw, forward_state_held: false });
+            chunked.backward_steps(&self.ops, &mut s, &HeadBackward { hidden: &self.hs, d_hidden: &g.d_hs, n, labels: &self.targets, grad_scale: GradScale::Buf(&self.inv_count), logit_scale: self.logit_scale, row_weights, dw, sparse: self.sparse.as_ref(), forward_state_held: false });
             self.res.restore(&self.gpu, &mut s, layers);
             self.rmsnorm_bwd(&mut s, &self.res[layers], "model.norm.weight", &g.d_hs, &g.dres[layers % 2], d, n);
         } else if let Some(head) = &self.head {

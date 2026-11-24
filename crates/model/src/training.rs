@@ -47,6 +47,9 @@ pub enum Capability {
     /// A trainer whose MoE routers can be forced to the routing a rollout engine recorded
     /// ([`TokenObjectives::set_routing_replay`]).
     RoutingReplay,
+    /// A trainer whose LM head takes extra targets per position beside the label in one backward
+    /// ([`TokenObjectives::enable_sparse_targets`], [`crate::head_ce::SparseTargets`]).
+    SparseTargets,
 }
 
 impl Capability {
@@ -59,6 +62,7 @@ impl Capability {
             Capability::KvRoundtrip => "a KV-cache round trip in its attention",
             Capability::PackedRows => "training on packed rows (several documents per row)",
             Capability::RoutingReplay => "routing replay in its MoE routers",
+            Capability::SparseTargets => "extra targets per position in its LM-head loss",
         }
     }
 }
@@ -174,6 +178,38 @@ pub trait TokenObjectives {
             None => Ok(()),
             Some(_) => Err("this model's trainer cannot replay recorded MoE routing".to_string()),
         }
+    }
+
+    /// Opt into up to `k` extra targets per position beside the label ([`crate::head_ce::SparseTargets`]): the loss
+    /// gains `sum_j c_j * (-log p(v_j))` per position, its gradient enters the one backward
+    /// (`d logits = W softmax - w e_y - sum_j c_j e_{v_j}`, `W = w + sum_j c_j`), and the forward reads back
+    /// `log p(v_j)`. Call once after [`Self::enable_weighted_loss`], before the first forward; a second call with the
+    /// same `k` is a no-op, with another `k` an error. Each [`crate::Model::set_batch`] clears the ids (every slot
+    /// unused), so a batch without extra targets trains as before. The model's own loss value
+    /// ([`crate::Model::forward`]) stays the labels' alone. The default refuses: a model without it must not be asked
+    /// to train an objective that needs it.
+    fn enable_sparse_targets(&mut self, k: u32) -> Result<(), String> {
+        Err(format!("this model's trainer cannot take {k} extra targets per position in its LM-head loss"))
+    }
+
+    /// The extra targets' ids of the batch just set, `[b * t * k]` in the layout of [`Self::set_loss_weights`]
+    /// ([`crate::IGNORE`] marks an unused slot; only supervised positions may use one). Call after `set_batch` and
+    /// before the forward that reads their log-probabilities.
+    fn set_sparse_target_ids(&self, ids: &[u32]) -> Result<(), String> {
+        let _ = ids;
+        Err("this model's trainer takes no extra targets (enable_sparse_targets refused)".to_string())
+    }
+
+    /// The extra targets' coefficients for the backward of the batch already forwarded, `[b * t * k]`.
+    fn set_sparse_target_weights(&self, coefs: &[f32]) -> Result<(), String> {
+        let _ = coefs;
+        Err("this model's trainer takes no extra targets (enable_sparse_targets refused)".to_string())
+    }
+
+    /// `log p_theta(v_j)` at every extra-target id of the batch most recently forwarded, `[b * t * k]` (under the
+    /// logit scale, like [`Self::batch_token_logprobs`]), `0.0` at unused slots; `None` when extra targets are off.
+    fn batch_sparse_target_logprobs(&self) -> Option<Vec<f32>> {
+        None
     }
 
     /// Tokens whose logits the LM head keeps alive at once ([`crate::head_ce`]),

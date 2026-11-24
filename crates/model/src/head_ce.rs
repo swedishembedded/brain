@@ -61,6 +61,8 @@ pub fn kernels() -> &'static [(&'static str, &'static str)] {
         ("matmul_dw_reg", kernels::MATMUL_DW_REG),
         ("logit_cap_mask", kernels::LOGIT_CAP_MASK),
         ("logit_cap_mask_bwd", kernels::LOGIT_CAP_MASK_BWD),
+        ("ce_sparse_targets", kernels::CE_SPARSE_TARGETS),
+        ("ce_gather_logprob", kernels::CE_GATHER_LOGPROB),
     ]
 }
 
@@ -162,6 +164,9 @@ pub struct HeadBackward<'a> {
     pub row_weights: Option<RowWeights<'a>>,
     /// The head's `[V, d]` weight gradient, accumulated into; `None` for a frozen head.
     pub dw: Option<HeadGrad<'a>>,
+    /// Extra targets per position ([`SparseTargets`]): their coefficients enter this backward's gradient in the same
+    /// pass. Needs `row_weights` (the label's weight is part of the same row) and the forward that read their ids.
+    pub sparse: Option<&'a SparseTargets>,
     /// True when `n` fits one chunk and the forward ran in the same recording
     /// context so its logits (and statistics, on a cooperative device) are still
     /// in the scratch: the backward then skips recomputing them.
@@ -204,6 +209,156 @@ pub struct HeadCe {
     /// The declared transform of the head's logits and the `(logit_cap_mask, logit_cap_mask_bwd)` kernels that apply it
     /// ([`Self::set_head_transform`]); `None` is the identity, which dispatches nothing.
     transform: Option<(HeadTransform, usize, usize)>,
+    /// The `(ce_sparse_targets, ce_gather_logprob)` kernels of extra targets, by their canonical names; `None` on a
+    /// model that does not register them, where [`SparseTargets`] are refused.
+    sparse: Option<(usize, usize)>,
+}
+
+/// Up to `k` extra targets per position beside the label: an id (or [`IGNORE`] for an unused slot) and a coefficient
+/// each, `[n * k]` row-major, and the trainer's log-probability at each id read back by the forward. The loss gains
+/// `sum_j c_j * nll(v_j)` per position, so one backward produces
+/// `d logits = W softmax - w e_y - sum_j c_j e_{v_j}` with `W = w + sum_j c_j` - the shape of every estimator that
+/// spreads a token's weight over the ids of a sampler's distribution (score centring, top-K distillation) at the cost
+/// of one pass instead of `k + 1`.
+///
+/// The ids must be written before the forward (a chunk's logits are gone once the next chunk is computed), the
+/// coefficients before the backward. A model owns one at its `[b * t]` positions; a recorded tape reads the buffers,
+/// so writing them never re-records anything.
+pub struct SparseTargets {
+    n: u32,
+    k: u32,
+    ids: DeviceBuffer,
+    coefs: DeviceBuffer,
+    logprobs: DeviceBuffer,
+}
+
+impl SparseTargets {
+    /// Room for `n` positions of `k` extra targets each, every slot unused and every coefficient zero.
+    ///
+    /// # Panics
+    /// `k` is zero.
+    pub fn new(gpu: &Gpu, n: u32, k: u32) -> SparseTargets {
+        assert!(k > 0, "SparseTargets: k must be at least one extra target per position");
+        let words = n as u64 * k as u64;
+        let t = SparseTargets { n, k, ids: gpu.storage(words), coefs: gpu.storage(words), logprobs: gpu.storage(words) };
+        t.clear(gpu);
+        t
+    }
+
+    /// Extra targets per position.
+    #[must_use]
+    pub fn k(&self) -> u32 {
+        self.k
+    }
+
+    /// Positions the buffers hold.
+    #[must_use]
+    pub fn positions(&self) -> u32 {
+        self.n
+    }
+
+    /// Write the `[n * k]` ids (all positions; [`IGNORE`] marks an unused slot).
+    ///
+    /// # Panics
+    /// The length is not `n * k`.
+    pub fn write_ids(&self, gpu: &Gpu, ids: &[u32]) {
+        assert_eq!(ids.len(), (self.n * self.k) as usize, "SparseTargets: {} ids for {} positions of {}", ids.len(), self.n, self.k);
+        gpu.write(&self.ids, ids);
+    }
+
+    /// Write the `[n * k]` coefficients (all positions; a slot whose id is [`IGNORE`] is not read).
+    ///
+    /// # Panics
+    /// The length is not `n * k`.
+    pub fn write_coefs(&self, gpu: &Gpu, coefs: &[f32]) {
+        assert_eq!(coefs.len(), (self.n * self.k) as usize, "SparseTargets: {} coefficients for {} positions of {}", coefs.len(), self.n, self.k);
+        gpu.write_f32(&self.coefs, coefs);
+    }
+
+    /// The shared body of [`crate::training::TokenObjectives::enable_sparse_targets`] for a model (`model`, for the
+    /// message) whose chunked head is `head` (`None`: a build without one) over `positions` positions: idempotent for
+    /// the same `k`, an error for another, for a head without the kernels, `k = 0`, or a model whose weighted loss is
+    /// not enabled (the label's weight and the extra targets' are one row of the same backward).
+    pub fn enable(slot: &mut Option<SparseTargets>, gpu: &Gpu, head: Option<&HeadCe>, weighted: bool, positions: u32, k: u32, model: &str) -> Result<(), String> {
+        match slot {
+            Some(t) if t.k == k => return Ok(()),
+            Some(t) => return Err(format!("{model}: extra targets are enabled with k = {}, not {k}", t.k)),
+            None => {}
+        }
+        let head = head.ok_or_else(|| format!("{model}: extra targets need the chunked LM head of a training build"))?;
+        if !head.sparse_targets_supported() {
+            return Err(format!("{model}: this device's kernel set does not register the sparse-target kernels (model::head_ce::kernels())"));
+        }
+        if k == 0 || !weighted {
+            return Err(format!("{model}: extra targets (k = {k}) need k >= 1 and enable_weighted_loss first"));
+        }
+        *slot = Some(SparseTargets::new(gpu, positions, k));
+        Ok(())
+    }
+
+    /// [`Self::write_ids`] after checking the length and every id against `valid_vocab` ([`check_sparse_id_range`]).
+    pub fn write_ids_checked(&self, gpu: &Gpu, ids: &[u32], valid_vocab: u32) -> Result<(), String> {
+        if ids.len() != (self.n * self.k) as usize {
+            return Err(format!("{} extra-target ids for {} positions of {}", ids.len(), self.n, self.k));
+        }
+        check_sparse_id_range(ids, valid_vocab)?;
+        self.write_ids(gpu, ids);
+        Ok(())
+    }
+
+    /// [`Self::write_coefs`] after checking the length and that every coefficient is finite.
+    pub fn write_coefs_checked(&self, gpu: &Gpu, coefs: &[f32]) -> Result<(), String> {
+        if coefs.len() != (self.n * self.k) as usize {
+            return Err(format!("{} extra-target coefficients for {} positions of {}", coefs.len(), self.n, self.k));
+        }
+        if let Some(at) = coefs.iter().position(|c| !c.is_finite()) {
+            return Err(format!("extra-target coefficient {} at slot {at} is not finite", coefs[at]));
+        }
+        self.write_coefs(gpu, coefs);
+        Ok(())
+    }
+
+    /// Mark every slot unused: what a model's every new batch starts with.
+    pub fn clear(&self, gpu: &Gpu) {
+        gpu.write(&self.ids, &vec![IGNORE; (self.n * self.k) as usize]);
+    }
+
+    /// The log-probabilities the last forward left at the first `positions` positions' ids, `[positions * k]`, `0`
+    /// at unused slots and ignored rows.
+    #[must_use]
+    pub fn read_logprobs(&self, gpu: &Gpu, positions: u32) -> Vec<f32> {
+        assert!(positions <= self.n, "SparseTargets: {positions} positions of {}", self.n);
+        gpu.read(&self.logprobs, (positions * self.k) as usize)
+    }
+}
+
+/// Refuse extra-target ids that a head cannot read: not `labels.len() * k` of them, an id at or past `valid_vocab`
+/// (the served vocabulary), or an extra target on a position whose label is [`IGNORE`] (that row has no
+/// distribution in the loss, so the target would be dropped silently). The message names the position.
+pub fn check_sparse_ids(labels: &[u32], ids: &[u32], k: u32, valid_vocab: u32) -> Result<(), String> {
+    let k = k as usize;
+    if k == 0 || ids.len() != labels.len() * k {
+        return Err(format!("{} extra-target ids for {} positions of {k}", ids.len(), labels.len()));
+    }
+    for (i, &label) in labels.iter().enumerate() {
+        for &id in ids[i * k..(i + 1) * k].iter().filter(|&&id| id != IGNORE) {
+            if label == IGNORE {
+                return Err(format!("extra target {id} at position {i}, whose label is ignored: an unsupervised position has no distribution in the loss"));
+            }
+            if id >= valid_vocab {
+                return Err(format!("extra target {id} at position {i} is at or past the valid vocabulary {valid_vocab}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Refuse an extra-target id at or past `valid_vocab` (the served vocabulary), naming its slot.
+pub fn check_sparse_id_range(ids: &[u32], valid_vocab: u32) -> Result<(), String> {
+    match ids.iter().position(|&id| id != IGNORE && id >= valid_vocab) {
+        Some(slot) => Err(format!("extra target {} at slot {slot} is at or past the valid vocabulary {valid_vocab}", ids[slot])),
+        None => Ok(()),
+    }
 }
 
 /// Partial `(value, index)` pairs per row the argmax readout reduces a logits row
@@ -323,6 +478,7 @@ impl HeadCe {
             argmax: gpu.kernel_index("argmax_part").zip(gpu.kernel_index("argmax_final")),
             bf16_dw: std::cell::RefCell::new(None),
             transform: None,
+            sparse: gpu.kernel_index("ce_sparse_targets").zip(gpu.kernel_index("ce_gather_logprob")),
         })
     }
 
@@ -445,7 +601,7 @@ impl HeadCe {
     /// token (`0` at [`IGNORE`]), one chunk at a time. `hidden` is `[n, d]`,
     /// `labels` and `nll` are `[n]`.
     pub fn forward_steps(&self, ops: &Ops, s: &mut Vec<Step>, hidden: &DeviceBuffer, n: u32, labels: &DeviceBuffer, nll: &DeviceBuffer, logit_scale: f32) {
-        self.forward_steps_with(ops, s, hidden, n, labels, nll, None, logit_scale);
+        self.forward_steps_with(ops, s, hidden, n, labels, nll, None, None, logit_scale);
     }
 
     /// [`Self::forward_steps`], and - when `argmax` is given - each row's greedy
@@ -459,17 +615,46 @@ impl HeadCe {
     /// readout produces exactly the loss and log-probabilities it produced
     /// without it.
     ///
+    /// With `sparse`, each chunk also leaves the log-probability of every extra-target id in
+    /// [`SparseTargets::read_logprobs`], read from the chunk's logits and its cross-entropy without a second pass over
+    /// the row.
+    ///
     /// # Panics
     /// If `argmax` is given on a device whose kernel set does not register
-    /// `argmax_part`/`argmax_final` (see [`Self::argmax_supported`]).
-    pub fn forward_steps_with(&self, ops: &Ops, s: &mut Vec<Step>, hidden: &DeviceBuffer, n: u32, labels: &DeviceBuffer, nll: &DeviceBuffer, argmax: Option<ArgmaxOut<'_>>, logit_scale: f32) {
+    /// `argmax_part`/`argmax_final` (see [`Self::argmax_supported`]), or `sparse` on one without the sparse-target
+    /// kernels ([`Self::sparse_targets_supported`]) or with fewer positions than `n`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_steps_with(&self, ops: &Ops, s: &mut Vec<Step>, hidden: &DeviceBuffer, n: u32, labels: &DeviceBuffer, nll: &DeviceBuffer, argmax: Option<ArgmaxOut<'_>>, sparse: Option<&SparseTargets>, logit_scale: f32) {
         for (r0, rows) in self.chunks(n) {
             self.logits_steps(ops, s, hidden, r0, rows, logit_scale);
             s.push(self.ce_value_step(ops.gpu(), labels, nll, r0, rows));
             if let Some(a) = argmax {
                 self.argmax_steps(ops.gpu(), s, rows, a, r0);
             }
+            if let Some(t) = sparse {
+                s.push(self.gather_step(ops.gpu(), t, labels, nll, n, r0, rows));
+            }
         }
+    }
+
+    /// Whether this head's device registers the sparse-target kernels, so it can take [`SparseTargets`].
+    #[must_use]
+    pub fn sparse_targets_supported(&self) -> bool {
+        self.sparse.is_some()
+    }
+
+    fn sparse_kernels(&self, t: &SparseTargets, n: u32) -> (usize, usize) {
+        assert!(t.n >= n, "HeadCe: {} positions of extra targets for {n} tokens", t.n);
+        self.sparse.expect("HeadCe: extra targets need the 'ce_sparse_targets'/'ce_gather_logprob' kernels registered on this Gpu (append model::head_ce::kernels())")
+    }
+
+    /// The extra-target log-probabilities of chunk `r0..r0 + rows` from its logits, labels and cross-entropy.
+    #[allow(clippy::too_many_arguments)]
+    fn gather_step(&self, gpu: &Gpu, t: &SparseTargets, labels: &DeviceBuffer, nll: &DeviceBuffer, n: u32, r0: u32, rows: u32) -> Step {
+        let (_, gather) = self.sparse_kernels(t, n);
+        // `r0` is 0 or a multiple of 64 rows (see `ce_value_step`), so `r0 * k` words is a legal binding offset too.
+        let (at, at_k) = ((r0 as u64, rows as u64), (r0 as u64 * t.k as u64, rows as u64 * t.k as u64));
+        gpu.step_sliced(gather, &[&self.logits, labels, nll, &t.ids, &t.logprobs], &[(0, 0), at, at, at_k, at_k], &[rows * t.k, self.vocab, t.k, IGNORE], rows * t.k)
     }
 
     /// Whether this head's device registers the per-row argmax kernels, so
@@ -528,6 +713,19 @@ impl HeadCe {
                 s.push(gpu.step_sliced(self.k.ce_stats, &[&self.logits, b.labels, &self.stats], &[(0, 0), at, (0, 0)], &[rows, v, IGNORE], rows));
             }
             s.push(gpu.step_sliced(self.k.ce_grad_stats, &[&self.logits, b.labels, &self.stats, &self.d_logits], &[(0, 0), at, (0, 0), (0, 0)], &[rows, v, IGNORE, 1f32.to_bits()], rows * v));
+            // Extra targets: the row weights and the extra coefficients enter here, before the transform and the
+            // scales (both elementwise, so they commute with a per-row factor), because the extra terms must pass
+            // through the soft cap's derivative too. Without extra targets the row weight is applied last, as always.
+            let d = match b.sparse {
+                Some(t) => {
+                    let (kernel, _) = self.sparse_kernels(t, b.n);
+                    let rw = b.row_weights.expect("HeadCe: extra targets need the row weights of a weighted-loss backward");
+                    let at_k = (r0 as u64 * t.k as u64, rows as u64 * t.k as u64);
+                    s.push(gpu.step_sliced(kernel, &[&self.d_logits, rw.weights, b.labels, &t.ids, &t.coefs, rw.scratch], &[(0, 0), at, at, at_k, at_k, (0, 0)], &[rows * v, v, t.k, IGNORE], rows * v));
+                    rw.scratch
+                }
+                None => &self.d_logits,
+            };
             // The gradient so far is with respect to the scaled transformed logits `scale * cap(z)`: through the soft
             // cap (and the padding mask), which reads `cap(z)` - the chunk's logits with the scale taken back out (they
             // are scratch from here on) - and then through the logit scale below (the factors commute).
@@ -536,18 +734,19 @@ impl HeadCe {
                 if b.logit_scale != 1.0 {
                     s.push(gpu.step(self.k.grad_scale, &[&self.logits], &[rows * v, (1.0 / b.logit_scale).to_bits()], rows * v));
                 }
-                s.extend(t.bwd_step(gpu, bwd, &self.d_logits, &self.logits, rows, v));
+                s.extend(t.bwd_step(gpu, bwd, d, &self.logits, rows, v));
             }
             // Chain rule through `logits = logit_scale * (h W^T)`, then the caller's scale.
             let mut host_coef = if b.logit_scale == 1.0 { None } else { Some(b.logit_scale) };
             match b.grad_scale {
                 GradScale::Const(c) => host_coef = Some(host_coef.unwrap_or(1.0) * c).filter(|&c| c != 1.0),
-                GradScale::Buf(buf) => s.push(gpu.step(self.k.grad_scale_buf, &[&self.d_logits, buf], &[rows * v], rows * v)),
+                GradScale::Buf(buf) => s.push(gpu.step(self.k.grad_scale_buf, &[d, buf], &[rows * v], rows * v)),
             }
             if let Some(coef) = host_coef {
-                s.push(gpu.step(self.k.grad_scale, &[&self.d_logits], &[rows * v, coef.to_bits()], rows * v));
+                s.push(gpu.step(self.k.grad_scale, &[d], &[rows * v, coef.to_bits()], rows * v));
             }
             let d_logits = match b.row_weights {
+                _ if b.sparse.is_some() => d,
                 Some(rw) => {
                     s.push(gpu.step_sliced(self.k.scale_row, &[&self.d_logits, rw.weights, rw.scratch], &[(0, 0), at, (0, 0)], &[rows * v, v], rows * v));
                     rw.scratch
@@ -630,12 +829,46 @@ impl HeadCe {
     /// token count and per-token log-probabilities, without ever holding more
     /// than one chunk of logits. `weights` scale each token's loss term.
     pub fn forward(&self, ops: &Ops, hidden: &DeviceBuffer, n: u32, labels: &[u32], weights: Option<&[f32]>, logit_scale: f32) -> HeadLoss {
+        self.forward_immediate(ops, hidden, n, labels, weights, None, logit_scale)
+    }
+
+    /// [`Self::forward`] with `k` extra targets per token (`ids`, `[n * k]`, [`IGNORE`] for an unused slot): also
+    /// the log-probability at each id, `[n * k]`. The loss is the labels' alone.
+    ///
+    /// # Errors
+    /// The ids fail [`check_sparse_ids`], or this head's device lacks the kernels.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_sparse(&self, ops: &Ops, hidden: &DeviceBuffer, n: u32, labels: &[u32], ids: &[u32], k: u32, logit_scale: f32) -> Result<(HeadLoss, Vec<f32>), String> {
+        let t = self.sparse_host(ops.gpu(), labels, ids, None, k)?;
+        let loss = self.forward_immediate(ops, hidden, n, labels, None, Some(&t), logit_scale);
+        Ok((loss, t.read_logprobs(ops.gpu(), n)))
+    }
+
+    /// Extra targets uploaded from the host for an immediate call, checked first.
+    fn sparse_host(&self, gpu: &Gpu, labels: &[u32], ids: &[u32], coefs: Option<&[f32]>, k: u32) -> Result<SparseTargets, String> {
+        if !self.sparse_targets_supported() {
+            return Err("HeadCe: this device's kernel set does not register 'ce_sparse_targets'/'ce_gather_logprob' (append model::head_ce::kernels())".to_string());
+        }
+        check_sparse_ids(labels, ids, k, self.head_transform().served_vocab(self.vocab as usize) as u32)?;
+        let t = SparseTargets::new(gpu, labels.len() as u32, k);
+        t.write_ids(gpu, ids);
+        if let Some(c) = coefs {
+            if c.len() != ids.len() {
+                return Err(format!("{} extra-target coefficients for {} ids", c.len(), ids.len()));
+            }
+            t.write_coefs(gpu, c);
+        }
+        Ok(t)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn forward_immediate(&self, ops: &Ops, hidden: &DeviceBuffer, n: u32, labels: &[u32], weights: Option<&[f32]>, sparse: Option<&SparseTargets>, logit_scale: f32) -> HeadLoss {
         assert_eq!(labels.len(), n as usize, "HeadCe::forward: {} labels for {n} tokens", labels.len());
         self.check_labels(labels);
         let gpu = ops.gpu();
         let (lab, nll) = (self.upload_labels(gpu, labels), gpu.storage(n as u64));
         let mut s = Vec::new();
-        self.forward_steps(ops, &mut s, hidden, n, &lab, &nll, logit_scale);
+        self.forward_steps_with(ops, &mut s, hidden, n, &lab, &nll, None, sparse, logit_scale);
         gpu.submit(&[], &s);
         let nll = gpu.read(&nll, n as usize);
         let w = |i: usize| weights.map_or(1.0, |ws| ws[i] as f64);
@@ -651,6 +884,23 @@ impl HeadCe {
     /// head's gradient added.
     #[allow(clippy::too_many_arguments)]
     pub fn backward(&self, ops: &Ops, hidden: &DeviceBuffer, d_hidden: &DeviceBuffer, n: u32, labels: &[u32], weights: Option<&[f32]>, d_scale: f32, logit_scale: f32, dw: Option<&DeviceBuffer>) {
+        self.backward_immediate(ops, hidden, d_hidden, n, labels, weights, None, d_scale, logit_scale, dw);
+    }
+
+    /// [`Self::backward`] with `k` extra targets per token: `d_hidden` receives
+    /// `d_scale * d(sum_i w_i nll(y_i) + sum_ij c_ij nll(v_ij))/d(hidden)` in one pass over the logits.
+    ///
+    /// # Errors
+    /// The ids fail [`check_sparse_ids`], the coefficients are not one per id, or this head's device lacks the kernels.
+    #[allow(clippy::too_many_arguments)]
+    pub fn backward_sparse(&self, ops: &Ops, hidden: &DeviceBuffer, d_hidden: &DeviceBuffer, n: u32, labels: &[u32], weights: &[f32], ids: &[u32], coefs: &[f32], k: u32, d_scale: f32, logit_scale: f32, dw: Option<&DeviceBuffer>) -> Result<(), String> {
+        let t = self.sparse_host(ops.gpu(), labels, ids, Some(coefs), k)?;
+        self.backward_immediate(ops, hidden, d_hidden, n, labels, Some(weights), Some(&t), d_scale, logit_scale, dw);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn backward_immediate(&self, ops: &Ops, hidden: &DeviceBuffer, d_hidden: &DeviceBuffer, n: u32, labels: &[u32], weights: Option<&[f32]>, sparse: Option<&SparseTargets>, d_scale: f32, logit_scale: f32, dw: Option<&DeviceBuffer>) {
         assert_eq!(labels.len(), n as usize, "HeadCe::backward: {} labels for {n} tokens", labels.len());
         self.check_labels(labels);
         let gpu = ops.gpu();
@@ -670,6 +920,7 @@ impl HeadCe {
                 logit_scale,
                 row_weights: wbuf.as_ref().zip(scratch.as_ref()).map(|(weights, scratch)| RowWeights { weights, scratch }),
                 dw: dw.map(|buf| HeadGrad { buf, dtype: GradDtype::F32 }),
+                sparse,
                 forward_state_held: false,
             },
         );

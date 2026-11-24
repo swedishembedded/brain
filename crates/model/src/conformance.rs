@@ -55,6 +55,8 @@ pub struct Declares {
     /// The config accepts an adapter rank and the model trains only the
     /// `.lora_a`/`.lora_b` tensors when it is given (full fine-tune otherwise).
     pub adapters: bool,
+    /// [`crate::training::TokenObjectives::enable_sparse_targets`] succeeds (extra targets in the LM-head loss).
+    pub sparse_targets: bool,
 }
 
 /// One model under test.
@@ -169,6 +171,7 @@ pub fn run<M: Model>(subject: &Subject<M>, seed: u64) -> Result<(), String> {
         logprobs_follow_logit_scale(subject, seed)?;
         crate::conformance_grad::unit_weights_reproduce_plain_training(subject, seed)?;
         crate::conformance_grad::weighted_loss_gradient_matches_finite_differences(subject, seed)?;
+        crate::conformance_grad::sparse_targets_match_their_label_equivalents(subject, seed)?;
         crate::conformance_head::chunked_head_ce_equals_unchunked(subject, seed)?;
     }
     if subject.declares.adapters {

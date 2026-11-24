@@ -205,6 +205,8 @@ pub struct Ripple {
     nlsa: Option<nlsa::NativeLsa>,
     /// Per-position loss weights, once [`model::training::TokenObjectives::enable_weighted_loss`] opted in.
     weighted: Option<model::lossw::WeightedCe>,
+    /// Extra targets per position beside the label, once `TokenObjectives::enable_sparse_targets` opted in.
+    sparse: Option<model::head_ce::SparseTargets>,
     /// The factor the logits are multiplied by before the softmax (the sampler-temperature correction).
     logit_scale: f32,
 }
@@ -255,6 +257,9 @@ impl Ripple {
         self.gpu.write(&self.targets, targets);
         let count = targets.iter().filter(|&&v| v != IGNORE).count();
         self.count.set(count.max(1) as f32);
+        if let Some(t) = &self.sparse {
+            t.clear(&self.gpu);
+        }
     }
 
     /// The stream the final norm reads (`[rows, hidden]`), after the last forward.

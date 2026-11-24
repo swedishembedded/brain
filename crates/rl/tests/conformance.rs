@@ -30,7 +30,7 @@ fn qwen3_subject() -> Subject<qwen3::Qwen> {
     Subject {
         name: "qwen3",
         config,
-        declares: Declares { token_objectives: true, adapters: true },
+        declares: Declares { token_objectives: true, adapters: true, sparse_targets: true },
         load: |path, rows, seq| qwen3::Qwen::load(path, rows, seq),
         tiers: vec![
             Tier { name: "bf16", build: |cfg, rows, seq, init| qwen3::Qwen::new_lora_dt(cfg, rows, seq, init, qwen3::Dtype::BF16), grad_rel_tol: 5e-2 },
@@ -52,7 +52,7 @@ fn gpt2_subject() -> Subject<gpt2::Gpt> {
     Subject {
         name: "gpt2",
         config,
-        declares: Declares { token_objectives: true, adapters: false },
+        declares: Declares { token_objectives: true, adapters: false, sparse_targets: false },
         load: |path, rows, seq| gpt2::Gpt::load(path, rows, seq),
         tiers: Vec::new(),
         budget: Budget::default(),
@@ -95,7 +95,7 @@ fn qwen35_subject() -> Subject<qwen35::model::Qwen35> {
     Subject {
         name: "qwen35",
         config,
-        declares: Declares { token_objectives: true, adapters: true },
+        declares: Declares { token_objectives: true, adapters: true, sparse_targets: true },
         load: |path, rows, seq| qwen35::model::Qwen35::load(path, rows, seq),
         tiers: vec![
             Tier { name: "bf16", build: |cfg, rows, seq, init| frozen(Dtype::BF16, cfg, rows, seq, init), grad_rel_tol: 5e-2 },
@@ -130,7 +130,7 @@ fn qwen35moe_subject() -> Subject<qwen35moe::model::Qwen35> {
     Subject {
         name: "qwen35moe",
         config,
-        declares: Declares { token_objectives: true, adapters: true },
+        declares: Declares { token_objectives: true, adapters: true, sparse_targets: true },
         load: |path, rows, seq| qwen35moe::model::Qwen35::load(path, rows, seq),
         tiers: Vec::new(),
         budget: Budget { tensors: Some(10), directions: 2 },
@@ -168,7 +168,7 @@ fn ricursive_subject() -> Subject<ricursive::Ripple> {
     let mut subject = Subject {
         name: "ricursive",
         config,
-        declares: Declares { token_objectives: true, adapters: true },
+        declares: Declares { token_objectives: true, adapters: true, sparse_targets: true },
         load: |path, rows, seq| Ripple::load(path, rows, seq),
         tiers: Vec::new(),
         budget: Budget { tensors: Some(12), directions: 2 },
@@ -206,7 +206,7 @@ fn inkling2_subject() -> Subject<inkling2::Inkling2Train> {
     Subject {
         name: "inkling2",
         config,
-        declares: Declares { token_objectives: true, adapters: true },
+        declares: Declares { token_objectives: true, adapters: true, sparse_targets: true },
         load: |path, rows, seq| Inkling2Train::load(path, rows, seq).unwrap_or_else(|e| panic!("{e}")),
         // A bf16 base rounds the router's logits, so a near-tie selects other experts than the f32 base and the
         // gradients are of another function: the tier is held to the f32 base with the routing pinned, in
@@ -323,7 +323,7 @@ fn a_model_without_token_objectives_is_refused_by_every_objective() {
     fn config(_adapter_rank: Option<u32>) -> FakeConfig {
         FakeConfig
     }
-    let subject: Subject<Fake> = Subject { name: "fake", config, declares: Declares { token_objectives: false, adapters: false }, load: |_, _, _| Fake, tiers: Vec::new(), budget: Budget::default(), chunked_head: None };
+    let subject: Subject<Fake> = Subject { name: "fake", config, declares: Declares { token_objectives: false, adapters: false, sparse_targets: false }, load: |_, _, _| Fake, tiers: Vec::new(), budget: Budget::default(), chunked_head: None };
     // seed: fixed so a failure reproduces
     let seed = 41;
     model::conformance::check_declaration(&subject, seed).unwrap_or_else(|e| panic!("{e}"));

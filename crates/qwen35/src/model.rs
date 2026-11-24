@@ -2987,6 +2987,7 @@ impl Qwen35 {
             self.rope_compact.set(run < self.t as usize);
         }
         self.count.set(c.max(1) as f32);
+        self.clear_sparse_targets();
 
         if self.cfg.mtp {
             // MTP predicts token t+2 from hidden_t + embed(x[t+1]). Per
@@ -4716,6 +4717,7 @@ impl Qwen35 {
                         logit_scale: 1.0,
                         row_weights: self.objectives.row_weights(),
                         dw: dw.as_ref().map(|(buf, dtype)| model::head_ce::HeadGrad { buf, dtype: *dtype }),
+                        sparse: self.objectives.sparse(),
                         forward_state_held: false,
                     },
                 );
@@ -7603,7 +7605,7 @@ impl Qwen35 {
             let ta = self.train_acts.borrow();
             let xn_final = &ta.as_ref().expect("qwen35: a head_ce build is a training build").xn_final;
             let mut s = Vec::new();
-            head.forward_steps_with(&self.ops, &mut s, xn_final, n, &self.targets, &self.ce_buf, self.objectives.argmax_out(), 1.0);
+            head.forward_steps_with(&self.ops, &mut s, xn_final, n, &self.targets, &self.ce_buf, self.objectives.argmax_out(), self.objectives.sparse(), 1.0);
             self.gpu.submit(&[], &s);
             return self.objectives.loss(&self.gpu, &self.gpu.read(&self.ce_buf, n as usize), self.count.get());
         }

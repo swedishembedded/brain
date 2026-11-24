@@ -343,7 +343,7 @@ fn a_bf16_head_accumulates_a_bf16_weight_gradient() {
         let (d_hidden, dw) = (g.storage((p.n * p.d) as u64), g.storage((p.v * p.d / 2) as u64));
         let mut s = Vec::new();
         let grad = HeadGrad { buf: &dw, dtype: GradDtype::Bf16 };
-        let b = HeadBackward { hidden: &hidden, d_hidden: &d_hidden, n: p.n as u32, labels: &labels, grad_scale: GradScale::Const(0.01), logit_scale: 1.0, row_weights: None, dw: Some(grad), forward_state_held: false };
+        let b = HeadBackward { hidden: &hidden, d_hidden: &d_hidden, n: p.n as u32, labels: &labels, grad_scale: GradScale::Const(0.01), logit_scale: 1.0, row_weights: None, dw: Some(grad), sparse: None, forward_state_held: false };
         hc.backward_steps(&ops, &mut s, &b);
         g.submit(&[], &s);
         let got: Vec<f32> = g.read(&dw, p.v * p.d / 2).iter().flat_map(|w| [f32::from_bits(w.to_bits() << 16), f32::from_bits(w.to_bits() & 0xFFFF_0000)]).collect();

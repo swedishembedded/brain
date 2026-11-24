@@ -30,7 +30,7 @@ use gpu_core::{f, DeviceBuffer, Gpu, Step};
 use model::adapter::exec::AdapterRuntime;
 use model::adapter::sites::LoraSites;
 use model::block::{self, Gqa, KernelIds};
-use model::head_ce::{GradScale, HeadBackward, HeadCe, HeadCeConfig, HeadKernels, RowWeights};
+use model::head_ce::{GradScale, HeadBackward, HeadCe, HeadCeConfig, HeadKernels, RowWeights, SparseTargets};
 use model::kv_tier::KvElement;
 use gpu_core::provider::library::GemmPrecision;
 use model::ops::{Act, Ops, TierPolicy, Weight};
@@ -263,6 +263,9 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
     // `enable_weighted_loss`) - appended here (and only here) is the whole
     // opt-in, same convention as `gradnorm_part`/`clip_coef_wg` above.
     ("scale_row", kernels::SCALE_ROW),
+    // Extra targets per position beside the label (`model::head_ce::SparseTargets`), resolved by name by `HeadCe`.
+    ("ce_sparse_targets", kernels::CE_SPARSE_TARGETS),
+    ("ce_gather_logprob", kernels::CE_GATHER_LOGPROB),
     // Coalesced RMSNorm backward-x - `block::rmsnorm_bwd` selects it over
     // `rmsnorm_dx` through the same `block::rms_variant` policy the forward
     // half uses for `rmsnorm_rows`. Registering it here is the whole opt-in;
@@ -662,6 +665,9 @@ pub struct Qwen {
     // raw `d_logits`. See `model::Batch::LmWeighted`'s doc comment for the
     // contract this realizes.
     weighted_ce: Option<model::lossw::WeightedCe>,
+    /// Extra targets per position beside the label (`TokenObjectives::enable_sparse_targets`), laid out at the run
+    /// length row after row as the targets and weights are.
+    sparse_targets: Option<model::head_ce::SparseTargets>,
     /// `Some` once `set_logit_scale` was first given a scale other than 1: the
     /// head's logits are then scaled in place right after the LM head GEMM.
     logit_scale: Option<model::logitscale::LogitScale>,
@@ -1657,6 +1663,7 @@ impl Qwen {
             mrope_cos: st(1),
             mrope_sin: st(1),
             weighted_ce: None,
+            sparse_targets: None,
             logit_scale: None,
             decode_mrope_cos,
             decode_mrope_sin,
@@ -1761,6 +1768,9 @@ impl Qwen {
         self.gpu.write(&self.targets, &targets);
         let c = y.iter().filter(|&&v| v != IGNORE).count();
         self.count.set(c.max(1) as f32);
+        if let Some(t) = &self.sparse_targets {
+            t.clear(&self.gpu);
+        }
     }
 
     /// The tokens per row worth computing for `targets` (`b` rows of `t`): a training batch needs nothing past the
@@ -2400,7 +2410,7 @@ impl Qwen {
     fn forward_steps(&self, b_use: u32, t_use: u32) -> Tape {
         let mut tape = self.body_tape(b_use, t_use);
         if self.shard.head && !self.external_head.get() {
-            self.head_ce().forward_steps(&self.ops, &mut tape.steps, &self.xn_final, b_use * t_use, &self.targets, &self.ce_buf, 1.0);
+            self.head_ce().forward_steps_with(&self.ops, &mut tape.steps, &self.xn_final, b_use * t_use, &self.targets, &self.ce_buf, None, self.sparse_targets.as_ref(), 1.0);
         }
         tape
     }
@@ -2748,6 +2758,7 @@ impl Qwen {
                         logit_scale: 1.0,
                         row_weights,
                         dw: head_dw.as_ref().map(|(buf, dtype)| model::head_ce::HeadGrad { buf, dtype: *dtype }),
+                        sparse: self.sparse_targets.as_ref(),
                         forward_state_held: true,
                     },
                 );
@@ -3199,6 +3210,34 @@ impl Qwen {
         }
     }
 
+    /// `model::training::TokenObjectives::enable_sparse_targets`: the head's extra targets, after which the recorded
+    /// passes are recorded again to read them.
+    pub fn enable_sparse_targets(&mut self, k: u32) -> Result<(), String> {
+        let had = self.sparse_targets.is_some();
+        SparseTargets::enable(&mut self.sparse_targets, &self.gpu, self.head_ce.as_ref(), self.weighted_ce.is_some(), self.b * self.t, k, "qwen3")?;
+        if !had && !self.decode_only {
+            self.fwd_steps = self.forward_steps(self.b, self.t);
+            self.run_tapes.get_mut().clear();
+            if !self.bwd_steps.steps.is_empty() {
+                self.bwd_steps = self.build_backward_steps();
+            }
+        }
+        Ok(())
+    }
+
+    /// Per-position values of the caller's `[b, t, width]` layout as the device holds them: each row's first
+    /// [`Self::run_len`] positions, row after row (the whole batch when nothing is trimmed), the rest `fill`.
+    fn at_run_length<T: Copy>(&self, values: &[T], width: usize, fill: T) -> Vec<T> {
+        let (t, run, n) = (self.t as usize * width, self.run_len() as usize * width, (self.b * self.t) as usize * width);
+        let mut out: Vec<T> = values.chunks(t).flat_map(|row| row[..run].iter().copied()).collect();
+        out.resize(n, fill);
+        out
+    }
+
+    fn sparse(&self) -> Result<&SparseTargets, String> {
+        self.sparse_targets.as_ref().ok_or_else(|| "qwen3: extra targets need enable_sparse_targets first".to_string())
+    }
+
     /// Multiply the head's logits by `scale` before the softmax of the loss,
     /// its gradient and [`Self::batch_token_logprobs`] (see
     /// `model::training::TokenObjectives::set_logit_scale`). The first scale
@@ -3344,7 +3383,7 @@ impl Qwen {
         let (ids, scratch) = self.argmax_out.get_or_init(|| (self.gpu.storage(u64::from(self.b * self.t)), head.argmax_scratch(&self.gpu)));
         self.set_batch(tokens, targets);
         let mut tape = self.body_tape(1, t_use);
-        head.forward_steps_with(&self.ops, &mut tape.steps, &self.xn_final, t_use, &self.targets, &self.ce_buf, Some(model::head_ce::ArgmaxOut { ids, scratch }), 1.0);
+        head.forward_steps_with(&self.ops, &mut tape.steps, &self.xn_final, t_use, &self.targets, &self.ce_buf, Some(model::head_ce::ArgmaxOut { ids, scratch }), None, 1.0);
         tape.submit(&self.gpu);
         let nll = self.gpu.read(&self.ce_buf, t_use as usize);
         let picked = self.gpu.read(ids, t_use as usize).into_iter().map(|id| id as u32).collect();
@@ -4498,6 +4537,29 @@ impl model::ModelConfig for QwenConfig {
 impl model::training::TokenObjectives for Qwen {
     fn enable_weighted_loss(&mut self) {
         Qwen::enable_weighted_loss(self)
+    }
+    fn enable_sparse_targets(&mut self, k: u32) -> Result<(), String> {
+        Qwen::enable_sparse_targets(self, k)
+    }
+    fn set_sparse_target_ids(&self, ids: &[u32]) -> Result<(), String> {
+        let t = self.sparse()?;
+        if ids.len() != (self.b * self.t * t.k()) as usize {
+            return Err(format!("qwen3: {} extra-target ids for {} positions of {}", ids.len(), self.b * self.t, t.k()));
+        }
+        t.write_ids_checked(&self.gpu, &self.at_run_length(ids, t.k() as usize, IGNORE), self.cfg.vocab)
+    }
+    fn set_sparse_target_weights(&self, coefs: &[f32]) -> Result<(), String> {
+        let t = self.sparse()?;
+        if coefs.len() != (self.b * self.t * t.k()) as usize {
+            return Err(format!("qwen3: {} extra-target coefficients for {} positions of {}", coefs.len(), self.b * self.t, t.k()));
+        }
+        t.write_coefs_checked(&self.gpu, &self.at_run_length(coefs, t.k() as usize, 0.0))
+    }
+    fn batch_sparse_target_logprobs(&self) -> Option<Vec<f32>> {
+        let t = self.sparse_targets.as_ref()?;
+        let (k, t_len, run) = (t.k() as usize, self.t as usize, self.run_len() as usize);
+        let computed = t.read_logprobs(&self.gpu, self.b * self.run_len());
+        Some(computed.chunks(run * k).flat_map(|row| row.iter().copied().chain(std::iter::repeat_n(0.0, (t_len - run) * k))).collect())
     }
     fn batch_token_logprobs(&self) -> Vec<f32> {
         Qwen::batch_token_logprobs(self)

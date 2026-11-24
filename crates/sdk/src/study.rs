@@ -276,7 +276,7 @@ impl ArchEntry {
             Capability::ChatFineTune => self.chat_fine_tune,
             Capability::ChatLoraFineTune => self.chat_lora_fine_tune,
             // Whether the trainer applies it is the model's answer when the run is prepared; the registry holds no row for it.
-            Capability::KvRoundtrip | Capability::RoutingReplay => true,
+            Capability::KvRoundtrip | Capability::RoutingReplay | Capability::SparseTargets => true,
             // The model answers it (`Model::reads_packed_rows`) when the packed objective is prepared; no registry row.
             Capability::PackedRows => true,
         };

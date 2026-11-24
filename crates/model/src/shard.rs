@@ -1251,6 +1251,18 @@ impl<M: Shardable> TokenObjectives for PipelineModel<M> {
     fn set_logit_scale(&mut self, scale: f32) {
         self.head_objectives_mut().set_logit_scale(scale);
     }
+    fn enable_sparse_targets(&mut self, k: u32) -> Result<(), String> {
+        self.head_objectives_mut().enable_sparse_targets(k)
+    }
+    fn set_sparse_target_ids(&self, ids: &[u32]) -> Result<(), String> {
+        self.pipe.borrow().head_stage().token_objectives().expect(HEAD_HAS_OBJECTIVES).set_sparse_target_ids(ids)
+    }
+    fn set_sparse_target_weights(&self, coefs: &[f32]) -> Result<(), String> {
+        self.pipe.borrow().head_stage().token_objectives().expect(HEAD_HAS_OBJECTIVES).set_sparse_target_weights(coefs)
+    }
+    fn batch_sparse_target_logprobs(&self) -> Option<Vec<f32>> {
+        self.pipe.borrow().head_stage().token_objectives().expect(HEAD_HAS_OBJECTIVES).batch_sparse_target_logprobs()
+    }
 }
 
 /// `PipelineModel::token_objectives*` return `Some` only when this holds.

@@ -18,6 +18,10 @@
 //!   `1/count` carries the extra factor (`LogitScale::grad_factor`). This
 //!   model records no tape, so a new scale takes effect on the next call.
 //!
+//! * **Extra targets.** Up to K `(id, weight)` pairs per position beside the label
+//!   (`model::head_ce::SparseTargets`): the head reads their log-probabilities in
+//!   the forward and adds their gradient in the same backward pass.
+//!
 //! The capability exists on a training build with the chunked head: not on an
 //! inference build, a pipeline stage without the head, or a build with the
 //! multi-token-prediction head (its loss has a second term no weight reaches).
@@ -29,7 +33,7 @@
 //! an email to info@swedishembedded.com.
 
 use gpu_core::{DeviceBuffer, Gpu};
-use model::head_ce::RowWeights;
+use model::head_ce::{RowWeights, SparseTargets};
 use model::logitscale::LogitScale;
 use model::training::TokenObjectives;
 
@@ -42,6 +46,7 @@ pub(super) struct State {
     weighted: Option<Weighted>,
     scale: Option<LogitScale>,
     argmax: Option<Argmax>,
+    sparse: Option<SparseTargets>,
 }
 
 /// The per-row argmax readout's buffers: `[b*t]` token ids (as the reduction's
@@ -86,6 +91,11 @@ impl State {
         }
     }
 
+    /// The extra targets of the head, when the model opted into them.
+    pub(super) fn sparse(&self) -> Option<&SparseTargets> {
+        self.sparse.as_ref()
+    }
+
     /// The argmax readout buffers, when the model opted into it.
     pub(super) fn argmax_out(&self) -> Option<model::head_ce::ArgmaxOut<'_>> {
         self.argmax.as_ref().map(|a| model::head_ce::ArgmaxOut { ids: &a.ids, scratch: &a.scratch })
@@ -101,22 +111,36 @@ impl Qwen35 {
     /// Every sequence's first `t_user` positions of a per-position buffer
     /// that is padded to `t` per sequence.
     fn unpad<T: Copy>(&self, padded: &[T]) -> Vec<T> {
-        let (tu, tp) = (self.t_user as usize, self.t as usize);
-        if tu == tp {
-            return padded.to_vec();
-        }
+        self.unpad_wide(padded, 1)
+    }
+
+    /// [`Self::unpad`] of a buffer with `width` values per position.
+    fn unpad_wide<T: Copy>(&self, padded: &[T], width: usize) -> Vec<T> {
+        let (tu, tp) = (self.t_user as usize * width, self.t as usize * width);
         (0..self.b as usize).flat_map(|s| padded[s * tp..s * tp + tu].iter().copied()).collect()
     }
 
     /// The inverse of [`Self::unpad`], filling padded positions with `fill`.
     fn pad<T: Copy>(&self, values: &[T], fill: T) -> Vec<T> {
-        let (tu, tp, b) = (self.t_user as usize, self.t as usize, self.b as usize);
-        assert_eq!(values.len(), b * tu, "qwen35: {} per-position values for {b} sequences of {tu}", values.len());
+        self.pad_wide(values, fill, 1)
+    }
+
+    /// [`Self::pad`] of `width` values per position.
+    fn pad_wide<T: Copy>(&self, values: &[T], fill: T, width: usize) -> Vec<T> {
+        let (tu, tp, b) = (self.t_user as usize * width, self.t as usize * width, self.b as usize);
+        assert_eq!(values.len(), b * tu, "qwen35: {} per-position values for {b} sequences of {} x {width}", values.len(), self.t_user);
         let mut padded = vec![fill; b * tp];
         for s in 0..b {
             padded[s * tp..s * tp + tu].copy_from_slice(&values[s * tu..(s + 1) * tu]);
         }
         padded
+    }
+
+    /// Mark every extra-target slot unused: what each new batch starts with.
+    pub(super) fn clear_sparse_targets(&self) {
+        if let Some(t) = &self.objectives.sparse {
+            t.clear(&self.gpu);
+        }
     }
 
     /// Give every supervised position weight 1 (a [`model::Batch::Lm`] on a
@@ -207,6 +231,36 @@ impl TokenObjectives for Qwen35 {
 
     fn set_kv_roundtrip(&mut self, element: Option<model::kv_tier::KvElement>) -> Result<(), String> {
         Qwen35::set_kv_roundtrip(self, element)
+    }
+
+    fn enable_sparse_targets(&mut self, k: u32) -> Result<(), String> {
+        let weighted = self.objectives.is_weighted();
+        SparseTargets::enable(&mut self.objectives.sparse, &self.gpu, self.head_ce.as_ref(), weighted, self.b * self.t, k, "qwen35")
+    }
+
+    fn set_sparse_target_ids(&self, ids: &[u32]) -> Result<(), String> {
+        let t = self.objectives.sparse.as_ref().ok_or("qwen35: set_sparse_target_ids needs enable_sparse_targets first")?;
+        let valid = self.head_ce.as_ref().map_or(self.cfg.vocab, |h| h.head_transform().served_vocab(self.cfg.vocab as usize) as u32);
+        if ids.len() != (self.b * self.t_user * t.k()) as usize {
+            return Err(format!("qwen35: {} extra-target ids for {} positions of {}", ids.len(), self.b * self.t_user, t.k()));
+        }
+        t.write_ids_checked(&self.gpu, &self.pad_wide(ids, model::IGNORE, t.k() as usize), valid)
+    }
+
+    fn set_sparse_target_weights(&self, coefs: &[f32]) -> Result<(), String> {
+        let t = self.objectives.sparse.as_ref().ok_or("qwen35: set_sparse_target_weights needs enable_sparse_targets first")?;
+        if coefs.len() != (self.b * self.t_user * t.k()) as usize {
+            return Err(format!("qwen35: {} extra-target coefficients for {} positions of {}", coefs.len(), self.b * self.t_user, t.k()));
+        }
+        t.write_coefs_checked(&self.gpu, &self.pad_wide(coefs, 0.0, t.k() as usize))
+    }
+
+    fn batch_sparse_target_logprobs(&self) -> Option<Vec<f32>> {
+        let t = self.objectives.sparse.as_ref()?;
+        let k = t.k() as usize;
+        let mut lps = t.read_logprobs(&self.gpu, self.b * self.run_len());
+        lps.resize((self.b * self.t) as usize * k, 0.0);
+        Some(self.unpad_wide(&lps, k))
     }
 
     fn set_logit_scale(&mut self, scale: f32) {

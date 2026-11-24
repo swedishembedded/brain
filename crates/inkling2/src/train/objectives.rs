@@ -11,6 +11,7 @@
 //! The loss is per token below a chunked head, so a per-token weight scales the head's logit gradient
 //! ([`model::head_ce::RowWeights`]) and the whole recipe's backward differentiates the weighted loss unchanged. The
 //! logit scale multiplies the logits before the soft cap inside the head (forward, gradient and log-probabilities).
+//! Extra targets per position ([`model::head_ce::SparseTargets`]) enter the same head backward.
 //! Routing replay forces every MoE call of the forward - one per logical visit, in visit order - to a recorded
 //! selection with the router's own weights ([`model::moe::router_fwd_replay`]); the backward's recompute replays the
 //! same record, so it differentiates what the forward ran.
@@ -45,6 +46,25 @@ impl TokenObjectives for Inkling2Train {
     fn set_loss_denominator(&self, tokens: f32) {
         assert!(tokens > 0.0, "the loss denominator must be positive, got {tokens}");
         self.count.set(tokens);
+    }
+
+    fn enable_sparse_targets(&mut self, k: u32) -> Result<(), String> {
+        let weighted = self.weighted.borrow().is_some();
+        let rows = self.rows();
+        model::head_ce::SparseTargets::enable(&mut self.sparse, self.ops.gpu(), Some(&self.head), weighted, rows, k, "inkling2")
+    }
+
+    fn set_sparse_target_ids(&self, ids: &[u32]) -> Result<(), String> {
+        let t = self.sparse.as_ref().ok_or("inkling2: set_sparse_target_ids needs enable_sparse_targets first")?;
+        t.write_ids_checked(self.ops.gpu(), ids, self.tc.cfg.valid_vocab)
+    }
+
+    fn set_sparse_target_weights(&self, coefs: &[f32]) -> Result<(), String> {
+        self.sparse.as_ref().ok_or("inkling2: set_sparse_target_weights needs enable_sparse_targets first")?.write_coefs_checked(self.ops.gpu(), coefs)
+    }
+
+    fn batch_sparse_target_logprobs(&self) -> Option<Vec<f32>> {
+        self.sparse.as_ref().map(|t| t.read_logprobs(self.ops.gpu(), self.rows()))
     }
 
     fn set_logit_scale(&mut self, scale: f32) {

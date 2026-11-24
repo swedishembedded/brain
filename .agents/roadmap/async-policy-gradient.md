@@ -40,6 +40,23 @@ mathematics first, then provenance, then the streaming job, then performance dri
 The cross-repository plan, its package numbering (A01-A53) and its review are kept by the orchestrating application
 that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A32-A33, A37-A49 and are the items below.
 
+## Done
+
+- [x] **Sparse extra targets in the LM-head loss** (`model::head_ce::SparseTargets`, `TokenObjectives::
+      enable_sparse_targets` / `set_sparse_target_ids` / `set_sparse_target_weights` / `batch_sparse_target_logprobs`,
+      `Capability::SparseTargets`): per position up to K `(id, weight)` pairs in one backward pass. `ce_sparse_targets`
+      (WGSL, one thread per logit, a K-term scan, no atomics) writes `W softmax - w e_y - sum_j c_j e_{v_j}` from the
+      plain CE gradient before the soft cap and the scales, so the extra terms pass through both; `ce_gather_logprob`
+      reads `log p(v_j) = z_v - z_y - nll` from the chunk's logits without a second pass over the row. Implemented on
+      every `HeadCe` trainer (qwen3, qwen35, qwen35moe, inkling2, ricursive, `PipelineModel` delegates); gpt2 (no
+      chunked head) refuses by the trait default. No CUDA candidate: the CE elementwise kernels have none and no gate
+      requires one. Tests: `model` `it::head_ce_sparse` (f64 oracle over 150 tokens / 64-row chunks / 250-row vocab
+      windows, F32 and BF16, soft cap, duplicate ids, label ids, unused slots, ignored rows; all-unused equals the
+      weighted path to 1e-6; refusals), and conformance C3b `sparse_targets_match_their_label_equivalents` on every
+      registered model (one backward with extra targets equals the sum of label-equivalent weighted backwards to 1e-4
+      of the largest gradient; read-back log-probabilities equal the label path's to 1e-5; verified to fail with the
+      qwen35 backward wiring removed, where a finite-difference form at the conformance tolerances did not).
+
 ## Open
 
 - [ ] **One policy-gradient configuration** (A03-A04; `engineering-cleanup.md` EC-1, EC-2): settings declared once
@@ -50,11 +67,6 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       estimator's sampled gradient against its own exact enumerated expectation (complete groups for group-standardised
       advantages); repartitioning the same tokens across micro-batches leaves the step's gradient unchanged; golden
       fixtures from the pinned TRL code for advantages, masks and centring coefficients (an isolated tool, CPU only).
-- [ ] **Sparse extra targets in the LM-head loss** (`model::head_ce`, `model::training::TokenObjectives`): per
-      position up to K `(id, weight)` pairs added to the weighted cross-entropy gradient
-      (`d logits = W softmax - w e_y - sum_j c_j e_{v_j}`, `W = w + sum_j c_j`) and the trainer's log-probability at
-      those ids read back after the forward. One shared implementation for every model on `HeadCe`; a model without it
-      is refused by name.
 - [ ] **Score-centred policy-gradient objective** (`rl::objective`): TRL's estimator (masked importance weight
       `f(r) = r 1[low <= r <= high]`, centring over the sampler's top-K plus a tail bucket), a separate algorithm next
       to the clipped surrogate, sharing `pg_batch`. Analytic tests on a tiny vocabulary against the exact expectation,

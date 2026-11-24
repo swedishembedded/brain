@@ -2024,6 +2024,7 @@ impl Qwen35 {
         self.gpu.write(&self.targets, targets);
         let c = targets.iter().filter(|&&v| v != model::IGNORE).count();
         self.count.set(c.max(1) as f32);
+        self.clear_sparse_targets();
     }
 
     // ---- vision-language embedding splice seam (see `crate::vl::Qwen35Vl`) --
@@ -3210,6 +3211,7 @@ impl Qwen35 {
                         logit_scale: 1.0,
                         row_weights: self.objectives.row_weights(),
                         dw,
+                        sparse: self.objectives.sparse(),
                         forward_state_held: false,
                     },
                 );
@@ -3426,7 +3428,7 @@ impl Qwen35 {
             let ta = self.train_acts.borrow();
             let xn_final = &ta.as_ref().expect("qwen35moe: a head_ce build is a training build").xn_final;
             let mut s = Vec::new();
-            head.forward_steps(&self.ops, &mut s, xn_final, n, &self.targets, &self.ce_buf, 1.0);
+            head.forward_steps_with(&self.ops, &mut s, xn_final, n, &self.targets, &self.ce_buf, None, self.objectives.sparse(), 1.0);
             self.gpu.submit(&[], &s);
             return self.objectives.loss(&self.gpu, &self.gpu.read(&self.ce_buf, n as usize), self.count.get());
         }

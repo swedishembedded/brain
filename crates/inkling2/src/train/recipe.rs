@@ -537,7 +537,7 @@ impl Inkling2Train {
     pub(super) fn head_loss(&self, fwd: &Saved) -> f32 {
         let n = fwd.rows.n();
         let mut s = Vec::new();
-        self.head.forward_steps(&self.ops, &mut s, &fwd.normed, n, &fwd.rows.labels, &fwd.nll, self.logit_scale.get());
+        self.head.forward_steps_with(&self.ops, &mut s, &fwd.normed, n, &fwd.rows.labels, &fwd.nll, None, self.sparse.as_ref(), self.logit_scale.get());
         self.flush(&mut s);
         let nll = self.g().read(&fwd.nll, n as usize);
         let sum: f64 = match self.weighted.borrow().as_ref() {
@@ -836,6 +836,7 @@ impl Inkling2Train {
             logit_scale: self.logit_scale.get(),
             row_weights: weighted.as_ref().map(|(weights, scratch)| RowWeights { weights, scratch }),
             dw: self.lin_grad(&names::unembed()).map(|buf| model::head_ce::HeadGrad { buf, dtype: model::ops::GradDtype::F32 }),
+            sparse: self.sparse.as_ref(),
             forward_state_held: false,
         };
         self.head.backward_steps(&self.ops, &mut s, &head);

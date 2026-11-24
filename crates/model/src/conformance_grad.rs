@@ -159,6 +159,86 @@ pub fn weighted_loss_gradient_matches_finite_differences<M: Model>(subject: &Sub
     Ok(())
 }
 
+/// C3b: extra targets per position ([`crate::training::TokenObjectives::enable_sparse_targets`]) on a model that
+/// declares them, or a refusal on one that does not. An extra target `(v, c)` adds `c * (-log p(v))` to the loss, which
+/// is exactly what the label `v` with weight `c` adds, so with three extra targets per supervised position (a random
+/// id, the same id again, the label itself; signed coefficients) the model's one backward must equal the sum of four
+/// weighted-loss backwards: the labels at their weights, and each slot's ids as labels at its coefficients, all over
+/// one denominator. The read-back log-probability at a slot is the one a batch with that slot's ids as labels reads.
+/// At the unit logit scale and at `1/2`. These are identities between two paths of the model, exact up to rounding,
+/// so they hold however small a tensor's gradient is at a random initialisation.
+pub fn sparse_targets_match_their_label_equivalents<M: Model>(subject: &Subject<M>, seed: u64) -> Result<(), String> {
+    const K: usize = 3;
+    let (mut m, _) = build(subject, trained_rank(subject), BATCH, seed);
+    randomize_adapters(&m, seed);
+    let vocab = subject_vocab(subject);
+    let (tokens, targets) = batch(vocab);
+    let objectives = require_token_objectives(&mut m).map_err(|e| e.to_string())?;
+    objectives.enable_weighted_loss();
+    match (objectives.enable_sparse_targets(K as u32), subject.declares.sparse_targets) {
+        (Ok(()), true) => {}
+        (Err(_), false) => return Ok(()),
+        (Ok(()), false) => return Err(format!("{}: declares no extra targets yet enable_sparse_targets succeeded", subject.name)),
+        (Err(e), true) => return Err(format!("{}: declares extra targets but refused them: {e}", subject.name)),
+    }
+    if objectives.enable_sparse_targets(K as u32 + 1).is_ok() {
+        return Err(format!("{}: enable_sparse_targets accepted a second k", subject.name));
+    }
+    let n = tokens.len();
+    let weights: Vec<f32> = (0..n).map(|i| if i % 3 == 0 { 0.0 } else { 0.5 + 0.1 * i as f32 }).collect();
+    let mut rng = Rng::new(seed ^ 0x51ab);
+    let supervised = |i: usize| targets[i] != crate::IGNORE;
+    let other: Vec<u32> = (0..n).map(|i| if supervised(i) { (targets[i] + 1 + (rng.next_f32() * (vocab - 1) as f32) as u32 % (vocab - 1)) % vocab } else { crate::IGNORE }).collect();
+    // Slot j's ids as a label row: the random id twice, then the label.
+    let slot_ids: [Vec<u32>; K] = [other.clone(), other.clone(), targets.clone()];
+    let slot_coefs: [Vec<f32>; K] = std::array::from_fn(|_| (0..n).map(|i| if supervised(i) { 2.0 * rng.next_f32() - 1.0 } else { 0.0 }).collect());
+    let ids: Vec<u32> = (0..n).flat_map(|i| slot_ids.iter().map(move |s| s[i])).collect();
+    let coefs: Vec<f32> = (0..n).flat_map(|i| slot_coefs.iter().map(move |c| c[i])).collect();
+    let denominator = 7.0f32;
+    let weighted = |m: &M, labels: &[u32], w: &[f32]| {
+        m.set_batch(Batch::LmWeighted { tokens: &tokens, targets: labels, weights: w });
+        m.token_objectives().expect("checked above").set_loss_denominator(denominator);
+    };
+    for scale in [1.0f32, 0.5] {
+        require_token_objectives(&mut m).map_err(|e| e.to_string())?.set_logit_scale(scale);
+        // The label-equivalent sum, and each slot's log-probabilities read as labels.
+        weighted(&m, &targets, &weights);
+        let mut want = gradients(&m);
+        let mut want_lp = Vec::with_capacity(K);
+        for (labels, c) in slot_ids.iter().zip(&slot_coefs) {
+            weighted(&m, labels, c);
+            // Read right after a forward: a model may drop its forward state in the backward.
+            m.forward();
+            want_lp.push(m.token_objectives().expect("checked above").batch_token_logprobs());
+            for ((_, total), (_, g)) in want.iter_mut().zip(gradients(&m)) {
+                total.iter_mut().zip(&g).for_each(|(t, g)| *t += g);
+            }
+        }
+        weighted(&m, &targets, &weights);
+        let o = m.token_objectives().expect("checked above");
+        o.set_sparse_target_ids(&ids)?;
+        o.set_sparse_target_weights(&coefs)?;
+        m.forward();
+        let lps = m.token_objectives().expect("checked above").batch_sparse_target_logprobs().ok_or_else(|| format!("{}: no extra-target log-probabilities after a forward", subject.name))?;
+        let got = gradients(&m);
+        for i in (0..n).filter(|&i| supervised(i)) {
+            for (j, lp) in want_lp.iter().enumerate() {
+                if (lps[i * K + j] - lp[i]).abs() > 1e-5 * lp[i].abs().max(1.0) {
+                    return Err(format!("{}: position {i} slot {j} at logit scale {scale}: extra-target log-probability {} vs {} as a label", subject.name, lps[i * K + j], lp[i]));
+                }
+            }
+        }
+        let scale_all = want.iter().map(|(_, w)| max_abs(w)).fold(0.0, f32::max).max(1e-12);
+        for ((name, g), (_, w)) in got.iter().zip(&want) {
+            let off = g.iter().zip(w).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+            if off > 1e-4 * scale_all {
+                return Err(format!("{}: {name} at logit scale {scale}: the gradient with extra targets is {off:e} from the sum of its label equivalents (largest gradient {scale_all:e})", subject.name));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// C9: for each declared frozen-base tier, the gradients of the trainable
 /// tensors are within the tier's stated tolerance of the f32 base's.
 pub fn tiers_track_the_f32_gradients<M: Model>(subject: &Subject<M>, seed: u64) -> Result<(), String> {

@@ -20,7 +20,7 @@
 //! email to info@swedishembedded.com.
 
 use gpu_core::{DeviceBuffer, Gpu};
-use model::head_ce::RowWeights;
+use model::head_ce::{RowWeights, SparseTargets};
 use model::logitscale::LogitScale;
 use model::training::TokenObjectives;
 
@@ -31,6 +31,7 @@ use super::Qwen35;
 pub(super) struct State {
     weighted: Option<Weighted>,
     scale: Option<LogitScale>,
+    sparse: Option<SparseTargets>,
 }
 
 /// The per-token weight row (`[b*t]`) and the scratch the head writes the weighted logit gradient to.
@@ -43,6 +44,11 @@ impl State {
     /// The head backward's row weights, when weighted loss is enabled.
     pub(super) fn row_weights(&self) -> Option<RowWeights<'_>> {
         self.weighted.as_ref().map(|w| RowWeights { weights: &w.weights, scratch: &w.scratch })
+    }
+
+    /// The head's extra targets, when the model opted into them.
+    pub(super) fn sparse(&self) -> Option<&SparseTargets> {
+        self.sparse.as_ref()
     }
 
     /// The CE gradient's scalar factor for a batch of `count` supervised tokens.
@@ -74,6 +80,13 @@ impl Qwen35 {
     pub(super) fn reset_loss_weights(&self) {
         if let Some(w) = &self.objectives.weighted {
             self.gpu.write_f32(&w.weights, &vec![1.0; (self.b * self.t) as usize]);
+        }
+    }
+
+    /// Mark every extra-target slot unused: what each new batch starts with.
+    pub(super) fn clear_sparse_targets(&self) {
+        if let Some(t) = &self.objectives.sparse {
+            t.clear(&self.gpu);
         }
     }
 
@@ -110,6 +123,24 @@ impl TokenObjectives for Qwen35 {
     fn set_loss_denominator(&self, tokens: f32) {
         assert!(tokens > 0.0, "the loss denominator must be positive, got {tokens}");
         self.count.set(tokens);
+    }
+
+    fn enable_sparse_targets(&mut self, k: u32) -> Result<(), String> {
+        let weighted = self.objectives.weighted.is_some();
+        SparseTargets::enable(&mut self.objectives.sparse, &self.gpu, self.head_ce.as_ref(), weighted, self.b * self.t, k, "qwen35moe")
+    }
+
+    fn set_sparse_target_ids(&self, ids: &[u32]) -> Result<(), String> {
+        let t = self.objectives.sparse.as_ref().ok_or("qwen35moe: set_sparse_target_ids needs enable_sparse_targets first")?;
+        t.write_ids_checked(&self.gpu, ids, self.cfg.vocab)
+    }
+
+    fn set_sparse_target_weights(&self, coefs: &[f32]) -> Result<(), String> {
+        self.objectives.sparse.as_ref().ok_or("qwen35moe: set_sparse_target_weights needs enable_sparse_targets first")?.write_coefs_checked(&self.gpu, coefs)
+    }
+
+    fn batch_sparse_target_logprobs(&self) -> Option<Vec<f32>> {
+        self.objectives.sparse.as_ref().map(|t| t.read_logprobs(&self.gpu, self.b * self.t))
     }
 
     fn set_logit_scale(&mut self, scale: f32) {

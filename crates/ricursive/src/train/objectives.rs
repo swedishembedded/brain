@@ -42,6 +42,30 @@ impl TokenObjectives for Ripple {
         self.count.set(tokens);
     }
 
+    fn enable_sparse_targets(&mut self, k: u32) -> Result<(), String> {
+        let had = self.sparse.is_some();
+        let (weighted, rows) = (self.weighted.is_some(), self.rows());
+        model::head_ce::SparseTargets::enable(&mut self.sparse, &self.gpu, self.head_ce.as_ref(), weighted, rows, k, "ricursive")?;
+        if !had {
+            // The recorded passes read the extra targets' buffers.
+            self.record();
+        }
+        Ok(())
+    }
+
+    fn set_sparse_target_ids(&self, ids: &[u32]) -> Result<(), String> {
+        let t = self.sparse.as_ref().ok_or("ricursive: set_sparse_target_ids needs enable_sparse_targets first")?;
+        t.write_ids_checked(&self.gpu, ids, self.cfg.model.vocab_size as u32)
+    }
+
+    fn set_sparse_target_weights(&self, coefs: &[f32]) -> Result<(), String> {
+        self.sparse.as_ref().ok_or("ricursive: set_sparse_target_weights needs enable_sparse_targets first")?.write_coefs_checked(&self.gpu, coefs)
+    }
+
+    fn batch_sparse_target_logprobs(&self) -> Option<Vec<f32>> {
+        self.sparse.as_ref().map(|t| t.read_logprobs(&self.gpu, self.rows()))
+    }
+
     fn set_logit_scale(&mut self, scale: f32) {
         assert!(scale.is_finite() && scale > 0.0, "ricursive: the logit scale must be finite and positive, got {scale}");
         if scale != self.logit_scale {

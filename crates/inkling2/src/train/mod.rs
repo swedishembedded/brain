@@ -285,6 +285,8 @@ pub struct Inkling2Train {
     count: Cell<f32>,
     saved: RefCell<Option<recipe::Saved>>,
     weighted: RefCell<Option<(DeviceBuffer, DeviceBuffer)>>,
+    /// Extra targets per position beside the label ([`TokenObjectives::enable_sparse_targets`]).
+    sparse: Option<model::head_ce::SparseTargets>,
     logit_scale: Cell<f32>,
     replay: RefCell<Option<Arc<RoutingReplay>>>,
     /// The f32 base of a LoRA build made from in-memory tensors, kept so [`model::Model::save`] writes a file
@@ -587,6 +589,7 @@ impl Inkling2Train {
             count: Cell::new(1.0),
             saved: RefCell::new(None),
             weighted: RefCell::new(None),
+            sparse: None,
             logit_scale: Cell::new(1.0),
             replay: RefCell::new(None),
             taken: RefCell::new(Vec::new()),
@@ -775,6 +778,9 @@ impl Inkling2Train {
         *self.batch.borrow_mut() = HostBatch { tokens: tokens.to_vec(), targets: targets.to_vec(), segments: segments.map(<[u32]>::to_vec) };
         if let Some((w, _)) = self.weighted.borrow().as_ref() {
             self.g().write_f32(w, &vec![1.0; n]);
+        }
+        if let Some(t) = &self.sparse {
+            t.clear(self.g());
         }
         *self.saved.borrow_mut() = None;
     }

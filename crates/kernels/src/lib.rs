@@ -306,12 +306,16 @@ pub const BROADCAST_ADD_HW_DA: &str = include_str!("../wgsl/broadcast_add_hw_da.
 pub const BSQ_QUANTIZE: &str = include_str!("../wgsl/bsq_quantize.wgsl");
 /// `wgsl/causal_conv1d_step.wgsl`
 pub const CAUSAL_CONV1D_STEP: &str = include_str!("../wgsl/causal_conv1d_step.wgsl");
+/// `wgsl/ce_gather_logprob.wgsl`
+pub const CE_GATHER_LOGPROB: &str = include_str!("../wgsl/ce_gather_logprob.wgsl");
 /// `wgsl/ce_grad.wgsl`
 pub const CE_GRAD: &str = include_str!("../wgsl/ce_grad.wgsl");
 /// `wgsl/ce_grad_masked.wgsl`
 pub const CE_GRAD_MASKED: &str = include_str!("../wgsl/ce_grad_masked.wgsl");
 /// `wgsl/ce_grad_stats.wgsl`
 pub const CE_GRAD_STATS: &str = include_str!("../wgsl/ce_grad_stats.wgsl");
+/// `wgsl/ce_sparse_targets.wgsl`
+pub const CE_SPARSE_TARGETS: &str = include_str!("../wgsl/ce_sparse_targets.wgsl");
 /// `wgsl/ce_stats.wgsl`
 pub const CE_STATS: &str = include_str!("../wgsl/ce_stats.wgsl");
 /// `wgsl/ce_value.wgsl`
@@ -1957,9 +1961,11 @@ pub const ALL: &[(&str, &str)] = &[
     ("broadcast_add_hw_da", BROADCAST_ADD_HW_DA),
     ("bsq_quantize", BSQ_QUANTIZE),
     ("causal_conv1d_step", CAUSAL_CONV1D_STEP),
+    ("ce_gather_logprob", CE_GATHER_LOGPROB),
     ("ce_grad", CE_GRAD),
     ("ce_grad_masked", CE_GRAD_MASKED),
     ("ce_grad_stats", CE_GRAD_STATS),
+    ("ce_sparse_targets", CE_SPARSE_TARGETS),
     ("ce_stats", CE_STATS),
     ("ce_value", CE_VALUE),
     ("ce_value_masked", CE_VALUE_MASKED),
