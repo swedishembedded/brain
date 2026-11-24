@@ -488,7 +488,7 @@ pub fn check_exact_resume<M: crate::Model>(name: &str, build: impl Fn() -> M, bl
     let state = scratch.join("run.state");
     let identity = serde_json::json!({"test": name});
     let mut stop_at_3 = |r: &crate::StepReport| r.step < 3;
-    let control = crate::FitControl { on_step: Some(&mut stop_at_3), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, grad_sync: None };
+    let control = crate::FitControl { on_step: Some(&mut stop_at_3), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, publish: None, grad_sync: None };
     let (first, _) = crate::fit_controlled(build(), objective()?, &opts, None, control).map_err(err)?;
     if !first.interrupted || !state.with_extension("offdevice").is_dir() {
         return Err(format!("{name}: the stopped run left no resume state with its off-device generation"));

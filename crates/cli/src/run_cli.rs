@@ -1298,7 +1298,7 @@ pub fn run_serve(args: &[String]) {
                     Some(trainjob::job::JobAccess { secret, coordinator })
                 }
             };
-            Some(serving::TrainKnobs { artifact_store, quotas, job_access })
+            Some(serving::TrainKnobs { artifact_store, quotas, job_access, bank: trainjob::bank::BankSlot::default() })
         }
     };
 
@@ -1723,6 +1723,8 @@ fn run_apis(a: RunApis) {
     // `--training` is the one switch for every training action, not only
     // `brain/train`'s: without it every surface refuses them.
     let training = a.knobs.train.is_some();
+    // Filled once the served bases exist (below): a streaming job publishes each new policy version to their banks.
+    let train_bank = a.knobs.train.as_ref().map(|t| t.bank.clone());
     let widest = widest_batch(&a.knobs);
     let reserve = card_reserve(a.reserve_gb, widest);
     if reserve.activation_fallback > 0 {
@@ -1783,6 +1785,12 @@ fn run_apis(a: RunApis) {
         }
     };
     let _adapter_watcher = host.watch(follow, &executor);
+    if let Some(slot) = &train_bank {
+        if let Err(e) = slot.fill(std::sync::Arc::new(bases.policy_bank(&executor))) {
+            eprintln!("brain serve: {e}");
+            std::process::exit(1);
+        }
+    }
     // Ready means servable: every served model, its adapters included, is sized now, before any surface binds and so
     // before the ready file; one that could never fit is withdrawn by name, and a configuration that leaves its
     // adapters, or everything, unservable refuses to start.

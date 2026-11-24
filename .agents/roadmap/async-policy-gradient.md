@@ -65,6 +65,51 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       `it::chat_rollout_records` (positions, packing, a 14-case refusal table, mixed K, provenance) and the v2
       fixtures.
 
+- [x] **Streaming policy-gradient job** (lane agrpo-stream, 2026-11-24; `crates/trainjob/src/stream.rs`,
+      `rl::objective::stream_pg`, `brain::RolloutStream`, `capability::inbox`, `trainjob::bank`): `brain/train` with
+      `stream` (a JSON document: `publish_adapter`, `publish_every`, `step_tokens`, `queue_tokens`, `max_staleness`?,
+      `max_steps`?, `start_adapter`?) instead of `data`, exactly one of them. Records reach the running job as job input
+      (`POST /v1/jobs/{id}/records[?epoch=N]` / `finish`, D-Bus `Input(job, kind, query, fd)`), checked as a dataset
+      is (`Asked::samples`, `check_rollouts_together` with the base's tokenizer digest), each group's advantages
+      computed on arrival by the batch path's own `external::advantages` over `SplitRollouts::of_split`; a step takes
+      whole groups in arrival order until it holds `step_tokens` policy tokens and divides by the step's own count
+      (token-sum) or sequences x constant (constant-length) however many micro-batches hold it; every `publish_every`
+      steps the adapter is offered in process to the serving bank (`ServingBank`: `verify_adapter_among` +
+      `LiveAdapters::serve`) and `published {version, digest, step}` follows once the registry lists it; groups more
+      than `max_staleness` versions behind are dropped and reported. Receipts: `applied {step, groups[, skipped]}`,
+      `committed {step, groups}` (after a training-state write, a stop, the job's completion), `dropped`, and a
+      `stream` frame with the run epoch. Full queue: 429 naming `allowance`, never while the queue holds less than one
+      step. Tests: `trainjob` `it::stream` (lifecycle over HTTP incl. a reply from the published version and
+      `/v1/models`, duplicate, stale drop, `410` after finish; the queue's allowance and no refusal below a step;
+      one-POST vs many-POST first version byte-identical; a resumed run takes again exactly the applied-but-uncommitted
+      group, `410` to the old id, `409` naming the new epoch; door refusals), `it::dbus`
+      `a_stream_job_over_the_bus_takes_its_records_by_input_and_finishes`, `model` `a_fed_objective_ends_the_run_complete_or_stops_it_resumable`,
+      `rl` `stream_pg` unit tests, `capability` `inbox`.
+      Decisions: (1) the job inbox is generic (`capability::inbox`, beside `CancelToken`): an `Inbox` on the
+      `Invocation`, armed by the HTTP and D-Bus surfaces before the door check; a job declares at its door that it
+      will read it (`will_read`), so records sent before it starts wait for it; a supervised worker's invocation
+      carries none and a stream job is refused at the door without one. (2) `model::Objective::supply` (before each
+      step: wait for data, `Finished` ends the run completed, `Stopped` interrupts it resumably) and `state_saved`
+      (after a training-state write) are the loop's two new seams; `FitControl::publish` writes the adapter every N
+      steps and hands it over before the step is reported. (3) The consumed keys ride in the objective's cursor, so they
+      are durable atomically with the weights they trained (stronger than the run record); the run record keeps the
+      epoch (`runs::Record::epoch`, +1 per job that continues the run). (4) The stream's settings are a `stream`
+      document param like `data`; the estimator's settings stay the `pg_settings` table's params, and
+      `check_streamable` refuses what the stream does not train: `behaviour start_of_run_proxy` (the versions that
+      sampled are not the run's start), importance correction, the numerics gate, kv round trip, `seq-mean` (a step's
+      sequence count varies), the score-centred estimator (pass the sampler top-K through when the settings lane
+      exposes it), teacher contexts and teacher scores, images, `cards`/`job`, `grad_accum` > 1, evaluations,
+      `adapter_id` (the card is `publish_adapter`).
+      Open: score-centred estimator through the stream (lay out `behavior_top` into `PgBatch::top`); a group whose
+      oldest record has no `policy_version` is never stale (unmeasurable); the consumed-key list grows with the run
+      (in the state's cursor); the published adapter is a snapshot card without base digest (it binds by base id);
+      a `--serve-adapters` file of the same id would fight the stream for it (refuse an id the directory owns);
+      `steps` is not read by a stream job (`max_steps` is).
+- [x] Per-step telemetry for async runs (lane agrpo-stream): every streamed step frame's `pg` carries
+      `staleness_mean`, `staleness_max` (versions behind the last published one), `policy_tokens`,
+      `learner_wait_seconds`, `queue_groups`, `queue_tokens`, `time_in_queue_seconds` (the step's groups' mean),
+      `dropped_stale`. Asserted in `trainjob` `it::stream`.
+
 ## Open
 
 - [x] **One policy-gradient configuration** (A03-A04; `engineering-cleanup.md` EC-1, EC-2): settings declared once
@@ -126,22 +171,8 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       `catalog/tests/it/multi_adapter.rs` (three back-to-back request streams on the tiny qwen3 resident, probe after the
       swap, every reply's text equals its named release's folded server), `scheduled_batch.rs`. Not exercised: a bank with
       fewer device slots than live releases (the new version may wait for a slot while the old one drains).
-- [ ] **Streaming policy-gradient job** (`crates/trainjob`): `brain/train` with `stream` instead of `data`; records of
-      complete groups are appended to the running job (`POST /v1/jobs/{id}/records`, D-Bus equivalent), deduplicated
-      by group key, held in a token-bounded queue (a full queue is a 429 naming the allowance); a step trains when its
-      token budget is filled; every `publish_every` steps the adapter is published to the serving bank under a fixed
-      id as the next version; records older than `max_staleness` versions are dropped and counted; `finish` drains
-      and ends. Events: `step`, `published {version, digest, step}`, `consumed {groups, tokens, dropped_stale}`, queue
-      depth. Resume: the job reports the group keys it consumed; a client re-sends the rest.
-      Receipts separate applied (the group's gradient is in an update) from committed (that update is in a durable
-      checkpoint); a client re-sends every group not committed, and the job deduplicates by key.
-      Design notes from the paused lane: a generic job inbox beside the cancel token (a worker-process job refuses it by
-      name); a streaming objective that lays out a whole step before its first backward; a publisher seam implemented
-      in-process by the serving binary; `finish` ends a run as completed, not cancelled.
 - [ ] **Run-level policy identity** (A16): training run, committed update, base and adapter digests beside the serving
       version, in every reply and every `published` event.
-- [ ] Per-step telemetry for async runs: staleness mean/max, trained tokens per step, time the learner waited for
-      records, records' time in queue.
 - [ ] End-to-end on Qwen3-4B (one card): serving and the streaming job in one process, rollouts from an orchestrator;
       profile (nsys) before optimising anything.
 - [ ] **Support replay for truncated samplers**: the sampler's support per position in the trace, the trainer's

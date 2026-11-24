@@ -151,6 +151,8 @@ pub struct TrainKnobs {
     /// What lets the server take part in jobs spread over several servers (`--train-job-secret`,
     /// `--train-job-coordinator`); `None` takes none.
     pub job_access: Option<trainjob::job::JobAccess>,
+    /// The serving adapter bank a streaming job publishes to, filled by the server once its bases are served.
+    pub bank: trainjob::bank::BankSlot,
 }
 
 /// What a server keeps free on each card, and the activation room it charges a
@@ -540,7 +542,7 @@ pub fn build_executor(machine: &Machine, reserve: Reserve, store: &catalog::Serv
     // see `trainjob::resident` for the policy. One run per card that serving may use.
     if let Some(train) = train {
         let largest = gpus.iter().map(|&(_, total)| total.saturating_sub(reserved)).max();
-        exec.register(trainjob::resident(trainjob::TrainConfig { models_dir: store.models_dir().map(std::path::Path::to_path_buf), store: train.artifact_store, work_root: trainjob::job::default_work_root(), largest_card_bytes: largest, devices: gpus.len().max(1), quotas: train.quotas, free_space: std::sync::Arc::new(trainjob::DiskFree), job_access: train.job_access }));
+        exec.register(trainjob::resident(trainjob::TrainConfig { models_dir: store.models_dir().map(std::path::Path::to_path_buf), store: train.artifact_store, work_root: trainjob::job::default_work_root(), largest_card_bytes: largest, devices: gpus.len().max(1), quotas: train.quotas, free_space: std::sync::Arc::new(trainjob::DiskFree), job_access: train.job_access, bank: train.bank }));
     }
     Serving { executor: exec, qwen, qwen_scanned, qwen35: qwen35_discovered, ricursive: ricursive_discovered, inkling2: inkling2_discovered }
 }

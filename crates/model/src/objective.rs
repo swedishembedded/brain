@@ -40,6 +40,20 @@ pub enum StepVerdict {
     Abort(std::io::Error),
 }
 
+/// Whether the run's next optimiser step has data, as an objective that is fed while it runs answers
+/// ([`Objective::supply`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Supply {
+    /// The next step's records are there: take it.
+    Ready,
+    /// The objective's stream has ended and every record of it was trained: the run is complete, short of
+    /// [`crate::FitOpts::steps`].
+    Finished,
+    /// The run is to stop where it is, resumable (its feed was cancelled): as when
+    /// [`crate::FitControl::on_step`] answers `false`.
+    Stopped,
+}
+
 /// One training objective: the batch-drawing, forward/backward, and
 /// (optional) eval/logging behavior that varies per training regime.
 ///
@@ -128,6 +142,17 @@ pub trait Objective<M: Model> {
     fn step_verdict(&mut self) -> StepVerdict {
         StepVerdict::Apply
     }
+
+    /// Whether the next step has data, asked before the first step and after each step's state was saved: an
+    /// objective fed while the run goes on (a stream of records) waits here until a step's worth has arrived, its feed
+    /// ended or it was stopped. Default: [`Supply::Ready`], an objective whose data is all there.
+    fn supply(&mut self) -> Supply {
+        Supply::Ready
+    }
+
+    /// The run's training state, with this objective's [`Self::cursor`], was written after step `completed`: what
+    /// the objective trained up to that step survives a restart. Default: not interested.
+    fn state_saved(&mut self, _completed: u32) {}
 
     /// How many optimiser updates the run has applied so far: reported before the first step (the
     /// count a resumed run continues from, 0 when fresh) and again after every step. It is the
@@ -256,6 +281,12 @@ impl<M: Model, O: Objective<M> + ?Sized> Objective<M> for Box<O> {
     fn updates_applied(&mut self, applied: u32) {
         (**self).updates_applied(applied)
     }
+    fn supply(&mut self) -> Supply {
+        (**self).supply()
+    }
+    fn state_saved(&mut self, completed: u32) {
+        (**self).state_saved(completed)
+    }
     fn cursor(&self) -> Option<serde_json::Value> {
         (**self).cursor()
     }
@@ -311,6 +342,12 @@ impl<M: Model, O: Objective<M> + ?Sized> Objective<M> for &mut O {
     }
     fn updates_applied(&mut self, applied: u32) {
         (**self).updates_applied(applied)
+    }
+    fn supply(&mut self) -> Supply {
+        (**self).supply()
+    }
+    fn state_saved(&mut self, completed: u32) {
+        (**self).state_saved(completed)
     }
     fn cursor(&self) -> Option<serde_json::Value> {
         (**self).cursor()

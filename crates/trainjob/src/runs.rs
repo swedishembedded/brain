@@ -124,6 +124,11 @@ pub struct Record {
     /// The layout the run began on; absent from a record written before layouts were kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<Layout>,
+    /// How many jobs have run the key: 1 for the first, one more for each that continued it. A client that sees it
+    /// change knows a job of its run ended and another took over from the last saved state (0 in a record written
+    /// before epochs were kept).
+    #[serde(default)]
+    pub epoch: u64,
 }
 
 /// A run of a key this job holds the lock of.
@@ -138,8 +143,8 @@ pub struct Run {
 
 /// What opening a key found.
 pub enum Opened {
-    /// A run to train, fresh or continued.
-    Run(Run),
+    /// A run to train, fresh or continued (boxed: a run's record is far larger than a result's handle).
+    Run(Box<Run>),
     /// The key's run completed: its recorded result.
     Completed(Value),
 }
@@ -205,12 +210,15 @@ pub fn open(store: &ArtifactStore, action: &str, key: &str, identity: &Digest, s
                 verify_published(store, key, &result)?;
                 return Ok(Opened::Completed(result));
             }
-            Ok(Opened::Run(Run { dir, record, _lock: lock, resumed: true }))
+            let mut record = record;
+            record.epoch += 1;
+            write_atomic(&path, &serde_json::to_vec_pretty(&record).map_err(|e| e.to_string())?).map_err(|e| refuse(key, format!("cannot write its run record: {e}")))?;
+            Ok(Opened::Run(Box::new(Run { dir, record, _lock: lock, resumed: true })))
         }
         None => {
-            let record = Record { format: RECORD_FORMAT.to_string(), key: key.to_string(), action: action.to_string(), identity: identity.hex(), seed: seed.or_else(|| Some(brain::random_seed())), status: Status::Running, result: None, layout: Some(layout.clone()) };
+            let record = Record { format: RECORD_FORMAT.to_string(), key: key.to_string(), action: action.to_string(), identity: identity.hex(), seed: seed.or_else(|| Some(brain::random_seed())), status: Status::Running, result: None, layout: Some(layout.clone()), epoch: 1 };
             write_atomic(&path, &serde_json::to_vec_pretty(&record).map_err(|e| e.to_string())?).map_err(|e| refuse(key, format!("cannot write its run record: {e}")))?;
-            Ok(Opened::Run(Run { dir, record, _lock: lock, resumed: false }))
+            Ok(Opened::Run(Box::new(Run { dir, record, _lock: lock, resumed: false })))
         }
     }
 }
@@ -240,6 +248,11 @@ impl Run {
     /// Where an adapter run keeps the adapter of each evaluation until it is published.
     pub fn evaluations_dir(&self) -> PathBuf {
         self.dir.join("evaluations")
+    }
+
+    /// How many jobs have run the key, this one included (see [`Record::epoch`]).
+    pub fn epoch(&self) -> u64 {
+        self.record.epoch
     }
 
     /// The seed the run trains with: the request's, or the one drawn when the run began.

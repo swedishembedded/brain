@@ -76,6 +76,11 @@ use crate::{CancelToken, Device, Error, Result};
 
 /// Where one run keeps its files, inside [`ChatFineTune::out_dir`].
 const PREPARED_DIR: &str = "prepared";
+/// What [`ChatFineTune::run_publishing`] hands each adapter to: the step count and the file, the callback's from then on.
+pub type Publisher<'a> = dyn FnMut(u32, &Path) -> std::io::Result<()> + 'a;
+
+/// Where a run writes the adapters it hands to its publisher.
+const PUBLISHED_DIR: &str = "published";
 const STATE_FILE: &str = "train.state";
 const ADAPTER_FILE: &str = "adapter.safetensors";
 const RECORD_FILE: &str = "training.json";
@@ -115,7 +120,7 @@ pub struct ChatFineTune {
     steps: u32,
     lr: f32,
     seed: Option<u64>,
-    max_block: Option<u32>,
+    pub(crate) max_block: Option<u32>,
     checkpoint_every: u32,
     resume_state: Option<PathBuf>,
     eval_every: u32,
@@ -132,8 +137,8 @@ pub struct ChatFineTune {
     f32_base: bool,
     base_format: Option<String>,
     gemm_precision: crate::GemmPrecision,
-    thinking: bool,
-    pack_answers: bool,
+    pub(crate) thinking: bool,
+    pub(crate) pack_answers: bool,
     /// What each step's backward keeps of its forward ([`ChatFineTune::activations`]); `None` is the base's own default.
     activations: Option<model::saved::SavedPolicy>,
     /// Train with the clipped policy-gradient objective on rollout records ([`ChatFineTune::policy_gradient`]).
@@ -148,6 +153,10 @@ pub struct ChatFineTune {
     native_sparse: Option<model::NativeSparse>,
     /// Base tensors trained in full beside the adapter ([`ChatFineTune::modules_to_save`]).
     modules_to_save: Vec<String>,
+    /// Train on rollout groups as they arrive instead of a dataset ([`ChatFineTune::rollout_stream`]).
+    pub(crate) stream: Option<crate::rollout_stream::StreamRef>,
+    /// Hand the adapter to the run's publisher every this-many steps ([`ChatFineTune::publish_every`]).
+    publish_every: u32,
 }
 
 /// The architecture a [`ChatFineTune`] trains, with the tier its frozen base
@@ -387,6 +396,7 @@ impl ChatFamily {
         &self,
         open: &Path,
         prepared_dir: &Path,
+        stream: Option<&std::sync::Arc<rl::objective::stream_pg::RolloutFeed>>,
         opts: &model::FitOpts,
         rank: u32,
         alpha: f32,
@@ -398,11 +408,15 @@ impl ChatFamily {
         modules_to_save: &[String],
     ) -> std::io::Result<(model::FitReport, TrainedLora, PolicyGradientStats, Vec<model::ScoredSet>)> {
         if let ChatFamily::Chat(entry, dtype) = self {
-            let (report, trained, scored, stats) = self.train_chat(entry, *dtype, open, prepared_dir, opts, rank, alpha, tuning, continue_from, control, held_out, Some(config), modules_to_save)?;
+            let (report, trained, scored, stats) = self.train_chat(entry, *dtype, open, prepared_dir, opts, rank, alpha, tuning, continue_from, control, held_out, Some((config, stream.cloned())), modules_to_save)?;
             return Ok((report, trained, stats.unwrap_or_default(), scored));
         }
         // The objective is written over `model::Model`: a family only builds its LoRA model and hands it to the visitor.
-        let mut fit = rl::fit::PolicyGradientFit::new(prepared_dir, config, opts, control);
+        let source = match stream {
+            Some(feed) => rl::fit::RolloutSource::Stream(std::sync::Arc::clone(feed)),
+            None => rl::fit::RolloutSource::Prepared(prepared_dir),
+        };
+        let mut fit = rl::fit::PolicyGradientFit::over(source, config, opts, control);
         let (report, trained) = self.visit_lora(open, prepared_dir, opts, rank, alpha, tuning, continue_from, &mut fit)?;
         Ok((report, trained, fit.into_stats().unwrap_or_default(), Vec::new()))
     }
@@ -455,14 +469,15 @@ impl ChatFamily {
         continue_from: Option<&Path>,
         control: model::FitControl<'_>,
         held_out: &[&Path],
-        policy_gradient: Option<PolicyGradientConfig>,
+        policy_gradient: Option<(PolicyGradientConfig, Option<std::sync::Arc<rl::objective::stream_pg::RolloutFeed>>)>,
         modules_to_save: &[String],
     ) -> std::io::Result<(model::FitReport, TrainedLora, Vec<model::ScoredSet>, Option<PolicyGradientStats>)> {
         if tuning != model::adapter::device::AdapterTuning::default() {
             return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, format!("{} trains the plain LoRA adapter; a rank-stabilised, LoRA+ or frozen-A variant is not wired for it", entry.model)));
         }
         let tiers = model::ops::TierPolicy::uniform(dtype);
-        let job = crate::chat_trainer::LoraJob { base: open, lora: model::finetune::LoraRequest { rank, alpha, continue_from, base: &tiers, modules_to_save }, opts, dir: prepared_dir, policy_gradient, held_out };
+        let (policy_gradient, stream) = policy_gradient.map_or((None, None), |(config, stream)| (Some(config), stream));
+        let job = crate::chat_trainer::LoraJob { base: open, lora: model::finetune::LoraRequest { rank, alpha, continue_from, base: &tiers, modules_to_save }, opts, dir: prepared_dir, policy_gradient, stream, held_out };
         let run = (entry.lora)(job, control)?;
         Ok((run.report, TrainedLora::Chat(run.save), run.scored, run.policy_gradient))
     }
@@ -524,8 +539,8 @@ pub(crate) fn choose_base_tier(single_card: bool, native: bool, params: u64, act
 }
 
 /// Where a [`ChatFineTune`]'s base is and which architecture it is.
-struct Located {
-    model_dir: PathBuf,
+pub(crate) struct Located {
+    pub(crate) model_dir: PathBuf,
     base_id: String,
     arch: &'static crate::study::ArchEntry,
     /// What the trainer opens as the checkpoint.
@@ -629,6 +644,8 @@ impl ChatFineTune {
             stages: 0,
             native_sparse: None,
             modules_to_save: Vec::new(),
+            stream: None,
+            publish_every: 0,
             continue_from: None,
             out_dir: None,
             adapter_id: None,
@@ -861,6 +878,31 @@ impl ChatFineTune {
     pub fn policy_gradient(mut self, config: PolicyGradientConfig) -> Self {
         self.policy_gradient = Some(config);
         self
+    }
+
+    /// Write the adapter every `steps` optimiser steps and hand it to the publisher [`Self::run_publishing`] is given,
+    /// as the policy's next version (`0`: never). The adapter is written under [`Self::adapter_id`].
+    pub fn publish_every(mut self, steps: u32) -> Self {
+        self.publish_every = steps;
+        self
+    }
+
+    /// Where the run's training state is, when it has a place: what a resumed run continues from.
+    pub(crate) fn saved_state(&self) -> Option<PathBuf> {
+        self.resume_state.clone().or_else(|| self.out_dir.as_ref().map(|dir| dir.join(STATE_FILE)))
+    }
+
+    /// The base and the policy-gradient configuration a stream trains with, every setting checked.
+    pub(crate) fn stream_setup(&self) -> Result<(Located, PolicyGradientConfig)> {
+        let named = self.arch.as_deref().map(crate::study::arch).transpose()?;
+        if let Some(arch) = named {
+            arch.require(Capability::ChatLoraFineTune)?;
+        }
+        let located = self.locate_base(named)?;
+        self.check_policy_gradient_setup(located.arch.id)?;
+        let config = self.policy_gradient_for(&located.model_dir)?.ok_or_else(|| Error::InvalidRequest("ChatFineTune: a rollout stream trains the policy gradient; call .policy_gradient(..)".to_string()))?;
+        rl::objective::stream_pg::check_streamable(&config).map_err(|e| Error::InvalidRequest(format!("ChatFineTune: policy_gradient: {e}")))?;
+        Ok((located, config))
     }
 
     /// On-policy distillation from another model ([`rl::objective::onpolicy_distill`]): `teacher` (a model reference
@@ -1184,17 +1226,34 @@ impl ChatFineTune {
     /// [`Error::DeviceOutOfMemory`] when the device refuses an allocation mid-run (the unwind is caught here: nothing
     /// above this call sees a panic for a full card).
     pub fn run_with(&self, cancel: &CancelToken, on_progress: impl FnMut(&FineTuneProgress)) -> Result<ChatFineTuneOutcome> {
-        crate::error::typed_device_oom(|| self.run_unwinding(cancel, on_progress))
+        crate::error::typed_device_oom(|| self.run_unwinding(cancel, on_progress, None))
+    }
+
+    /// [`Self::run_with`], handing the adapter to `publish` every [`Self::publish_every`] steps with the step count;
+    /// the file is the callback's from then on, and an error it returns ends the run.
+    pub fn run_publishing(&self, cancel: &CancelToken, on_progress: impl FnMut(&FineTuneProgress), publish: &mut Publisher<'_>) -> Result<ChatFineTuneOutcome> {
+        crate::error::typed_device_oom(|| self.run_unwinding(cancel, on_progress, Some(publish)))
     }
 
     /// [`Self::run_with`] before a device out-of-memory unwind is made an error.
-    fn run_unwinding(&self, cancel: &CancelToken, mut on_progress: impl FnMut(&FineTuneProgress)) -> Result<ChatFineTuneOutcome> {
+    fn run_unwinding(&self, cancel: &CancelToken, mut on_progress: impl FnMut(&FineTuneProgress), publish: Option<&mut Publisher<'_>>) -> Result<ChatFineTuneOutcome> {
         // A named architecture is refused before anything is read.
         let named = self.arch.as_deref().map(crate::study::arch).transpose()?;
         if let Some(arch) = named {
             arch.require(Capability::ChatLoraFineTune)?;
         }
-        let dataset = self.dataset.as_deref().ok_or_else(|| Error::MissingArgument("ChatFineTune: no dataset; call .dataset(path)".to_string()))?;
+        let stream = self.stream.as_ref().map(|s| &s.0);
+        let dataset = match (self.dataset.as_deref(), stream) {
+            (Some(_), Some(_)) => return Err(Error::InvalidRequest("ChatFineTune: a run trains a dataset or a rollout stream, not both".to_string())),
+            (None, None) => return Err(Error::MissingArgument("ChatFineTune: no dataset; call .dataset(path)".to_string())),
+            (dataset, _) => dataset,
+        };
+        if stream.is_some() {
+            let others = [(self.held_out.is_some(), "held_out"), (self.held_out_text.is_some(), "held_out_text"), (self.monitor.is_some(), "monitor"), (!self.replay.is_empty() || !self.weighted_replay.is_empty(), "replay"), (self.grad_accum != 1, "grad_accum (a stream's step is cut by its step_tokens)"), (self.parallel.is_some(), "data_parallel")];
+            if let Some((_, name)) = others.iter().find(|(set, _)| *set) {
+                return Err(Error::InvalidRequest(format!("ChatFineTune: a rollout stream trains its records alone; {name} is not taken with it")));
+            }
+        }
         let out_dir = self.out_dir.as_deref().ok_or_else(|| Error::MissingArgument("ChatFineTune: no out directory; call .out_dir(path)".to_string()))?;
         let Located { model_dir, base_id, arch, open } = self.locate_base(named)?;
         let weights_str = utf8(&open)?;
@@ -1218,7 +1277,10 @@ impl ChatFineTune {
         let render = data::chat::RenderOpts { keep_reasoning: no_think.is_some() };
         let images = image_reader(arch.id, &model_dir)?;
         let asked = Asked { tok: &tok, tmpl: &tmpl, no_think: no_think.as_deref(), render, pack: self.pack_answers, images: &*images };
-        let train_samples = asked.read(dataset)?;
+        let train_samples = match dataset {
+            Some(path) => asked.read(path)?,
+            None => Vec::new(),
+        };
         let dataset_records = train_samples.len();
         let mut replay_samples = Vec::new();
         for path in &self.replay {
@@ -1234,13 +1296,17 @@ impl ChatFineTune {
         refuse_images_in(held_out.as_deref(), "held-out")?;
         refuse_images_in(held_out_text.as_deref(), "held-out text")?;
         let carries = |records: Option<&[ChatSample]>| records.is_some_and(|r| r.iter().any(|s| s.rollout.is_some()));
-        self.check_rollout_records(&[
+        // A stream's records are checked as they arrive.
+        if stream.is_none() { self.check_rollout_records(&[
             ("dataset", carries(Some(&train_samples))),
             ("replay", carries(Some(&replay_samples)) || weighted_samples.iter().any(|(records, _)| carries(Some(records)))),
             ("held-out", carries(held_out.as_deref())),
             ("held-out text", carries(held_out_text.as_deref())),
             ("monitoring", carries(monitor.as_deref())),
-        ])?;
+        ])?; }
+        if let (Some(_), Some(config)) = (stream, &policy_gradient) {
+            rl::objective::stream_pg::check_streamable(config).map_err(|e| Error::InvalidRequest(format!("ChatFineTune: policy_gradient: {e}")))?;
+        }
         if let Some(config) = &policy_gradient {
             check_rollouts_together(&train_samples, &replay_samples, &weighted_samples, config.truncated, tok.digest())?;
         }
@@ -1284,7 +1350,11 @@ impl ChatFineTune {
                 }
             }
         }
-        let block = block_for(longest, self.max_block)?;
+        let block = match (stream, self.max_block) {
+            (Some(feed), Some(max)) if feed.settings().block == max as usize => max,
+            (Some(_), _) => return Err(Error::InvalidRequest("ChatFineTune: a rollout stream trains rows of the max_block it was opened with".to_string())),
+            (None, _) => block_for(longest, self.max_block)?,
+        };
 
         let selected_gpus: Vec<u32> = if self.placed {
             gpu_core::devices::current_gpu().into_iter().collect()
@@ -1317,7 +1387,7 @@ impl ChatFineTune {
         if self.grad_accum == 0 {
             return Err(Error::InvalidRequest("ChatFineTune: grad_accum must be at least 1".to_string()));
         }
-        let state_path = self.resume_state.clone().unwrap_or_else(|| out_dir.join(STATE_FILE));
+        let state_path = self.saved_state().expect("the out directory is set");
         let seed = resolve_seed(self.seed, Some(&state_path))?;
         let requested = model::FitOpts {
             grad_accum: self.grad_accum,
@@ -1337,12 +1407,25 @@ impl ChatFineTune {
             native_sparse: self.native_sparse,
             ..fit_opts(self.steps, block, self.lr, seed)
         };
+        // A stream holds nothing to probe before it is fed: the first step's loss is the estimate. Its length is not
+        // known in advance: a short warmup, and an open-ended stream keeps its peak rate.
+        let requested = match stream {
+            Some(_) => {
+                let open_ended = self.steps >= crate::rollout_stream::OPEN_ENDED_STREAM_STEPS;
+                model::FitOpts { initial_probe_batches: 0, warmup: (self.steps / WARMUP_DIVISOR).clamp(1, crate::rollout_stream::STREAM_MAX_WARMUP), min_lr: if open_ended { self.lr } else { requested.min_lr }, ..requested }
+            }
+            None => requested,
+        };
         let checks: Vec<&dyn model::training_plan::PlanCheck> = policy_gradient.iter().map(|c| c as &dyn model::training_plan::PlanCheck).collect();
         let opts = model::training_plan::ValidatedTrainingPlan::build(requested, &checks).map_err(|e| Error::InvalidRequest(format!("ChatFineTune: {e}")))?.into_opts();
         let base_digest = base_digest(&open)?;
         let identity = serde_json::json!({
             "base": base_digest,
-            "dataset": digest(dataset)?,
+            "dataset": match (dataset, stream) {
+                (Some(path), _) => serde_json::json!(digest(path)?),
+                (None, Some(feed)) => serde_json::json!({"stream": {"step_tokens": feed.settings().step_tokens, "block": feed.settings().block}}),
+                (None, None) => unreachable!("a run has a dataset or a stream"),
+            },
             "replay": self.replay.iter().map(|p| digest(p)).collect::<Result<Vec<_>>>()?,
             "weighted_replay": self.weighted_replay.iter().map(|(p, share)| Ok((digest(p)?, share.to_bits()))).collect::<Result<Vec<_>>>()?,
             "monitor": self.monitor.as_deref().map(digest).transpose()?,
@@ -1379,11 +1462,23 @@ impl ChatFineTune {
             }
             None => None,
         };
-        let control = model::FitControl { on_step: Some(&mut on_step), state: Some(&state_path), state_every: self.checkpoint_every, identity, snapshots, grad_sync: self.parallel.as_ref().map(crate::DataParallel::grad_sync) };
+        let published_card = self.adapter_id.clone().unwrap_or_else(|| format!("{base_id}:local:chat:latest"));
+        let published_dir = out_dir.join(PUBLISHED_DIR);
+        let publication = match publish {
+            Some(publish) if self.publish_every > 0 => {
+                std::fs::create_dir_all(&published_dir).map_err(|e| Error::Backend(format!("{}: {e}", published_dir.display())))?;
+                let snapshots = model::AdapterSnapshots { dir: &published_dir, card_id: &published_card, base_id: &base_id, family: arch.family, lora: model::adapter::device::LoraCfg::new(rank, alpha, Vec::new()) };
+                Some(model::AdapterPublish { every: self.publish_every, snapshots, publish })
+            }
+            Some(_) => None,
+            None if self.publish_every > 0 => return Err(Error::InvalidRequest("ChatFineTune: publish_every hands adapters to a publisher; run it with run_publishing".to_string())),
+            None => None,
+        };
+        let control = model::FitControl { on_step: Some(&mut on_step), state: Some(&state_path), state_every: self.checkpoint_every, identity, snapshots, publish: publication, grad_sync: self.parallel.as_ref().map(crate::DataParallel::grad_sync) };
         let held_out_refs: Vec<&Path> = held_out_dirs.iter().map(PathBuf::as_path).collect();
         let (report, trained, scored, policy_gradient) = match policy_gradient {
             Some(config) => {
-                let (report, trained, stats, scored) = family.train_policy_gradient(&open, &prepared_dir, &opts, rank, alpha, self.tuning, self.continue_from.as_deref(), control, config, &held_out_refs, &self.modules_to_save).map_err(|e| crate::error::training_error("training", e))?;
+                let (report, trained, stats, scored) = family.train_policy_gradient(&open, &prepared_dir, stream, &opts, rank, alpha, self.tuning, self.continue_from.as_deref(), control, config, &held_out_refs, &self.modules_to_save).map_err(|e| crate::error::training_error("training", e))?;
                 (report, trained, scored, Some(PolicyGradientOutcome { config, stats }))
             }
             None => {
@@ -1478,7 +1573,10 @@ impl ChatFineTune {
             base_digest: Some(base_digest),
             cycle: self.cycle,
         };
-        let dataset_id = digest(dataset)?;
+        let dataset_id = match dataset {
+            Some(path) => digest(path)?,
+            None => "rollout-stream".to_string(),
+        };
         trained.save(utf8(&adapter_path)?, &adapter_id, &base_id, Some(&dataset_id), provenance)
             .map_err(|e| Error::Backend(format!("{}: saving the adapter: {e}", adapter_path.display())))?;
         outcome.adapter_digest = Some(digest(&adapter_path)?);
@@ -2402,11 +2500,17 @@ impl Asked<'_> {
             return Err(Error::Backend(format!("{}: holds no supervised turns (`\"train\": true`)", path.display())));
         }
         let records = ChatSample::from_jsonl_with(path, self.images).map_err(|e| Error::Backend(format!("{}: {e}", path.display())))?;
+        self.samples(&records, &path.display().to_string())
+    }
+
+    /// The samples `records` are trained as, each checked to encode and to supervise something; `origin` names where
+    /// they came from in an error.
+    pub(crate) fn samples(&self, records: &[ChatSample], origin: &str) -> Result<Vec<ChatSample>> {
         let mut samples = Vec::with_capacity(records.len());
         // The record each sample came from, so an error about an example names its record.
         let mut origins: Vec<usize> = Vec::with_capacity(records.len());
         for (at, record) in records.iter().enumerate() {
-            let examples = self.examples_of(record).map_err(|e| Error::Backend(format!("{}: record {} cannot be encoded for training: {e}", path.display(), at + 1)))?;
+            let examples = self.examples_of(record).map_err(|e| Error::Backend(format!("{}: record {} cannot be encoded for training: {e}", origin, at + 1)))?;
             origins.extend(std::iter::repeat_n(at, examples.len()));
             samples.extend(examples);
         }
@@ -2416,13 +2520,13 @@ impl Asked<'_> {
             }
             let (ids, mask) = sample
                 .encode_with(self.tok, self.tmpl, self.render)
-                .map_err(|e| Error::Backend(format!("{}: record {} (example {}) cannot be encoded for training: {e}", path.display(), origins[at] + 1, at + 1)))?;
+                .map_err(|e| Error::Backend(format!("{}: record {} (example {}) cannot be encoded for training: {e}", origin, origins[at] + 1, at + 1)))?;
             // An example made from one answer of a longer record holds the images its text places, the first ones.
             if let Some(placeholder) = self.images.placeholder_token() {
-                sample.keep_images_placed_in(data::chat::token_runs(&ids, placeholder).len()).map_err(|e| Error::Backend(format!("{}: example {}: {e}", path.display(), at + 1)))?;
+                sample.keep_images_placed_in(data::chat::token_runs(&ids, placeholder).len()).map_err(|e| Error::Backend(format!("{}: example {}: {e}", origin, at + 1)))?;
             }
             if !mask.iter().any(|m| *m) {
-                return Err(Error::Backend(format!("{}: example {} encodes to {} token(s) with none supervised, so training on it would be a no-op", path.display(), at + 1, ids.len())));
+                return Err(Error::Backend(format!("{}: example {} encodes to {} token(s) with none supervised, so training on it would be a no-op", origin, at + 1, ids.len())));
             }
         }
         Ok(samples)
@@ -2667,7 +2771,7 @@ pub(crate) fn utf8(path: &Path) -> Result<&str> {
 
 /// The rules of the training-record contract that hold between records, over every record a policy-gradient run
 /// trains on (the dataset and its replay sets, read together): the first refusal, naming its rule and field.
-fn check_rollouts_together(dataset: &[ChatSample], replay: &[ChatSample], weighted: &[(Vec<ChatSample>, f32)], truncated: data::chat_rollout::TruncatedRollouts, base_tokenizer: Option<&str>) -> Result<()> {
+pub(crate) fn check_rollouts_together(dataset: &[ChatSample], replay: &[ChatSample], weighted: &[(Vec<ChatSample>, f32)], truncated: data::chat_rollout::TruncatedRollouts, base_tokenizer: Option<&str>) -> Result<()> {
     let sets = std::iter::once(("dataset", dataset)).chain(std::iter::once(("replay", replay))).chain(weighted.iter().map(|(records, _)| ("weighted replay", &records[..])));
     let records: Vec<(&str, usize, Option<&data::chat_rollout::Rollout>)> = sets.flat_map(|(name, records)| records.iter().enumerate().map(move |(at, r)| (name, at, r.rollout.as_ref()))).collect();
     let rollouts: Vec<Option<&data::chat_rollout::Rollout>> = records.iter().map(|(_, _, r)| *r).collect();

@@ -208,7 +208,7 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
             outcome.outputs = result;
             return Ok(outcome);
         }
-        Some(crate::runs::Opened::Run(run)) => Some(run),
+        Some(crate::runs::Opened::Run(run)) => Some(*run),
         None => None,
     };
     let base_dir = job::resolve_base(env.models_dir.as_deref(), &p.base)?;

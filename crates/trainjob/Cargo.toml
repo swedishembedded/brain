@@ -20,6 +20,8 @@ brain-modelstore.workspace = true
 brain-horizon.workspace = true
 brain-qwen3tts.workspace = true
 brain-model.workspace = true
+# The serving adapter bank a streaming job publishes each new policy version to.
+brain-llmserve.workspace = true
 brain = { workspace = true, features = ["study"] }
 blake3.workspace = true
 libc.workspace = true
@@ -49,3 +51,5 @@ brain-apiserve.workspace = true
 brain-events.workspace = true
 axum.workspace = true
 tower.workspace = true
+# Reading a job's event stream as it arrives.
+futures.workspace = true

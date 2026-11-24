@@ -201,7 +201,7 @@ fn rank_process() {
         let (train, val, bcfg, _, itos) = model::load_dataset_with_itos(&data, &opts)?;
         let sync = GradSync { collective: &*faulty, rank, checkpoint: Some(CheckpointIdentity { job: &context.plan().job, plan: &identity }), observer: Some(&observe) };
         let state = args.dir.join("state");
-        let control = model::FitControl { grad_sync: Some(sync), state: Some(&state), state_every: 1, identity: serde_json::json!({ "test": "zero3-faults" }), ..Default::default() };
+        let control = model::FitControl { publish: None, grad_sync: Some(sync), state: Some(&state), state_every: 1, identity: serde_json::json!({ "test": "zero3-faults" }), ..Default::default() };
         model::fit_controlled(m, model::causal_lm::<Qwen35>(train, val, bcfg, itos), &opts, Some(&args.dir.join("model.safetensors")), control).map(|_| ())
     };
     let trained = if device { gpu_core::devices::with_gpu(gpu_core::testgpu::cards()[rank].index, train).unwrap_or_else(|e| Err(std::io::Error::other(e))) } else { train() };

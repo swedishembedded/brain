@@ -447,7 +447,7 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
             outcome.outputs = result;
             return Ok(outcome);
         }
-        Some(crate::runs::Opened::Run(run)) => Some(run),
+        Some(crate::runs::Opened::Run(run)) => Some(*run),
         None => None,
     };
     let cfg = sft_config(&request, &base_dir, run.as_ref().map(crate::runs::Run::seed))?;
@@ -459,7 +459,7 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
     };
     let state = run.as_ref().map(crate::runs::Run::state_path);
     let identity = json!({"base": p.base, "dataset": request.digests().iter().map(Digest::hex).collect::<Vec<_>>()});
-    let control = model::train::FitControl { on_step: Some(&mut on_step), state: state.as_deref(), state_every: p.checkpoint_every.unwrap_or(crate::runs::DEFAULT_CHECKPOINT_EVERY), identity, snapshots: None, grad_sync: None };
+    let control = model::train::FitControl { on_step: Some(&mut on_step), state: state.as_deref(), state_every: p.checkpoint_every.unwrap_or(crate::runs::DEFAULT_CHECKPOINT_EVERY), identity, snapshots: None, publish: None, grad_sync: None };
     let trained = qwen3tts::speech_sft::speech_sft(&cfg, &train, held_out.as_ref(), control).map_err(|e| format!("{ACTION}: {e}"))?;
     if trained.report.fit.interrupted {
         return Err(capability::failure::CANCELLED.to_string());
@@ -522,7 +522,7 @@ mod tests {
     /// A cancelled job stops before it reads anything.
     #[test]
     fn a_cancelled_job_stops_before_any_work() {
-        let env = JobEnv { store: None, models_dir: None, work_root: std::env::temp_dir(), quotas: Default::default(), job_access: None, largest_card_bytes: None };
+        let env = JobEnv { store: None, models_dir: None, work_root: std::env::temp_dir(), quotas: Default::default(), job_access: None, largest_card_bytes: None, bank: Default::default() };
         let mut inv = Invocation::new();
         inv.cancel = capability::CancelToken::armed();
         inv.cancel.cancel();

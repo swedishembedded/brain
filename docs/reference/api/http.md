@@ -460,6 +460,13 @@ present on every surface and behind the same key, hooks and admission:
   frame the action reports (a training step's loss and statistics), and one `done`
   event with the final status. The last 4096 frames are kept, and `Last-Event-ID`
   resumes after the last event received; at most 8 streams follow one job.
+- `POST /v1/jobs/{id}/records[?epoch=N]` and `POST /v1/jobs/{id}/finish` send a running job input: the JSONL
+  rollout records of a streaming training job and the end of them (body at most 64 MiB; `finish` takes none). The
+  job answers each: `200` with its receipt, `400` for input it refuses, `409` for input that disagrees with its state
+  (another run epoch, records after `finish`), `429` with `Retry-After` for a full queue (`detail.allowance`), `503`
+  with `Retry-After` for a job not ready to answer yet, `410` for a job that has ended or reads no input, `404` for
+  an id the caller does not hold. See
+  [Training while serving](../../guides/training/served-training.md#training-while-serving-a-streaming-job).
 
   A job is detached from the request that started it and from its event streams: a
   client that hangs up does not end it. Ending one is a `DELETE /v1/jobs/{id}`, with the

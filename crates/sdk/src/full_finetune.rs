@@ -610,7 +610,7 @@ impl FullRun<'_> {
             state: self.resume_state,
             state_every: self.checkpoint_every,
             identity: self.identity.clone(),
-            grad_sync: self.parallel.map(crate::DataParallel::grad_sync),
+            publish: None, grad_sync: self.parallel.map(crate::DataParallel::grad_sync),
             ..Default::default()
         };
         let tuned = self.out_dir.join(TUNED_FILE);

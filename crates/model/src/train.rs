@@ -1656,6 +1656,9 @@ pub struct FitControl<'a> {
     /// [`FitOpts::eval_interval`]; a model with no adapter parameters is
     /// refused.
     pub snapshots: Option<AdapterSnapshots<'a>>,
+    /// Write the adapter every this-many completed steps and hand each file to a callback (a server offering it as the
+    /// policy's next version). A model with no adapter parameters is refused.
+    pub publish: Option<AdapterPublish<'a>>,
     /// A distributed run: every step's gradients are averaged over this
     /// group, and each rank trains on its own shard of the training-record
     /// stream ([`Objective::shard`]), derived from the group's rank and world
@@ -1690,6 +1693,15 @@ impl AdapterSnapshots<'_> {
     pub fn path(&self, step: u32) -> std::path::PathBuf {
         self.dir.join(format!("step-{step}.safetensors"))
     }
+}
+
+/// [`FitControl::publish`]: the adapter after every [`Self::every`] completed steps, written as a snapshot would be
+/// ([`AdapterSnapshots::path`]) and handed to [`Self::publish`] with the step count. The callback owns the file from
+/// then on; an error it returns ends the run.
+pub struct AdapterPublish<'a> {
+    pub every: u32,
+    pub snapshots: AdapterSnapshots<'a>,
+    pub publish: &'a mut dyn FnMut(u32, &Path) -> std::io::Result<()>,
 }
 
 /// How a [`fit_controlled`] run went.
@@ -2357,7 +2369,40 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
 
     // The global norm of the latest applied sharded step, after its accumulation scale, when it clipped.
     let mut sharded_norm: Option<f32> = None;
-    for step in first_step..opts.steps {
+    // Writes the training state after `$completed` steps: the selection record holds the evaluations too, saved whether
+    // or not the run selects, so a resumed run reports every evaluation of the whole run, those before the resume
+    // included. The objective is told once it is written.
+    macro_rules! save_state {
+        ($completed:expr) => {
+            if let Some(state) = control.state {
+                let completed = $completed;
+                match (&generations, &grad_sync) {
+                    (Some(g), Some(sync)) => {
+                        save_train_state(&model, &g.path(completed), completed, applied, &rng, opts, &identity, Some(&selection), obj.cursor(), zero.as_ref())?;
+                        if let Some(observe) = sync.observer {
+                            observe(crate::jobfault::StepPhase::StateSaved, completed);
+                        }
+                        g.commit(sync.collective, &mut health, completed)?;
+                        if let Some(observe) = sync.observer {
+                            observe(crate::jobfault::StepPhase::Committed, completed);
+                        }
+                    }
+                    _ => save_train_state(&model, state, completed, applied, &rng, opts, &identity, Some(&selection), obj.cursor(), zero.as_ref())?,
+                }
+                obj.state_saved(completed);
+            }
+        };
+    }
+    // An objective fed while the run goes on may have nothing to train yet, or nothing at all.
+    let steps_end = match obj.supply() {
+        crate::objective::Supply::Ready => opts.steps,
+        crate::objective::Supply::Finished => first_step,
+        crate::objective::Supply::Stopped => {
+            interrupted = first_step < opts.steps;
+            first_step
+        }
+    };
+    for step in first_step..steps_end {
         // The schedule counts applied updates (AdamW's `t` counts the same), so a step that applies none does not
         // consume warmup or shorten the decay. A cooldown is a window of loop steps with its own end, so it is
         // positioned by the loop step.
@@ -2616,33 +2661,43 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
             }
         }
 
+        // The adapter of every `every`-th step, written by the rank that writes and handed over before the step is
+        // reported, so its report can say the version is out.
+        if let Some(publication) = control.publish.as_mut().filter(|p| writer && p.every > 0 && completed.is_multiple_of(p.every)) {
+            let path = publication.snapshots.path(completed);
+            let snapshots = &publication.snapshots;
+            crate::lora::device_adapter::save_lora_with_lineage(path.to_str().expect("utf-8 path"), &model, &snapshots.lora, snapshots.card_id, snapshots.base_id, snapshots.family, None, None)?;
+            (publication.publish)(completed, &path)?;
+        }
+
         let keep_going = match control.on_step.as_mut() {
             Some(on_step) => on_step(&StepReport { step: completed, steps: opts.steps, loss, lr, grad_norm, eval_loss: step_eval, work, metrics: obj.metrics() }),
             None => true,
         };
-        if let Some(state) = control.state {
-            let periodic = control.state_every > 0 && completed.is_multiple_of(control.state_every);
-            if !keep_going || periodic {
-                // The selection record holds the evaluations too: saved whether or not the run selects, so a resumed run
-                // reports every evaluation of the whole run, those before the resume included.
-                match (&generations, &grad_sync) {
-                    (Some(g), Some(sync)) => {
-                        save_train_state(&model, &g.path(completed), completed, applied, &rng, opts, &identity, Some(&selection), obj.cursor(), zero.as_ref())?;
-                        if let Some(observe) = sync.observer {
-                            observe(crate::jobfault::StepPhase::StateSaved, completed);
-                        }
-                        g.commit(sync.collective, &mut health, completed)?;
-                        if let Some(observe) = sync.observer {
-                            observe(crate::jobfault::StepPhase::Committed, completed);
-                        }
-                    }
-                    _ => save_train_state(&model, state, completed, applied, &rng, opts, &identity, Some(&selection), obj.cursor(), zero.as_ref())?,
-                }
-            }
+        let periodic = control.state_every > 0 && completed.is_multiple_of(control.state_every);
+        let mut saved_now = false;
+        if keep_going && periodic {
+            save_state!(completed);
+            saved_now = true;
         }
-        if !keep_going {
-            interrupted = completed < opts.steps;
-            break;
+        // An objective fed while the run goes on waits here for the next step's records, after this step's state is
+        // safe, so what it trained is durable however long the wait.
+        let next = match (keep_going, completed < opts.steps) {
+            (false, _) => crate::objective::Supply::Stopped,
+            (true, true) => obj.supply(),
+            // The run's last step: nothing more is asked of the objective.
+            (true, false) => crate::objective::Supply::Ready,
+        };
+        if next == crate::objective::Supply::Stopped && !saved_now {
+            save_state!(completed);
+        }
+        match next {
+            crate::objective::Supply::Ready => {}
+            crate::objective::Supply::Finished => break,
+            crate::objective::Supply::Stopped => {
+                interrupted = completed < opts.steps;
+                break;
+            }
         }
     }
 
@@ -3566,7 +3621,7 @@ mod tests {
         fit_controlled(plain, examples_objective_batched(&[4; 6], 4, 2), &opts, None, FitControl::default()).expect("fit");
 
         let coll = crate::HostCollective::new(1);
-        let control = FitControl { grad_sync: Some(GradSync { collective: &*coll, rank: 0, checkpoint: None, observer: None }), ..Default::default() };
+        let control = FitControl { publish: None, grad_sync: Some(GradSync { collective: &*coll, rank: 0, checkpoint: None, observer: None }), ..Default::default() };
         let sharded = Recorder::new(RecorderCfg, 2, 4, &HashMap::new());
         let sharded_drawn = std::rc::Rc::clone(&sharded.drawn);
         fit_controlled(sharded, examples_objective_batched(&[4; 6], 4, 2), &opts, None, control).expect("fit");
@@ -3678,7 +3733,7 @@ mod tests {
     fn a_group_over_an_objective_that_cannot_shard_is_refused_by_name() {
         let opts = FitOpts { steps: 1, eval_interval: 0, ..Default::default() };
         let coll = crate::HostCollective::new(1);
-        let control = FitControl { grad_sync: Some(GradSync { collective: &*coll, rank: 0, checkpoint: None, observer: None }), ..Default::default() };
+        let control = FitControl { publish: None, grad_sync: Some(GradSync { collective: &*coll, rank: 0, checkpoint: None, observer: None }), ..Default::default() };
         let err = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Whole, &opts, None, control)
             .err()
             .expect("an objective with no shard must refuse");
@@ -3694,15 +3749,81 @@ mod tests {
         let identity = serde_json::json!({"run": 1});
         let opts = FitOpts { steps: 4, eval_interval: 0, ..Default::default() };
         let mut stop_at_two = |s: &StepReport| s.step < 2;
-        let control = FitControl { on_step: Some(&mut stop_at_two), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, grad_sync: None };
+        let control = FitControl { on_step: Some(&mut stop_at_two), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, publish: None, grad_sync: None };
         let script = [StepVerdict::Skip("empty".into()), StepVerdict::Apply];
         fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Verdicts(script.into()), &opts, None, control).expect("fit");
 
         let model = Recorder::new(RecorderCfg, 1, 1, &HashMap::new());
         let indices = std::rc::Rc::clone(&model.indices);
-        let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity, snapshots: None, grad_sync: None };
+        let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity, snapshots: None, publish: None, grad_sync: None };
         fit_controlled(model, Verdicts(Default::default()), &opts, None, control).expect("fit");
         assert_eq!(*indices.borrow(), vec![2, 3]);
+    }
+
+    /// An objective fed while it runs: it has data for `ready` steps, then answers `end`; it records which steps'
+    /// states were written.
+    struct Fed {
+        ready: u32,
+        end: crate::objective::Supply,
+        saved: std::rc::Rc<std::cell::RefCell<Vec<u32>>>,
+        asked: std::rc::Rc<std::cell::Cell<u32>>,
+    }
+    impl Objective<Recorder> for Fed {
+        fn regime(&self) -> &'static str {
+            "fed"
+        }
+        fn micro_step(&mut self, _m: &Recorder, _r: &mut Rng) -> f32 {
+            self.ready -= 1;
+            0.0
+        }
+        fn loss_probe(&mut self, _m: &Recorder, _r: &mut Rng) -> f32 {
+            0.0
+        }
+        fn supply(&mut self) -> crate::objective::Supply {
+            self.asked.set(self.asked.get() + 1);
+            if self.ready > 0 { crate::objective::Supply::Ready } else { self.end }
+        }
+        fn cursor(&self) -> Option<serde_json::Value> {
+            Some(serde_json::json!(self.ready))
+        }
+        fn restore_cursor(&mut self, _cursor: &serde_json::Value) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn state_saved(&mut self, completed: u32) {
+            self.saved.borrow_mut().push(completed);
+        }
+    }
+
+    /// A fed objective whose stream ends completes the run short of its steps; one stopped leaves it interrupted with
+    /// its state written; either way the objective hears of every state written, periodic ones included.
+    #[test]
+    fn a_fed_objective_ends_the_run_complete_or_stops_it_resumable() {
+        use crate::objective::Supply;
+        let dir = tmp("fed-objective");
+        let state = dir.join("train.state");
+        let opts = FitOpts { steps: 100, eval_interval: 0, initial_probe_batches: 0, ..Default::default() };
+        let run = |end: Supply, every: u32| {
+            let saved = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let _ = std::fs::remove_file(&state);
+            let control = FitControl { state: Some(&state), state_every: every, identity: serde_json::json!({"run": 1}), ..Default::default() };
+            let (report, _) = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Fed { ready: 3, end, saved: saved.clone(), asked: Default::default() }, &opts, None, control).expect("fit");
+            let saved = saved.borrow().clone();
+            (report, saved)
+        };
+        let (finished, saved) = run(Supply::Finished, 2);
+        assert_eq!((finished.steps_completed, finished.interrupted), (3, false));
+        assert_eq!(saved, vec![2], "the periodic state only");
+        let (stopped, saved) = run(Supply::Stopped, 2);
+        assert_eq!((stopped.steps_completed, stopped.interrupted), (3, true));
+        assert_eq!(saved, vec![2, 3], "a stop writes the state it stopped at");
+        assert!(state.exists());
+        let (empty, _) = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Fed { ready: 0, end: Supply::Finished, saved: Default::default(), asked: Default::default() }, &opts, None, FitControl::default()).expect("fit");
+        assert_eq!((empty.steps_completed, empty.interrupted), (0, false), "a stream that ends before any record trains nothing");
+        // At the run's last step the objective is not asked for another (it would wait for records nobody trains).
+        let asked = std::rc::Rc::new(std::cell::Cell::new(0));
+        let short = FitOpts { steps: 2, ..opts.clone() };
+        let (capped, _) = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Fed { ready: 5, end: Supply::Stopped, saved: Default::default(), asked: asked.clone() }, &short, None, FitControl::default()).expect("fit");
+        assert_eq!((capped.steps_completed, capped.interrupted, asked.get()), (2, false, 2));
     }
 
     /// An objective that walks a stream of its own: its position is saved with the exact-resume state and
@@ -3740,20 +3861,20 @@ mod tests {
         let opts = FitOpts { steps: 4, eval_interval: 0, ..Default::default() };
         let restored = std::rc::Rc::new(std::cell::Cell::new(None));
         let mut stop_at_two = |s: &StepReport| s.step < 2;
-        let control = FitControl { on_step: Some(&mut stop_at_two), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, grad_sync: None };
+        let control = FitControl { on_step: Some(&mut stop_at_two), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, publish: None, grad_sync: None };
         fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Walker { position: 0, restored: restored.clone() }, &opts, None, control).expect("fit");
         assert_eq!(restored.get(), None, "a fresh run restores nothing");
 
-        let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, grad_sync: None };
+        let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, publish: None, grad_sync: None };
         fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Walker { position: 0, restored: restored.clone() }, &opts, None, control).expect("fit");
         assert_eq!(restored.get(), Some(2));
 
         // A state saved by an objective with no position cannot continue one that has a position.
         let plain_state = dir.join("plain.state");
         let mut stop_at_two = |s: &StepReport| s.step < 2;
-        let control = FitControl { on_step: Some(&mut stop_at_two), state: Some(&plain_state), state_every: 0, identity: identity.clone(), snapshots: None, grad_sync: None };
+        let control = FitControl { on_step: Some(&mut stop_at_two), state: Some(&plain_state), state_every: 0, identity: identity.clone(), snapshots: None, publish: None, grad_sync: None };
         fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Verdicts(Default::default()), &opts, None, control).expect("fit");
-        let control = FitControl { on_step: None, state: Some(&plain_state), state_every: 0, identity, snapshots: None, grad_sync: None };
+        let control = FitControl { on_step: None, state: Some(&plain_state), state_every: 0, identity, snapshots: None, publish: None, grad_sync: None };
         let err = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Walker { position: 0, restored }, &opts, None, control).err().expect("refused");
         assert!(err.to_string().contains("stream position"), "{err}");
     }
@@ -3768,7 +3889,7 @@ mod tests {
         let dir = tmp("arithmetic-identity");
         let state = dir.join("train.state");
         let mut stop_at_two = |s: &StepReport| s.step < 2;
-        let control = FitControl { on_step: Some(&mut stop_at_two), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, grad_sync: None };
+        let control = FitControl { on_step: Some(&mut stop_at_two), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, publish: None, grad_sync: None };
         fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Verdicts(Default::default()), &base, None, control).expect("fit");
 
         let changed: Vec<(&str, FitOpts)> = vec![
@@ -3778,11 +3899,11 @@ mod tests {
             ("gemm precision", FitOpts { gemm_precision: gpu_core::provider::library::GemmPrecision::Fp32Reference, ..base.clone() }),
         ];
         for (what, opts) in changed {
-            let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, grad_sync: None };
+            let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, publish: None, grad_sync: None };
             let result = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Verdicts(Default::default()), &opts, None, control);
             assert!(result.is_err(), "a resume with a different {what} must be refused");
         }
-        let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity, snapshots: None, grad_sync: None };
+        let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity, snapshots: None, publish: None, grad_sync: None };
         fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Verdicts(Default::default()), &base, None, control).expect("the same options resume");
     }
 
@@ -3997,14 +4118,14 @@ mod tests {
 
         let state = dir.join("train.state");
         let mut stop_at_three = |s: &StepReport| s.step < 3;
-        let control = FitControl { on_step: Some(&mut stop_at_three), state: Some(&state), state_every: 0, identity: serde_json::json!({"run": 1}), snapshots: None, grad_sync: None };
+        let control = FitControl { on_step: Some(&mut stop_at_three), state: Some(&state), state_every: 0, identity: serde_json::json!({"run": 1}), snapshots: None, publish: None, grad_sync: None };
         let (stopped, _) = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Curve { evals: evals.clone(), next: std::cell::Cell::new(0) }, &opts, None, control).expect("fit");
         assert!(stopped.interrupted && stopped.steps_completed == 3 && stopped.kept_best.is_none(), "{stopped:?}");
         assert_eq!(stopped.evaluations.len(), 3);
 
         // The curve continues where the first run left off: its first
         // evaluation is the fourth of the whole run.
-        let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity: serde_json::json!({"run": 1}), snapshots: None, grad_sync: None };
+        let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity: serde_json::json!({"run": 1}), snapshots: None, publish: None, grad_sync: None };
         let (resumed, model) = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Curve { evals: evals[3..].to_vec(), next: std::cell::Cell::new(0) }, &opts, None, control).expect("fit");
         assert_eq!(resumed.resumed_at, Some(3));
         assert_eq!(model.read_weight("w"), vec![4.0], "the best parameters of the whole run");
@@ -4013,7 +4134,7 @@ mod tests {
 
         // A state from a run that did not select is not continued by one that does.
         let plain = FitOpts { patience: 0, ..opts.clone() };
-        let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity: serde_json::json!({"run": 1}), snapshots: None, grad_sync: None };
+        let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity: serde_json::json!({"run": 1}), snapshots: None, publish: None, grad_sync: None };
         let Err(err) = fit_controlled(Recorder::new(RecorderCfg, 1, 1, &HashMap::new()), Curve { evals: vec![], next: std::cell::Cell::new(0) }, &plain, None, control) else {
             panic!("a state saved with another selection must not be continued")
         };

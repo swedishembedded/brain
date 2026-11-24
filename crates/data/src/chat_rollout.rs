@@ -866,28 +866,7 @@ pub fn write(dir: &Path, split: &str, rollouts: &[Option<Option<Outcome>>], base
     if rollouts.iter().all(Option::is_none) && baselines.is_empty() {
         return Ok(());
     }
-    if let Some(o) = rollouts.iter().flatten().flatten().chain(baselines).find(|o| !o.reward.is_finite() || o.teacher_log_ratio.is_some_and(|r| !r.is_finite())) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("group {:?}: reward {} or teacher log-ratio {:?} is not a finite number", o.group, o.reward, o.teacher_log_ratio)));
-    }
-    let mut groups: Vec<String> = Vec::new();
-    let mut group_index: BTreeMap<String, u32> = BTreeMap::new();
-    let mut member_index: BTreeMap<(u32, Member), u32> = BTreeMap::new();
-    let mut grade = |o: &'_ Outcome| -> Graded {
-        let group = *group_index.entry(o.group.clone()).or_insert_with(|| {
-            groups.push(o.group.clone());
-            (groups.len() - 1) as u32
-        });
-        let next = member_index.len() as u32;
-        let member = *member_index.entry((group, o.member.clone())).or_insert(next);
-        Graded { group, member, reward: o.reward, teacher_log_ratio: o.teacher_log_ratio }
-    };
-    assert_eq!(rollouts.len(), provenance.len(), "chat_rollout::write: one provenance per example");
-    let examples: Vec<Option<ExampleRollout>> = rollouts
-        .iter()
-        .zip(provenance)
-        .map(|(rollout, from)| rollout.as_ref().map(|outcome| ExampleRollout { graded: outcome.as_ref().map(&mut grade), policy_version: from.policy_version, sampler: from.sampler }))
-        .collect();
-    let baselines: Vec<Graded> = baselines.iter().map(&mut grade).collect();
+    let (groups, examples, baselines) = number(rollouts, baselines, provenance).map_err(|why| io::Error::new(io::ErrorKind::InvalidInput, why))?;
     let top = top.filter(|t| t.logprobs.iter().any(|l| !l.is_nan()));
     let file = RolloutsFile { groups, examples, baselines, behavior_top_k: top.map(|t| t.k) };
     std::fs::write(&outcomes, serde_json::to_vec(&file).map_err(io::Error::other)?)?;
@@ -902,6 +881,45 @@ pub fn write(dir: &Path, split: &str, rollouts: &[Option<Option<Outcome>>], base
         binio::write_f32_bin(&btl, &top.logprobs)?;
     }
     Ok(())
+}
+
+/// Groups and rollouts numbered in the order first seen: the group keys, each example's rollout and each baseline's
+/// outcome in those numbers. Refuses a reward or a teacher log-ratio that is not finite.
+type Numbered = (Vec<String>, Vec<Option<ExampleRollout>>, Vec<Graded>);
+
+fn number(rollouts: &[Option<Option<Outcome>>], baselines: &[Outcome], provenance: &[Provenance]) -> Result<Numbered, String> {
+    if let Some(o) = rollouts.iter().flatten().flatten().chain(baselines).find(|o| !o.reward.is_finite() || o.teacher_log_ratio.is_some_and(|r| !r.is_finite())) {
+        return Err(format!("group {:?}: reward {} or teacher log-ratio {:?} is not a finite number", o.group, o.reward, o.teacher_log_ratio));
+    }
+    let mut groups: Vec<String> = Vec::new();
+    let mut group_index: BTreeMap<String, u32> = BTreeMap::new();
+    let mut member_index: BTreeMap<(u32, Member), u32> = BTreeMap::new();
+    let mut grade = |o: &'_ Outcome| -> Graded {
+        let group = *group_index.entry(o.group.clone()).or_insert_with(|| {
+            groups.push(o.group.clone());
+            (groups.len() - 1) as u32
+        });
+        let next = member_index.len() as u32;
+        let member = *member_index.entry((group, o.member.clone())).or_insert(next);
+        Graded { group, member, reward: o.reward, teacher_log_ratio: o.teacher_log_ratio }
+    };
+    assert_eq!(rollouts.len(), provenance.len(), "chat_rollout: one provenance per example");
+    let examples: Vec<Option<ExampleRollout>> = rollouts
+        .iter()
+        .zip(provenance)
+        .map(|(rollout, from)| rollout.as_ref().map(|outcome| ExampleRollout { graded: outcome.as_ref().map(&mut grade), policy_version: from.policy_version, sampler: from.sampler }))
+        .collect();
+    let baselines: Vec<Graded> = baselines.iter().map(&mut grade).collect();
+    Ok((groups, examples, baselines))
+}
+
+impl SplitRollouts {
+    /// The rollout data of an encoded split held in memory, numbered as [`write`] numbers it: what [`read`] gives back
+    /// for the split once written.
+    pub fn of_split(split: &crate::chat::EncodedSplit) -> Result<SplitRollouts, String> {
+        let (groups, examples, baselines) = number(&split.rollouts, &split.baselines, &split.provenance)?;
+        Ok(SplitRollouts { groups, examples, behavior: split.behavior.clone(), truncated: split.truncated.clone(), baselines })
+    }
 }
 
 /// The rollout data of one split of a prepared dataset.

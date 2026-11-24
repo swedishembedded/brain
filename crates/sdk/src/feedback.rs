@@ -335,7 +335,7 @@ impl FeedbackFineTune {
             on_progress(&FineTuneProgress::of(s));
             !cancel.is_cancelled()
         };
-        let control = model::FitControl { on_step: Some(&mut on_step), state: Some(&state_path), state_every: self.checkpoint_every, identity, snapshots: None, grad_sync: None };
+        let control = model::FitControl { on_step: Some(&mut on_step), state: Some(&state_path), state_every: self.checkpoint_every, identity, snapshots: None, publish: None, grad_sync: None };
         let adapter_path = out_dir.join(ADAPTER_FILE);
         let adapter_id = self.adapter_id.clone().unwrap_or_else(|| format!("{base_id}:local:feedback:latest"));
         let (desirable, undesirable) = (examples.iter().filter(|e| e.desirable).count(), examples.iter().filter(|e| !e.desirable).count());

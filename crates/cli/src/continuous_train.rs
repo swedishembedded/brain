@@ -174,17 +174,32 @@ impl ServedBases {
     /// The bases as directory hosts on `executor`, the one each is registered with. A resident listed twice (the
     /// flag-selected Qwen3 is also the scan's) is one host.
     pub fn bank_hosts(&self, executor: &Executor) -> Vec<BankHost> {
+        let mut hosts: Vec<BankHost> = self.distinct_qwen().into_iter().map(|q| BankHost::new(q.clone(), executor.clone())).collect();
+        hosts.extend(self.qwen35.iter().map(|g| BankHost::new(g.clone(), executor.clone())));
+        hosts.extend(self.ricursive.iter().map(|r| BankHost::new(r.clone(), executor.clone())));
+        hosts.extend(self.inkling2.iter().map(|r| BankHost::new(r.clone(), executor.clone())));
+        hosts
+    }
+
+    /// The bases' adapter banks as the training workload publishes to them (`brain/train` with a `stream`).
+    pub fn policy_bank(&self, executor: &Executor) -> trainjob::bank::ServingBank {
+        use trainjob::bank::ServingBank;
+        let mut hosts: Vec<_> = self.distinct_qwen().into_iter().map(|q| ServingBank::host(q.clone(), executor.clone())).collect();
+        hosts.extend(self.qwen35.iter().map(|g| ServingBank::host(g.clone(), executor.clone())));
+        hosts.extend(self.ricursive.iter().map(|r| ServingBank::host(r.clone(), executor.clone())));
+        hosts.extend(self.inkling2.iter().map(|r| ServingBank::host(r.clone(), executor.clone())));
+        ServingBank::new(hosts)
+    }
+
+    /// The Qwen3 residents, each once (the flag-selected one is also the scan's).
+    fn distinct_qwen(&self) -> Vec<&Arc<QwenResident>> {
         let mut qwen: Vec<&Arc<QwenResident>> = Vec::new();
         for q in &self.qwen {
             if !qwen.iter().any(|seen| Arc::ptr_eq(seen, q)) {
                 qwen.push(q);
             }
         }
-        let mut hosts: Vec<BankHost> = qwen.into_iter().map(|q| BankHost::new(q.clone(), executor.clone())).collect();
-        hosts.extend(self.qwen35.iter().map(|g| BankHost::new(g.clone(), executor.clone())));
-        hosts.extend(self.ricursive.iter().map(|r| BankHost::new(r.clone(), executor.clone())));
-        hosts.extend(self.inkling2.iter().map(|r| BankHost::new(r.clone(), executor.clone())));
-        hosts
+        qwen
     }
 }
 

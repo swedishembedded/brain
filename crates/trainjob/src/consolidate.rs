@@ -468,7 +468,7 @@ pub fn run_full(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], p
             outcome.outputs = result;
             return Ok(outcome);
         }
-        Some(crate::runs::Opened::Run(run)) => Some(run),
+        Some(crate::runs::Opened::Run(run)) => Some(*run),
         None => None,
     };
     let base_dir = job::resolve_base(env.models_dir.as_deref(), &p.base)?;

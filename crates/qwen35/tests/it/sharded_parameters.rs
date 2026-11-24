@@ -101,7 +101,7 @@ fn run(dir: &Path, opts: &model::FitOpts, m: Qwen35, sync: Option<GradSync<'_>>,
         seen.push((r.loss, r.grad_norm.unwrap_or(f32::NAN)));
         stop.is_none_or(|n| r.step < n)
     };
-    let control = model::FitControl { on_step: Some(&mut on_step), grad_sync: sync, state, identity: serde_json::json!({ "test": "zero3" }), ..Default::default() };
+    let control = model::FitControl { on_step: Some(&mut on_step), publish: None, grad_sync: sync, state, identity: serde_json::json!({ "test": "zero3" }), ..Default::default() };
     model::fit_controlled(m, model::causal_lm::<Qwen35>(train, val, bcfg, itos), opts, out, control).unwrap();
     seen
 }
@@ -291,7 +291,7 @@ fn measure_sharded_parameters_rank() {
         true
     };
     let sync = GradSync { collective: &*job, rank, checkpoint: None, observer: None };
-    let control = model::FitControl { on_step: Some(&mut on_step), grad_sync: Some(sync), ..Default::default() };
+    let control = model::FitControl { on_step: Some(&mut on_step), publish: None, grad_sync: Some(sync), ..Default::default() };
     model::fit_controlled(m, model::causal_lm::<Qwen35>(train, val, bcfg, itos), &opts, None, control).unwrap();
     eprintln!("rank {rank}: done in {:.1} s", started.elapsed().as_secs_f64());
 }

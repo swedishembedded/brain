@@ -64,6 +64,28 @@ pub fn rig_qwen3_serving_jobs(tag: &str, memory: u64, gpus: &[u32], cpu_compute:
     rig_budgeted(tag, budgets, true, None, Vec::new(), qwen3_model_dir_of(&format!("{tag}-base"), qwen3::QwenConfig::tiny()), job_access)
 }
 
+/// A server holding the toy `qwen3` base as `local/toy` that also serves it, with an adapter bank, under that id: what
+/// a streaming job publishes its versions to.
+pub fn rig_stream(tag: &str) -> Rig {
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 16 << 30, 0);
+    let bank = trainjob::bank::BankSlot::default();
+    let served: Arc<Mutex<Option<Arc<catalog::resident_llm::QwenResident>>>> = Arc::default();
+    let keep = Arc::clone(&served);
+    let serve = move |base: &Path| -> Vec<Arc<dyn residency::ResidentModel>> {
+        let config = catalog::resident_llm::QwenServeConfig { adapter_bank: Some(llmserve::adapter_registry::AdapterBankSettings::default()), ..Default::default() };
+        let card = checkpoint::st::ModelCard::new(BASE, "qwen");
+        let tokenizer = base.parent().unwrap().join("tokenizer.json");
+        let resident = Arc::new(catalog::resident_llm::QwenResident::from_card_configured(base.to_str().unwrap(), &card, tokenizer.to_str(), config));
+        *keep.lock().unwrap() = Some(Arc::clone(&resident));
+        vec![resident]
+    };
+    let rig = rig_serving(tag, budgets, qwen3_model_dir_of(&format!("{tag}-base"), qwen3::QwenConfig::tiny()), bank.clone(), serve);
+    let resident = served.lock().unwrap().take().expect("the base is served");
+    bank.fill(Arc::new(trainjob::bank::ServingBank::new(vec![trainjob::bank::ServingBank::host(resident, rig.exec.clone())]))).unwrap();
+    rig
+}
+
 /// [`rig_qwen3_on`] on cards of `card` bytes each, the largest card's size known to the service as a server measures
 /// it, computing on the CPU backend.
 pub fn rig_qwen3_cards(tag: &str, gpus: &[u32], card: u64) -> Rig {
@@ -97,6 +119,16 @@ fn rig_budgeted(tag: &str, budgets: Budgets, store: bool, card: Option<u64>, ext
 /// [`rig_budgeted`] holding its jobs to `quotas`.
 #[allow(clippy::too_many_arguments)]
 fn rig_quoted(tag: &str, budgets: Budgets, store: bool, card: Option<u64>, extra: Vec<Arc<dyn residency::ResidentModel>>, made: TempDir, job_access: Option<trainjob::job::JobAccess>, quotas: trainjob::Quotas) -> Rig {
+    rig_built(tag, budgets, store, card, made, job_access, quotas, trainjob::bank::BankSlot::default(), move |_| extra)
+}
+
+/// [`rig_budgeted`] with an adapter bank, serving what `serve` makes of the base's file beside the training workload.
+fn rig_serving(tag: &str, budgets: Budgets, made: TempDir, bank: trainjob::bank::BankSlot, serve: impl FnOnce(&Path) -> Vec<Arc<dyn residency::ResidentModel>>) -> Rig {
+    rig_built(tag, budgets, true, None, made, None, trainjob::Quotas::default(), bank, serve)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rig_built(tag: &str, budgets: Budgets, store: bool, card: Option<u64>, made: TempDir, job_access: Option<trainjob::job::JobAccess>, quotas: trainjob::Quotas, bank: trainjob::bank::BankSlot, extra: impl FnOnce(&Path) -> Vec<Arc<dyn residency::ResidentModel>>) -> Rig {
     let dir = TempDir::new(tag);
     let models = dir.join("models");
     let base = models.join("local").join("toy");
@@ -111,9 +143,9 @@ fn rig_quoted(tag: &str, budgets: Budgets, store: bool, card: Option<u64>, extra
     let work_root = dir.join("work");
     // As a server counts them: one run in flight per card, and at least one.
     let devices = budgets.gpus().len().max(1);
-    let config = TrainConfig { models_dir: Some(models.clone()), store: store.then(|| store_handle.clone()), work_root: work_root.clone(), largest_card_bytes: card, devices, quotas, free_space: Arc::new(trainjob::DiskFree), job_access };
+    let config = TrainConfig { models_dir: Some(models.clone()), store: store.then(|| store_handle.clone()), work_root: work_root.clone(), largest_card_bytes: card, devices, quotas, free_space: Arc::new(trainjob::DiskFree), job_access, bank };
     let mut served = vec![trainjob::resident(config)];
-    served.extend(extra);
+    served.extend(extra(&base.join("model.brain.safetensors")));
     let exec = Executor::start(served, budgets, Policy::default());
     Rig { dir, store: store_handle, exec, work_root }
 }

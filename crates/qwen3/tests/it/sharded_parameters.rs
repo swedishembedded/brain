@@ -76,7 +76,7 @@ fn build(shard: Option<ShardGroup>) -> Qwen {
 
 fn run(dir: &Path, opts: &model::FitOpts, m: Qwen, sync: Option<GradSync<'_>>, out: &Path) {
     let (train, val, bcfg, _, itos) = model::load_dataset_with_itos(dir, opts).unwrap();
-    let control = model::FitControl { grad_sync: sync, ..Default::default() };
+    let control = model::FitControl { publish: None, grad_sync: sync, ..Default::default() };
     model::fit_controlled(m, model::causal_lm::<Qwen>(train, val, bcfg, itos), opts, Some(out), control).unwrap();
 }
 

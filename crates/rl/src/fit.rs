@@ -34,6 +34,8 @@ use crate::env::{Environment, Verifier};
 use crate::objective::distill::{DistillConfig, DistillExample, DistillTopK, TopK};
 use crate::objective::dpo::{Dpo, DpoConfig, PackedPair};
 use crate::objective::external::{ExternalPolicyGradient, PolicyGradientConfig, PolicyGradientStats};
+use crate::objective::stream_pg::{RolloutFeed, StreamedPolicyGradient};
+use std::sync::Arc;
 use crate::objective::feedback::{Feedback, FeedbackConfig, PackedFeedback};
 use crate::objective::grpo::Grpo;
 
@@ -220,11 +222,20 @@ impl ModelFit for DistillFit<'_, '_> {
     }
 }
 
-/// Policy-gradient training on externally collected rollouts over whichever model the trainer builds
-/// ([`ExternalPolicyGradient`]): the objective is opened on the prepared dataset when the model arrives, and what the
-/// run measured is kept for [`Self::stats`].
+/// Where a [`PolicyGradientFit`] takes its rollouts from.
+#[derive(Clone)]
+pub enum RolloutSource<'a> {
+    /// A prepared dataset ([`data::chat::prepare_chat_samples`]): [`ExternalPolicyGradient`].
+    Prepared(&'a std::path::Path),
+    /// Groups arriving while the run goes on: [`StreamedPolicyGradient`].
+    Stream(Arc<RolloutFeed>),
+}
+
+/// Policy-gradient training on externally collected rollouts over whichever model the trainer builds: the objective is
+/// opened on its source when the model arrives ([`ExternalPolicyGradient`] over a prepared dataset,
+/// [`StreamedPolicyGradient`] over a feed), and what the run measured is kept for [`Self::stats`].
 pub struct PolicyGradientFit<'a, 'c> {
-    dir: &'a std::path::Path,
+    source: RolloutSource<'a>,
     config: PolicyGradientConfig,
     opts: &'a FitOpts,
     control: Option<FitControl<'c>>,
@@ -234,7 +245,12 @@ pub struct PolicyGradientFit<'a, 'c> {
 impl<'a, 'c> PolicyGradientFit<'a, 'c> {
     /// `dir` is the prepared dataset ([`data::chat::prepare_chat_samples`]) of the rollouts.
     pub fn new(dir: &'a std::path::Path, config: PolicyGradientConfig, opts: &'a FitOpts, control: FitControl<'c>) -> PolicyGradientFit<'a, 'c> {
-        PolicyGradientFit { dir, config, opts, control: Some(control), stats: None }
+        PolicyGradientFit::over(RolloutSource::Prepared(dir), config, opts, control)
+    }
+
+    /// The fit over `source`.
+    pub fn over(source: RolloutSource<'a>, config: PolicyGradientConfig, opts: &'a FitOpts, control: FitControl<'c>) -> PolicyGradientFit<'a, 'c> {
+        PolicyGradientFit { source, config, opts, control: Some(control), stats: None }
     }
 
     /// What the run measured, after it ran (interrupted or not); `None` before.
@@ -251,10 +267,20 @@ impl<'a, 'c> PolicyGradientFit<'a, 'c> {
 impl ModelFit for PolicyGradientFit<'_, '_> {
     fn fit<M: Model>(&mut self, model: M) -> std::io::Result<(FitReport, M)> {
         let control = take_control(&mut self.control, "policy-gradient")?;
-        let mut objective = ExternalPolicyGradient::open(self.dir, self.opts, self.config)?;
-        let result = fit_controlled(model, &mut objective, self.opts, None, control);
-        self.stats = Some(objective.into_stats());
-        result
+        match &self.source {
+            RolloutSource::Prepared(dir) => {
+                let mut objective = ExternalPolicyGradient::open(dir, self.opts, self.config)?;
+                let result = fit_controlled(model, &mut objective, self.opts, None, control);
+                self.stats = Some(objective.into_stats());
+                result
+            }
+            RolloutSource::Stream(feed) => {
+                let mut objective = StreamedPolicyGradient::new(Arc::clone(feed), self.config, self.opts.batch_size.max(1) as usize).map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidInput, why))?;
+                let result = fit_controlled(model, &mut objective, self.opts, None, control);
+                self.stats = Some(objective.into_stats());
+                result
+            }
+        }
     }
 }
 

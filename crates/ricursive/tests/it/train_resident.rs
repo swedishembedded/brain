@@ -226,7 +226,7 @@ fn a_resumed_run_ends_exactly_where_the_uninterrupted_run_does() {
         let (straight_report, straight) = fit(build(value, window, ClipPass::TwoPass), &dir, &o);
         let state = dir.join(format!("run-{window:?}.state"));
         let mut stop_at_4 = |s: &model::StepReport| s.step < 4;
-        let control = model::FitControl { on_step: Some(&mut stop_at_4), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, grad_sync: None };
+        let control = model::FitControl { on_step: Some(&mut stop_at_4), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, publish: None, grad_sync: None };
         let (first, _) = model::fit_controlled(build(value, window, ClipPass::TwoPass), objective(&dir, &o), &o, None, control).unwrap();
         assert!(first.interrupted && state.is_file(), "stopped at step 4 with a state file");
         let control = model::FitControl { state: Some(&state), identity, ..Default::default() };
@@ -451,7 +451,7 @@ fn a_resumed_pipeline_ends_exactly_where_the_uninterrupted_one_does() {
     let (straight_report, straight) = fit_pipeline(build_pipeline(stages, value), &dir, &o);
     let state = dir.join("run.state");
     let mut stop_at_4 = |s: &model::StepReport| s.step < 4;
-    let control = model::FitControl { on_step: Some(&mut stop_at_4), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, grad_sync: None };
+    let control = model::FitControl { on_step: Some(&mut stop_at_4), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, publish: None, grad_sync: None };
     let (train, val, bcfg, _, itos) = model::load_dataset_with_itos(&dir, &o).unwrap();
     let (first, _) = model::fit_controlled(build_pipeline(stages, value), model::causal_lm::<PipelineModel<Ripple>>(train, val, bcfg, itos), &o, None, control).unwrap();
     assert!(first.interrupted && state.is_file());

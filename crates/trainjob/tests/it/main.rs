@@ -27,4 +27,5 @@ mod resume;
 mod run;
 mod schedule;
 mod speech;
+mod stream;
 mod support;

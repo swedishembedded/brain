@@ -246,7 +246,7 @@ impl std::str::FromStr for BehaviourSource {
 /// once (an example is one call, or one answer, of its rollout); a truncated rollout takes no part and trains on
 /// nothing unless the run keeps it (`truncated`). A group that holds one rollout that takes part is refused, by the
 /// contract's rule (`group_of_one`), as are two examples of one rollout that disagree (`rollout_mismatch`).
-fn advantages(split: &data::chat_rollout::SplitRollouts, norm: AdvantageNorm, floor: AdvantageFloor, truncated: TruncatedRollouts) -> Result<Vec<f32>, String> {
+pub(crate) fn advantages(split: &data::chat_rollout::SplitRollouts, norm: AdvantageNorm, floor: AdvantageFloor, truncated: TruncatedRollouts) -> Result<Vec<f32>, String> {
     use data::chat_rollout::{group_members, GroupEntry, GroupFault, RecordRule};
     let graded: Vec<(usize, data::chat_rollout::Graded)> = split.examples.iter().enumerate().filter_map(|(e, r)| r.and_then(|r| r.graded).map(|g| (e, g))).collect();
     // Baseline-only outcomes take part in their groups like any rollout; no example trains on them.
@@ -753,15 +753,74 @@ impl Laid {
 
 /// The step being accumulated.
 #[derive(Default)]
-struct StepAccumulator {
-    terms: Vec<BatchTerms>,
-    sequences: usize,
-    advantage_sum: f64,
-    advantaged_sequences: usize,
+pub(crate) struct StepAccumulator {
+    pub(crate) terms: Vec<BatchTerms>,
+    pub(crate) sequences: usize,
+    pub(crate) advantage_sum: f64,
+    pub(crate) advantaged_sequences: usize,
     teacher_tokens: usize,
     teacher_sum: f64,
     teacher_max: f32,
     teacher_clipped: usize,
+}
+
+impl StepAccumulator {
+    /// The record of step `step` (1-based) from what its micro-batches measured.
+    pub(crate) fn close(self, step: usize, grad_norm: f32, scoring_seconds: f32) -> PolicyGradientStep {
+        let acc = self;
+        let mut sum = BatchTerms::default();
+        for t in &acc.terms {
+            sum.loss += t.loss;
+            sum.supervised += t.supervised;
+            sum.policy_tokens += t.policy_tokens;
+            sum.clipped += t.clipped;
+            sum.clipped_high += t.clipped_high;
+            sum.clipped_low += t.clipped_low;
+            sum.dual_clipped += t.dual_clipped;
+            sum.weight_masked += t.weight_masked;
+            sum.weight_sum += t.weight_sum;
+            sum.nll_sum += t.nll_sum;
+            sum.signed_tokens += t.signed_tokens;
+            sum.imitation_tokens += t.imitation_tokens;
+            sum.kl_sum += t.kl_sum;
+            sum.kl_tokens += t.kl_tokens;
+            sum.ratio_sum += t.ratio_sum;
+            sum.ratio_min = sum.ratio_min.min(t.ratio_min);
+            sum.ratio_max = sum.ratio_max.max(t.ratio_max);
+            sum.centred_masked += t.centred_masked;
+            sum.sampler_mass_sum += t.sampler_mass_sum;
+        }
+        let per_token = |x: f32| if sum.supervised > 0 { x / sum.supervised as f32 } else { 0.0 };
+        let policy = sum.policy_tokens.max(1) as f32;
+        PolicyGradientStep {
+            step,
+            sequences: acc.sequences,
+            tokens: sum.supervised,
+            loss: per_token(sum.loss),
+            clip_fraction: if sum.signed_tokens > 0 { sum.clipped as f32 / sum.signed_tokens as f32 } else { 0.0 },
+            clip_fraction_high: if sum.signed_tokens > 0 { sum.clipped_high as f32 / sum.signed_tokens as f32 } else { 0.0 },
+            clip_fraction_low: if sum.signed_tokens > 0 { sum.clipped_low as f32 / sum.signed_tokens as f32 } else { 0.0 },
+            clip_fraction_dual: if sum.signed_tokens > 0 { sum.dual_clipped as f32 / sum.signed_tokens as f32 } else { 0.0 },
+            entropy_estimate: if sum.policy_tokens > 0 { (sum.nll_sum / f64::from(policy)) as f32 } else { 0.0 },
+            mean_response_tokens: if acc.sequences > 0 { sum.supervised as f32 / acc.sequences as f32 } else { 0.0 },
+            grad_norm,
+            importance_weight_mean: if sum.policy_tokens > 0 { (sum.weight_sum / f64::from(policy)) as f32 } else { 1.0 },
+            importance_masked_fraction: if sum.policy_tokens > 0 { sum.weight_masked as f32 / policy } else { 0.0 },
+            skipped: None,
+            kl: (sum.kl_tokens > 0).then(|| sum.kl_sum / sum.kl_tokens as f32),
+            ratio_mean: if sum.policy_tokens > 0 { (sum.ratio_sum / f64::from(policy)) as f32 } else { 1.0 },
+            ratio_min: if sum.policy_tokens > 0 { sum.ratio_min } else { 1.0 },
+            ratio_max: if sum.policy_tokens > 0 { sum.ratio_max } else { 1.0 },
+            mean_advantage: if acc.advantaged_sequences > 0 { (acc.advantage_sum / acc.advantaged_sequences as f64) as f32 } else { 0.0 },
+            imitation_tokens: sum.imitation_tokens,
+            token_advantage_mean: if acc.teacher_tokens > 0 { (acc.teacher_sum / acc.teacher_tokens as f64) as f32 } else { 0.0 },
+            token_advantage_max: acc.teacher_max,
+            token_advantage_clip_fraction: if acc.teacher_tokens > 0 { acc.teacher_clipped as f32 / acc.teacher_tokens as f32 } else { 0.0 },
+            sampler_mass: if sum.policy_tokens > 0 { (sum.sampler_mass_sum / f64::from(policy)) as f32 } else { 0.0 },
+            centred_masked_fraction: if sum.policy_tokens > 0 { sum.centred_masked as f32 / policy } else { 0.0 },
+            scoring_seconds,
+        }
+    }
 }
 
 /// Clipped policy-gradient training on a prepared dataset of externally collected rollouts. See the module docs.
@@ -1175,59 +1234,8 @@ impl ExternalPolicyGradient {
 
     /// The step's statistics from what its micro-batches measured.
     fn close_step(&mut self, grad_norm: f32) {
-        let acc = std::mem::take(&mut self.accumulating);
-        let mut sum = BatchTerms::default();
-        for t in &acc.terms {
-            sum.loss += t.loss;
-            sum.supervised += t.supervised;
-            sum.policy_tokens += t.policy_tokens;
-            sum.clipped += t.clipped;
-            sum.clipped_high += t.clipped_high;
-            sum.clipped_low += t.clipped_low;
-            sum.dual_clipped += t.dual_clipped;
-            sum.weight_masked += t.weight_masked;
-            sum.weight_sum += t.weight_sum;
-            sum.nll_sum += t.nll_sum;
-            sum.signed_tokens += t.signed_tokens;
-            sum.imitation_tokens += t.imitation_tokens;
-            sum.kl_sum += t.kl_sum;
-            sum.kl_tokens += t.kl_tokens;
-            sum.ratio_sum += t.ratio_sum;
-            sum.ratio_min = sum.ratio_min.min(t.ratio_min);
-            sum.ratio_max = sum.ratio_max.max(t.ratio_max);
-            sum.centred_masked += t.centred_masked;
-            sum.sampler_mass_sum += t.sampler_mass_sum;
-        }
-        let per_token = |x: f32| if sum.supervised > 0 { x / sum.supervised as f32 } else { 0.0 };
-        let policy = sum.policy_tokens.max(1) as f32;
-        self.stats.steps.push(PolicyGradientStep {
-            step: self.stats.steps.len() + 1,
-            sequences: acc.sequences,
-            tokens: sum.supervised,
-            loss: per_token(sum.loss),
-            clip_fraction: if sum.signed_tokens > 0 { sum.clipped as f32 / sum.signed_tokens as f32 } else { 0.0 },
-            clip_fraction_high: if sum.signed_tokens > 0 { sum.clipped_high as f32 / sum.signed_tokens as f32 } else { 0.0 },
-            clip_fraction_low: if sum.signed_tokens > 0 { sum.clipped_low as f32 / sum.signed_tokens as f32 } else { 0.0 },
-            clip_fraction_dual: if sum.signed_tokens > 0 { sum.dual_clipped as f32 / sum.signed_tokens as f32 } else { 0.0 },
-            entropy_estimate: if sum.policy_tokens > 0 { (sum.nll_sum / f64::from(policy)) as f32 } else { 0.0 },
-            mean_response_tokens: if acc.sequences > 0 { sum.supervised as f32 / acc.sequences as f32 } else { 0.0 },
-            grad_norm,
-            importance_weight_mean: if sum.policy_tokens > 0 { (sum.weight_sum / f64::from(policy)) as f32 } else { 1.0 },
-            importance_masked_fraction: if sum.policy_tokens > 0 { sum.weight_masked as f32 / policy } else { 0.0 },
-            skipped: None,
-            kl: (sum.kl_tokens > 0).then(|| sum.kl_sum / sum.kl_tokens as f32),
-            ratio_mean: if sum.policy_tokens > 0 { (sum.ratio_sum / f64::from(policy)) as f32 } else { 1.0 },
-            ratio_min: if sum.policy_tokens > 0 { sum.ratio_min } else { 1.0 },
-            ratio_max: if sum.policy_tokens > 0 { sum.ratio_max } else { 1.0 },
-            mean_advantage: if acc.advantaged_sequences > 0 { (acc.advantage_sum / acc.advantaged_sequences as f64) as f32 } else { 0.0 },
-            imitation_tokens: sum.imitation_tokens,
-            token_advantage_mean: if acc.teacher_tokens > 0 { (acc.teacher_sum / acc.teacher_tokens as f64) as f32 } else { 0.0 },
-            token_advantage_max: acc.teacher_max,
-            token_advantage_clip_fraction: if acc.teacher_tokens > 0 { acc.teacher_clipped as f32 / acc.teacher_tokens as f32 } else { 0.0 },
-            sampler_mass: if sum.policy_tokens > 0 { (sum.sampler_mass_sum / f64::from(policy)) as f32 } else { 0.0 },
-            centred_masked_fraction: if sum.policy_tokens > 0 { sum.centred_masked as f32 / policy } else { 0.0 },
-            scoring_seconds: std::mem::take(&mut self.scoring_seconds),
-        });
+        let step = std::mem::take(&mut self.accumulating).close(self.stats.steps.len() + 1, grad_norm, std::mem::take(&mut self.scoring_seconds));
+        self.stats.steps.push(step);
     }
 
     /// Feed the numerics gate with the sequences of one micro-batch: for each policy sequence (a row with an advantage)

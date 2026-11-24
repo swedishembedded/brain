@@ -31,10 +31,13 @@
 //! * [`pretrain`]: `pretrain`, raw-text training of every weight with held-out evaluation.
 //! * [`job`]: one run, from staged inputs to the adapter and its report.
 //! * [`parallel`]: a run spread over the server's cards (`cards`) and over several servers (`job`), as ranks.
+//! * [`stream`]: a policy-gradient job fed rollout groups while it runs, publishing each new adapter version to the
+//!   serving bank ([`bank`]).
 //! * [`runs`]: the `resume_key` contract: durable run records, exact resumption, idempotent completion.
 //! * [`resident`]: the run as a workload the residency executor places,
 //!   evicting idle serving instances for it and refusing when serving is busy.
 
+pub mod bank;
 pub mod consolidate;
 pub mod create;
 pub mod dryrun;
@@ -47,6 +50,7 @@ pub mod resident;
 pub mod runs;
 pub mod speech;
 pub mod store;
+pub mod stream;
 pub mod timeline;
 
 pub use quota::{DiskFree, FreeSpace, Quotas};

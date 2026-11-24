@@ -47,6 +47,8 @@ pub struct JobEnv {
     pub job_access: Option<JobAccess>,
     /// The memory in bytes of the largest card a run may be placed on; `None` on a host with no accelerator.
     pub largest_card_bytes: Option<u64>,
+    /// The serving adapter bank a streaming job publishes each new version to; empty on a server that serves none.
+    pub bank: crate::bank::BankSlot,
 }
 
 /// What a server was started with to take part in jobs spread over several servers (a request's `job`): the job
@@ -339,10 +341,34 @@ impl RunFiles {
 /// The trainer for `request` over the files `staged`, writing where `files` says, on the device this thread is scoped to.
 /// `teacher_dir` is the model store directory of the request's `distill_teacher`, when it names one.
 pub fn build_fine_tune(request: &Request, base_dir: &Path, teacher_dir: Option<&Path>, staged: &Staged, files: &RunFiles) -> Result<brain::ChatFineTune, String> {
+    let mut ft = fine_tune_settings(request, base_dir, teacher_dir, files)?.dataset(&staged.train);
+    if let Some(path) = &staged.held_out {
+        ft = ft.held_out(path);
+    }
+    if let Some(path) = &staged.held_out_text {
+        ft = ft.held_out_text(path);
+    }
+    if let Some(path) = &staged.monitor {
+        ft = ft.monitor(path);
+    }
+    if let Some(path) = &staged.start_adapter {
+        ft = ft.continue_from(path);
+    }
+    for path in &staged.replay {
+        ft = ft.replay(path);
+    }
+    for (path, share) in &staged.weighted_replay {
+        ft = ft.replay_at(path, *share);
+    }
+    Ok(ft)
+}
+
+/// Every setting of `request`'s fine-tune but what it trains on, writing where `files` says, on the device this thread
+/// is scoped to.
+pub(crate) fn fine_tune_settings(request: &Request, base_dir: &Path, teacher_dir: Option<&Path>, files: &RunFiles) -> Result<brain::ChatFineTune, String> {
     let p = &request.params;
     let mut ft = brain::ChatFineTune::from_pretrained(utf8(base_dir)?)
         .placed(true)
-        .dataset(&staged.train)
         .out_dir(&files.out_dir)
         .steps(p.steps)
         .grad_accum(p.grad_accum)
@@ -391,24 +417,6 @@ pub fn build_fine_tune(request: &Request, base_dir: &Path, teacher_dir: Option<&
     }
     if let Some(v) = p.replay_share {
         ft = ft.replay_share(v);
-    }
-    if let Some(path) = &staged.held_out {
-        ft = ft.held_out(path);
-    }
-    if let Some(path) = &staged.held_out_text {
-        ft = ft.held_out_text(path);
-    }
-    if let Some(path) = &staged.monitor {
-        ft = ft.monitor(path);
-    }
-    if let Some(path) = &staged.start_adapter {
-        ft = ft.continue_from(path);
-    }
-    for path in &staged.replay {
-        ft = ft.replay(path);
-    }
-    for (path, share) in &staged.weighted_replay {
-        ft = ft.replay_at(path, *share);
     }
     if p.keep_evaluations {
         ft = ft.keep_evaluations(&files.evaluations);
@@ -607,16 +615,16 @@ pub fn step_frame(progress: &brain::FineTuneProgress, seconds: f64) -> Value {
 /// summary of the run (which rides one frame, a D-Bus datagram that is lost when it does not fit the socket, so it holds
 /// totals and short lists, every one bounded by the request: see [`crate::request::MAX_EVALUATIONS`]; the per-step
 /// series are the frames the run streamed and the `record` blob).
-struct Trained {
-    adapter: PathBuf,
-    record: Option<PathBuf>,
+pub(crate) struct Trained {
+    pub(crate) adapter: PathBuf,
+    pub(crate) record: Option<PathBuf>,
     /// `sha256:<hex>` of the adapter file, as the adapter's card records it.
-    adapter_sha256: String,
+    pub(crate) adapter_sha256: String,
     /// The adapter of each evaluation the run kept, by step.
-    evaluations: Vec<(u32, PathBuf)>,
+    pub(crate) evaluations: Vec<(u32, PathBuf)>,
     /// The step this job continued a resumable run's saved state at.
-    resumed_at: Option<u32>,
-    summary: Value,
+    pub(crate) resumed_at: Option<u32>,
+    pub(crate) summary: Value,
 }
 
 fn preference_score_json(score: Option<brain::PreferenceScore>) -> Value {
@@ -717,13 +725,13 @@ pub(crate) fn trainer_failure(e: brain::Error) -> String {
 }
 
 /// Where a run's datasets, base, teachers and files are: what every rank of it trains from.
-struct Inputs<'a> {
-    base_dir: &'a Path,
+pub(crate) struct Inputs<'a> {
+    pub(crate) base_dir: &'a Path,
     /// The model store directory of the request's `distill_teacher`, when it names one.
-    teacher_dir: Option<&'a Path>,
+    pub(crate) teacher_dir: Option<&'a Path>,
     /// A distillation's teacher adapter, staged when the request names one by digest.
-    teacher_adapter: Option<&'a Path>,
-    staged: &'a Staged,
+    pub(crate) teacher_adapter: Option<&'a Path>,
+    pub(crate) staged: &'a Staged,
 }
 
 /// Trains `request`'s objective once, writing where `files` says, on the device this thread is scoped to: as `rank`
@@ -810,7 +818,7 @@ pub fn run(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], progre
             outputs["resume"] = crate::runs::completed_report(p.resume_key.as_deref().unwrap_or_default());
             return recorded(env, &request, outputs);
         }
-        Some(crate::runs::Opened::Run(run)) => Some(run),
+        Some(crate::runs::Opened::Run(run)) => Some(*run),
         None => None,
     };
     let base_dir = resolve_base(env.models_dir.as_deref(), &p.base)?;
@@ -818,7 +826,11 @@ pub fn run(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], progre
     let steps = p.steps;
     let work = Workdir::create(env)?;
     progress(Progress::event(0, steps, json!({"type": "stage", "stage": "staging the datasets"})));
-    let staged = stage(&request.data, &inv.blobs, env.store.as_ref(), &work)?;
+    let staged = match (&request.data, &request.stream) {
+        (Some(data), _) => stage(data, &inv.blobs, env.store.as_ref(), &work)?,
+        (None, Some(stream)) => crate::stream::stage(stream, &inv.blobs, env.store.as_ref(), &work)?,
+        (None, None) => unreachable!("a request names data or a stream"),
+    };
     if inv.cancel.is_cancelled() {
         return Err("cancelled".into());
     }
@@ -836,7 +848,12 @@ pub fn run(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], progre
     };
     let inputs = Inputs { base_dir: &base_dir, teacher_dir: teacher_dir.as_deref(), teacher_adapter: teacher_adapter.as_deref(), staged: &staged };
     let began = Instant::now();
-    let trained = if request.spread.ranked() {
+    let mut uncommitted = Vec::new();
+    let trained = if request.stream.is_some() {
+        let streamed = crate::stream::train(env, &request, &inputs, &files, inv, run.as_ref().map_or(1, crate::runs::Run::epoch), began, progress)?;
+        uncommitted = streamed.uncommitted;
+        streamed.trained
+    } else if request.spread.ranked() {
         train_ranks(&request, env, &inputs, &files, &work, devices, &inv.cancel, began, progress)?
     } else {
         train_objective(&request, &inputs, &files, None, &inv.cancel, &mut |step| progress(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64()))))?
@@ -886,6 +903,10 @@ pub fn run(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], progre
         // Everything the result names is published: the run is complete, and a resubmission answers with this.
         run.finish(&mut outputs, trained.resumed_at)?;
     }
+    // A completed stream: what it trained since its last saved state is in the published adapter and the result.
+    if !uncommitted.is_empty() {
+        progress(Progress::event(0, 0, json!({"type": "committed", "step": outputs["steps_completed"], "groups": uncommitted})));
+    }
     result.outputs = outputs;
     if p.return_adapter {
         let bytes = std::fs::read(&trained.adapter).map_err(|e| format!("train: reading the adapter: {e}"))?;
@@ -925,7 +946,7 @@ mod tests {
     use capability::Media;
 
     fn env_with(root: &Path, max_job_staging_bytes: u64, store: Option<ArtifactStore>) -> JobEnv {
-        JobEnv { store, models_dir: None, work_root: root.to_path_buf(), quotas: Quotas { max_job_staging_bytes, ..Quotas::default() }, job_access: None, largest_card_bytes: None }
+        JobEnv { store, models_dir: None, work_root: root.to_path_buf(), quotas: Quotas { max_job_staging_bytes, ..Quotas::default() }, job_access: None, largest_card_bytes: None, bank: Default::default() }
     }
 
     fn blobs(sizes: &[(&str, usize)]) -> BTreeMap<String, Blob> {

@@ -760,7 +760,7 @@ fn train_in(scratch: &Path, weights: &str, inv: &Invocation, progress: &mut dyn 
                 progress(Progress::step(s.step, s.steps, format!("loss {:.4}", s.loss)));
                 true
             };
-            train_once(model::FitControl { on_step: Some(&mut on_step), grad_sync: Some(sync), ..Default::default() })
+            train_once(model::FitControl { on_step: Some(&mut on_step), publish: None, grad_sync: Some(sync), ..Default::default() })
         })?,
         None => {
             let mut on_step = |s: &model::StepReport| {

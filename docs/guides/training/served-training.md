@@ -553,6 +553,84 @@ version that drew it, so the trainer can decide what is too stale to train on:
   default 32) is fixed when the server starts, so an adapter above it cannot be
   hot-loaded.
 
+## Training while serving: a streaming job
+
+`brain/train` with `objective: policy_gradient` and a `stream` document instead of `data` trains on rollout groups
+an orchestrator sends while the job runs, and serves each new adapter version from the same process. Any architecture
+whose trainer declares the policy gradient takes it. The server must serve the base with an adapter bank
+(`--adapter-slots`, `--serve-adapters` or another adapter flag), and the job is started over HTTP or D-Bus, the
+surfaces that deliver its input.
+
+```
+POST /v1/jobs
+{"model": "brain/train", "action": "train", "params": {
+   "base": "Qwen/Qwen3-4B", "objective": "policy_gradient", "loss_agg": "token-sum", "max_block": 4096,
+   "resume_key": "run-7", "checkpoint_every": 4,
+   "stream": "{\"publish_adapter\": \"Qwen/Qwen3-4B:lab:policy:v1\", \"publish_every\": 1,
+               \"step_tokens\": 16384, \"queue_tokens\": 65536, \"max_staleness\": 2}"}}
+```
+
+| `stream` field | Meaning |
+|---|---|
+| `publish_adapter` | the adapter id every version is served under (`<vendor>/<repo>:<owner>:<name>:<tag>`) |
+| `publish_every` | steps between publications; the final adapter is published when the job ends |
+| `step_tokens` | policy tokens (supervised tokens of rollouts) one optimiser step trains: a step takes whole groups, in arrival order, until it holds at least this many |
+| `queue_tokens` | policy tokens the queue holds, at least `step_tokens` |
+| `max_staleness` | optional: a group whose oldest record's `policy_version` is more than this many versions behind the last published one is dropped, not trained |
+| `max_steps` | optional: the job ends after this many steps; the learning-rate schedule spans it (1,000,000 when unset) |
+| `start_adapter` | optional: `{"digest": ...}` or `{"blob": "adapter"}`, the adapter the run continues |
+
+The estimator and its settings are the request's policy-gradient params, as for a dataset. A step is normalised over
+its own tokens, so `loss_agg` is `token-sum` or `constant-length`; `behaviour` is `recorded` (every policy token
+carries the sampler's `behavior_logprobs`); importance correction, teacher contexts, images, `cards`, `job`,
+`grad_accum` above 1, evaluations and `adapter_id` are refused.
+
+**Records.** `POST /v1/jobs/{id}/records[?epoch=N]` (D-Bus `Input(job, "records", query, fd)`) takes a JSONL body
+of training-record contract v2 rollout records; a request's records form complete groups (every record of a group key
+is in the one request). They are checked as a dataset is, the base's tokenizer digest included, and each group's
+advantages are computed when it arrives. The answer:
+
+```
+200 {"accepted": ["g1"], "duplicates": ["g0"], "zero_advantage": 0, "queued_groups": 3, "queued_tokens": 9120,
+     "allowance": 56416, "epoch": 2, "version": 5}
+```
+
+A group key the run already took (queued, trained or dropped) is a `duplicate`: re-sending is idempotent. A group
+whose rewards are all equal is accepted, counted in `zero_advantage`, and trains nothing. A full queue answers
+`429` with `Retry-After` and `"detail": {"allowance", "queued_tokens", "offered_tokens", "epoch"}`: nothing of the
+request is queued. It is never `429` while the queue holds less than `step_tokens`. A record the contract refuses is
+`400` naming it; `?epoch=N` naming another epoch than the run's, or records after `finish`, is `409` with
+`"detail": {"epoch"}`; a job that has ended is `410`, and an id the server does not know (it restarted) is `404`.
+Records sent before the job is ready (it is loading the base, or a resumed run is restoring its state) wait for it;
+a job that has not answered within two minutes is `503` with `Retry-After` (retry the same request).
+
+**Finish.** `POST /v1/jobs/{id}/finish` (D-Bus `Input(job, "finish", "{}", empty fd)`) answers
+`{"finishing": true, "queued_groups", "queued_tokens", "epoch"}`; the job trains what is queued, publishes the final
+adapter to the bank and the artifact store, and ends with the result a dataset run reports. `DELETE` cancels as for
+every job: the run writes its state and stops.
+
+**Events.** Beside the `step` frames, whose `pg` object also carries `staleness_mean`, `staleness_max`,
+`policy_tokens`, `learner_wait_seconds` (the time the learner waited for the step's records), `queue_groups`,
+`queue_tokens`, `time_in_queue_seconds` (the step's groups' mean) and `dropped_stale`, the job reports:
+
+```
+{"type": "stream", "epoch": 2, "publish_adapter": "...", "version": 5, "step_tokens": 16384, "queue_tokens": 65536, "max_staleness": 2}
+{"type": "applied", "step": 7, "groups": ["g1", "g2"]}                 (+ "skipped": why, when a guard skipped the update)
+{"type": "published", "version": 6, "digest": "sha256:...", "step": 7}
+{"type": "dropped", "reason": "stale", "groups": ["g0"]}
+{"type": "committed", "step": 8, "groups": ["g1", "g2", "g0"]}
+```
+
+`applied` follows the step whose optimiser update holds the groups' gradient; `committed` follows the write of a
+training state that holds it (every `checkpoint_every` steps of a `resume_key` run, a cancel, and the job's
+completion); a version is `published` once a request for `publish_adapter` is routed to it, and staleness is measured
+against it.
+
+**Resuming.** Started again with the same `resume_key`, the run continues from its last saved state at the next
+epoch (the `stream` frame and every answer carry it). The queue is not kept: the client re-sends every group it has
+no `committed` receipt for, and the run answers the committed ones as duplicates. A client that names the epoch it
+believes in (`?epoch=N`) learns at its next call that another job took the run over.
+
 ## Security
 
 The surface is behind the server's key like every route and takes no parameter

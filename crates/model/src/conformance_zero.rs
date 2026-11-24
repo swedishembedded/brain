@@ -92,7 +92,7 @@ fn run<M: Model>(name: &str, build: &(impl Fn() -> M + Sync), dir: &Path, world:
                         stop.is_none_or(|n| r.step < n)
                     };
                     let path = state.map(|f| f(rank));
-                    let control = FitControl { on_step: Some(&mut stop_at), state: path.as_deref(), state_every: 0, identity: serde_json::json!({ "test": name }), snapshots: None, grad_sync: Some(sync) };
+                    let control = FitControl { on_step: Some(&mut stop_at), state: path.as_deref(), state_every: 0, identity: serde_json::json!({ "test": name }), snapshots: None, publish: None, grad_sync: Some(sync) };
                     let (_, model) = crate::fit_controlled(build(), objective, opts, None, control).map_err(err)?;
                     Ok(RankRun { weights: weights_of(&model), losses })
                 })

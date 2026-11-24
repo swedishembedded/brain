@@ -490,7 +490,7 @@ impl PreferenceFineTune {
             on_progress(&FineTuneProgress::of(s));
             crate::data_parallel::keep_going(self.parallel.as_ref(), s.step, cancel)
         };
-        let control = model::FitControl { on_step: Some(&mut on_step), state: Some(&state_path), state_every: self.checkpoint_every, identity, snapshots: None, grad_sync: self.parallel.as_ref().map(crate::DataParallel::grad_sync) };
+        let control = model::FitControl { on_step: Some(&mut on_step), state: Some(&state_path), state_every: self.checkpoint_every, identity, snapshots: None, publish: None, grad_sync: self.parallel.as_ref().map(crate::DataParallel::grad_sync) };
         let adapter_path = out_dir.join(ADAPTER_FILE);
         let adapter_id = self.adapter_id.clone().unwrap_or_else(|| format!("{base_id}:local:dpo:latest"));
         let provenance = checkpoint::st::TrainingProvenance {

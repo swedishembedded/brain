@@ -73,6 +73,8 @@ pub(crate) struct LoraJob<'a> {
     pub dir: &'a Path,
     /// Train the clipped policy-gradient objective on rollout records instead of the supervised loss.
     pub policy_gradient: Option<PolicyGradientConfig>,
+    /// The policy gradient's records arrive while the run goes on, from this feed, instead of from `dir`.
+    pub stream: Option<std::sync::Arc<rl::objective::stream_pg::RolloutFeed>>,
     /// Prepared held-out sets scored on the resident model before the first step and after the last.
     pub held_out: &'a [&'a Path],
 }
@@ -275,7 +277,11 @@ fn lora<T: ChatTrainer + 'static>(job: LoraJob<'_>, control: FitControl<'_>) -> 
     }
     match job.policy_gradient {
         Some(config) => {
-            let mut fit = PolicyGradientFit::new(job.dir, config, job.opts, control);
+            let source = match &job.stream {
+                Some(feed) => rl::fit::RolloutSource::Stream(std::sync::Arc::clone(feed)),
+                None => rl::fit::RolloutSource::Prepared(job.dir),
+            };
+            let mut fit = PolicyGradientFit::over(source, config, job.opts, control);
             let (report, scored, save) = run::<T, _>(&job, &mut fit, continuing, sync)?;
             Ok(LoraOutcome { report, scored, policy_gradient: Some(fit.into_stats().unwrap_or_default()), save })
         }

@@ -173,6 +173,12 @@ mod data_parallel;
 #[cfg(feature = "study")]
 mod finetune;
 #[cfg(feature = "study")]
+mod rollout_stream;
+#[cfg(feature = "study")]
+pub use rollout_stream::{RolloutStream, StreamRefusal, MAX_STREAM_RECORDS, OPEN_ENDED_STREAM_STEPS, STREAM_MAX_WARMUP};
+#[cfg(feature = "study")]
+pub use rl::objective::stream_pg::{check_streamable, Admission as StreamAdmission, StreamSettings};
+#[cfg(feature = "study")]
 mod example_length;
 #[cfg(feature = "study")]
 pub use example_length::ExampleMeter;
@@ -232,7 +238,7 @@ pub use model::zero::Sharding;
 #[cfg(feature = "study")]
 pub use data_parallel::{DataParallel, GroupBreaker, JobRanks, ParallelReport, RankDevice, RankGuard};
 #[cfg(feature = "study")]
-pub use finetune::{DEFAULT_LORA_LR, DEFAULT_LORA_RANK, LORA_WEIGHT_DECAY, emit_held_out_records, score_chat, score_tokens, score_tokens_qwen35, HeldOutRecords, ChatFineTune, ChatFineTuneOutcome, FineTuneProgress, TrainFootprint, FineTuneStatus, HeldOutScore, MonitorPoint, PolicyGradientOutcome, RecordReadout, Selection, TokenReadout, TokenScore};
+pub use finetune::{DEFAULT_LORA_LR, DEFAULT_LORA_RANK, LORA_WEIGHT_DECAY, Publisher, emit_held_out_records, score_chat, score_tokens, score_tokens_qwen35, HeldOutRecords, ChatFineTune, ChatFineTuneOutcome, FineTuneProgress, TrainFootprint, FineTuneStatus, HeldOutScore, MonitorPoint, PolicyGradientOutcome, RecordReadout, Selection, TokenReadout, TokenScore};
 #[cfg(feature = "study")]
 mod full_finetune;
 #[cfg(feature = "study")]

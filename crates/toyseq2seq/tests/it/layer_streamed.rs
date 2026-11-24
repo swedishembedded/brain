@@ -133,7 +133,7 @@ fn resume_exactly(build: &dyn Fn() -> Seq2Seq, cfg: &Seq2SeqConfig, scratch: &st
     let state = scratch.join("run.state");
     let identity = serde_json::json!({"test": "toyseq2seq"});
     let mut stop_at_3 = |r: &model::StepReport| r.step < 3;
-    let control = model::FitControl { on_step: Some(&mut stop_at_3), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, grad_sync: None };
+    let control = model::FitControl { on_step: Some(&mut stop_at_3), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, publish: None, grad_sync: None };
     let (first, _) = model::fit_controlled(build(), objective(), &opts, None, control).map_err(err)?;
     if !first.interrupted || !state.with_extension("offdevice").is_dir() {
         return Err("toyseq2seq: the stopped run left no resume state with its off-device generation".into());

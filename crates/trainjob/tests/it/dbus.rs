@@ -329,3 +329,54 @@ fn the_real_base_trains_over_the_bus_and_its_release_speaks_in_its_new_voice() {
     let spoken = inst.run("design", &inv, &mut |_| {}).unwrap();
     assert!(!audio::wav::parse(&spoken.blobs["audio"].bytes).unwrap().samples.is_empty(), "it speaks in its new voice and language");
 }
+
+/// A streaming job over the bus: `Subscribe` creates it, `Input` hands it a group and then `finish`, its receipts and
+/// published version ride the event stream, and `Input` to a job that is gone (or another user's) is refused.
+#[test]
+fn a_stream_job_over_the_bus_takes_its_records_by_input_and_finishes() {
+    if !session_bus_reachable() {
+        brain_testutil::skip_unavailable("no reachable session bus (run under `dbus-run-session -- cargo test ...`)");
+        return;
+    }
+    let rig = crate::support::rig_stream("dbus-stream");
+    let sizes = crate::stream::sizes(&rig);
+    let group = crate::stream::group(sizes, "g1", 0);
+    let tokens = (sizes[0] + sizes[1]) as u64;
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let manager = brain_dbus::service::Manager::new(rig.exec.clone()).with_training(true);
+        let name = format!("com.swedishembedded.Brain1.trainstream{}", std::process::id());
+        let _conn = zbus::connection::Builder::session().name(name.as_str()).serve_at(brain_dbus::OBJECT_PATH, manager).build().await.unwrap();
+        let client = zbus::Connection::session().await.unwrap();
+        let proxy = zbus::Proxy::new(&client, name.as_str(), brain_dbus::OBJECT_PATH, "com.swedishembedded.Brain1.Manager").await.unwrap();
+        let stream = json!({"publish_adapter": crate::stream::ADAPTER, "publish_every": 1, "step_tokens": tokens, "queue_tokens": tokens});
+        let params = json!({"base": BASE, "objective": "policy_gradient", "loss_agg": "token-sum", "rank": 2, "lr": 2e-2, "seed": 7, "max_block": 128, "stream": stream.to_string()});
+        let (job, events): (u64, ZOwnedFd) = proxy.call("Subscribe", &(trainjob::MODEL, trainjob::ACTION, params.to_string(), HashMap::<String, ZOwnedFd>::new(), "{}")).await.unwrap();
+        let input = |kind: &'static str, body: Vec<u8>| {
+            let proxy = &proxy;
+            async move { proxy.call::<_, _, String>("Input", &(job, kind, "{}", memfd(&body))).await.map(|reply| serde_json::from_str::<Value>(&reply).unwrap()) }
+        };
+        let accepted = input("records", group.clone()).await.unwrap();
+        assert_eq!((accepted["accepted"].clone(), accepted["answer"]["accepted"].clone()), (json!(true), json!(["g1"])), "{accepted}");
+        let refused = input("records", b"not json".to_vec()).await.unwrap();
+        assert_eq!((refused["accepted"].clone(), refused["refusal"].clone()), (json!(false), json!("invalid")), "{refused}");
+        assert_eq!(input("finish", Vec::new()).await.unwrap()["answer"]["finishing"], json!(true));
+        let events = std::sync::Arc::new(OwnedFd::from(events));
+        let mut kinds = Vec::new();
+        loop {
+            let reader = events.clone();
+            let Some((frame, _)) = tokio::task::spawn_blocking(move || next_frame(&reader)).await.unwrap() else { panic!("the stream ended without a terminal frame") };
+            match frame["type"].as_str().unwrap() {
+                "progress" => kinds.push(frame["event"]["type"].as_str().unwrap_or_default().to_string()),
+                "done" => break,
+                "error" => panic!("the job failed: {frame}"),
+                _ => {}
+            }
+        }
+        for kind in ["stream", "applied", "published", "step", "committed"] {
+            assert!(kinds.iter().any(|k| k == kind), "{kind} in {kinds:?}");
+        }
+        let gone = proxy.call::<_, _, String>("Input", &(job, "records", "{}", memfd(&group))).await;
+        assert!(gone.unwrap_err().to_string().contains("no such job"));
+    });
+}

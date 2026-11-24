@@ -41,6 +41,7 @@ Bus `com.swedishembedded.Brain1`, object `/com/swedishembedded/Brain1`, interfac
 | `Subscribe(model, action, params, in_fds, in_meta)` | a job that streams progress/result frames back — for long-running generation |
 | `Cancel(job)` | cooperative cancel of an in-flight `Subscribe` job of the calling user |
 | `Jobs()` | the calling user's in-flight `Subscribe` jobs, as JSON |
+| `Input(job, kind, query, body_fd)` | input to a running `Subscribe` job of the calling user: a streaming training job's `records` (JSONL in the fd) or `finish`; `query` is `{}` or `{"epoch": N}`. Answers JSON `{"accepted": true, "answer": {...}}` or `{"accepted": false, "refusal": "invalid" \| "busy" \| "conflict" \| "gone" \| "unavailable", "message", "detail"}` (`busy`: a full queue, `detail.allowance`; `unavailable`: the job is not ready yet, retry); an unknown, finished or another user's job is the error `no such job` ([streaming jobs](../../guides/training/served-training.md#training-while-serving-a-streaming-job)) |
 | `StreamTranscribe(model, params, pcm_fd)` | continuous-input method for live audio, e.g. streaming ASR |
 | props | `Version`, `ActiveJobs` (in-flight `Run`/`Subscribe`/stream jobs), `Models` |
 

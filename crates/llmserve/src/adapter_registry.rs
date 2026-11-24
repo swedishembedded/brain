@@ -609,6 +609,11 @@ impl LiveAdapters {
         Ok(())
     }
 
+    /// The release offered under `id` (its digest and policy version), when this resident offers one.
+    pub fn identity(&self, id: &str) -> Option<AdapterIdentity> {
+        self.target.registry().identity(id)
+    }
+
     /// Withdraw the adapter offered under `id`: it leaves the model listing at
     /// once and takes no new request, requests already accepted for it finish,
     /// and the engine unloads it when the next batch starts. An id that is not

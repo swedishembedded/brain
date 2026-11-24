@@ -338,7 +338,11 @@ pub fn speech_sft(cfg: &SpeechSftConfig, train: &Shard, held_out: Option<&Shard>
     };
 
     let mut history = Vec::new();
-    let ::model::train::FitControl { on_step: mut caller, state, state_every, identity, snapshots, grad_sync } = control;
+    let ::model::train::FitControl { on_step: mut caller, state, state_every, identity, snapshots, publish, grad_sync } = control;
+    // A speech fine-tune trains every weight of the talker: it has no adapter to publish while it runs.
+    if publish.is_some() {
+        return Err("speech_sft: a full fine-tune of the talker publishes no adapter during the run".to_string());
+    }
     let mut on_step = |r: &::model::train::StepReport| {
         history.push(step_of(r));
         caller.as_mut().is_none_or(|f| f(r))
@@ -346,7 +350,7 @@ pub fn speech_sft(cfg: &SpeechSftConfig, train: &Shard, held_out: Option<&Shard>
     let mut fingerprint = cfg.clone();
     fingerprint.seed = None;
     let identity = serde_json::json!({ "caller": identity, "speech_sft": serde_json::to_string(&fingerprint).map_err(|e| e.to_string())? });
-    let control = ::model::train::FitControl { on_step: Some(&mut on_step), state, state_every, identity, snapshots, grad_sync };
+    let control = ::model::train::FitControl { on_step: Some(&mut on_step), state, state_every, identity, snapshots, publish: None, grad_sync };
     let (fit, model) = ::model::train::fit_controlled(model, objective, &opts, None, control).map_err(|e| e.to_string())?;
 
     let tensors = ::model::Model::param_names(&model)

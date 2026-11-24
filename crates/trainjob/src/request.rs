@@ -95,7 +95,8 @@ fn spec_without_defaults() -> ActionSpec {
         .streaming()
         .cancellable()
         .param(ParamSpec::new("base", ParamType::Str, "the base model, `<vendor>/<repo>` in the server's model store").required())
-        .param(ParamSpec::new("data", ParamType::Str, "JSON document naming the datasets: {\"train\": SRC, \"held_out\"?, \"held_out_text\"?, \"monitor\"?, \"start_adapter\"?, \"replay\"?: [SRC], \"weighted_replay\"?: [{SRC fields, \"share\"}]} where SRC is {\"digest\": \"<blake3 hex>\"} (an artifact of the server's store) or {\"blob\": \"<input name>\"} (an input blob of this call)").required())
+        .param(ParamSpec::new("data", ParamType::Str, "JSON document naming the datasets: {\"train\": SRC, \"held_out\"?, \"held_out_text\"?, \"monitor\"?, \"start_adapter\"?, \"replay\"?: [SRC], \"weighted_replay\"?: [{SRC fields, \"share\"}]} where SRC is {\"digest\": \"<blake3 hex>\"} (an artifact of the server's store) or {\"blob\": \"<input name>\"} (an input blob of this call); exactly one of data and stream"))
+        .param(ParamSpec::new("stream", ParamType::Str, "rollout groups posted while the job runs (`POST /v1/jobs/{id}/records`, D-Bus `Input`) instead of a dataset, trained by the policy gradient: JSON document {\"publish_adapter\": \"<vendor>/<repo>:<owner>:<name>:<tag>\", \"publish_every\": STEPS, \"step_tokens\": TOKENS, \"queue_tokens\": TOKENS, \"max_staleness\"?: VERSIONS, \"max_steps\"?: STEPS, \"start_adapter\"?: SRC}; every publish_every steps the adapter is served under publish_adapter as its next version; exactly one of data and stream"))
         .param(ParamSpec::new("objective", ParamType::Enum(vec!["sft".into(), "policy_gradient".into(), "preference".into(), "feedback".into(), "distill".into()]), "supervised imitation; the clipped policy gradient on rollout records that carry a reward and group (training-record contract v2) or a teacher context; preference optimization on `generic-preference-v1` pairs by the pair loss `loss` (`dataset` and `held_out` hold pairs); KTO on `generic-feedback-v1` desirable and undesirable completions; or top-K distillation from a teacher policy of the same base on the supervised turns of chat records").default(json!("sft")))
         .param(ParamSpec::new("steps", ParamType::Int, "optimiser steps").default(json!(100)).min(1.0).max(1_000_000.0).step(1.0))
         .param(ParamSpec::new("rank", ParamType::Int, "LoRA rank of a fresh adapter; a continued adapter keeps its own (default 8)").min(1.0).max(256.0).step(1.0))
@@ -186,13 +187,13 @@ pub enum Source {
 /// A source as it is written in the `data` document: exactly one of the two fields.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SourceDoc {
+pub(crate) struct SourceDoc {
     digest: Option<String>,
     blob: Option<String>,
 }
 
 impl SourceDoc {
-    fn resolve(self, what: &str) -> Result<Source, String> {
+    pub(crate) fn resolve(self, what: &str) -> Result<Source, String> {
         match (self.digest, self.blob) {
             (Some(digest), None) => Digest::parse(&digest).map(Source::Digest).map_err(|e| format!("data.{what}.digest: {e}")),
             (None, Some(blob)) => Ok(Source::Blob(blob)),
@@ -347,7 +348,8 @@ impl Objective {
 #[serde(deny_unknown_fields)]
 pub struct Params {
     pub base: String,
-    pub data: String,
+    pub data: Option<String>,
+    pub stream: Option<String>,
     pub objective: Objective,
     pub steps: u32,
     pub rank: Option<u32>,
@@ -400,7 +402,10 @@ const SHARED_WITH_PARAMS: [&str; 1] = ["teacher"];
 #[derive(Debug)]
 pub struct Request {
     pub params: Params,
-    pub data: DataRefs,
+    /// The datasets of a run over a dataset; `None` for a stream.
+    pub data: Option<DataRefs>,
+    /// The settings of a run over rollout groups posted while it runs; `None` for a dataset.
+    pub stream: Option<crate::stream::StreamRefs>,
     /// How the run is spread over this server's cards and, with a `job`, over several servers.
     pub spread: crate::parallel::Spread,
 }
@@ -425,13 +430,21 @@ impl Request {
                 params.policy_gradient.insert(name, value).map_err(|e| format!("train: {name}: {e}"))?;
             }
         }
-        let data = DataRefs::parse(&params.data)?;
         let refused = |what: &str| Err(format!("train: {what}"));
+        let (data, stream) = match (params.data.as_deref(), params.stream.as_deref()) {
+            (Some(data), None) => (Some(DataRefs::parse(data)?), None),
+            (None, Some(stream)) => (None, Some(crate::stream::StreamRefs::parse(stream)?)),
+            (Some(_), Some(_)) => return refused("name exactly one of data and stream"),
+            (None, None) => return refused("name the datasets (data) or a stream of rollout groups (stream)"),
+        };
+        if stream.is_some() {
+            crate::stream::check_request(&params)?;
+        }
         if params.objective != Objective::Distill && params.top_k.is_some() {
             return refused(&format!("top_k configures distillation; the objective is {}", params.objective.name()));
         }
-        if params.objective == Objective::Distill {
-            check_distill(&params, &data, &pg_named)?;
+        if let (Objective::Distill, Some(data)) = (params.objective, &data) {
+            check_distill(&params, data, &pg_named)?;
         }
         if params.objective == Objective::Sft && !pg_named.is_empty() {
             return refused(&format!("{} configure the policy gradient; the objective is sft", pg_named.join(", ")));
@@ -459,8 +472,8 @@ impl Request {
             });
             return refused(&format!("{} configure the {} objective; the objective is {}", foreign.join(", "), owners.join(" or "), params.objective.name()));
         }
-        if matches!(params.objective, Objective::Preference | Objective::Feedback) {
-            check_preference(&params, &data, &pg_named)?;
+        if let (Objective::Preference | Objective::Feedback, Some(data)) = (params.objective, &data) {
+            check_preference(&params, data, &pg_named)?;
         }
         if params.objective == Objective::Preference {
             crate::job::pair_loss(&params)?;
@@ -496,8 +509,21 @@ impl Request {
         if spread.job.is_some() && params.objective == Objective::Feedback {
             return refused(&format!("job trains data-parallel across servers, and the feedback objective trains on one card: {FEEDBACK_ON_ONE_CARD}"));
         }
-        check_attached(&data, inv)?;
-        Ok(Request { params, data, spread })
+        match (&data, &stream) {
+            (Some(data), _) => check_attached(data, inv)?,
+            (None, Some(stream)) => stream.check_attached(inv)?,
+            (None, None) => unreachable!("one of data and stream was parsed"),
+        }
+        Ok(Request { params, data, stream, spread })
+    }
+
+    /// Every artifact digest the request names.
+    pub fn digests(&self) -> Vec<Digest> {
+        match (&self.data, &self.stream) {
+            (Some(data), _) => data.digests(),
+            (None, Some(stream)) => stream.digests(),
+            (None, None) => Vec::new(),
+        }
     }
 }
 
@@ -660,7 +686,7 @@ mod tests {
         let r = request(json!({"base": "Qwen/Qwen3.8-27B-FP8", "data": json!({"train": {"digest": digest(1)}}).to_string()}), &[]).unwrap();
         assert_eq!((r.params.objective, r.params.steps, r.params.max_block, r.params.grad_accum, r.params.thinking), (Objective::Sft, 100, 8192, 1, true));
         assert_eq!((r.params.rank, r.params.lr, r.params.seed), (None, None, None), "what the caller does not name stays the trainer's own default");
-        assert_eq!(r.data.digests().len(), 1);
+        assert_eq!(r.digests().len(), 1);
         assert!(!r.params.strict_updates, "a non-finite step is skipped by default");
         assert_eq!(r.params.cards, 1, "a run trains on one card unless it asks for more");
         let strict = request(json!({"base": "Qwen/Qwen3.8-27B-FP8", "data": json!({"train": {"digest": digest(1)}}).to_string(), "strict_updates": true}), &[]).unwrap();
@@ -702,7 +728,7 @@ mod tests {
     fn a_dataset_is_a_blob_of_the_call_or_a_digest_never_a_path() {
         let ok = json!({"base": "a/b", "data": json!({"train": {"blob": "dataset"}, "held_out": {"digest": digest(2)}}).to_string()});
         let r = request(ok, &["dataset"]).unwrap();
-        assert_eq!(r.data.train, Source::Blob("dataset".into()));
+        assert_eq!(r.data.as_ref().unwrap().train, Source::Blob("dataset".into()));
         for (doc, why) in [
             (json!({"train": {"path": "/etc/passwd"}}), "a path"),
             (json!({"train": "/etc/passwd"}), "a bare string"),
@@ -740,7 +766,8 @@ mod tests {
         }
         let doc = json!({"train": {"digest": digest(1)}, "replay": [{"digest": digest(2)}], "weighted_replay": [{"blob": "replay_1", "share": 0.25}]}).to_string();
         let r = request(json!({"base": "a/b", "data": doc}), &["replay_1"]).unwrap();
-        assert_eq!((r.data.replay.len(), r.data.weighted_replay.len()), (1, 1));
+        let data = r.data.as_ref().unwrap();
+        assert_eq!((data.replay.len(), data.weighted_replay.len()), (1, 1));
     }
 
     #[test]

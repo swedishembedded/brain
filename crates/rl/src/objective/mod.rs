@@ -22,3 +22,4 @@ pub mod pg_settings;
 pub mod score_cache;
 pub mod score_centring;
 pub(crate) mod stream;
+pub mod stream_pg;

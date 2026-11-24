@@ -107,7 +107,7 @@ fn a_resumed_lora_run_ends_with_the_uninterrupted_runs_weights_and_optimizer_sta
 
     let state = scratch.path().join("run.state");
     let mut stop = |s: &model::StepReport| s.step < STOP;
-    let control = model::FitControl { on_step: Some(&mut stop), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, grad_sync: None };
+    let control = model::FitControl { on_step: Some(&mut stop), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, publish: None, grad_sync: None };
     let (first, stopped) = model::fit_controlled(build(&run, &init), objective(scratch.path(), &run), &run, None, control).unwrap();
     assert!(first.interrupted && state.is_file(), "stopped at step {STOP} with a state file");
     // The frozen base, with the stopped run's trained factors over it.

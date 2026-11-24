@@ -104,10 +104,10 @@ fn assert_resume_after<O: Objective<Qwen>>(name: &str, rows: u32, stop_after: u3
     let state = dir.join("train.state");
     let identity = serde_json::json!({ "run": name });
     let mut stop = |s: &StepReport| s.step < stop_after;
-    let control = FitControl { on_step: Some(&mut stop), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, grad_sync: None };
+    let control = FitControl { on_step: Some(&mut stop), state: Some(&state), state_every: 0, identity: identity.clone(), snapshots: None, publish: None, grad_sync: None };
     let (first, _) = fit_controlled(lora_model(rows), make(), &opts, None, control).expect("the interrupted run");
     assert!(first.interrupted);
-    let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity, snapshots: None, grad_sync: None };
+    let control = FitControl { on_step: None, state: Some(&state), state_every: 0, identity, snapshots: None, publish: None, grad_sync: None };
     let mut resumed_objective = make();
     let (resumed_report, resumed) = fit_controlled(lora_model(rows), &mut resumed_objective, &opts, None, control).expect("the resumed run");
     std::fs::remove_dir_all(&dir).ok();
