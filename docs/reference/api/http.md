@@ -68,7 +68,7 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   decoded duration. `language` reaches a model only if its `transcribe` action
   takes one.
 - **Speech** (`POST /v1/audio/speech`, also without `/v1`): `{"model", "input", "response_format"?,
-  "input_references"?, "instructions"?, "voice"?, "seed"?}`. `input` is 1 to 4096 characters; `response_format` is
+  "input_references"?, "instructions"?, "voice"?, "seed"?, "language"?}`. `input` is 1 to 4096 characters; `response_format` is
   `wav` (default, 16-bit mono) or `pcm` (raw 16-bit signed little-endian mono); the reply is the audio itself, with
   `Content-Type` `audio/wav` or `audio/pcm`, `X-Sample-Rate` (the model's own rate, 24000 for Qwen3-TTS and
   CosyVoice) and `X-Seed` (the seed the take was drawn with; send it back as `seed` for the same take).
@@ -81,7 +81,12 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
     alone. CosyVoice needs the transcript.
   - `instructions` (1 to 4096 characters) describes the voice and delivery, and `voice` names a preset voice; both
     need a checkpoint that has them (Qwen3-TTS VoiceDesign and CustomVoice). A custom voice object
-    (`{"id": ...}`) is refused: brain keeps no stored voices.
+    (`{"id": ...}`) is refused: brain keeps no stored voices. A trained Qwen3-TTS checkpoint's named voices are its
+    preset voices.
+  - `language` (brain's extension, 1 to 64 characters) names the language the input is spoken in, as the model's
+    checkpoint names its languages (Qwen3-TTS: a `codec_language_id` key such as `english`, a trained one's new
+    languages included, or `auto`); omitted, the model's default. A language the checkpoint does not name is a 400
+    listing the ones it does.
   - The request goes to the model's speech action whose declared contract takes everything it carries; anything no
     action of the model takes (`voice` on a model with no presets, a reference on one that does not clone, a missing
     transcript where one is required), a compressed `response_format`, `speed`, `stream_format` and any unknown field
@@ -542,7 +547,7 @@ The Anthropic entry carries only `supported_parameters` of them.
 | Field | Meaning |
 |---|---|
 | `capabilities` | Names derived from the model's manifest: `chat`, `tools` (chat whose `generate` accepts `tools`), `vision` (chat whose `generate` reads `image` inputs; image parts sent to any other model are refused with 400), `embeddings`, `images`, `transcription` (a `transcribe` action taking `audio`), `speech` (an action that declares a speech contract and returns `audio`). On OpenRouter the card's `architecture` modalities follow from the same set in OpenRouter's names: `audio->transcription` for a transcription model, `text->speech` for a speech model. |
-| `speech` | On a `speech` model: `response_formats` (`wav`, `pcm`), `max_reference_seconds`, and `modes`, one per speech action, each saying whether it imitates a recording (`reference_voice`), whether that recording's transcript is `none`, `optional` or `required`, and whether it takes `instructions`, preset voices (`preset_voices`) and a `seed`. A request that needs a mode the model lacks is refused with 400. |
+| `speech` | On a `speech` model: `response_formats` (`wav`, `pcm`), `max_reference_seconds`, and `modes`, one per speech action, each saying whether it imitates a recording (`reference_voice`), whether that recording's transcript is `none`, `optional` or `required`, and whether it takes `instructions`, preset voices (`preset_voices`), a `seed` and a `language`. A request that needs a mode the model lacks is refused with 400. |
 | `max_images_per_request`, `max_image_pixels_per_request` | On a `vision` model: the most images (the `image`, `image1`, ... inputs its `generate` action declares), and pixels over all of them, one request may carry; a request past either is refused with 400. |
 | `architecture.input_modalities` | On a chat model: `"text"`, then `"image"` for a `vision` model and `"audio"` for one whose `generate` takes an `audio` clip (the field an agent runtime reads to decide what it may attach). |
 | `supported_parameters` | On a model that generates text, on every dialect: the request fields its `generate` action honours - `max_tokens`, then the sampling parameters among `temperature`, `top_p`, `top_k`, `seed`, `presence_penalty`, `frequency_penalty`, `min_p`, `repetition_penalty`, the DRY fields, the thinking-budget names and `ignore_eos`, then the token-capture fields (`logprobs`, `return_token_ids`, `policy_trace`). A field not listed is refused with 400 naming it. |

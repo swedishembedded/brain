@@ -71,6 +71,9 @@ pub struct SpeechContract {
     pub length: Option<String>,
     /// The param the request's seed fills.
     pub seed: Option<String>,
+    /// The param naming the language the words are spoken in, as the model
+    /// names its languages.
+    pub language: Option<String>,
 }
 
 /// What a speech request asks for, as far as the choice of action goes.
@@ -85,7 +88,7 @@ pub struct SpeechRequest {
 impl SpeechContract {
     /// An action that speaks `text` in a voice of its own.
     pub fn new(text: &str) -> SpeechContract {
-        SpeechContract { text: text.into(), reference: None, instructions: None, voice: None, length: None, seed: None }
+        SpeechContract { text: text.into(), reference: None, instructions: None, voice: None, length: None, seed: None, language: None }
     }
 
     /// The action imitates the recording in `input`, its transcript going as
@@ -112,6 +115,10 @@ impl SpeechContract {
 
     pub fn seed(mut self, param: &str) -> SpeechContract {
         self.seed = Some(param.into());
+        self
+    }
+    pub fn language(mut self, param: &str) -> SpeechContract {
+        self.language = Some(param.into());
         self
     }
 
@@ -154,6 +161,7 @@ impl SpeechContract {
             "instructions": self.instructions.is_some(),
             "preset_voices": self.voice.is_some(),
             "seed": self.seed.is_some(),
+            "language": self.language.is_some(),
         })
     }
 
@@ -162,7 +170,7 @@ impl SpeechContract {
     /// not among its inputs. Empty for a contract that only names what exists.
     pub fn undeclared(&self, spec: &crate::ActionSpec) -> Vec<String> {
         let param = |name: &str| spec.params.iter().any(|p| p.name == name);
-        let mut missing: Vec<String> = [Some(self.text.as_str()), self.instructions.as_deref(), self.voice.as_deref(), self.length.as_deref(), self.seed.as_deref(), self.reference.as_ref().and_then(|r| r.transcript.param())]
+        let mut missing: Vec<String> = [Some(self.text.as_str()), self.instructions.as_deref(), self.voice.as_deref(), self.length.as_deref(), self.seed.as_deref(), self.language.as_deref(), self.reference.as_ref().and_then(|r| r.transcript.param())]
             .into_iter()
             .flatten()
             .filter(|name| !param(name))

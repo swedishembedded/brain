@@ -21,6 +21,8 @@
 //! - `voice`: one of the model's preset voices, by name. A custom voice object (`{"id": ...}`) is refused: brain keeps
 //!   no stored voices, and a reference goes in `input_references`.
 //! - `seed`: the run's seed (brain's extension), echoed in the `x-seed` header with the seed actually used.
+//! - `language`: the language the input is spoken in, as the model names its languages (brain's extension; a
+//!   model that names none refuses it).
 //!
 //! The model's speech action is the one whose contract has a place for everything the request carries
 //! ([`crate::catalog::speech_action_for`]); a field no action of the model can take is a 400 naming it, never
@@ -52,6 +54,8 @@ pub const MAX_INSTRUCTIONS_CHARS: usize = 4096;
 pub const MAX_TRANSCRIPT_CHARS: usize = 4096;
 /// The longest voice name accepted, in characters.
 pub const MAX_VOICE_CHARS: usize = 64;
+/// The longest language name accepted, in characters.
+pub const MAX_LANGUAGE_CHARS: usize = 64;
 /// The longest reference recording accepted: a voice is imitated from seconds of speech, and every second of it is
 /// prompt the model attends to at every step it writes.
 pub const MAX_REFERENCE_SECONDS: u32 = 30;
@@ -74,6 +78,8 @@ struct SpeechRequest {
     voice: Option<Value>,
     #[serde(default)]
     seed: Option<u64>,
+    #[serde(default)]
+    language: Option<String>,
     #[serde(default)]
     input_references: Option<Vec<ReferencePart>>,
 }
@@ -113,6 +119,7 @@ struct Parsed {
     instructions: Option<String>,
     voice: Option<String>,
     seed: Option<u64>,
+    language: Option<String>,
     reference: Option<Reference>,
 }
 
@@ -169,11 +176,14 @@ fn parse(provider: crate::surface::Provider, body: &Bytes) -> Result<Parsed, Api
         Some(Value::Object(_)) => return Err(invalid("'voice' as a custom voice object is not supported: brain keeps no stored voices; send the recording to imitate as an input_audio part of 'input_references'".into())),
         Some(_) => return Err(invalid("'voice' must be the name of one of the model's preset voices".into())),
     };
+    if let Some(language) = &req.language {
+        bounded("language", language, MAX_LANGUAGE_CHARS)?;
+    }
     let reference = match req.input_references {
         None => None,
         Some(parts) => reference_of(parts).map_err(invalid)?,
     };
-    Ok(Parsed { model: req.model, input: req.input, format, instructions: req.instructions, voice, seed: req.seed, reference })
+    Ok(Parsed { model: req.model, input: req.input, format, instructions: req.instructions, voice, seed: req.seed, language: req.language, reference })
 }
 
 /// The one recording and the optional transcript `input_references` may carry, still encoded.
@@ -256,6 +266,9 @@ pub async fn speech(State(state): State<AppState>, caller: CallerExt, body: Byte
     if parsed.seed.is_some() && contract.seed.is_none() {
         return ApiError::invalid_request(provider, format!("'seed' is not supported by model '{model}'")).into_response();
     }
+    if parsed.language.is_some() && contract.language.is_none() {
+        return ApiError::invalid_request(provider, format!("'language' is not supported by model '{model}'")).into_response();
+    }
     let mut call = Invocation::new().set(&contract.text, json!(parsed.input));
     if let Some(length) = &contract.length {
         call = call.set(length, json!(MAX_FRAMES));
@@ -267,6 +280,9 @@ pub async fn speech(State(state): State<AppState>, caller: CallerExt, body: Byte
         call = call.set(param, json!(text));
     }
     if let (Some(param), Some(name)) = (&contract.voice, &parsed.voice) {
+        call = call.set(param, json!(name));
+    }
+    if let (Some(param), Some(name)) = (&contract.language, &parsed.language) {
         call = call.set(param, json!(name));
     }
     if let (Some(slot), Some(reference)) = (&contract.reference, parsed.reference) {

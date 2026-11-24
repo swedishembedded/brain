@@ -81,12 +81,13 @@ fn speech_action(name: &str) -> ActionSpec {
     ActionSpec::new(name, name)
         .param(ParamSpec::new("text", ParamType::Str, "the text to speak").required())
         .param(ParamSpec::new("seed", ParamType::Int, "seed").min(0.0))
+        .param(ParamSpec::new("lang", ParamType::Str, "language"))
         .output(BlobSpec::new("audio", Media::Audio, "a WAV"))
 }
 
 impl ResidentModel for Voices {
     fn manifest(&self) -> Manifest {
-        let base = || SpeechContract::new("text").seed("seed");
+        let base = || SpeechContract::new("text").seed("seed").language("lang");
         let actions = if self.transcript_required {
             vec![speech_action("synth")
                 .param(ParamSpec::new("ref_text", ParamType::Str, "transcript").required())
@@ -261,7 +262,7 @@ async fn the_speech_route_is_behind_the_key_and_the_model_is_listed_as_speech() 
     let tts = listed["data"].as_array().unwrap().iter().find(|m| m["id"] == "brain-tts").expect("the speech model is listed");
     assert_eq!(tts["capabilities"], json!(["speech"]));
     assert_eq!(tts["speech"]["response_formats"], json!(["wav", "pcm"]));
-    assert_eq!(tts["speech"]["modes"], json!([{"reference_voice": false, "reference_transcript": "none", "instructions": false, "preset_voices": false, "seed": false}]));
+    assert_eq!(tts["speech"]["modes"], json!([{"reference_voice": false, "reference_transcript": "none", "instructions": false, "preset_voices": false, "seed": false, "language": false}]));
     let cloner = listed["data"].as_array().unwrap().iter().find(|m| m["id"] == "brain-cloner").expect("listed");
     assert_eq!(cloner["speech"]["modes"][0]["reference_transcript"], "required", "a client can tell the transcript is needed");
     let chat = listed["data"].as_array().unwrap().iter().find(|m| m["id"] == "brain-chat").unwrap();
@@ -313,6 +314,11 @@ async fn a_speech_request_is_routed_by_what_it_steers_and_hands_the_reference_ov
     let (action, params, _) = take(&seen);
     assert_eq!((action.as_str(), &params["speaker"]), ("design", &json!("ryan")));
 
+    let body = json!({"model": "brain-voices", "input": "hej", "voice": "astrid", "language": "swedish"});
+    assert_eq!(post(&app, "/v1/audio/speech", &body).await.0, StatusCode::OK);
+    let (action, params, _) = take(&seen);
+    assert_eq!((action.as_str(), &params["speaker"], &params["lang"]), ("design", &json!("astrid"), &json!("swedish")), "the language goes to the action's own param");
+
     let body = json!({"model": "brain-cloner", "input": "x", "input_references": [
         {"type": "input_audio", "input_audio": {"data": url}}, {"type": "text", "text": "what it says"}]});
     assert_eq!(post(&app, "/v1/audio/speech", &body).await.0, StatusCode::OK);
@@ -332,6 +338,8 @@ async fn steering_a_model_cannot_take_is_refused_by_name_before_any_run() {
     let cases: Vec<(Value, &str)> = vec![
         (json!({"model": "brain-tts", "input": "hi", "voice": "alloy"}), "voice"),
         (json!({"model": "brain-tts", "input": "hi", "seed": 1}), "seed"),
+        (json!({"model": "brain-tts", "input": "hi", "language": "swedish"}), "language"),
+        (json!({"model": "brain-voices", "input": "hi", "language": "x".repeat(apiserve::speech::MAX_LANGUAGE_CHARS + 1)}), "language"),
         (json!({"model": "brain-tts", "input": "hi", "input_references": [audio_part.clone()]}), "input_references"),
         (json!({"model": "brain-cloner", "input": "hi"}), "input_references"),
         (json!({"model": "brain-cloner", "input": "hi", "input_references": [audio_part.clone()]}), "transcript"),

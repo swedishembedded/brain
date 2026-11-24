@@ -179,7 +179,7 @@ pub fn audio_outcome(wav: Vec<f32>, seed: u64) -> ActionResult {
 /// Where a generic speech request's words, length cap and seed go: the same
 /// params on every speech action.
 fn speech_contract() -> SpeechContract {
-    SpeechContract::new("text").length("max_frames").seed("seed")
+    SpeechContract::new("text").length("max_frames").seed("seed").language("lang")
 }
 
 pub fn synth_spec() -> ActionSpec {
