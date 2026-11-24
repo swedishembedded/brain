@@ -77,20 +77,39 @@ pub fn sniff(bytes: &[u8]) -> Option<Format> {
 /// Decode a recording to 16 kHz mono f32 samples, refusing anything longer
 /// than `max_seconds`.
 pub fn decode_speech(bytes: &[u8], max_seconds: u32) -> Result<Vec<f32>, DecodeError> {
-    let limit = max_seconds as usize * ASR_SAMPLE_RATE as usize;
-    let samples = match sniff(bytes) {
+    let (samples, rate) = decode(bytes, max_seconds, ASR_SAMPLE_RATE)?;
+    Ok(if rate == ASR_SAMPLE_RATE { samples } else { to_speech_rate(&samples, rate) })
+}
+
+/// The rate Opus decodes at when the recording is kept whole: its full band.
+pub const OPUS_FULL_RATE: u32 = 48_000;
+
+/// Decode a recording at the rate it carries, mono, refusing anything longer
+/// than `max_seconds`: a WAV at its own rate, Opus at its full 48 kHz. What a
+/// model takes that reads the whole band - a voice to imitate, whose timbre a
+/// 16 kHz copy would cut at 8 kHz - and resamples itself to what each of its
+/// parts wants.
+pub fn decode_recording(bytes: &[u8], max_seconds: u32) -> Result<(Vec<f32>, u32), DecodeError> {
+    decode(bytes, max_seconds, OPUS_FULL_RATE)
+}
+
+/// A recording as mono samples and their rate: a WAV at its own rate, Opus at
+/// `opus_rate` (one libopus decodes at directly: 8, 12, 16, 24 or 48 kHz).
+fn decode(bytes: &[u8], max_seconds: u32, opus_rate: u32) -> Result<(Vec<f32>, u32), DecodeError> {
+    let limit = max_seconds as usize * opus_rate as usize;
+    let (samples, rate) = match sniff(bytes) {
         Some(Format::Wav) => wav(bytes, max_seconds)?,
-        Some(Format::Ogg) => compressed::ogg(bytes, limit, max_seconds)?,
-        Some(Format::WebM) => compressed::webm(bytes, limit, max_seconds)?,
+        Some(Format::Ogg) => (compressed::ogg(bytes, opus_rate, limit, max_seconds)?, opus_rate),
+        Some(Format::WebM) => (compressed::webm(bytes, opus_rate, limit, max_seconds)?, opus_rate),
         None => return Err(DecodeError::Unsupported("not a recognised container".into())),
     };
     if samples.is_empty() {
         return Err(DecodeError::Empty);
     }
-    Ok(samples)
+    Ok((samples, rate))
 }
 
-fn wav(bytes: &[u8], max_seconds: u32) -> Result<Vec<f32>, DecodeError> {
+fn wav(bytes: &[u8], max_seconds: u32) -> Result<(Vec<f32>, u32), DecodeError> {
     let wav = crate::wav::parse(bytes).map_err(|e| DecodeError::Malformed(e.to_string()))?;
     if !(8_000..=192_000).contains(&wav.sample_rate) {
         return Err(DecodeError::Unsupported(format!("WAV sample rate {} Hz", wav.sample_rate)));
@@ -98,7 +117,7 @@ fn wav(bytes: &[u8], max_seconds: u32) -> Result<Vec<f32>, DecodeError> {
     if wav.samples.len() as u64 > max_seconds as u64 * wav.sample_rate as u64 {
         return Err(DecodeError::TooLong { max_seconds });
     }
-    Ok(to_speech_rate(&wav.samples, wav.sample_rate))
+    Ok((wav.samples, wav.sample_rate))
 }
 
 /// Resample mono samples at `rate` to the recogniser's 16 kHz through the
@@ -115,13 +134,18 @@ mod compressed {
     use matroska_demuxer::{Frame, MatroskaFile, TrackType};
     use ::opus::{Channels, Decoder};
 
-    use super::DecodeError;
-    use crate::asr_caps::ASR_SAMPLE_RATE;
+    use super::{DecodeError, OPUS_FULL_RATE};
 
-    /// Opus counts pre-skip and granule positions at 48 kHz.
-    const OPUS_RATE_RATIO: u64 = 48_000 / ASR_SAMPLE_RATE as u64;
-    /// The longest Opus packet, 120 ms, at 16 kHz.
-    const MAX_PACKET_FRAMES: usize = ASR_SAMPLE_RATE as usize * 120 / 1000;
+    /// How many 48 kHz ticks, Opus's unit for pre-skip and granule
+    /// positions, one output sample at `rate` spans.
+    fn ticks_per_sample(rate: u32) -> u64 {
+        (OPUS_FULL_RATE / rate) as u64
+    }
+
+    /// The longest Opus packet, 120 ms, at `rate`.
+    fn max_packet_frames(rate: u32) -> usize {
+        rate as usize * 120 / 1000
+    }
 
     /// The `OpusHead` identification header (RFC 7845 section 5.1).
     struct Head {
@@ -144,7 +168,7 @@ mod compressed {
         Ok(Head { channels, pre_skip: u16::from_le_bytes([packet[10], packet[11]]) as u64 })
     }
 
-    /// Opus packets in, mono 16 kHz out, the decoder's pre-skip dropped.
+    /// Opus packets in, mono at the decoder's rate out, the pre-skip dropped.
     struct Stream {
         decoder: Decoder,
         channels: usize,
@@ -156,14 +180,14 @@ mod compressed {
     }
 
     impl Stream {
-        fn new(head: &Head, limit: usize, max_seconds: u32) -> Result<Stream, DecodeError> {
+        fn new(head: &Head, rate: u32, limit: usize, max_seconds: u32) -> Result<Stream, DecodeError> {
             let channels = if head.channels == 2 { Channels::Stereo } else { Channels::Mono };
-            let decoder = Decoder::new(ASR_SAMPLE_RATE, channels).map_err(|e| DecodeError::Malformed(e.to_string()))?;
+            let decoder = Decoder::new(rate, channels).map_err(|e| DecodeError::Malformed(e.to_string()))?;
             Ok(Stream {
                 decoder,
                 channels: head.channels,
-                skip: (head.pre_skip / OPUS_RATE_RATIO) as usize,
-                frame: vec![0.0; MAX_PACKET_FRAMES * head.channels],
+                skip: (head.pre_skip / ticks_per_sample(rate)) as usize,
+                frame: vec![0.0; max_packet_frames(rate) * head.channels],
                 out: Vec::new(),
                 limit,
                 max_seconds,
@@ -193,7 +217,7 @@ mod compressed {
         }
     }
 
-    pub(super) fn ogg(bytes: &[u8], limit: usize, max_seconds: u32) -> Result<Vec<f32>, DecodeError> {
+    pub(super) fn ogg(bytes: &[u8], rate: u32, limit: usize, max_seconds: u32) -> Result<Vec<f32>, DecodeError> {
         let malformed = |e: ogg::OggReadError| DecodeError::Malformed(e.to_string());
         let mut reader = ogg::PacketReader::new(Cursor::new(bytes));
         let first = reader.read_packet().map_err(malformed)?.ok_or(DecodeError::Empty)?;
@@ -201,7 +225,7 @@ mod compressed {
         // Only the first logical stream is the recording; another multiplexed
         // beside it is ignored rather than mixed in.
         let serial = first.stream_serial();
-        let mut stream = Stream::new(&head, limit, max_seconds)?;
+        let mut stream = Stream::new(&head, rate, limit, max_seconds)?;
         let mut tags_seen = false;
         let mut last_granule = None;
         while let Some(packet) = reader.read_packet().map_err(malformed)? {
@@ -222,12 +246,12 @@ mod compressed {
         // ends; the encoder pads the final packet past it.
         let mut out = stream.out;
         if let Some(end) = last_granule.and_then(|g| g.checked_sub(head.pre_skip)) {
-            out.truncate((end / OPUS_RATE_RATIO) as usize);
+            out.truncate((end / ticks_per_sample(rate)) as usize);
         }
         Ok(out)
     }
 
-    pub(super) fn webm(bytes: &[u8], limit: usize, max_seconds: u32) -> Result<Vec<f32>, DecodeError> {
+    pub(super) fn webm(bytes: &[u8], rate: u32, limit: usize, max_seconds: u32) -> Result<Vec<f32>, DecodeError> {
         let malformed = |e: matroska_demuxer::DemuxError| DecodeError::Malformed(e.to_string());
         let mut file = MatroskaFile::open(Cursor::new(bytes)).map_err(malformed)?;
         let track = file
@@ -237,7 +261,7 @@ mod compressed {
             .ok_or_else(|| DecodeError::Unsupported("WebM without an Opus audio track".into()))?;
         let number = track.track_number().get();
         let head = head(track.codec_private().ok_or_else(|| DecodeError::Malformed("Opus track without its OpusHead".into()))?)?;
-        let mut stream = Stream::new(&head, limit, max_seconds)?;
+        let mut stream = Stream::new(&head, rate, limit, max_seconds)?;
         let mut frame = Frame::default();
         while file.next_frame(&mut frame).map_err(malformed)? {
             if frame.track == number {
@@ -284,6 +308,19 @@ mod tests {
         let out = decode_speech(&crate::wav::encode(&whistle, 48_000), 30).unwrap();
         let rms = (out.iter().map(|x| x * x).sum::<f32>() / out.len() as f32).sqrt();
         assert!(rms < 0.01 * 0.5 / std::f32::consts::SQRT_2, "a 10 kHz tone survived the drop to 16 kHz at rms {rms}");
+    }
+
+    /// A voice kept whole: a 48 kHz WAV comes back at 48 kHz with its 10 kHz
+    /// content, which the 16 kHz path removes.
+    #[test]
+    fn a_recording_keeps_its_own_rate_and_band() {
+        let whistle: Vec<f32> = (0..48_000).map(|i| 0.5 * (2.0 * std::f32::consts::PI * 10_000.0 * i as f32 / 48_000.0).sin()).collect();
+        let (out, rate) = decode_recording(&crate::wav::encode(&whistle, 48_000), 30).unwrap();
+        assert_eq!(rate, 48_000);
+        assert_eq!(out.len(), whistle.len());
+        assert!((rms(&out) - rms(&whistle)).abs() < 1e-3, "rms {}", rms(&out));
+        assert_eq!(decode_recording(&crate::wav::encode(&whistle, 48_000), 0), Err(DecodeError::TooLong { max_seconds: 0 }));
+        assert!(matches!(decode_recording(b"ID3\x04 an mp3", 30), Err(DecodeError::Unsupported(_))));
     }
 
     #[test]
@@ -386,6 +423,18 @@ mod tests {
             assert_is_tone(&out);
             // The final granule position trims the encoder's padding exactly.
             assert_eq!(out.len(), (50 * 960 - 312) / 3);
+        }
+
+        /// Kept whole, Opus decodes at its full 48 kHz: the same recording,
+        /// three times the samples, the padding trimmed at the same point.
+        #[test]
+        fn ogg_opus_decodes_at_its_full_rate_for_a_recording() {
+            let (out, rate) = decode_recording(&ogg_file(&encode(&tone()), opus_head(1, 312)), 30).unwrap();
+            assert_eq!(rate, OPUS_FULL_RATE);
+            assert_eq!(out.len(), 50 * 960 - 312);
+            let steady = &out[4800..out.len() - 4800];
+            let crossings = steady.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count() as f32 * 48_000.0 / steady.len() as f32;
+            assert!((crossings - 440.0).abs() < 5.0, "{crossings} Hz");
         }
 
         #[test]
