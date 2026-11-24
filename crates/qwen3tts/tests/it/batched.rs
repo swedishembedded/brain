@@ -9,7 +9,7 @@
 
 use capability::CancelToken;
 use data::tokenizer::Tokenizer;
-use qwen3tts::batched::{BatchedDecoder, Job};
+use qwen3tts::batched::{BatchedDecoder, Job, WeightTier};
 use qwen3tts::prompt::{self, Prompt, TtsSpecials};
 use qwen3tts::{GenOpts, SamplingRequest, TtsPaths};
 
@@ -46,7 +46,7 @@ fn batched_streams_match_the_per_stream_device_path_and_each_other() {
     let Some(paths) = crate::store::store_paths() else { return };
     let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir).unwrap();
     let gpu = gpu_core::Gpu::new(&[]);
-    let mut dec = BatchedDecoder::load_on(&gpu, &paths, 4).unwrap();
+    let mut dec = BatchedDecoder::load_on(&gpu, &paths, 4, WeightTier::F32).unwrap();
     let prompts: Vec<Prompt> = TEXTS.iter().map(|t| prompt_for(&paths, dec.talker_tables(), &sp, t)).collect();
     let job = |p: &Prompt| Job { prompt: p.clone(), opts: greedy(60).resolved_for(&paths.ckpt_dir), cancel: CancelToken::default() };
 
@@ -63,5 +63,40 @@ fn batched_streams_match_the_per_stream_device_path_and_each_other() {
     let together = decode(&mut dec, &sp, prompts.iter().map(job).collect());
     for (i, (t, a)) in together.iter().zip(&alone).enumerate() {
         assert_eq!(t, a, "stream {i} decoded with the others is the stream decoded alone");
+    }
+}
+
+/// The decoder at the checkpoint's own precision (bf16 weights, half-precision tensor-core products) against the
+/// fp32 one: after each prompt the first codebook's distribution is the same to within a small KL with the same best
+/// code, and greedy decoding from both starts with (nearly) the same frame.
+#[test]
+fn the_stored_precision_decoder_matches_the_fp32_one() {
+    let _serial = brain_testutil::env_lock();
+    let Some(paths) = crate::store::store_paths() else { return };
+    let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir).unwrap();
+    let gpu = gpu_core::Gpu::new(&[]);
+    let mut f32_dec = BatchedDecoder::load_on(&gpu, &paths, 1, WeightTier::F32).unwrap();
+    let mut stored = BatchedDecoder::load_on(&gpu, &paths, 1, WeightTier::Stored).unwrap();
+    // The published checkpoints are bf16: a stored tier that fell back to fp32 would pass the comparison below.
+    assert_eq!(stored.weights_tiers(), (qwen3::Dtype::BF16, qwen3::Dtype::BF16), "the stored tier holds the checkpoint's bf16");
+    let softmax = |l: &[f32]| -> Vec<f64> {
+        let m = l.iter().cloned().fold(f32::NEG_INFINITY, f32::max) as f64;
+        let e: Vec<f64> = l.iter().map(|&x| (x as f64 - m).exp()).collect();
+        let z: f64 = e.iter().sum();
+        e.into_iter().map(|x| x / z).collect()
+    };
+    let argmax = |l: &[f32]| l.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+    for text in TEXTS {
+        let prompt = prompt_for(&paths, f32_dec.talker_tables(), &sp, text);
+        let (a, b) = (f32_dec.prompt_logits(&prompt), stored.prompt_logits(&prompt));
+        let (p, q) = (softmax(&a), softmax(&b));
+        let kl: f64 = p.iter().zip(&q).filter(|(p, _)| **p > 0.0).map(|(p, q)| p * (p / q.max(1e-300)).ln()).sum();
+        eprintln!("{text:?}: KL(fp32 || stored) = {kl:.2e}");
+        assert_eq!(argmax(&a), argmax(&b), "{text:?}: the best first code differs");
+        assert!(kl < 1e-2, "{text:?}: KL {kl}");
+        let job = |p: &Prompt| Job { prompt: p.clone(), opts: greedy(2).resolved_for(&paths.ckpt_dir), cancel: CancelToken::default() };
+        let (x, y) = (decode(&mut f32_dec, &sp, vec![job(&prompt)]).remove(0), decode(&mut stored, &sp, vec![job(&prompt)]).remove(0));
+        let same = x[..16].iter().zip(&y[..16]).filter(|(a, b)| a == b).count();
+        assert!(same >= 14, "{text:?}: the first frame shares {same} of 16 codes: {:?} vs {:?}", &x[..16], &y[..16]);
     }
 }

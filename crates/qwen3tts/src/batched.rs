@@ -52,6 +52,16 @@ const BLOCK: u32 = 16;
 pub const MAX_CONTEXT: u32 = 2048;
 /// Positions one prefill chunk carries.
 const PREFILL_CHUNK: u32 = 512;
+/// The precision the decoders' weights are held in on the device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WeightTier {
+    /// As the checkpoint stores each tensor (bf16 for the published Qwen3-TTS checkpoints): nothing that was
+    /// published is rounded, and the products take the half-precision tensor-core GEMMs.
+    Stored,
+    /// fp32 throughout: the precision the per-stream reference decoders compute in.
+    F32,
+}
+
 /// What admitting a job came to.
 enum Admission {
     Started(Stream),
@@ -155,16 +165,22 @@ fn project(rows: Vec<f32>, projection: Option<&(Vec<f32>, Vec<f32>)>, e: usize, 
 }
 
 impl BatchedDecoder {
-    /// Load both decoders on `gpu`'s device for up to `max_streams` streams at once.
-    pub fn load_on(gpu: &Gpu, paths: &TtsPaths, max_streams: usize) -> Result<BatchedDecoder, String> {
+    /// Load both decoders on `gpu`'s device for up to `max_streams` streams at once, their weights at `tier`.
+    pub fn load_on(gpu: &Gpu, paths: &TtsPaths, max_streams: usize, tier: WeightTier) -> Result<BatchedDecoder, String> {
         let max_streams = max_streams.max(1);
         // The Talker streams from its reader tensor by tensor; nothing is held as fp32 beside the upload.
-        let talker_src = crate::import::open_talker(&paths.talker)?;
-        let mut tcfg = QwenConfig::from_json_checked(&talker_src.config())?;
+        let talker_reader = crate::import::open_talker(&paths.talker)?;
+        let mut tcfg = QwenConfig::from_json_checked(&talker_reader.config())?;
+        // Read through the checkpoint's packed view, so a bf16 tensor reaches its tier as stored.
+        let talker_src = checkpoint::packed::stored_source(talker_reader);
         tcfg.block_size = MAX_CONTEXT;
         let per_seq = MAX_CONTEXT / BLOCK;
         let pool = pool_blocks(max_streams);
-        let talker = Engine::from_source_tier_on(gpu, tcfg, &talker_src, BLOCK, pool, max_streams as u32, per_seq, PREFILL_CHUNK, false, Dtype::F32);
+        let talker_tiers = match tier {
+            WeightTier::Stored => model::ops::stored_tier_policy(&*talker_src, tcfg.param_list().iter().map(|(name, _)| name.as_str())),
+            WeightTier::F32 => model::ops::TierPolicy::uniform(Dtype::F32),
+        };
+        let talker = Engine::from_source_tiers_on(gpu, tcfg, &*talker_src, BLOCK, pool, max_streams as u32, per_seq, PREFILL_CHUNK, false, &talker_tiers);
         drop(talker_src);
 
         let tables_host = TalkerTables::load(&paths.talker);
@@ -219,7 +235,15 @@ impl BatchedDecoder {
         for name in &heads {
             mtp_map.insert(name.clone(), take(&mtp_ckpt, name)?);
         }
-        let mut mtp = Engine::from_map_tier_on(gpu, mcfg, &mtp_map, BLOCK, max_streams as u32, max_streams as u32, 1, CODEBOOKS as u32, false, Dtype::F32);
+        // The code predictor's tensors are held as its checkpoint stores its heads.
+        let mtp_tier = match tier {
+            WeightTier::Stored => {
+                let src = checkpoint::packed::stored_source(crate::import::open_mtp(&paths.mtp)?);
+                model::ops::stored_tier(&*src, "lm_head.0.weight").unwrap_or(Dtype::F32)
+            }
+            WeightTier::F32 => Dtype::F32,
+        };
+        let mut mtp = Engine::from_map_tier_on(gpu, mcfg, &mtp_map, BLOCK, max_streams as u32, max_streams as u32, 1, CODEBOOKS as u32, false, mtp_tier);
         let names: Vec<&str> = heads.iter().map(String::as_str).collect();
         mtp.add_heads(&mtp_map, &names, mc.vocab as usize)?;
         mtp.set_window_capacity(nres);
@@ -248,6 +272,22 @@ impl BatchedDecoder {
     /// The code predictor's residual tables, for the prompt builders.
     pub fn residual_tables(&self) -> &ResidualTables {
         &self.residual
+    }
+
+    /// The codebook-0 logits after `prompt` (`[vocab]`): what the first frame is drawn from. The prompt's
+    /// positions are released again; nothing a stream holds is touched.
+    pub fn prompt_logits(&mut self, prompt: &Prompt) -> Vec<f32> {
+        let d = self.tables.d();
+        let mut table = BlockTable::new();
+        let rows: Vec<qwen3::model::PrefillInput> = prompt.embeds.chunks(d).map(qwen3::model::PrefillInput::Embed).collect();
+        let hidden = self.talker.prefill_mixed(&mut table, &rows);
+        self.talker.release_table(&mut table);
+        self.tables.codec_head_logits(&hidden)
+    }
+
+    /// The tiers the Talker's and the code predictor's weights are held in.
+    pub fn weights_tiers(&self) -> (Dtype, Dtype) {
+        (self.talker.weights_tier(), self.mtp.weights_tier())
     }
 
     /// Both host tables, shared: what a caller building prompts while [`Self::run`] holds the

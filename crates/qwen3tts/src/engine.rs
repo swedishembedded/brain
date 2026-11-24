@@ -123,7 +123,7 @@ impl Core {
         Ok(match placement {
             Placement::Host => Core::Host { talker: CpuTalker::load(&paths.talker), mtp: CpuMtp::load(&paths.mtp) },
             Placement::Device => {
-                let dec = BatchedDecoder::load_on(&gpu_core::Gpu::new(&[]), paths, DEVICE_STREAMS)?;
+                let dec = BatchedDecoder::load_on(&gpu_core::Gpu::new(&[]), paths, DEVICE_STREAMS, crate::batched::WeightTier::Stored)?;
                 let (talker, mtp) = dec.hosts();
                 Core::Device { dec, talker, mtp, paths: paths.clone(), policy: None }
             }
