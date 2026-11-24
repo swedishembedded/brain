@@ -76,7 +76,7 @@ fn cached_matches_cachefree() {
 
     let sp = TtsSpecials::from_config_dir(&CKPT).unwrap();
     let tok = prompt::load_tokenizer(&CKPT).unwrap();
-    let language_id = sp.language_id("english");
+    let language_id = sp.language_id("english").expect("the checkpoint names english");
 
     // x-vector from the reference wav.
     let wav = audio::wav::read(&REF_WAV).unwrap();
@@ -230,7 +230,7 @@ fn cached_clone_audio_quality() {
     // --- build the prompt + generate codes directly so we can inspect them ---
     let sp = TtsSpecials::from_config_dir(&CKPT).unwrap();
     let tok = prompt::load_tokenizer(&CKPT).unwrap();
-    let language_id = sp.language_id("english");
+    let language_id = sp.language_id("english").expect("the checkpoint names english");
     let refwav = audio::wav::read(&REF_WAV).unwrap();
     let spk = ecapatdnn::SpeakerEncoder::load_inference_on(gpu_core::testgpu::dev(ecapatdnn::model::PIPELINES), &SPEAKER);
     let xvec = spk.embed_wav(&refwav.samples, refwav.sample_rate);

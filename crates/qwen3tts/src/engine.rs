@@ -352,7 +352,7 @@ impl ResidentEngine {
             return self.speak(text, lang, opts, cancel, on_audio);
         }
         let began = std::time::Instant::now();
-        let language_id = self.sp.language_id(lang);
+        let language_id = self.sp.language_id(lang)?;
         let (role_ids, text_ids) = self.text_ids(text)?;
         let prompt = self.core.xvector(&self.sp, &role_ids, &text_ids, None, language_id);
         self.stream_prompt(&prompt, opts, cancel, on_audio, began)
@@ -444,7 +444,7 @@ impl ResidentEngine {
         let prompt = match voice {
             Some((reference, words)) => self.clone_prompt(text, reference, words, None, lang)?,
             None => {
-                let language_id = self.sp.language_id(lang);
+                let language_id = self.sp.language_id(lang)?;
                 let (role_ids, text_ids) = self.text_ids(text)?;
                 self.core.xvector(&self.sp, &role_ids, &text_ids, None, language_id)
             }
@@ -501,7 +501,7 @@ impl ResidentEngine {
 
     /// [`Self::speak`] stopping before the codec: the `[frames, 16]` codes.
     pub fn speak_codes(&mut self, text: &str, lang: &str, opts: &GenOpts, cancel: &CancelToken) -> Result<Vec<u32>, String> {
-        let language_id = self.sp.language_id(lang);
+        let language_id = self.sp.language_id(lang)?;
         let (role_ids, text_ids) = self.text_ids(text)?;
         let prompt = self.core.xvector(&self.sp, &role_ids, &text_ids, None, language_id);
         self.generate(&prompt, opts, cancel)
@@ -521,7 +521,7 @@ impl ResidentEngine {
         on_audio: &mut dyn FnMut(&[f32], u32),
     ) -> Result<Vec<f32>, String> {
         self.sp.check_steering(pipeline::design_steering(instruct, speaker))?;
-        let language_id = self.sp.language_id(lang);
+        let language_id = self.sp.language_id(lang)?;
         let speaker_id = pipeline::resolve_speaker(&self.sp, speaker)?;
         let (role_ids, text_ids) = self.text_ids(text)?;
         let instruct_ids = if instruct.trim().is_empty() { Vec::new() } else { self.tok.encode(&pipeline::instruct_text(instruct)) };
@@ -559,7 +559,7 @@ impl ResidentEngine {
     /// `ref_codes`, an in-context prompt with the reference's own codes
     /// otherwise.
     fn clone_prompt(&mut self, text: &str, reference: &Reference, ref_text: &str, ref_codes: Option<&[u32]>, lang: &str) -> Result<Prompt, String> {
-        let language_id = self.sp.language_id(lang);
+        let language_id = self.sp.language_id(lang)?;
         let encode_codes = ref_codes.is_none() && !ref_text.trim().is_empty();
         self.ensure_ref(reference, encode_codes)?;
         let cached = self.ref_cache.as_ref().expect("ensure_ref populated the cache");

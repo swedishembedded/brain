@@ -194,14 +194,24 @@ impl TtsSpecials {
         self.spk_id.get(&name.to_lowercase()).copied()
     }
 
-    /// Codec language id for a language name (case-insensitive). `"auto"` (or
-    /// unknown) yields `None`, selecting the no-language ("nothink") prefix.
-    pub fn language_id(&self, name: &str) -> Option<u32> {
+    /// Codec language id for a language name (case-insensitive). `"auto"`
+    /// yields `None`, the no-language ("nothink") prefix, which lets the
+    /// model infer the language from the text. A language the checkpoint
+    /// does not name is refused with the ones it does, tagged
+    /// `invalid-request`, rather than spoken as if `auto` had been asked.
+    pub fn language_id(&self, name: &str) -> Result<Option<u32>, String> {
         let n = name.to_lowercase();
         if n == "auto" {
-            return None;
+            return Ok(None);
         }
-        self.lang.get(&n).copied()
+        self.lang.get(&n).copied().map(Some).ok_or_else(|| {
+            let mut known: Vec<&str> = self.lang.keys().map(String::as_str).collect();
+            known.sort_unstable();
+            capability::failure::tag(
+                capability::failure::FailureClass::InvalidRequest,
+                format!("this checkpoint was not trained on language {name:?}; it names {known:?}, or \"auto\" to infer it from the text"),
+            )
+        })
     }
 }
 
@@ -495,6 +505,17 @@ mod steering_tests {
         assert!(design_ckpt.check_steering(design(false, false)).is_err());
         let err = base.check_steering(design(true, false)).unwrap_err();
         assert_eq!(capability::failure::classify(&err).map(|(c, _)| c), Some(capability::failure::FailureClass::UnsupportedCapability), "{err}");
+    }
+
+    #[test]
+    fn a_language_the_checkpoint_does_not_name_is_refused_not_spoken_as_auto() {
+        let mut sp = crate::testsupport::tiny_specials();
+        sp.lang.insert("english".into(), 2050);
+        assert_eq!(sp.language_id("English").unwrap(), Some(2050));
+        assert_eq!(sp.language_id("auto").unwrap(), None);
+        let err = sp.language_id("swedish").unwrap_err();
+        assert!(err.contains("swedish") && err.contains("english") && err.contains("auto"), "{err}");
+        assert_eq!(capability::failure::classify(&err).map(|(c, _)| c), Some(capability::failure::FailureClass::InvalidRequest));
     }
 
     #[test]

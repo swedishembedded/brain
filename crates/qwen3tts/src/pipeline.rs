@@ -634,7 +634,7 @@ pub fn clone(
     // reads `opts.plan()` and never re-reads a config file.
     let opts = &opts.clone().resolved_for(&paths.ckpt_dir);
     let tok = prompt::load_tokenizer(&paths.ckpt_dir)?;
-    let language_id = sp.language_id(language);
+    let language_id = sp.language_id(language)?;
 
     // speaker x-vector from the reference audio.
     let wav = &reference.wav;
@@ -741,7 +741,7 @@ pub fn synth_codes(
     // reads `opts.plan()` and never re-reads a config file.
     let opts = &opts.clone().resolved_for(&paths.ckpt_dir);
     let tok = prompt::load_tokenizer(&paths.ckpt_dir)?;
-    let language_id = sp.language_id(language);
+    let language_id = sp.language_id(language)?;
 
     let input_ids = tok.encode(&assistant_text(target_text));
     let (role_ids, text_ids) = split_input_ids(&input_ids)?;
@@ -777,7 +777,7 @@ pub fn clone_npu(
     // reads `opts.plan()` and never re-reads a config file.
     let opts = &opts.clone().resolved_for(&paths.ckpt_dir);
     let tok = prompt::load_tokenizer(&paths.ckpt_dir)?;
-    let language_id = sp.language_id(language);
+    let language_id = sp.language_id(language)?;
 
     let wav = &reference.wav;
     let speaker = ecapatdnn::SpeakerEncoder::load_inference(&paths.speaker);
@@ -828,7 +828,7 @@ pub fn synth_npu(
     // reads `opts.plan()` and never re-reads a config file.
     let opts = &opts.clone().resolved_for(&paths.ckpt_dir);
     let tok = prompt::load_tokenizer(&paths.ckpt_dir)?;
-    let language_id = sp.language_id(language);
+    let language_id = sp.language_id(language)?;
 
     let input_ids = tok.encode(&assistant_text(target_text));
     let (role_ids, text_ids) = split_input_ids(&input_ids)?;
@@ -990,7 +990,7 @@ pub fn design(
     // reads `opts.plan()` and never re-reads a config file.
     let opts = &opts.clone().resolved_for(&paths.ckpt_dir);
     let tok = prompt::load_tokenizer(&paths.ckpt_dir)?;
-    let language_id = sp.language_id(language);
+    let language_id = sp.language_id(language)?;
     let speaker_id = resolve_speaker(&sp, speaker)?;
 
     let input_ids = tok.encode(&assistant_text(target_text));
@@ -1031,7 +1031,7 @@ pub fn design_npu(
     // reads `opts.plan()` and never re-reads a config file.
     let opts = &opts.clone().resolved_for(&paths.ckpt_dir);
     let tok = prompt::load_tokenizer(&paths.ckpt_dir)?;
-    let language_id = sp.language_id(language);
+    let language_id = sp.language_id(language)?;
     let speaker_id = resolve_speaker(&sp, speaker)?;
 
     let input_ids = tok.encode(&assistant_text(target_text));

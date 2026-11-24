@@ -255,7 +255,7 @@ pub fn synth_batch(paths: &TtsPaths, reqs: &[BatchRequest], cancel: &CancelToken
             }
             let ids = tok.encode(&pipeline::assistant_text(&r.text));
             let (role_ids, text_ids) = pipeline::split_input_ids(&ids).map_err(|e| format!("tts batch: request {i}: {e}"))?;
-            let language_id = sp.language_id(&r.lang);
+            let language_id = sp.language_id(&r.lang)?;
             out.push((
                 prompt::build_xvector_prompt(&talker, &sp, &role_ids, &text_ids, None, language_id),
                 // Resolve each request's sampling plan HERE: this is the batch's

@@ -241,7 +241,7 @@ impl TtsEngine {
     /// frames and only the newest frames' audio is emitted via `on_audio`, so
     /// playback can start after the first chunk instead of after the whole clip.
     pub fn run(&mut self, req: &Req, on_audio: &mut dyn FnMut(&[f32], u32)) -> Result<usize, String> {
-        let lang_id = self.sp.language_id(&req.lang);
+        let lang_id = self.sp.language_id(&req.lang)?;
         let input_ids = self.tok.encode(&pipeline::assistant_text(&req.text));
         let (role_ids, text_ids) = pipeline::split_input_ids(&input_ids)?;
 
