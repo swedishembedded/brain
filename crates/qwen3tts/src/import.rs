@@ -26,63 +26,76 @@ use serde_json::Value;
 
 use crate::config::{MtpConfig, TalkerConfig};
 
+/// The Talker tensors outside its decoder layers: `(upstream name, brain name)`.
+/// One table read both ways ([`talker_hf_to_brain`], [`talker_brain_to_hf`]).
+const TALKER_NAMES: &[(&str, &str)] = &[
+    ("talker.model.codec_embedding.weight", "tok.weight"),
+    ("talker.model.norm.weight", "norm.weight"),
+    ("talker.model.text_embedding.weight", "text_embedding.weight"),
+    ("talker.codec_head.weight", "lm_head.weight"),
+    ("talker.text_projection.linear_fc1.weight", "text_projection.fc1.weight"),
+    ("talker.text_projection.linear_fc1.bias", "text_projection.fc1.bias"),
+    ("talker.text_projection.linear_fc2.weight", "text_projection.fc2.weight"),
+    ("talker.text_projection.linear_fc2.bias", "text_projection.fc2.bias"),
+];
+
+/// The code predictor's tensors outside its decoder layers and per-codebook tables.
+const MTP_NAMES: &[(&str, &str)] = &[
+    ("talker.code_predictor.model.norm.weight", "norm.weight"),
+    ("talker.code_predictor.small_to_mtp_projection.weight", "small_to_mtp_projection.weight"),
+    ("talker.code_predictor.small_to_mtp_projection.bias", "small_to_mtp_projection.bias"),
+];
+
+/// The code predictor's per-codebook tables: `(upstream prefix, brain prefix)`,
+/// each followed by `{i}.weight` on both sides.
+const MTP_TABLES: &[(&str, &str)] = &[("talker.code_predictor.model.codec_embedding.", "codec_embedding."), ("talker.code_predictor.lm_head.", "lm_head.")];
+
+/// Where each component's decoder layers live: `(upstream prefix, brain prefix)`,
+/// each followed by `{n}.{leaf}` with the Qwen3 leaf names mapped by `qwen3::hf`.
+const TALKER_LAYERS: (&str, &str) = ("talker.model.layers.", "blocks.");
+const MTP_LAYERS: (&str, &str) = ("talker.code_predictor.model.layers.", "blocks.");
+
+/// Translate `name` through `fixed`, `tables` and `layers`, from the upstream
+/// side to brain's (`to_brain`) or back.
+type Names = &'static [(&'static str, &'static str)];
+
+fn translate(name: &str, fixed: Names, tables: Names, layers: (&'static str, &'static str), to_brain: bool) -> Option<String> {
+    let pick = |&(hf, brain): &(&'static str, &'static str)| if to_brain { (hf, brain) } else { (brain, hf) };
+    if let Some((_, to)) = fixed.iter().map(pick).find(|(from, _)| *from == name) {
+        return Some(to.to_string());
+    }
+    for (from, to) in tables.iter().map(pick) {
+        if let Some(i) = name.strip_prefix(from).and_then(|r| r.strip_suffix(".weight")).filter(|i| i.parse::<u32>().is_ok()) {
+            return Some(format!("{to}{i}.weight"));
+        }
+    }
+    let (from, to) = pick(&layers);
+    let (n, leaf) = name.strip_prefix(from)?.split_once('.')?;
+    n.parse::<u32>().ok()?;
+    let leaf = if to_brain { qwen3::hf::layer_leaf(leaf)? } else { qwen3::hf::hf_layer_leaf(leaf)? };
+    Some(format!("{to}{n}.{leaf}"))
+}
+
 /// Map an HF `talker.*` tensor name to its brain Talker-container name, or `None`
 /// to drop it (a non-Talker tensor: `code_predictor.*`, `speaker_encoder.*`).
 pub fn talker_hf_to_brain(name: &str) -> Option<String> {
-    if name == "talker.model.codec_embedding.weight" {
-        return Some("tok.weight".to_string());
-    }
-    if name == "talker.model.norm.weight" {
-        return Some("norm.weight".to_string());
-    }
-    if name == "talker.model.text_embedding.weight" {
-        return Some("text_embedding.weight".to_string());
-    }
-    if name == "talker.codec_head.weight" {
-        return Some("lm_head.weight".to_string());
-    }
-    if let Some(rest) = name.strip_prefix("talker.text_projection.") {
-        let leaf = match rest {
-            "linear_fc1.weight" => "text_projection.fc1.weight",
-            "linear_fc1.bias" => "text_projection.fc1.bias",
-            "linear_fc2.weight" => "text_projection.fc2.weight",
-            "linear_fc2.bias" => "text_projection.fc2.bias",
-            _ => return None,
-        };
-        return Some(leaf.to_string());
-    }
-    let rest = name.strip_prefix("talker.model.layers.")?;
-    let (n, rest) = rest.split_once('.')?;
-    Some(format!("blocks.{n}.{}", qwen3::hf::layer_leaf(rest)?))
+    translate(name, TALKER_NAMES, &[], TALKER_LAYERS, true)
+}
+
+/// The upstream name of a brain Talker tensor: the inverse of [`talker_hf_to_brain`].
+pub fn talker_brain_to_hf(name: &str) -> Option<String> {
+    translate(name, TALKER_NAMES, &[], TALKER_LAYERS, false)
 }
 
 /// Map an HF `talker.code_predictor.*` tensor name to its brain MTP-container
 /// name, or `None` to drop it.
 pub fn mtp_hf_to_brain(name: &str) -> Option<String> {
-    if name == "talker.code_predictor.model.norm.weight" {
-        return Some("norm.weight".to_string());
-    }
-    if name == "talker.code_predictor.small_to_mtp_projection.weight" {
-        return Some("small_to_mtp_projection.weight".to_string());
-    }
-    if name == "talker.code_predictor.small_to_mtp_projection.bias" {
-        return Some("small_to_mtp_projection.bias".to_string());
-    }
-    if let Some(i) = name
-        .strip_prefix("talker.code_predictor.model.codec_embedding.")
-        .and_then(|r| r.strip_suffix(".weight"))
-    {
-        return Some(format!("codec_embedding.{i}.weight"));
-    }
-    if let Some(i) = name
-        .strip_prefix("talker.code_predictor.lm_head.")
-        .and_then(|r| r.strip_suffix(".weight"))
-    {
-        return Some(format!("lm_head.{i}.weight"));
-    }
-    let rest = name.strip_prefix("talker.code_predictor.model.layers.")?;
-    let (n, rest) = rest.split_once('.')?;
-    Some(format!("blocks.{n}.{}", qwen3::hf::layer_leaf(rest)?))
+    translate(name, MTP_NAMES, MTP_TABLES, MTP_LAYERS, true)
+}
+
+/// The upstream name of a brain MTP tensor: the inverse of [`mtp_hf_to_brain`].
+pub fn mtp_brain_to_hf(name: &str) -> Option<String> {
+    translate(name, MTP_NAMES, MTP_TABLES, MTP_LAYERS, false)
 }
 
 fn read_config(dir: &Path) -> Result<Value, String> {
@@ -390,6 +403,27 @@ mod tests {
         assert_eq!(mtp_hf_to_brain("talker.model.norm.weight"), None);
     }
 
+    /// Every brain tensor of both components maps to an upstream name and back
+    /// to itself, so a trained tensor is exported under the name a reader of the
+    /// release looks up.
+    #[test]
+    fn the_name_table_reads_both_ways() {
+        let tc = TalkerConfig::from_json(&serde_json::json!({"talker_config": {}}));
+        let mc = MtpConfig { embedding_dim: 2048, ..MtpConfig::from_json(&serde_json::json!({"talker_config": {}})) };
+        for (brain, _) in talker_param_specs(&tc) {
+            let hf = talker_brain_to_hf(&brain).unwrap_or_else(|| panic!("{brain} has no upstream name"));
+            assert!(hf.starts_with("talker.") && !hf.starts_with("talker.code_predictor."), "{hf}");
+            assert_eq!(talker_hf_to_brain(&hf).as_deref(), Some(brain.as_str()), "{hf}");
+        }
+        for (brain, _) in mtp_param_specs(&mc) {
+            let hf = mtp_brain_to_hf(&brain).unwrap_or_else(|| panic!("{brain} has no upstream name"));
+            assert!(hf.starts_with("talker.code_predictor."), "{hf}");
+            assert_eq!(mtp_hf_to_brain(&hf).as_deref(), Some(brain.as_str()), "{hf}");
+        }
+        assert_eq!(talker_hf_to_brain("talker.model.layers.x.mlp.up_proj.weight"), None);
+        assert_eq!(mtp_hf_to_brain("talker.code_predictor.lm_head.x.weight"), None);
+    }
+
     #[test]
     fn param_spec_counts() {
         // Real Talker: 28 layers × 11 + tok + norm + lm_head + text_embedding + 4
@@ -405,50 +439,6 @@ mod tests {
         };
         let ms = mtp_param_specs(&mc);
         assert_eq!(ms.len(), 5 * 11 + 1 + 15 + 15);
-    }
-
-    /// Inverse of `talker_hf_to_brain`: the HF tensor name a given brain Talker
-    /// param name came from.
-    fn hf_name_for_talker(brain_name: &str) -> String {
-        match brain_name {
-            "tok.weight" => "talker.model.codec_embedding.weight".to_string(),
-            "norm.weight" => "talker.model.norm.weight".to_string(),
-            "lm_head.weight" => "talker.codec_head.weight".to_string(),
-            "text_embedding.weight" => "talker.model.text_embedding.weight".to_string(),
-            "text_projection.fc1.weight" => "talker.text_projection.linear_fc1.weight".to_string(),
-            "text_projection.fc1.bias" => "talker.text_projection.linear_fc1.bias".to_string(),
-            "text_projection.fc2.weight" => "talker.text_projection.linear_fc2.weight".to_string(),
-            "text_projection.fc2.bias" => "talker.text_projection.linear_fc2.bias".to_string(),
-            other => {
-                let rest = other.strip_prefix("blocks.").unwrap();
-                let (n, leaf) = rest.split_once('.').unwrap();
-                format!("talker.model.layers.{n}.{}", qwen3::hf::hf_layer_leaf(leaf).unwrap_or_else(|| panic!("unknown brain leaf {leaf}")))
-            }
-        }
-    }
-
-    /// Inverse of `mtp_hf_to_brain`.
-    fn hf_name_for_mtp(brain_name: &str) -> String {
-        match brain_name {
-            "norm.weight" => "talker.code_predictor.model.norm.weight".to_string(),
-            "small_to_mtp_projection.weight" => {
-                "talker.code_predictor.small_to_mtp_projection.weight".to_string()
-            }
-            "small_to_mtp_projection.bias" => "talker.code_predictor.small_to_mtp_projection.bias".to_string(),
-            other if other.starts_with("codec_embedding.") => {
-                let i = other.strip_prefix("codec_embedding.").unwrap().strip_suffix(".weight").unwrap();
-                format!("talker.code_predictor.model.codec_embedding.{i}.weight")
-            }
-            other if other.starts_with("lm_head.") => {
-                let i = other.strip_prefix("lm_head.").unwrap().strip_suffix(".weight").unwrap();
-                format!("talker.code_predictor.lm_head.{i}.weight")
-            }
-            other => {
-                let rest = other.strip_prefix("blocks.").unwrap();
-                let (n, leaf) = rest.split_once('.').unwrap();
-                format!("talker.code_predictor.model.layers.{n}.{}", qwen3::hf::hf_layer_leaf(leaf).unwrap_or_else(|| panic!("unknown brain leaf {leaf}")))
-            }
-        }
     }
 
     #[test]
@@ -486,13 +476,13 @@ mod tests {
         let mut expect_talker: HashMap<String, Vec<f32>> = HashMap::new();
         let mut expect_mtp: HashMap<String, Vec<f32>> = HashMap::new();
         for (i, (name, numel)) in talker_specs.iter().enumerate() {
-            let hf = hf_name_for_talker(name);
+            let hf = talker_brain_to_hf(name).unwrap();
             let data: Vec<f32> = (0..*numel).map(|j| (i * 10_000 + j) as f32 * 0.001).collect();
             plan.push((hf.clone(), vec![*numel as u64]));
             expect_talker.insert(name.clone(), data);
         }
         for (i, (name, numel)) in mtp_specs.iter().enumerate() {
-            let hf = hf_name_for_mtp(name);
+            let hf = mtp_brain_to_hf(name).unwrap();
             let data: Vec<f32> = (0..*numel).map(|j| (i * 20_000 + j) as f32 * 0.001 + 5.0).collect();
             plan.push((hf.clone(), vec![*numel as u64]));
             expect_mtp.insert(name.clone(), data);
@@ -506,12 +496,12 @@ mod tests {
         )
         .unwrap();
         for (i, (name, numel)) in talker_specs.iter().enumerate() {
-            let hf = hf_name_for_talker(name);
+            let hf = talker_brain_to_hf(name).unwrap();
             let data: Vec<f32> = (0..*numel).map(|j| (i * 10_000 + j) as f32 * 0.001).collect();
             w.write(&hf, &data).unwrap();
         }
         for (i, (name, numel)) in mtp_specs.iter().enumerate() {
-            let hf = hf_name_for_mtp(name);
+            let hf = mtp_brain_to_hf(name).unwrap();
             let data: Vec<f32> = (0..*numel).map(|j| (i * 20_000 + j) as f32 * 0.001 + 5.0).collect();
             w.write(&hf, &data).unwrap();
         }
