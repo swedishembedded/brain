@@ -20,7 +20,7 @@ use std::io;
 
 use optim::codec::Rounding;
 use optim::rule::Rule;
-use optim::storage::{BlockStateStorage, MemBacking};
+use optim::storage::{BlockStateStorage, MemBacking, OptimizerStateStorage};
 use optim::streamed::{state_layout, ParamTiles, StreamedOptimizer, TensorSpec};
 use paramstore::precision::{MasterPolicy, ParamPrecision, ValueDtype};
 
@@ -129,6 +129,52 @@ impl HostAdam {
     pub fn state_bytes(&self) -> u64 {
         self.opt.state_physical_bytes()
     }
+
+    /// The tensors, `(name, elements)`, in the order the optimizer was built with.
+    pub fn tensors(&self) -> impl Iterator<Item = (&str, usize)> {
+        self.names.iter().map(String::as_str).zip(self.numels.iter().copied())
+    }
+
+    /// Key the stochastic rounding of narrow moment formats on `seed` (the run's), so a run resumed under the same
+    /// seed rounds as the original did. f32 moments round to nearest and do not read it.
+    pub fn pin_seed(&mut self, seed: u64) {
+        let step = self.opt.step_count();
+        self.opt.set_position(step, seed);
+    }
+
+    /// Tensor `ti`'s AdamW moments `(m, v)`, decoded to f32: what an exact resume saves beside the value.
+    pub fn read_moments(&mut self, ti: usize) -> io::Result<(Vec<f32>, Vec<f32>)> {
+        let numel = self.numel(ti)?;
+        let mut m = vec![0.0f32; numel];
+        let mut v = vec![0.0f32; numel];
+        let tile = self.opt.tile_elems();
+        for start in (0..numel).step_by(tile) {
+            let n = tile.min(numel - start);
+            self.opt.state_mut().read_tile(ti, 0, start, &mut m[start..start + n])?;
+            self.opt.state_mut().read_tile(ti, 1, start, &mut v[start..start + n])?;
+        }
+        Ok((m, v))
+    }
+
+    /// Put back tensor `ti`'s moments as [`Self::read_moments`] returned them, encoded into the state format (round to
+    /// nearest; f32 moments are restored exactly).
+    pub fn write_moments(&mut self, ti: usize, m: &[f32], v: &[f32]) -> io::Result<()> {
+        let numel = self.numel(ti)?;
+        if m.len() != numel || v.len() != numel {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("host optimizer: tensor {ti} holds {numel} values, the moments {} and {}", m.len(), v.len())));
+        }
+        let tile = self.opt.tile_elems();
+        for start in (0..numel).step_by(tile) {
+            let n = tile.min(numel - start);
+            self.opt.state_mut().write_tile(ti, 0, start, &m[start..start + n], optim::codec::Rounding::NEAREST)?;
+            self.opt.state_mut().write_tile(ti, 1, start, &v[start..start + n], optim::codec::Rounding::NEAREST)?;
+        }
+        Ok(())
+    }
+
+    fn numel(&self, ti: usize) -> io::Result<usize> {
+        self.numels.get(ti).copied().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, format!("host optimizer: no tensor {ti} (it holds {})", self.numels.len())))
+    }
 }
 
 /// The host-optimizer-state contract every model with [`crate::Model::set_host_optimizer`] honours, for its own test
@@ -191,6 +237,32 @@ mod tests {
         }
         let worst = w.iter().zip(&want).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
         assert!(worst <= 4.0 * f32::EPSILON, "host update differs from the reference by {worst}");
+    }
+
+    /// Spec: a run that saves the moments after a step and restores them into a fresh optimizer continues exactly as
+    /// the uninterrupted one does (f32 moments).
+    #[test]
+    fn restored_moments_continue_the_run_exactly() {
+        let n = 3000;
+        let grad = |s: usize| -> Vec<f32> { (0..n).map(|i| ((i * 5 + s * 11) % 13) as f32 / 13.0 - 0.4).collect() };
+        let params = [("w".to_string(), n)];
+        let mut straight = HostAdam::new(&params, ParamPrecision::FP32).unwrap();
+        let mut w_straight = vec![0.5f32; n];
+        for t in 1..=3 {
+            straight.step(&mut [(&mut w_straight[..], &grad(t)[..])], &args(t as u32)).unwrap();
+        }
+        let mut first = HostAdam::new(&params, ParamPrecision::FP32).unwrap();
+        let mut w = vec![0.5f32; n];
+        for t in 1..=2 {
+            first.step(&mut [(&mut w[..], &grad(t)[..])], &args(t as u32)).unwrap();
+        }
+        let (m, v) = first.read_moments(0).unwrap();
+        assert!(m.iter().any(|x| *x != 0.0) && v.iter().all(|x| *x >= 0.0));
+        let mut resumed = HostAdam::new(&params, ParamPrecision::FP32).unwrap();
+        resumed.write_moments(0, &m, &v).unwrap();
+        resumed.step(&mut [(&mut w[..], &grad(3)[..])], &args(3)).unwrap();
+        assert_eq!(w, w_straight, "a resumed host update differs from the straight run");
+        assert!(resumed.write_moments(0, &m[1..], &v).is_err() && resumed.read_moments(1).is_err());
     }
 
     /// Spec: narrower moments hold fewer host bytes, in order; a precision with a master copy is refused.

@@ -832,6 +832,32 @@ impl HeadCe {
         self.forward_immediate(ops, hidden, n, labels, weights, None, logit_scale)
     }
 
+    /// [`Self::forward`], and each token's greedy pick under the head (the argmax of its logits) beside the loss: what
+    /// a caller scoring a teacher-forced batch reads to count the positions the model would have got right.
+    ///
+    /// # Errors
+    /// This head's device does not register the argmax kernels ([`Self::argmax_supported`]).
+    pub fn forward_argmax(&self, ops: &Ops, hidden: &DeviceBuffer, n: u32, labels: &[u32], logit_scale: f32) -> Result<(HeadLoss, Vec<u32>), String> {
+        if !self.argmax_supported() {
+            return Err("HeadCe::forward_argmax: this device's kernel set does not register 'argmax_part'/'argmax_final'".to_string());
+        }
+        assert_eq!(labels.len(), n as usize, "HeadCe::forward_argmax: {} labels for {n} tokens", labels.len());
+        self.check_labels(labels);
+        let gpu = ops.gpu();
+        let (lab, nll, ids, scratch) = (self.upload_labels(gpu, labels), gpu.storage(n as u64), gpu.storage(n.max(1) as u64), self.argmax_scratch(gpu));
+        let mut s = Vec::new();
+        self.forward_steps_with(ops, &mut s, hidden, n, &lab, &nll, Some(ArgmaxOut { ids: &ids, scratch: &scratch }), None, logit_scale);
+        gpu.submit(&[], &s);
+        let nll = gpu.read(&nll, n as usize);
+        let picks = gpu.read(&ids, n as usize).into_iter().map(|x| x as u32).collect();
+        let loss = HeadLoss {
+            loss_sum: nll.iter().map(|&l| l as f64).sum(),
+            count: labels.iter().filter(|&&l| l != IGNORE).count() as u32,
+            logprobs: nll.iter().map(|&l| -l).collect(),
+        };
+        Ok((loss, picks))
+    }
+
     /// [`Self::forward`] with `k` extra targets per token (`ids`, `[n * k]`, [`IGNORE`] for an unused slot): also
     /// the log-probability at each id, `[n * k]`. The loss is the labels' alone.
     ///

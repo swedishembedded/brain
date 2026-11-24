@@ -179,6 +179,30 @@ fn chunked_loss_logprobs_and_hidden_gradient_match_the_host_reference() {
     }
 }
 
+/// Spec: the greedy pick read beside the loss is each token's host argmax over the head, in every chunk, and the loss
+/// is the plain forward's.
+#[test]
+fn the_argmax_readout_is_each_tokens_greedy_pick_beside_the_same_loss() {
+    let kernels: Vec<_> = all_kernels().iter().copied().chain([("argmax_part", kernels::ARGMAX_PART), ("argmax_final", kernels::ARGMAX_FINAL)]).collect();
+    let mut ops = Ops::new(Gpu::new(&kernels)).expect("Ops::new");
+    ops.set_gemm_precision(GemmPrecision::Fp32Reference);
+    let p = problem(150, 96, 1000);
+    let w = head(&ops, &p, Dtype::F32);
+    let hc = build(&ops, &p, &w, 64, false);
+    let hidden = ops.gpu().storage_init("hidden", &p.hidden);
+    let (loss, picks) = hc.forward_argmax(&ops, &hidden, p.n as u32, &p.labels, 1.0).unwrap();
+    let plain = hc.forward(&ops, &hidden, p.n as u32, &p.labels, None, 1.0);
+    assert_eq!((loss.count, loss.loss_sum), (plain.count, plain.loss_sum));
+    for (i, &pick) in picks.iter().enumerate() {
+        let logit = |j: usize| (0..p.d).map(|c| p.hidden[i * p.d + c] as f64 * p.raw[j * p.d + c] as f64).sum::<f64>();
+        let best = (0..p.v).max_by(|&a, &b| logit(a).total_cmp(&logit(b))).unwrap();
+        assert!(pick as usize == best || (logit(pick as usize) - logit(best)).abs() < 1e-4, "token {i}: picked {pick}, the argmax is {best}");
+    }
+    let bare = Ops::new(Gpu::new(all_kernels())).expect("Ops::new");
+    let hb = HeadCe::new(&bare, p.d as u32, p.v as u32, &head(&bare, &p, Dtype::F32), HeadCeConfig { rows_per_chunk: 64, tile_budget_words: None }, HeadKernels::from_gpu(bare.gpu()).unwrap()).unwrap();
+    assert!(hb.forward_argmax(&bare, &bare.gpu().storage_init("h", &p.hidden), p.n as u32, &p.labels, 1.0).is_err(), "a device without the readout refuses");
+}
+
 #[test]
 fn chunking_and_windowing_change_nothing() {
     let ops = ops();
