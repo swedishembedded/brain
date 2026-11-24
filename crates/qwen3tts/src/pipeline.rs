@@ -528,7 +528,10 @@ pub(crate) fn split_input_ids(ids: &[u32]) -> Result<(Vec<u32>, Vec<u32>), Strin
     // nothing to trail: refuse it here rather than panic in a builder.
     let min = MIN_TEXT_TOKENS + 3 + 5;
     if ids.len() < min {
-        return Err(format!("the text is too short: it tokenizes to {} tokens, at least {MIN_TEXT_TOKENS} are needed", ids.len().saturating_sub(3 + 5)));
+        return Err(capability::failure::tag(
+            capability::failure::FailureClass::InvalidRequest,
+            format!("the text is too short: it tokenizes to {} tokens, at least {MIN_TEXT_TOKENS} are needed", ids.len().saturating_sub(3 + 5)),
+        ));
     }
     Ok((ids[..3].to_vec(), ids[3..ids.len() - 5].to_vec()))
 }
@@ -545,6 +548,12 @@ pub(crate) fn instruct_text(instruct: &str) -> String {
     format!("<|im_start|>user\n{instruct}<|im_end|>\n")
 }
 
+/// How a `design` request steers the voice: whether it carries an instruction
+/// and a preset speaker (a blank one counts as none).
+pub(crate) fn design_steering(instruct: &str, speaker: Option<&str>) -> prompt::Steering {
+    prompt::Steering::Design { instruct: !instruct.trim().is_empty(), speaker: speaker.is_some_and(|s| !s.trim().is_empty()) }
+}
+
 /// Resolve a CustomVoice preset speaker name to its codec-token id (or error with
 /// the supported list). `None` name -> `None` (VoiceDesign).
 pub(crate) fn resolve_speaker(sp: &TtsSpecials, speaker: Option<&str>) -> Result<Option<u32>, String> {
@@ -554,7 +563,7 @@ pub(crate) fn resolve_speaker(sp: &TtsSpecials, speaker: Option<&str>) -> Result
         Some(name) => sp.speaker_id(name).map(Some).ok_or_else(|| {
             let mut names: Vec<&String> = sp.spk_id.keys().collect();
             names.sort();
-            format!("unknown speaker {name:?}; supported preset speakers: {names:?}")
+            capability::failure::tag(capability::failure::FailureClass::InvalidRequest, format!("unknown speaker {name:?}; supported preset speakers: {names:?}"))
         }),
     }
 }
@@ -619,6 +628,7 @@ pub fn clone(
         return Err("cancelled".to_string());
     }
     let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir)?;
+    sp.check_steering(prompt::Steering::Reference)?;
     // Resolve the sampling plan ONCE per generation call, here, because this is
     // the outermost layer that knows the checkpoint directory. Everything below
     // reads `opts.plan()` and never re-reads a config file.
@@ -761,6 +771,7 @@ pub fn clone_npu(
     npu: &NpuOpts,
 ) -> Result<Vec<f32>, String> {
     let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir)?;
+    sp.check_steering(prompt::Steering::Reference)?;
     // Resolve the sampling plan ONCE per generation call, here, because this is
     // the outermost layer that knows the checkpoint directory. Everything below
     // reads `opts.plan()` and never re-reads a config file.
@@ -973,6 +984,7 @@ pub fn design(
         return Err("cancelled".to_string());
     }
     let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir)?;
+    sp.check_steering(design_steering(instruct, speaker))?;
     // Resolve the sampling plan ONCE per generation call, here, because this is
     // the outermost layer that knows the checkpoint directory. Everything below
     // reads `opts.plan()` and never re-reads a config file.
@@ -1013,6 +1025,7 @@ pub fn design_npu(
     npu: &NpuOpts,
 ) -> Result<Vec<f32>, String> {
     let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir)?;
+    sp.check_steering(design_steering(instruct, speaker))?;
     // Resolve the sampling plan ONCE per generation call, here, because this is
     // the outermost layer that knows the checkpoint directory. Everything below
     // reads `opts.plan()` and never re-reads a config file.

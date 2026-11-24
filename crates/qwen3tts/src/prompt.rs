@@ -69,6 +69,57 @@ pub struct TtsSpecials {
     /// Preset speaker name -> codec-token id (CustomVoice `talker_config.spk_id`).
     /// Empty for Base / VoiceDesign.
     pub spk_id: HashMap<String, u32>,
+    /// Which released checkpoint this is (`tts_model_type`, `tts_model_size`):
+    /// it decides what a request may steer ([`Self::check_steering`]). `None`
+    /// for a config that does not say, which is held to nothing.
+    pub checkpoint: Option<Checkpoint>,
+}
+
+/// A released Qwen3-TTS checkpoint's kind: each was trained for one way of
+/// choosing the voice.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CheckpointKind {
+    /// Clones a reference recording (it ships the speaker encoder).
+    Base,
+    /// Speaks as one of its preset speakers, the larger size also following an
+    /// instruction.
+    CustomVoice,
+    /// Speaks in a voice an instruction describes.
+    VoiceDesign,
+}
+
+/// The checkpoint's kind and size, as its `config.json` states them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Checkpoint {
+    pub kind: CheckpointKind,
+    /// `tts_model_size` (`0b6`, `1b7`).
+    pub size: String,
+}
+
+/// How a request steers the voice, for [`TtsSpecials::check_steering`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Steering {
+    /// A reference recording to imitate (`clone`).
+    Reference,
+    /// An instruction and/or a preset speaker (`design`).
+    Design { instruct: bool, speaker: bool },
+}
+
+/// The smallest released size, whose CustomVoice checkpoint was not trained to
+/// follow an instruction.
+const SMALL_SIZE: &str = "0b6";
+
+impl Checkpoint {
+    fn from_config(v: &serde_json::Value) -> Result<Option<Checkpoint>, String> {
+        let Some(kind) = v["tts_model_type"].as_str() else { return Ok(None) };
+        let kind = match kind {
+            "base" => CheckpointKind::Base,
+            "custom_voice" => CheckpointKind::CustomVoice,
+            "voice_design" => CheckpointKind::VoiceDesign,
+            other => return Err(format!("config.json: unknown tts_model_type {other:?} (expected base, custom_voice or voice_design)")),
+        };
+        Ok(Some(Checkpoint { kind, size: v["tts_model_size"].as_str().unwrap_or_default().to_string() }))
+    }
 }
 
 impl TtsSpecials {
@@ -111,7 +162,31 @@ impl TtsSpecials {
             codec_eos: gu(t, "codec_eos_token_id", 2150),
             lang,
             spk_id,
+            checkpoint: Checkpoint::from_config(&v)?,
         })
+    }
+
+    /// Whether this checkpoint can steer the voice as `steering` asks: a
+    /// reference only on Base, an instruction alone only on VoiceDesign, a
+    /// preset speaker only on CustomVoice and an instruction beside it only on
+    /// the larger CustomVoice (the reference accepts and then drops one on the
+    /// 0.6B; brain refuses it instead of speaking as if it had been followed).
+    /// The error is tagged [`capability::failure::FailureClass::UnsupportedCapability`]
+    /// and names the checkpoint kind that would serve.
+    pub fn check_steering(&self, steering: Steering) -> Result<(), String> {
+        use capability::failure::{tag, FailureClass};
+        let Some(ckpt) = &self.checkpoint else { return Ok(()) };
+        let refuse = |why: &str| Err(tag(FailureClass::UnsupportedCapability, why));
+        match (steering, &ckpt.kind) {
+            (Steering::Reference, CheckpointKind::Base) => Ok(()),
+            (Steering::Reference, _) => refuse("this checkpoint does not clone a recorded voice; a Base checkpoint does"),
+            (Steering::Design { instruct: false, speaker: false }, _) => refuse("voice design needs an instruction or a preset speaker"),
+            (Steering::Design { .. }, CheckpointKind::Base) => refuse("a Base checkpoint takes no instruction or preset speaker; a VoiceDesign checkpoint follows an instruction, a CustomVoice one has preset speakers"),
+            (Steering::Design { speaker: true, .. }, CheckpointKind::VoiceDesign) => refuse("a VoiceDesign checkpoint has no preset speakers; a CustomVoice one does"),
+            (Steering::Design { speaker: false, .. }, CheckpointKind::CustomVoice) => refuse("a CustomVoice checkpoint speaks as one of its preset speakers: name one"),
+            (Steering::Design { instruct: true, .. }, CheckpointKind::CustomVoice) if ckpt.size == SMALL_SIZE => refuse("the 0.6B CustomVoice checkpoint does not follow an instruction; the 1.7B one does"),
+            (Steering::Design { .. }, _) => Ok(()),
+        }
     }
 
     /// Preset speaker codec-token id for a CustomVoice speaker name (case-insensitive).
@@ -378,5 +453,53 @@ pub fn build_icl_prompt(
         embeds,
         trailing,
         tts_pad,
+    }
+}
+
+#[cfg(test)]
+mod steering_tests {
+    use super::*;
+
+    fn specials(kind: Option<(&str, &str)>) -> TtsSpecials {
+        let mut v = serde_json::json!({"talker_config": {}});
+        if let Some((kind, size)) = kind {
+            v["tts_model_type"] = serde_json::json!(kind);
+            v["tts_model_size"] = serde_json::json!(size);
+        }
+        TtsSpecials { checkpoint: Checkpoint::from_config(&v).unwrap(), ..crate::testsupport::tiny_specials() }
+    }
+    const fn design(instruct: bool, speaker: bool) -> Steering {
+        Steering::Design { instruct, speaker }
+    }
+
+    /// The reference package's rule per checkpoint kind (`generate_voice_clone`,
+    /// `generate_voice_design`, `generate_custom_voice`), with the 0.6B
+    /// CustomVoice's instruction refused rather than dropped.
+    #[test]
+    fn each_checkpoint_kind_serves_only_the_steering_it_was_trained_for() {
+        let base = specials(Some(("base", "0b6")));
+        let design_ckpt = specials(Some(("voice_design", "1b7")));
+        let small_cv = specials(Some(("custom_voice", "0b6")));
+        let large_cv = specials(Some(("custom_voice", "1b7")));
+        assert!(base.check_steering(Steering::Reference).is_ok());
+        for s in [&design_ckpt, &small_cv, &large_cv] {
+            assert!(s.check_steering(Steering::Reference).is_err());
+        }
+        assert!(base.check_steering(design(true, false)).is_err(), "Base would ignore the instruction");
+        assert!(design_ckpt.check_steering(design(true, false)).is_ok());
+        assert!(design_ckpt.check_steering(design(true, true)).is_err());
+        assert!(small_cv.check_steering(design(false, true)).is_ok());
+        assert!(small_cv.check_steering(design(true, true)).is_err(), "the 0.6B drops the instruction");
+        assert!(large_cv.check_steering(design(true, true)).is_ok());
+        assert!(large_cv.check_steering(design(true, false)).is_err(), "CustomVoice needs a speaker");
+        assert!(design_ckpt.check_steering(design(false, false)).is_err());
+        let err = base.check_steering(design(true, false)).unwrap_err();
+        assert_eq!(capability::failure::classify(&err).map(|(c, _)| c), Some(capability::failure::FailureClass::UnsupportedCapability), "{err}");
+    }
+
+    #[test]
+    fn an_unstated_kind_is_held_to_nothing_and_an_unknown_one_is_refused() {
+        assert!(specials(None).check_steering(design(true, true)).is_ok());
+        assert!(Checkpoint::from_config(&serde_json::json!({"tts_model_type": "duet"})).is_err());
     }
 }

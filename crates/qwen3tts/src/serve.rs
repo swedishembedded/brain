@@ -247,6 +247,7 @@ impl TtsEngine {
 
         let prompt = match self.cfg.kind {
             Kind::Clone => {
+                self.sp.check_steering(prompt::Steering::Reference)?;
                 let ref_code = self.ref_code.as_ref().ok_or("clone engine missing ref codes")?;
                 let ref_ids = self.ref_ids.as_ref().unwrap();
                 let xvec = self.xvec.as_ref().unwrap();
@@ -255,6 +256,7 @@ impl TtsEngine {
                 )
             }
             Kind::Design => {
+                self.sp.check_steering(pipeline::design_steering(&req.instruct, req.speaker.as_deref()))?;
                 let instruct_ids = if req.instruct.trim().is_empty() {
                     Vec::new()
                 } else {

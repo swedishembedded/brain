@@ -520,6 +520,7 @@ impl ResidentEngine {
         cancel: &CancelToken,
         on_audio: &mut dyn FnMut(&[f32], u32),
     ) -> Result<Vec<f32>, String> {
+        self.sp.check_steering(pipeline::design_steering(instruct, speaker))?;
         let language_id = self.sp.language_id(lang);
         let speaker_id = pipeline::resolve_speaker(&self.sp, speaker)?;
         let (role_ids, text_ids) = self.text_ids(text)?;
@@ -548,6 +549,7 @@ impl ResidentEngine {
         cancel: &CancelToken,
         on_audio: &mut dyn FnMut(&[f32], u32),
     ) -> Result<Vec<f32>, String> {
+        self.sp.check_steering(crate::prompt::Steering::Reference)?;
         let prompt = self.clone_prompt(text, reference, ref_text, ref_codes, lang)?;
         self.run_prompt(&prompt, opts, cancel, on_audio)
     }

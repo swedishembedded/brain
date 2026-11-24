@@ -76,8 +76,14 @@ $Q clone \
   --out audio=demo.wav --seed $RANDOM
 ```
 
-Instructed voice design / preset speakers (CustomVoice/VoiceDesign
-checkpoints only):
+Instructed voice design / preset speakers. Each released checkpoint is
+trained for one way of choosing the voice, read from its `config.json`
+(`tts_model_type`): `clone` runs only on a Base checkpoint, `design` with an
+instruction alone only on VoiceDesign, `design` with `--speaker` only on
+CustomVoice, and an instruction beside a speaker only on the 1.7B CustomVoice
+(the 0.6B one was not trained to follow one). Any other combination is
+refused naming the checkpoint kind that would serve it, never spoken as if it
+had been followed:
 
 ```bash
 $Q design --text "..." --instruct "a calm, low voice" \

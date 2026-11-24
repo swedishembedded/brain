@@ -117,6 +117,7 @@ pub fn tiny_specials() -> TtsSpecials {
         codec_eos: 1050,
         lang: std::collections::HashMap::new(),
         spk_id: std::collections::HashMap::new(),
+        checkpoint: None,
     }
 }
 

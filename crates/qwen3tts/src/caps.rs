@@ -834,21 +834,33 @@ mod caps_tests {
         }
     }
 
-    /// End-to-end: a real generation through the SAME `capability::Registry`
-    /// path D-Bus/HTTP/`brain serve` use, against the checkpoint the model
-    /// store resolves. Skips cleanly when the store holds none.
+    /// End-to-end through the SAME `capability::Registry` path D-Bus/HTTP/
+    /// `brain serve` use, against the checkpoint the model store resolves:
+    /// `design` speaks only on a checkpoint trained to follow an instruction
+    /// (VoiceDesign), and a Base checkpoint refuses it by class rather than
+    /// speaking as if the instruction had been followed. Skips cleanly when
+    /// the store holds none.
     #[test]
-    fn design_action_produces_real_audio_through_the_registry() {
+    fn design_runs_only_where_the_checkpoint_follows_an_instruction() {
         let Some(paths) = crate::testsupport::store_paths() else {
             brain_testutil::skip("no Qwen3-TTS checkpoint in the model store");
             return;
         };
-        let inv = Invocation::new().set("text", json!("Reached through the generic action surface now.")).set("max_frames", json!(24));
-        let outcome = registry(Some(paths)).run(MODEL, "design", inv, &mut |_| {}).expect("design action should succeed");
-        let samples = outcome.outputs["samples"].as_u64().expect("samples field");
-        assert!(samples > 0, "design produced no audio");
-        let audio = outcome.blobs.get("audio").expect("audio blob");
-        assert!(!audio.bytes.is_empty(), "audio blob is empty");
-        eprintln!("design-action e2e: {samples} samples, {} audio bytes", audio.bytes.len());
+        let kind = crate::prompt::TtsSpecials::from_config_dir(&paths.ckpt_dir).expect("config.json").checkpoint.map(|c| c.kind);
+        let inv = Invocation::new()
+            .set("text", json!("Reached through the generic action surface now."))
+            .set("instruct", json!("a calm, low voice"))
+            .set("max_frames", json!(24));
+        let result = registry(Some(paths)).run(MODEL, "design", inv, &mut |_| {});
+        match kind {
+            Some(crate::prompt::CheckpointKind::VoiceDesign) => {
+                let outcome = result.expect("a VoiceDesign checkpoint follows the instruction");
+                assert!(outcome.outputs["samples"].as_u64().unwrap_or(0) > 0, "design produced no audio");
+            }
+            _ => {
+                let err = result.expect_err("a checkpoint not trained for instructions must refuse one");
+                assert_eq!(capability::failure::classify(&err).map(|(c, _)| c), Some(capability::failure::FailureClass::UnsupportedCapability), "{err}");
+            }
+        }
     }
 }
