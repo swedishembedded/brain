@@ -718,3 +718,32 @@ async fn a_client_that_hangs_up_while_its_job_waits_for_a_lane_takes_the_job_wit
     tokio::time::sleep(Duration::from_millis(600)).await;
     assert_eq!(rig.trainer_runs.load(Ordering::SeqCst), 0, "a job whose client hung up while it was queued ran anyway");
 }
+
+/// A running job's input routes are behind the key, reach only the caller's own job, and say plainly when the job
+/// reads no input or has ended; a body past the cap is refused before it reaches the job.
+#[tokio::test]
+async fn a_jobs_input_is_its_owners_alone_and_a_job_that_reads_none_says_so() {
+    let rig = rig();
+    let (_, created) = call(&rig.app, Method::POST, "/v1/jobs", "alice", Some(run_body("brain-slow", "render", json!({"steps": 200}), json!({})))).await;
+    let id = created["id"].as_str().unwrap().to_string();
+    for route in ["records", "finish"] {
+        let uri = format!("/v1/jobs/{id}/{route}");
+        let response = rig.app.clone().oneshot(Request::builder().method(Method::POST).uri(&uri).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{route} without a key");
+        let (status, _) = call(&rig.app, Method::POST, &uri, "mallory", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{route}: another caller must not learn the job exists");
+        let (status, body) = call(&rig.app, Method::POST, &uri, "alice", None).await;
+        assert_eq!(status, StatusCode::GONE, "{route}: a render job reads no input: {body}");
+        assert!(body["error"]["message"].as_str().unwrap().contains("reads no input"), "{body}");
+    }
+    let (status, _) = call(&rig.app, Method::POST, "/v1/jobs/00000000-0000-0000-0000-000000000000/records", "alice", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call(&rig.app, Method::POST, &format!("/v1/jobs/{id}/records?path=/etc"), "alice", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "a query field the route does not define");
+    let big = vec![b'x'; apiserve::capabilities::MAX_BODY_BYTES + 1];
+    let response = rig.app.clone().oneshot(Request::builder().method(Method::POST).uri(format!("/v1/jobs/{id}/records")).header(header::AUTHORIZATION, "Bearer alice").body(Body::from(big)).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let _ = call(&rig.app, Method::DELETE, &format!("/v1/jobs/{id}"), "alice", None).await;
+    let (status, _) = call(&rig.app, Method::POST, &format!("/v1/jobs/{id}/records"), "alice", None).await;
+    assert_eq!(status, StatusCode::GONE, "a cancelled job takes no input");
+}

@@ -178,12 +178,12 @@ impl Manager {
 
     /// [`Self::register_job`] for a job its caller addresses by id (`Subscribe`): listed by `Jobs` to `owner` and
     /// cancelled by `Cancel` only for `owner`.
-    fn register_owned_job(&self, inv: &mut Invocation, owner: String, model: &str, action: &str) -> (u64, CancelToken) {
+    fn register_owned_job(&self, inv: &mut Invocation, owner: String, model: &str, action: &str, inbox: capability::inbox::InboxSender) -> (u64, CancelToken) {
         let token = CancelToken::armed();
         inv.cancel = token.clone();
         let job = self.next_job.fetch_add(1, Ordering::Relaxed) + 1;
         let info = residency::jobs::JobInfo { owner, model: model.to_string(), action: action.to_string(), submitted: std::time::SystemTime::now() };
-        self.jobs.insert_described(job, token.clone(), info);
+        self.jobs.insert_described(job, token.clone(), info, Some(inbox));
         (job, token)
     }
 
@@ -195,6 +195,9 @@ impl Manager {
         let permit = self.edge_permits.clone().try_acquire_owned().map_err(|_| fdo::Error::Failed("server saturated: request rejected at the edge".into()))?;
         let model = resolve_model_alias(model);
         let mut inv = self.build_inv(&params, in_fds, &in_meta).map_err(fdo::Error::Failed)?;
+        // Armed before the door check, so a job that takes input (`Input`) sees that this transport delivers it.
+        let (inbox_tx, inbox) = capability::inbox::inbox();
+        inv.inbox = inbox;
         // A resident model's call is checked here, so a refusal is this
         // method's own error; a model still to be fetched is checked once it
         // is resident, in `submit_subscribed_job`.
@@ -203,7 +206,7 @@ impl Manager {
         }
         // Arm a cancel token under the returned job id: `Cancel(job)` from its owner flips it and
         // the running action aborts at its next poll.
-        let (job, token) = self.register_owned_job(&mut inv, owner, &model, &action);
+        let (job, token) = self.register_owned_job(&mut inv, owner, &model, &action, inbox_tx);
         let jobs = self.jobs.clone();
         let (stream, client) = crate::stream::pair().map_err(|e| fdo::Error::Failed(e.to_string()))?;
         let stream = Arc::new(Mutex::new(stream));
@@ -279,7 +282,7 @@ impl Manager {
     fn build_inv(&self, params: &str, in_fds: HashMap<String, ZOwnedFd>, in_meta: &str) -> Result<Invocation, String> {
         let params: Value = if params.trim().is_empty() { json!({}) } else { serde_json::from_str(params).map_err(|e| format!("params JSON: {e}"))? };
         let meta: Value = if in_meta.trim().is_empty() { json!({}) } else { serde_json::from_str(in_meta).map_err(|e| format!("in_meta JSON: {e}"))? };
-        let mut inv = Invocation { params, blobs: Default::default(), cancel: Default::default(), scope: String::new() };
+        let mut inv = Invocation { params, blobs: Default::default(), cancel: Default::default(), scope: String::new(), inbox: Default::default() };
         // A call carries at most a few blobs and a bounded total: each fd is
         // capped on its own (`MAX_FD_BLOB_BYTES`), and without these bounds a
         // caller could still pass as many as the bus allows.
@@ -877,6 +880,39 @@ impl Manager {
     async fn cancel(&self, #[zbus(header)] header: zbus::message::Header<'_>, #[zbus(connection)] connection: &zbus::Connection, job: u64) -> bool {
         let owner = caller_owner(&header, connection).await;
         self.jobs.get_owned(&job, &owner).map(|t| t.cancel()).is_some()
+    }
+
+    /// Send input to a running `Subscribe` job of the caller ([`capability::inbox`]): `kind` (a streaming training
+    /// job's `records` or `finish`), `query` (JSON, `{}` or `{"epoch": N}`) and the body read from `body` (a memfd or
+    /// pipe; JSONL records). Answers JSON: `{"accepted": true, "answer": {...}}`, or `{"accepted": false, "refusal":
+    /// "invalid" | "busy" | "conflict" | "gone", "message", "detail"}` (`busy` is a full queue naming its
+    /// `allowance`). An unknown, finished or another user's job is the error `no such job`.
+    async fn input(&self, #[zbus(header)] header: zbus::message::Header<'_>, #[zbus(connection)] connection: &zbus::Connection, job: u64, kind: String, query: String, body: ZOwnedFd) -> fdo::Result<String> {
+        use std::os::fd::AsFd;
+        let owner = caller_owner(&header, connection).await;
+        let sender = self.jobs.inbox_owned(&job, &owner).ok_or_else(|| fdo::Error::Failed("no such job".to_string()))?;
+        let query: Value = if query.trim().is_empty() { json!({}) } else { serde_json::from_str(&query).map_err(|e| fdo::Error::InvalidArgs(format!("query: {e}")))? };
+        // The one field a query names: the run epoch the client believes in.
+        let fields = query.as_object().ok_or_else(|| fdo::Error::InvalidArgs("query: not a JSON object".to_string()))?;
+        if let Some((name, _)) = fields.iter().find(|(name, value)| *name != "epoch" || !(value.is_null() || value.is_u64())) {
+            return Err(fdo::Error::InvalidArgs(format!("query: {name:?} is not an \"epoch\" (a non-negative integer)")));
+        }
+        let bytes = read_fd_to_vec(body.as_fd()).map_err(|e| fdo::Error::InvalidArgs(format!("body: {e}")))?;
+        let reply = tokio::task::spawn_blocking(move || sender.send(&kind, query, bytes, capability::inbox::INPUT_WAIT)).await.map_err(|_| fdo::Error::Failed("the job's input could not be delivered".to_string()))?;
+        Ok(match reply {
+            Ok(answer) => json!({"accepted": true, "answer": answer}),
+            Err(refusal) => {
+                let name = match refusal.kind {
+                    capability::inbox::InputRefusalKind::Invalid => "invalid",
+                    capability::inbox::InputRefusalKind::Busy => "busy",
+                    capability::inbox::InputRefusalKind::Conflict => "conflict",
+                    capability::inbox::InputRefusalKind::Gone => "gone",
+                    capability::inbox::InputRefusalKind::Unavailable => "unavailable",
+                };
+                json!({"accepted": false, "refusal": name, "message": refusal.message, "detail": refusal.detail})
+            }
+        }
+        .to_string())
     }
 
     /// The caller's in-flight `Subscribe` jobs as a JSON array, oldest first: `[{"job", "model", "action",

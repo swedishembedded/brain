@@ -20,6 +20,10 @@
 //! dropped connection, and a training run's `resume_key` picks it up again
 //! after a restart). Ending one is explicit: `DELETE /v1/jobs/{id}`, with the id
 //! from the `POST` or from `GET /v1/jobs`.
+//! - `POST /v1/jobs/{id}/records` and `POST /v1/jobs/{id}/finish` send a running job input
+//!   ([`capability::inbox`]): a streaming training job's rollout records, and the end of them. The job answers each;
+//!   a job that reads no input, or has ended, is `410`, a full queue `429` naming the allowance, input the job refuses
+//!   `400`, input that disagrees with the job's state (another run epoch, records after `finish`) `409`.
 //! - `GET /v1/jobs/{id}/events` follows one as a server-sent event stream: each step
 //!   tick (`progress`) and each structured frame the action emits (`frame`, such as a
 //!   training step's loss and statistics) as it happens, then one terminal `done`
@@ -90,6 +94,8 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/jobs/{id}", get(job_status).delete(cancel_job))
         .route("/v1/jobs/{id}/result", get(job_result))
         .route("/v1/jobs/{id}/events", get(job_events))
+        .route("/v1/jobs/{id}/records", post(job_records))
+        .route("/v1/jobs/{id}/finish", post(job_finish))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
 }
 
@@ -119,7 +125,7 @@ struct BlobWire {
 
 /// Reads and validates a call against the action's own spec, so nothing invalid
 /// reaches the hooks or the executor.
-fn parse_call(state: &AppState, body: &Bytes) -> Result<Parsed, ApiError> {
+fn parse_call(state: &AppState, body: &Bytes, inbox: capability::inbox::Inbox) -> Result<Parsed, ApiError> {
     let provider = state.provider;
     let call: CallBody = serde_json::from_slice(body).map_err(|e| ApiError::invalid_request(provider, format!("invalid JSON body: {e}")))?;
 
@@ -132,6 +138,8 @@ fn parse_call(state: &AppState, body: &Bytes) -> Result<Parsed, ApiError> {
         .ok_or_else(|| ApiError::not_found(provider, format!("model '{}' has no action '{}'", call.model, call.action)))?;
 
     let mut inv = Invocation::new();
+    // Armed before admission, so a job that takes input sees at its door that this surface delivers it.
+    inv.inbox = inbox;
     inv.params = match call.params {
         Value::Null => json!({}),
         Value::Object(map) => Value::Object(map),
@@ -236,7 +244,7 @@ async fn devices(State(state): State<AppState>) -> Json<Value> {
 
 async fn run(State(state): State<AppState>, caller: CallerExt, body: Bytes) -> Response {
     let state = state.scoped(caller);
-    let call = match parse_call(&state, &body) {
+    let call = match parse_call(&state, &body, Default::default()) {
         Ok(call) => call.admitted,
         Err(e) => return e.into_response(),
     };
@@ -265,6 +273,8 @@ struct Entry {
     finished: Option<Instant>,
     phase: Phase,
     cancel: Option<oneshot::Sender<()>>,
+    /// Where the job's input goes while it runs.
+    inbox: Option<capability::inbox::InboxSender>,
     log: EventLog,
     /// Carries the sequence number of the newest frame, so a follower waits for the next one.
     wake: watch::Sender<u64>,
@@ -338,7 +348,7 @@ impl AsyncJobs {
     }
 
     /// Makes room for one more job of `scope`, or says why there is none.
-    fn open(&self, scope: &str, model: &str, action: &str, cancel: oneshot::Sender<()>) -> Result<Uuid, &'static str> {
+    fn open(&self, scope: &str, model: &str, action: &str, cancel: oneshot::Sender<()>, inbox: capability::inbox::InboxSender) -> Result<Uuid, &'static str> {
         let mut entries = self.lock();
         Self::reap(&mut entries, Instant::now());
         if entries.len() >= MAX_JOBS {
@@ -358,6 +368,7 @@ impl AsyncJobs {
                 finished: None,
                 phase: Phase::Running { step: 0, total: 0 },
                 cancel: Some(cancel),
+                inbox: Some(inbox),
                 log: EventLog::default(),
                 wake: watch::channel(0).0,
                 followers: Arc::default(),
@@ -393,6 +404,7 @@ impl AsyncJobs {
                 entry.phase = phase;
                 entry.finished = Some(Instant::now());
                 entry.cancel = None;
+                entry.inbox = None;
                 entry.record_end();
             }
         }
@@ -410,6 +422,7 @@ impl AsyncJobs {
             }
             entry.phase = Phase::Cancelled;
             entry.finished = Some(Instant::now());
+            entry.inbox = None;
             entry.record_end();
             return Some(phase_name(&entry.phase));
         }
@@ -454,6 +467,11 @@ impl AsyncJobs {
             .collect();
         mine.sort_by_key(|(created, _)| *created);
         mine.into_iter().map(|(_, item)| item).collect()
+    }
+
+    /// Where `scope`'s job `id` takes input: `None` when there is no such job, `Some(None)` when it has ended.
+    fn inbox(&self, scope: &str, id: Uuid) -> Option<Option<capability::inbox::InboxSender>> {
+        self.lock().get(&id).filter(|e| e.scope == scope).map(|e| e.inbox.clone())
     }
 
     /// What `scope` is allowed to see of job `id`.
@@ -514,13 +532,14 @@ fn parse_id(raw: &str) -> Option<Uuid> {
 
 async fn create_job(State(state): State<AppState>, caller: CallerExt, body: Bytes) -> Response {
     let state = state.scoped(caller);
-    let Parsed { admitted: call, model, action } = match parse_call(&state, &body) {
+    let (inbox_tx, inbox) = capability::inbox::inbox();
+    let Parsed { admitted: call, model, action } = match parse_call(&state, &body, inbox) {
         Ok(call) => call,
         Err(e) => return e.into_response(),
     };
     let scope = state.scope();
     let (cancel_tx, cancel_rx) = oneshot::channel();
-    let id = match state.async_jobs.open(&scope, &model, &action, cancel_tx) {
+    let id = match state.async_jobs.open(&scope, &model, &action, cancel_tx, inbox_tx) {
         Ok(id) => id,
         Err(why) => return ApiError::rate_limited(state.provider, why).into_response(),
     };
@@ -685,6 +704,66 @@ async fn job_events(State(state): State<AppState>, caller: CallerExt, Path(raw):
         Some((Ok::<_, std::convert::Infallible>(event), (follow, jobs)))
     });
     Sse::new(events).keep_alive(KeepAlive::default()).into_response()
+}
+
+/// The query of an input route: the run epoch the client believes in, which the job checks.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InputQuery {
+    epoch: Option<u64>,
+}
+
+/// `POST /v1/jobs/{id}/records`: the body (JSONL) is the job's `records` input.
+async fn job_records(State(state): State<AppState>, caller: CallerExt, Path(raw): Path<String>, query: axum::extract::Query<InputQuery>, body: Bytes) -> Response {
+    job_input(state, caller, raw, "records", query.0, body).await
+}
+
+/// `POST /v1/jobs/{id}/finish`: the job's `finish` input; the body is empty.
+async fn job_finish(State(state): State<AppState>, caller: CallerExt, Path(raw): Path<String>, query: axum::extract::Query<InputQuery>, body: Bytes) -> Response {
+    if !body.is_empty() {
+        return ApiError::invalid_request(state.provider, "finish takes no body").into_response();
+    }
+    job_input(state, caller, raw, "finish", query.0, body).await
+}
+
+/// Hands `kind` input to the caller's own job `raw` and answers with the job's reply.
+async fn job_input(state: AppState, caller: CallerExt, raw: String, kind: &'static str, query: InputQuery, body: Bytes) -> Response {
+    use capability::inbox::InputRefusalKind;
+    let state = state.scoped(caller);
+    let Some(id) = parse_id(&raw) else { return no_such_job(&state) };
+    let sender = match state.async_jobs.inbox(&state.scope(), id) {
+        None => return no_such_job(&state),
+        Some(None) => return input_refused(&state, capability::inbox::InputRefusal::new(InputRefusalKind::Gone, "the job has ended")),
+        Some(Some(sender)) => sender,
+    };
+    let query = json!({"epoch": query.epoch});
+    let body = body.to_vec();
+    let reply = tokio::task::spawn_blocking(move || sender.send(kind, query, body, capability::inbox::INPUT_WAIT)).await;
+    match reply {
+        Ok(Ok(answer)) => Json(answer).into_response(),
+        Ok(Err(refusal)) => input_refused(&state, refusal),
+        Err(_) => ApiError::internal(state.provider, "the job's input could not be delivered").into_response(),
+    }
+}
+
+/// A job's refusal of its input as a response: the status its kind names, the error, and the job's own detail.
+fn input_refused(state: &AppState, refusal: capability::inbox::InputRefusal) -> Response {
+    use capability::inbox::InputRefusalKind;
+    let (status, mut body) = match refusal.kind {
+        InputRefusalKind::Invalid => (StatusCode::BAD_REQUEST, ApiError::invalid_request(state.provider, refusal.message).body()),
+        InputRefusalKind::Busy => (StatusCode::TOO_MANY_REQUESTS, ApiError::rate_limited(state.provider, refusal.message).body()),
+        InputRefusalKind::Conflict => (StatusCode::CONFLICT, json!({"error": {"message": refusal.message, "type": "conflict"}})),
+        InputRefusalKind::Gone => (StatusCode::GONE, json!({"error": {"message": refusal.message, "type": "gone"}})),
+        InputRefusalKind::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, json!({"error": {"message": refusal.message, "type": "unavailable"}})),
+    };
+    if !refusal.detail.is_null() {
+        body["detail"] = refusal.detail;
+    }
+    let mut response = (status, Json(body)).into_response();
+    if status == StatusCode::TOO_MANY_REQUESTS || status == StatusCode::SERVICE_UNAVAILABLE {
+        response.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from(crate::error::RETRY_AFTER_SECS));
+    }
+    response
 }
 
 async fn cancel_job(State(state): State<AppState>, caller: CallerExt, Path(raw): Path<String>) -> Response {

@@ -562,7 +562,7 @@ impl Brain {
             return;
         };
         // wire → capability::Invocation (decode base64 blobs).
-        let mut inv = capability::Invocation { params: params.clone(), blobs: Default::default(), cancel: Default::default(), scope: String::new() };
+        let mut inv = capability::Invocation { params: params.clone(), blobs: Default::default(), cancel: Default::default(), scope: String::new(), inbox: Default::default() };
         for wb in blobs {
             let bytes = match events::base64::decode(&wb.b64) {
                 Ok(b) => b,

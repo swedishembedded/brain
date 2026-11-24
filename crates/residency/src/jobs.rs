@@ -31,6 +31,8 @@ pub struct JobInfo {
 struct Registered {
     token: CancelToken,
     info: Option<JobInfo>,
+    /// Where the job's input goes, for a job that takes some ([`capability::inbox`]).
+    inbox: Option<capability::inbox::InboxSender>,
 }
 
 /// Armed cancel tokens for in-flight jobs, keyed by `K`. An entry lives from
@@ -59,16 +61,22 @@ impl<K: Eq + Hash> JobRegistry<K> {
     /// before calling this.
     pub fn insert(&self, id: K, token: CancelToken) {
         if let Ok(mut m) = self.0.lock() {
-            m.insert(id, Registered { token, info: None });
+            m.insert(id, Registered { token, info: None, inbox: None });
         }
     }
 
     /// [`Self::insert`] for a job a client addresses by its id: listed to `info.owner` by [`Self::owned_by`] and
     /// cancelled only through [`Self::get_owned`] by that owner.
-    pub fn insert_described(&self, id: K, token: CancelToken, info: JobInfo) {
+    pub fn insert_described(&self, id: K, token: CancelToken, info: JobInfo, inbox: Option<capability::inbox::InboxSender>) {
         if let Ok(mut m) = self.0.lock() {
-            m.insert(id, Registered { token, info: Some(info) });
+            m.insert(id, Registered { token, info: Some(info), inbox });
         }
+    }
+
+    /// Where the described job `id` takes input when `owner` owns it; `None` as [`Self::get_owned`] answers `None`, and
+    /// for a job registered without an inbox.
+    pub fn inbox_owned(&self, id: &K, owner: &str) -> Option<capability::inbox::InboxSender> {
+        self.0.lock().ok().and_then(|m| m.get(id).filter(|r| r.info.as_ref().is_some_and(|i| i.owner == owner)).and_then(|r| r.inbox.clone()))
     }
 
     /// Drop a finished (or admission-timed-out) job's entry.
@@ -152,8 +160,8 @@ mod tests {
         let reg: JobRegistry<u64> = JobRegistry::new();
         let info = |owner: &str| JobInfo { owner: owner.to_string(), model: "m".into(), action: "a".into(), submitted: std::time::SystemTime::now() };
         let (mine, theirs) = (CancelToken::armed(), CancelToken::armed());
-        reg.insert_described(1, mine.clone(), info("uid:1000"));
-        reg.insert_described(2, theirs.clone(), info("uid:1001"));
+        reg.insert_described(1, mine.clone(), info("uid:1000"), None);
+        reg.insert_described(2, theirs.clone(), info("uid:1001"), None);
         reg.insert(3, CancelToken::armed());
         assert_eq!(reg.owned_by("uid:1000").into_iter().map(|(id, _)| id).collect::<Vec<_>>(), vec![1]);
         assert!(reg.get_owned(&2, "uid:1000").is_none(), "another owner's job cannot be reached");

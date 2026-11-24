@@ -40,6 +40,7 @@ pub mod bounds;
 pub mod failure;
 pub mod scratch;
 pub mod hot;
+pub mod inbox;
 pub mod pixels;
 pub mod presentation;
 pub mod speech;
@@ -535,7 +536,7 @@ impl ActionSpec {
                 return Err(violation(Violation::UnknownInput, k, format!("unknown input '{k}' for action '{action}'")));
             }
         }
-        Ok(Invocation { params: Value::Object(params), blobs: inv.blobs, cancel: inv.cancel, scope: inv.scope })
+        Ok(Invocation { params: Value::Object(params), blobs: inv.blobs, cancel: inv.cancel, scope: inv.scope, inbox: inv.inbox })
     }
 }
 
@@ -816,16 +817,18 @@ pub struct Invocation {
     /// chose (a streaming session) keys it by this too, so one caller can
     /// neither read nor advance another's. Empty for an unnamed caller.
     pub scope: String,
+    /// Input the client sends the job while it runs ([`inbox`]); unarmed (the default) when the surface delivers none.
+    pub inbox: inbox::Inbox,
 }
 
 impl Invocation {
     pub fn new() -> Invocation {
-        Invocation { params: json!({}), blobs: BTreeMap::new(), cancel: CancelToken::default(), scope: String::new() }
+        Invocation { params: json!({}), blobs: BTreeMap::new(), cancel: CancelToken::default(), scope: String::new(), inbox: inbox::Inbox::default() }
     }
     /// This invocation's parameters and cancellation, without its blobs: what a caller that only needs to
     /// remember the request (not read its payload again) keeps. A page of pixels is tens of megabytes.
     pub fn without_blobs(&self) -> Invocation {
-        Invocation { params: self.params.clone(), blobs: BTreeMap::new(), cancel: self.cancel.clone(), scope: self.scope.clone() }
+        Invocation { params: self.params.clone(), blobs: BTreeMap::new(), cancel: self.cancel.clone(), scope: self.scope.clone(), inbox: self.inbox.clone() }
     }
     pub fn set(mut self, key: &str, v: Value) -> Invocation {
         self.params.as_object_mut().expect("params must be an object").insert(key.into(), v);
