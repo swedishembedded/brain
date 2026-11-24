@@ -89,6 +89,7 @@ heading and a `Scope: <one sentence>` line under it, then run `make generate/roa
 | [`qwen35`](qwen35.md) | qwen35 | Qwen3.8-27B dense hybrid decoder (`crates/qwen35`). |
 | [`qwen35moe`](qwen35moe.md) | qwen35moe | Qwen3.5-35B-A3B hybrid MoE decoder (`crates/qwen35moe`). |
 | [`qwen3omnimoe`](qwen3omnimoe.md) | qwen3omnimoe | Qwen3-Omni-30B (`crates/qwen3omnimoe`). |
+| [`qwen3tts-sft`](qwen3tts-sft.md) | qwen3tts-sft | Multi-speaker full fine-tuning of Qwen3-TTS (Talker + code predictor) on recorded speech, new languages and named voices, exported as an upstream-layout checkpoint. |
 | [`qwen3tts`](qwen3tts.md) | qwen3tts | Qwen3-TTS synthesis stack (`crates/qwen3tts`, `mimi`, `ecapatdnn`). |
 | [`research-upgrades`](research-upgrades.md) | research-to-stack - brain share | brain's share of the cross-project research upgrades. |
 | [`ripple-gpu-validation`](ripple-gpu-validation.md) | ripple-gpu-validation | The ordered, runnable plan that takes Ripple-65B from "finished on the CPU backend and the software Vulkan adapter" to "validated and measured on GH200 cards": every step's command, the number it should reproduce and what a failure points to. |
