@@ -62,6 +62,23 @@ impl ArchSpec for Qwen3TtsSpec {
     }
 }
 
+/// The complete Qwen3-TTS checkpoints (Talker, MTP, codec and speaker
+/// encoder) under the model store at `root`, smallest first. A store holding
+/// several does not resolve to one on its own; a caller that needs just one
+/// and has no reason to prefer another (a test, a smoke run) takes the first.
+pub fn store_checkpoints(root: &Path) -> Vec<crate::TtsPaths> {
+    use brain_modelstore::resolve::{resolve, Resolution};
+    let records = brain_modelstore::inventory::scan(root);
+    let assemblies: Vec<Assembly> = match resolve("qwen3tts", &records, &[&Qwen3TtsSpec], &BTreeMap::new()) {
+        Resolution::Resolved(a) => vec![*a],
+        Resolution::Ambiguous(a) => a.choices.into_iter().map(|c| *c.assembly).collect(),
+        Resolution::Missing(_) => Vec::new(),
+    };
+    let mut paths: Vec<crate::TtsPaths> = assemblies.iter().filter_map(|a| crate::TtsPaths::from_assembly(a).ok()).filter(|p| p.require(false).is_ok()).collect();
+    paths.sort_by_key(crate::TtsPaths::f32_weight_bytes);
+    paths
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
