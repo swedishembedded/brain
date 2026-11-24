@@ -329,6 +329,50 @@ fn a_policy_trace_equals_the_trainers_teacher_forced_log_probs() {
     assert!(sampler.iter().zip(&full).all(|(s, f)| s >= &(f - TOLERANCE)) && sampler.iter().zip(&full).any(|(s, f)| s > &(f + 0.01)), "sampler {sampler:?} vs full {full:?}");
 }
 
+/// SPEC: `policy_trace_top_log_probs` on a real engine (tiny qwen35 on the CPU): the top list's source is the scoring pass,
+/// whose figures for the sampled tokens equal the decode steps' own trace of the same request within `TOLERANCE`
+/// (the decode and the scoring prefill differ only in rounding), and its entries are the trainer's teacher-forced
+/// log-probabilities of those ids at the same temperature.
+#[test]
+fn the_top_log_probs_of_a_policy_trace_agree_with_the_decode_trace_and_the_trainer() {
+    const TOLERANCE: f32 = 2e-3;
+    const TOP: usize = 3;
+    let front = front();
+    let spec = llmserve::generate_spec("trace", true);
+    let temperature = 0.8f32;
+    let base = || inv("policy trace", 7, f64::from(temperature), 23).set("top_k", json!(4)).set("policy_trace", json!(true));
+    let decode = spec.validate(base()).expect("valid");
+    let top = spec.validate(base().set("policy_trace_top_log_probs", json!(TOP))).expect("valid");
+    let results = run_batch_scheduled(&mut scheduler(2), &front, &[decode, top], &mut |_, _| {});
+    let decode = results[0].clone().expect("request succeeds").outputs["policy_trace"].clone();
+    let top = results[1].clone().expect("request succeeds").outputs["policy_trace"].clone();
+    assert_eq!((decode["log_prob_source"].clone(), top["log_prob_source"].clone()), (json!("decode"), json!("score")));
+    assert_eq!(decode["generation_token_ids"], top["generation_token_ids"], "asking for the top list changes nothing about the decode");
+    let (prompt, generated): (Vec<u32>, Vec<u32>) = (serde_json::from_value(top["prompt_token_ids"].clone()).unwrap(), serde_json::from_value(top["generation_token_ids"].clone()).unwrap());
+    let decoded: Vec<f32> = serde_json::from_value(decode["generation_log_probs"].clone()).unwrap();
+    let scored: Vec<f32> = serde_json::from_value(top["generation_log_probs"].clone()).unwrap();
+    let ids: Vec<Vec<u32>> = serde_json::from_value(top["generation_top_ids"].clone()).unwrap();
+    let lps: Vec<Vec<f32>> = serde_json::from_value(top["generation_top_log_probs"].clone()).unwrap();
+    for (i, (d, s)) in decoded.iter().zip(&scored).enumerate() {
+        assert!((d - s).abs() < TOLERANCE, "position {i}: decode {d}, score {s}");
+        assert_eq!((ids[i].len(), lps[i].len()), (TOP, TOP));
+        assert!(lps[i].windows(2).all(|w| w[0] >= w[1]), "most probable first");
+        if let Some(j) = ids[i].iter().position(|&t| t == generated[i]) {
+            assert_eq!(lps[i][j].to_bits(), s.to_bits(), "position {i}: the sampled token's figure is its entry");
+        }
+    }
+    // The first and the last position's top ids, scored by the trainer in place of the sampled token.
+    for &i in &[0, generated.len() - 1] {
+        let context: Vec<u32> = prompt.iter().chain(&generated[..i]).copied().collect();
+        for (&id, &lp) in ids[i].iter().zip(&lps[i]) {
+            let mut one = context.clone();
+            one.push(id);
+            let want = trainer_logprobs(&one, context.len(), temperature)[0];
+            assert!((lp - want).abs() < TOLERANCE, "position {i}, token {id}: served {lp}, trainer {want}");
+        }
+    }
+}
+
 /// A policy trace is refused by name where it would not be the sampling policy's, and never silently without one.
 #[test]
 fn a_policy_trace_is_refused_when_the_request_reshapes_the_distribution() {

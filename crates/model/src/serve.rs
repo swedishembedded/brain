@@ -235,6 +235,24 @@ pub trait PagedDecoder {
         Err("this decoder cannot score a continuation: it has no teacher-forced scoring pass".to_string())
     }
 
+    /// Whether [`Self::score_continuation_top`] is implemented. A request for a policy trace with top log-probabilities
+    /// is refused up front by a decoder that cannot, instead of after its whole generation.
+    fn scores_top_log_probs(&self) -> bool {
+        false
+    }
+
+    /// [`Self::score_continuation`] with the sampler's top list: for every `p` in `from..tokens.len()` the figure of
+    /// `tokens[p]` and the `top` most likely tokens of the same row, from [`crate::logprobs::scored_position`] on the
+    /// logits row the serving forward computes at position `p - 1`. One pass, the same row for both figures, so a token
+    /// that is among the top reads its top entry's number exactly. The contract of [`Self::score_continuation`] holds
+    /// otherwise.
+    ///
+    /// The default is an error naming the gap ([`Self::scores_top_log_probs`] is `false`).
+    fn score_continuation_top(&mut self, namespace: KvNamespace, tokens: &[u32], from: usize, temperature: f32, top: usize) -> Result<Vec<crate::logprobs::ScoredPosition>, String> {
+        let _ = (namespace, tokens, from, temperature, top);
+        Err("this decoder cannot return the top log-probabilities of a continuation: its scoring pass reports only the scored token's".to_string())
+    }
+
     /// `logits = hidden @ head^T` for [`prefill`](Self::prefill)'s hidden
     /// state - a full `[vocab]` vector. [`admit_greedy`](Self::admit_greedy)/
     /// [`admit_topk`](Self::admit_topk) are what admission actually calls;
@@ -2179,6 +2197,23 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// serving forward ([`PagedDecoder::score_continuation`]), for a sequence that ran under `adapter`. Run
     /// between steps, on the scheduling thread: it holds the decoder for one prefill of `tokens`.
     pub fn score_continuation(&mut self, adapter: Option<AdapterId>, tokens: &[u32], from: usize, temperature: f32) -> Result<Vec<f32>, String> {
+        self.scored(adapter, tokens, from, temperature, |dec, namespace| dec.score_continuation(namespace, tokens, from, temperature))
+    }
+
+    /// [`Self::score_continuation`] with the `top` most likely tokens of every scored position
+    /// ([`PagedDecoder::score_continuation_top`]).
+    pub fn score_continuation_top(&mut self, adapter: Option<AdapterId>, tokens: &[u32], from: usize, temperature: f32, top: usize) -> Result<Vec<crate::logprobs::ScoredPosition>, String> {
+        self.scored(adapter, tokens, from, temperature, |dec, namespace| dec.score_continuation_top(namespace, tokens, from, temperature, top))
+    }
+
+    /// Whether the decoder can return top log-probabilities with a policy trace ([`Self::score_continuation_top`]).
+    pub fn scores_top_log_probs(&self) -> bool {
+        self.dec.scores_top_log_probs()
+    }
+
+    /// One scoring pass `run` under the namespace of `adapter`, after the arguments every pass shares are checked and the
+    /// adapter is resident and pinned for the pass.
+    fn scored<T>(&mut self, adapter: Option<AdapterId>, tokens: &[u32], from: usize, temperature: f32, run: impl FnOnce(&mut D, KvNamespace) -> Result<T, String>) -> Result<T, String> {
         if from == 0 || from > tokens.len() {
             return Err(format!("score_continuation: `from` is {from} for {} tokens; it must lie in 1..={}", tokens.len(), tokens.len()));
         }
@@ -2186,7 +2221,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             return Err(format!("score_continuation: the temperature is {temperature}; it must be finite and positive"));
         }
         let namespace = adapter.map_or(BASE_KV_NAMESPACE, |a| a.kv_namespace());
-        let Some(adapter) = adapter else { return self.dec.score_continuation(namespace, tokens, from, temperature) };
+        let Some(adapter) = adapter else { return run(&mut self.dec, namespace) };
         // An adapter must be resident in the decoder's bank while its rows run, as for a decoded sequence: made
         // resident (it may be loading), pinned for the pass, unpinned however the pass ends.
         let mut attempts = 0u32;
@@ -2202,7 +2237,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             }
         }
         self.dec.pin_adapter(adapter);
-        let scored = self.dec.score_continuation(namespace, tokens, from, temperature);
+        let scored = run(&mut self.dec, namespace);
         self.dec.unpin_adapter(adapter);
         scored
     }

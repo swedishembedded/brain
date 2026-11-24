@@ -4217,6 +4217,7 @@ impl ResidentModel for SiblingChat {
         m.model = self.name.clone();
         // It reports the sampled tokens and the policy trace when asked.
         m.actions[0] = ["logprobs", "return_token_ids", "policy_trace"].into_iter().fold(m.actions[0].clone(), |spec, name| spec.param(ParamSpec::new(name, ParamType::Bool, "token capture")));
+        m.actions[0] = m.actions[0].clone().param(ParamSpec::new("policy_trace_top_log_probs", ParamType::Int, "top list of the policy trace").min(1.0).max(20.0));
         m
     }
     fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
@@ -4264,6 +4265,13 @@ impl Instance for SiblingChatInst {
             // The scored sequence: the sampled ids and the stop token that ended them, under the full distribution.
             out = out.set("policy_trace", json!({"prompt_token_ids": [1, 2, 3, 4, 5], "generation_token_ids": [11, 12, 99], "generation_log_probs": [-1.5, -0.75, -0.125], "log_prob_temperature": 1.0, "tokenizer_digest": format!("sha256:{}", "d".repeat(64)), "chat_template_digest": format!("sha256:{}", "e".repeat(64))}));
             out = out.set("base_digest", json!(format!("sha256:{}", "b".repeat(64))));
+            // The top list is echoed as asked: K entries for each of the three generated positions.
+            if let Some(k) = inv.get_i64("policy_trace_top_log_probs") {
+                let trace = out.outputs.get_mut("policy_trace").and_then(Value::as_object_mut).expect("the trace");
+                trace.insert("top_log_probs".into(), json!(k));
+                trace.insert("generation_top_ids".into(), json!(vec![(0..k).collect::<Vec<_>>(); 3]));
+                trace.insert("generation_top_log_probs".into(), json!(vec![(0..k).map(|i| -(i as f64)).collect::<Vec<_>>(); 3]));
+            }
         }
         let answer = match requested {
             Some(seed) => format!("answered by {who} with seed {seed}"),
@@ -4652,6 +4660,39 @@ async fn a_chat_reply_returns_a_policy_trace_only_when_asked() {
     let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &bad).await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
     assert!(v.to_string().contains("'policy_trace' must be a boolean"), "{v}");
+}
+
+/// `policy_trace: {"top_log_probs": K}` is the trace plus the sampler's top K per generated position, streamed on the
+/// terminal chunk too. It is an object with that one integer: another key or type, a K outside what the model declares
+/// (1..=20) or a model that does not declare it is a 400 naming `policy_trace.top_log_probs`; the reply stays
+/// bounded by that maximum.
+#[tokio::test]
+async fn a_policy_trace_object_asks_for_the_top_log_probs_and_is_bounded() {
+    let (app, _exec, key) = adapter_app(Provider::OpenAI);
+    let mut asked = chat_body(ADAPTER_BASE);
+    asked["policy_trace"] = json!({"top_log_probs": 3});
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &asked).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let trace = &v["policy_trace"];
+    assert_eq!(trace["generation_token_ids"], json!([11, 12, 99]));
+    assert_eq!((trace["top_log_probs"].clone(), trace["generation_top_ids"][2].clone()), (json!(3), json!([0, 1, 2])));
+    assert_eq!(trace["generation_top_log_probs"][0], json!([0.0, -1.0, -2.0]));
+
+    asked["stream"] = json!(true);
+    let (_, sse) = post_text(&app, Provider::OpenAI, &key, "/v1/chat/completions", &asked).await;
+    assert!(sse.contains("generation_top_ids"), "{sse}");
+
+    for (bad, why) in [(json!({"top_log_probs": 21}), "at most 20"), (json!({"top_log_probs": 0}), "at least 1"), (json!({"top_log_probs": "3"}), "must be an integer"), (json!({"top_log_probs": 2.5}), "must be an integer"), (json!({}), "must be an integer"), (json!({"top_log_probs": 3, "extra": 1}), "policy_trace.extra"), (json!([3]), "boolean or an object")] {
+        let mut body = chat_body(ADAPTER_BASE);
+        body["policy_trace"] = bad.clone();
+        let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}: {v}");
+        assert!(v.to_string().contains(why), "{bad}: {v}");
+    }
+    let mut body = chat_body(ADAPTER_BASE);
+    body["policy_trace"] = json!({"top_log_probs": 21});
+    let (_, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await;
+    assert!(v.to_string().contains("policy_trace.top_log_probs"), "the refusal names the request field: {v}");
 }
 
 /// A chat request that asks for them gets the sampled token ids and each

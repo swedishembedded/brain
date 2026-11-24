@@ -207,8 +207,15 @@ struct Capture {
     raw: bool,
     /// `policy_trace`: the temperature the full-distribution log-probabilities are taken at (see [`PolicyTrace`]).
     trace: Option<f32>,
+    /// `policy_trace_top_log_probs`: how many of the most probable tokens of each generated position's row the trace
+    /// carries besides the sampled token's figure (`0`: none).
+    top: usize,
     prompt: Vec<u32>,
 }
+
+/// The most tokens per generated position a policy trace may carry ([`with_token_capture`]'s
+/// `policy_trace_top_log_probs`): the reply holds `max_new x` this many ids and figures.
+pub const MAX_TRACE_TOP_LOG_PROBS: usize = 20;
 
 /// `spec` with the token-capture parameters every action served through this
 /// crate honours ([`Capture`]): one declaration, so a client of any surface
@@ -221,6 +228,15 @@ pub fn with_token_capture(spec: ActionSpec) -> ActionSpec {
             ParamType::Bool,
             "return the training-grade policy trace (policy_trace): prompt ids, generated ids (the stop token included) and their log-probabilities under the model's full, untruncated distribution at the request temperature, with the base and adapter that served them; refused where the decoder cannot score its own generation or the request reshapes the distribution (penalties, DRY, no-repeat, thinking budget)",
         ))
+        .param(
+            ParamSpec::new(
+                "policy_trace_top_log_probs",
+                ParamType::Int,
+                "with policy_trace: also return, for every generated position, the K most probable token ids of the row it was drawn from and their log-probabilities under the whole row at the request temperature (generation_top_ids, generation_top_log_probs), computed with the same arithmetic as generation_log_probs in one scoring pass; refused where the decoder cannot report them",
+            )
+            .min(1.0)
+            .max(MAX_TRACE_TOP_LOG_PROBS as f64),
+        )
         .param(ParamSpec::new(
             "return_raw",
             ParamType::Bool,
@@ -276,13 +292,17 @@ impl Capture {
         let token_ids = inv.get_bool("return_token_ids").unwrap_or(false);
         let raw = inv.get_bool("return_raw").unwrap_or(false);
         let trace = inv.get_bool("policy_trace").unwrap_or(false);
-        Capture { logprobs, token_ids, raw, trace: None, prompt: if token_ids || trace { prompt.to_vec() } else { Vec::new() } }
+        Capture { logprobs, token_ids, raw, trace: None, top: inv.get_i64("policy_trace_top_log_probs").map_or(0, |k| k as usize), prompt: if token_ids || trace { prompt.to_vec() } else { Vec::new() } }
     }
 
     /// Why this request's policy trace cannot be the sampling policy's, when it asked for one.
-    fn trace_refusal(inv: &Invocation, sampler: &model::serve::SampleParams, scores: bool) -> Option<String> {
+    fn trace_refusal(inv: &Invocation, sampler: &model::serve::SampleParams, scores: bool, scores_top: bool) -> Option<String> {
+        let top = inv.get_i64("policy_trace_top_log_probs").is_some();
         if !inv.get_bool("policy_trace").unwrap_or(false) {
-            return None;
+            return top.then(|| capability::failure::tag(capability::failure::FailureClass::InvalidRequest, "policy_trace_top_log_probs: it is the top list of a policy trace, so the request must set policy_trace"));
+        }
+        if top && scores && !scores_top {
+            return Some(capability::failure::tag(capability::failure::FailureClass::UnsupportedCapability, "policy_trace_top_log_probs: this model's scoring pass reports only the scored token's log-probability, not the most probable tokens of its row"));
         }
         if !scores {
             return Some(capability::failure::tag(capability::failure::FailureClass::UnsupportedCapability, "policy_trace: this model cannot score its own generation, so it cannot return full-distribution log-probabilities"));
@@ -427,7 +447,7 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
                 let sample = req.sampler;
                 let seed = req.seed;
                 job.capture = Capture::of(&inv, &req.ids);
-                if let Some(why) = Capture::trace_refusal(&inv, &sample, self.sched.scores_continuations()) {
+                if let Some(why) = Capture::trace_refusal(&inv, &sample, self.sched.scores_continuations(), self.sched.scores_top_log_probs()) {
                     self.set_job(bi, job);
                     return (bi, Some(Err(why)));
                 }
@@ -572,18 +592,19 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
         // arithmetic that drew the tokens, with no second prefill on the lane. A scoring pass would recompute them on
         // other kernels and another batch shape, which round differently on a card (knowledge #446) and, run
         // serially for every reply, left a loaded lane host-bound (knowledge #528).
-        if let Some(traced) = trace.filter(|t| t.len() == generated.len()) {
+        let wants_top = self.jobs[bi].capture.top > 0;
+        if let Some(traced) = trace.filter(|t| !wants_top && t.len() == generated.len()) {
             let prompt = self.jobs[bi].capture.prompt.clone();
-            return Some(Ok(self.with_trace(bi, outcome, prompt, generated, traced, "decode")));
+            return Some(Ok(self.with_trace(bi, outcome, prompt, generated, traced, None, "decode")));
         }
         // A whole-distribution draw whose steps did not all report it still has the sampler's own figures, which are the
         // whole row's when nothing cut it.
-        let decoded = self.jobs[bi].sample.as_ref().is_some_and(|s| self.sched.reports_whole_distribution_logprobs(s)) && logprobs.len() == toks.len() && completion.stop_token.is_some() == completion.stop_logprob.is_some();
+        let decoded = !wants_top && self.jobs[bi].sample.as_ref().is_some_and(|s| self.sched.reports_whole_distribution_logprobs(s)) && logprobs.len() == toks.len() && completion.stop_token.is_some() == completion.stop_logprob.is_some();
         if decoded {
             let mut traced = logprobs.to_vec();
             traced.extend(completion.stop_logprob);
             let prompt = self.jobs[bi].capture.prompt.clone();
-            return Some(Ok(self.with_trace(bi, outcome, prompt, generated, traced, "decode")));
+            return Some(Ok(self.with_trace(bi, outcome, prompt, generated, traced, None, "decode")));
         }
         self.awaiting.push(AwaitingTrace { bi, outcome, generated, since: std::time::Instant::now() });
         None
@@ -592,9 +613,9 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
     /// `outcome` with job `bi`'s policy trace: its prompt and generated ids, a log-probability per generated id at the
     /// request temperature, where those came from (`decode`: the decode steps that drew the tokens; `score`: a
     /// teacher-forced pass after the generation) and the identity of the tokenizer and prompt path.
-    fn with_trace(&self, bi: usize, outcome: capability::Outcome, prompt: Vec<u32>, generated: Vec<u32>, log_probs: Vec<f32>, source: &str) -> capability::Outcome {
+    fn with_trace(&self, bi: usize, outcome: capability::Outcome, prompt: Vec<u32>, generated: Vec<u32>, log_probs: Vec<f32>, top: Option<Vec<Vec<(u32, f32)>>>, source: &str) -> capability::Outcome {
         let temperature = self.jobs[bi].capture.trace.expect("only a traced request has a trace");
-        let trace = serde_json::json!({
+        let mut trace = serde_json::json!({
             "prompt_token_ids": prompt,
             "generation_token_ids": generated,
             "generation_log_probs": log_probs,
@@ -603,6 +624,11 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
             "tokenizer_digest": self.front.tokenizer_digest(),
             "chat_template_digest": self.front.chat_template_digest(),
         });
+        if let Some(top) = top {
+            trace["top_log_probs"] = serde_json::json!(self.jobs[bi].capture.top);
+            trace["generation_top_ids"] = top.iter().map(|row| row.iter().map(|e| e.0).collect::<Vec<_>>()).collect::<Vec<_>>().into();
+            trace["generation_top_log_probs"] = top.iter().map(|row| row.iter().map(|e| e.1).collect::<Vec<_>>()).collect::<Vec<_>>().into();
+        }
         outcome.set("policy_trace", trace)
     }
 
@@ -627,11 +653,19 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
             let prompt = self.jobs[bi].capture.prompt.clone();
             let mut all = prompt.clone();
             all.extend(&generated);
-            let result = self
-                .sched
-                .score_continuation(self.jobs[bi].adapter, &all, prompt.len(), temperature)
-                .map_err(|e| capability::failure::tag(capability::failure::FailureClass::Unavailable, format!("{}: policy_trace: {e}", self.front.label())))
-                .map(|scored| self.with_trace(bi, outcome, prompt, generated, scored, "score"));
+            let adapter = self.jobs[bi].adapter;
+            let top = self.jobs[bi].capture.top;
+            let label = self.front.label().to_string();
+            let unavailable = |e: String| capability::failure::tag(capability::failure::FailureClass::Unavailable, format!("{label}: policy_trace: {e}"));
+            let result = if top > 0 {
+                self.sched.score_continuation_top(adapter, &all, prompt.len(), temperature, top).map_err(unavailable).map(|scored| {
+                    let log_probs = scored.iter().map(|s| s.log_prob).collect();
+                    let top = scored.into_iter().map(|s| s.top).collect();
+                    self.with_trace(bi, outcome, prompt, generated, log_probs, Some(top), "score")
+                })
+            } else {
+                self.sched.score_continuation(adapter, &all, prompt.len(), temperature).map_err(unavailable).map(|scored| self.with_trace(bi, outcome, prompt, generated, scored, None, "score"))
+            };
             finished.push((bi, result));
         }
         self.awaiting = waiting;

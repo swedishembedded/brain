@@ -635,12 +635,13 @@ impl Engine {
         self.model.gpu.read(&logits, rows as usize * self.model.cfg.vocab as usize)
     }
 
-    /// The log-probability of `tokens[p]`, `p` in `from..tokens.len()`, under the full distribution
-    /// `softmax(logits / temperature)` of position `p - 1` ([`PagedDecoder::score_continuation`]): one chunked
+    /// The figure `each(p, row)` makes of the logits row at position `p - 1`, for `p` in `from..tokens.len()`: the full
+    /// distribution `softmax(logits / temperature)` is the caller's to take of it ([`PagedDecoder::score_continuation`],
+    /// [`PagedDecoder::score_continuation_top`]). One chunked
     /// prefill of `tokens` as a fresh sequence in `namespace`, keeping the final-normed hidden state of every
     /// round row, then the resident head over the scored rows. The sequence's block and recurrent state are
     /// released before returning.
-    pub fn score_continuation(&mut self, namespace: model::paged::KvNamespace, tokens: &[u32], from: usize, temperature: f32) -> Result<Vec<f32>, String> {
+    pub fn score_rows<T>(&mut self, namespace: model::paged::KvNamespace, tokens: &[u32], from: usize, mut each: impl FnMut(usize, &[f32]) -> T) -> Result<Vec<T>, String> {
         if tokens.len() > self.max_seq_len() {
             return Err(format!("qwen35: {} tokens exceed this engine's per-sequence capacity of {}", tokens.len(), self.max_seq_len()));
         }
@@ -672,7 +673,7 @@ impl Engine {
             let rows = SCORE_HEAD_ROWS.min(tokens.len() - 1 - first);
             let x = self.model.gpu.storage_init("qwen35.serve.score.hidden", &hidden[first * d..(first + rows) * d]);
             let logits = self.model.gpu.read(&self.model.head_logits_rows_dev(&x, rows as u32), rows * v);
-            out.extend(logits.chunks(v).enumerate().map(|(i, row)| model::logprobs::row_logprob_at(row, tokens[first + i + 1] as usize, temperature)));
+            out.extend(logits.chunks(v).enumerate().map(|(i, row)| each(first + i + 1, row)));
         }
         Ok(out)
     }
@@ -840,7 +841,13 @@ impl PagedDecoder for Engine {
         true
     }
     fn score_continuation(&mut self, namespace: model::paged::KvNamespace, tokens: &[u32], from: usize, temperature: f32) -> Result<Vec<f32>, String> {
-        Engine::score_continuation(self, namespace, tokens, from, temperature)
+        Engine::score_rows(self, namespace, tokens, from, |p, row| model::logprobs::row_logprob_at(row, tokens[p] as usize, temperature))
+    }
+    fn scores_top_log_probs(&self) -> bool {
+        true
+    }
+    fn score_continuation_top(&mut self, namespace: model::paged::KvNamespace, tokens: &[u32], from: usize, temperature: f32, top: usize) -> Result<Vec<model::logprobs::ScoredPosition>, String> {
+        Engine::score_rows(self, namespace, tokens, from, |p, row| model::logprobs::scored_position(row, tokens[p], top, temperature))
     }
     fn admit_topk(&self, hidden: &[f32], k: usize) -> Vec<(u32, f32)> {
         Engine::admit_topk(self, hidden, k)

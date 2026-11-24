@@ -23,6 +23,8 @@ pub struct Toy {
     alloc: BlockAllocator,
     cached: u32,
     scoring: bool,
+    /// Scoring also reports the top log-probabilities ([`Toy::scoring_top`]).
+    top_scoring: bool,
     /// Scoring answers "not ready" this many times before it answers "ready" (a prompt being read in).
     busy_polls: std::cell::Cell<u32>,
     /// Offer every token as a candidate ([`Toy::sampling`]); greedy only otherwise.
@@ -33,7 +35,7 @@ pub struct Toy {
 
 impl Toy {
     pub fn new(alloc: BlockAllocator, cached: u32) -> Toy {
-        Toy { alloc, cached, scoring: false, busy_polls: std::cell::Cell::new(0), sampling: false, scores_run: 0 }
+        Toy { alloc, cached, scoring: false, top_scoring: false, busy_polls: std::cell::Cell::new(0), sampling: false, scores_run: 0 }
     }
 
     /// The same decoder, able to sample: after token `p` its row ranks every token, `p + 1` first, then `p + 2`, ...,
@@ -48,6 +50,13 @@ impl Toy {
     pub fn scoring(mut self) -> Toy {
         self.scoring = true;
         self
+    }
+
+    /// The same decoder, scoring a continuation from its logits rows ([`Toy::sampling`]'s rows: after token `p` the row
+    /// ranks `p + 1` first) with the top log-probabilities, as a real decoder's scoring pass does.
+    pub fn scoring_top(mut self) -> Toy {
+        self.top_scoring = true;
+        self.scoring()
     }
 
     /// The same, refusing to be ready for the first `polls` times it is asked.
@@ -72,6 +81,16 @@ impl PagedDecoder for Toy {
         }
         self.scores_run += 1;
         Ok(tokens[from..].iter().map(|&t| -(t as f32) / 100.0 / temperature).collect())
+    }
+    fn scores_top_log_probs(&self) -> bool {
+        self.top_scoring
+    }
+    fn score_continuation_top(&mut self, _namespace: model::paged::KvNamespace, tokens: &[u32], from: usize, temperature: f32, top: usize) -> Result<Vec<model::logprobs::ScoredPosition>, String> {
+        if !self.top_scoring {
+            return Err("the toy cannot score the top".to_string());
+        }
+        self.scores_run += 1;
+        Ok((from..tokens.len()).map(|p| model::logprobs::scored_position(&self.logits(&[tokens[p - 1] as f32]), tokens[p], top, temperature)).collect())
     }
     fn alloc_mut(&mut self) -> &mut BlockAllocator {
         &mut self.alloc

@@ -337,6 +337,16 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   the decode did and differs from the decode-time distribution by a few thousandths of a nat
   per token. `logprobs` (above) is the sampler's own, truncated figure and is a different
   quantity.
+  `policy_trace` may instead be the object `{"top_log_probs": K}` (an integer `1..=20`; no other key or type, each a 400
+  naming `policy_trace.<key>`; a K past 20 or below 1 is a 400 naming `policy_trace.top_log_probs`, and a model that does not
+  declare it refuses it by that name). The trace then also carries `top_log_probs` (K) and, for each generated token
+  including the stop token, `generation_top_ids[i]` and `generation_top_log_probs[i]`: the K most probable token ids of
+  the row position `i` was drawn from (most probable first, ties to the lower id) and their log-probabilities under the
+  whole row at `log_prob_temperature`, with the same arithmetic as `generation_log_probs[i]`, which is the entry of the
+  sampled token bit for bit when it is among them. All of it comes from one scoring pass (`log_prob_source: "score"`, the
+  extra prefill above), under the adapter the request ran with; a model whose scoring pass cannot report a top list
+  fails with `unsupported-capability` naming `policy_trace_top_log_probs`. The reply grows by at most 20 ids and 20
+  figures per generated token. Over D-Bus the same two params are `policy_trace: true` and `policy_trace_top_log_probs: K`.
 - **Scoring given text (`score`).** A served Qwen3 or Qwen3.8 chat model (the Qwen3.8-27B served from a released FP8
   or GGUF checkpoint included), and each adapter id riding on it, has a
   `score` action, called through `POST /v1/run` with `model` the base or adapter id and `blobs.records` a

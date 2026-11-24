@@ -49,3 +49,39 @@ fn scoring_refuses_what_it_cannot_score_by_name() {
     assert!(engine.score_continuation(0, &too_long, 1, 1.0).unwrap_err().contains("exceed"));
     assert!(engine.score_continuation(0, &[1, 2, 99_999], 1, 1.0).unwrap_err().contains("outside the model vocabulary"));
 }
+
+/// SPEC: the top list of a scored position is the most probable tokens of the row the serving forward computed there,
+/// under `softmax(logits / T)` over the whole row: it equals an independent f64 softmax of the trainer's logits for
+/// the same prefix within the engine's tolerance, is ordered most probable first, and the figure of the scored token
+/// is its own top entry bit for bit when it is among them (one pass, one arithmetic).
+#[test]
+fn a_scored_continuation_reports_the_top_of_the_row_it_scored() {
+    const TOLERANCE: f64 = 1e-3;
+    const TOP: usize = 5;
+    let (mut engine, trainer) = engine_and_trainer();
+    let tokens = [3u32, 9, 1, 14, 2, 8, 5, 11];
+    let from = 4;
+    let logits = trainer.logits_all(&tokens[..tokens.len() - 1]);
+    let vocab = logits.len() / (tokens.len() - 1);
+    for temperature in [1.0f32, 0.7] {
+        let scored = engine.score_continuation_top(0, &tokens, from, temperature, TOP).expect("the engine scores the top");
+        let figures = engine.score_continuation(0, &tokens, from, temperature).expect("the engine scores");
+        assert_eq!(scored.len(), tokens.len() - from);
+        for (i, position) in scored.iter().enumerate() {
+            assert_eq!(position.log_prob.to_bits(), figures[i].to_bits(), "position {i}: the top pass scores the token as the plain pass does");
+            let p = from + i;
+            let scaled: Vec<f64> = logits[(p - 1) * vocab..p * vocab].iter().map(|&z| f64::from(z) / f64::from(temperature)).collect();
+            let max = scaled.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let lse = max + scaled.iter().map(|z| (z - max).exp()).sum::<f64>().ln();
+            let mut ranked: Vec<(u32, f64)> = scaled.iter().enumerate().map(|(t, z)| (t as u32, z - lse)).collect();
+            ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+            assert_eq!(position.top.len(), TOP);
+            for (got, want) in position.top.iter().zip(&ranked) {
+                assert!((f64::from(got.1) - want.1).abs() < TOLERANCE, "temperature {temperature}, position {i}: served {got:?}, trainer {want:?}");
+            }
+            if let Some(entry) = position.top.iter().find(|e| e.0 == tokens[p]) {
+                assert_eq!(entry.1.to_bits(), position.log_prob.to_bits(), "position {i}: the token's figure is its top entry");
+            }
+        }
+    }
+}

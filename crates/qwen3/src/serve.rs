@@ -3977,6 +3977,36 @@ impl Engine {
         last
     }
 
+    /// One whole-sequence pass ([`Engine::score_positions`]) in the sequence's namespace, then the device head on each
+    /// position `p - 1` that predicts `tokens[p]`, `p` in `from..tokens.len()`: the same final norm and head projection
+    /// decode samples from. `each` turns the logits row and the position into the figure the caller wants
+    /// ([`PagedDecoder::score_continuation`], [`PagedDecoder::score_continuation_top`]).
+    fn score_rows<T>(&mut self, namespace: model::paged::KvNamespace, tokens: &[u32], from: usize, mut each: impl FnMut(usize, &[f32]) -> T) -> Result<Vec<T>, String> {
+        if tokens.len() > self.max_seq_len() {
+            return Err(format!("qwen3: {} tokens exceed the engine's per-sequence capacity of {}", tokens.len(), self.max_seq_len()));
+        }
+        if let Some(&bad) = tokens.iter().find(|&&t| t >= self.cfg.vocab) {
+            return Err(format!("qwen3: token {bad} is outside the model vocabulary ({})", self.cfg.vocab));
+        }
+        let need = self.blocks_for(tokens.len() as u32);
+        if self.free_blocks() < need {
+            self.reclaim_prefix(need - self.free_blocks());
+        }
+        if self.free_blocks() < need {
+            return Err(format!("qwen3: scoring {} tokens needs {need} KV blocks and {} are free", tokens.len(), self.free_blocks()));
+        }
+        let mut table = BlockTable::with_namespace(namespace);
+        let hidden = self.score_positions(&mut table, tokens);
+        self.release_table(&mut table);
+        let d = self.cfg.d_model as usize;
+        Ok((from..tokens.len())
+            .map(|p| {
+                let row = self.logits(&hidden[(p - 1) * d..p * d]);
+                each(p, &row)
+            })
+            .collect())
+    }
+
     /// Like [`Engine::prefill`], but returns EVERY position's final-norm
     /// hidden state (`[prompt.len() * d_model]`, row-major) instead of only
     /// the last - what teacher-forced held-out scoring needs (`qwen3::eval`),
@@ -4689,32 +4719,14 @@ impl model::serve::PagedDecoder for Engine {
     fn scores_continuations(&self) -> bool {
         true
     }
-    /// One whole-sequence pass ([`Engine::score_positions`]) in the sequence's namespace, then the device head on
-    /// each scored position: the same final norm and head projection decode samples from.
+    fn scores_top_log_probs(&self) -> bool {
+        true
+    }
     fn score_continuation(&mut self, namespace: model::paged::KvNamespace, tokens: &[u32], from: usize, temperature: f32) -> Result<Vec<f32>, String> {
-        if tokens.len() > self.max_seq_len() {
-            return Err(format!("qwen3: {} tokens exceed the engine's per-sequence capacity of {}", tokens.len(), self.max_seq_len()));
-        }
-        if let Some(&bad) = tokens.iter().find(|&&t| t >= self.cfg.vocab) {
-            return Err(format!("qwen3: token {bad} is outside the model vocabulary ({})", self.cfg.vocab));
-        }
-        let need = self.blocks_for(tokens.len() as u32);
-        if self.free_blocks() < need {
-            self.reclaim_prefix(need - self.free_blocks());
-        }
-        if self.free_blocks() < need {
-            return Err(format!("qwen3: scoring {} tokens needs {need} KV blocks and {} are free", tokens.len(), self.free_blocks()));
-        }
-        let mut table = BlockTable::with_namespace(namespace);
-        let hidden = self.score_positions(&mut table, tokens);
-        self.release_table(&mut table);
-        let d = self.cfg.d_model as usize;
-        Ok((from..tokens.len())
-            .map(|p| {
-                let row = self.logits(&hidden[(p - 1) * d..p * d]);
-                model::logprobs::row_logprob_at(&row, tokens[p] as usize, temperature)
-            })
-            .collect())
+        self.score_rows(namespace, tokens, from, |p, row| model::logprobs::row_logprob_at(row, tokens[p] as usize, temperature))
+    }
+    fn score_continuation_top(&mut self, namespace: model::paged::KvNamespace, tokens: &[u32], from: usize, temperature: f32, top: usize) -> Result<Vec<model::logprobs::ScoredPosition>, String> {
+        self.score_rows(namespace, tokens, from, |p, row| model::logprobs::scored_position(row, tokens[p], top, temperature))
     }
 
     fn prefill(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32> {

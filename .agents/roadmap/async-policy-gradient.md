@@ -62,9 +62,21 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
 - [ ] **Rollout record fields** (`data::chat_rollout`, contract v2, additive): `behavior_top_ids` /
       `behavior_top_logprobs` (K per sampled token) and `policy_version` (oldest version among the requests that
       produced the record).
-- [ ] **The sampler's top-K in `policy_trace`** (`policy_trace: {top_log_probs: K}`): per generated position the K most
-      probable ids and their whole-row log-probabilities at the sampling temperature, from the arithmetic that drew the
-      token (the score fallback produces the same figures), shared by every architecture that scores continuations.
+- [x] **The sampler's top-K in `policy_trace`** (`policy_trace: {"top_log_probs": K}`, K in 1..=20; params `policy_trace` +
+      `policy_trace_top_log_probs` over D-Bus): per generated position (stop token included) `generation_top_ids` /
+      `generation_top_log_probs`, the K most probable ids and their whole-row log-probabilities at the sampling
+      temperature, from `model::logprobs::scored_position` (one row, one arithmetic: the sampled token's
+      `generation_log_probs` entry is its top entry bit for bit). Shared by every decoder that scores continuations
+      (`PagedDecoder::score_continuation_top`: qwen3, qwen35 incl. int8/fp8 residents, ouro; conformance-checked; a decoder
+      that cannot refuses by name before decoding). Tests: `llmserve/tests/it/outcome_report.rs`,
+      `qwen3/tests/it/engine_score_continuation.rs`, `catalog/tests/it/scheduled_batch.rs` (decode trace == score trace
+      within 2e-3, entries == trainer), `apiserve/tests/it/api.rs` (shape, bounds, names). API audit: one integer param
+      bounded by the action's spec (1..=20, refused by name), an object with no other key, no path or secret; the reply
+      grows by at most 20 ids and 20 figures per generated token, within the existing `max_new`/body limits.
+      Decision: a request with a top list takes its figures from the scoring pass (`log_prob_source: "score"`), not the
+      decode steps: the device readout only keeps a candidate list for truncated draws, so a whole-row top-K from the
+      decode would need a device top-k over every row. Open (profile first): serve the top list from the decode steps for
+      whole-row draws, which removes the extra prefill (knowledge #528).
 - [ ] **Adapter routes refresh under load**: a re-published adapter id is routed to its new version for new requests
       while older requests finish on the old one (today a route refreshes only when its lane is idle).
 - [ ] **Streaming policy-gradient job** (`crates/trainjob`): `brain/train` with `stream` instead of `data`; records of

@@ -576,9 +576,10 @@ impl Engine {
         (hs, gates)
     }
 
-    /// [`PagedDecoder::score_continuation`]: one [`Self::trunk`] over `tokens` (no KV written), each position's
-    /// exit row gathered on the host as decode gathers it, the head over the rows that predict a scored token.
-    fn score(&self, tokens: &[u32], from: usize, temperature: f32) -> Result<Vec<f32>, String> {
+    /// The figure `each(p, row)` makes of the head's logits row predicting `tokens[p]`, `p` in `from..tokens.len()`
+    /// ([`PagedDecoder::score_continuation`], [`PagedDecoder::score_continuation_top`]): one [`Self::trunk`] over `tokens`
+    /// (no KV written), each position's exit row gathered on the host as decode gathers it, the head over the rows that predict a scored token.
+    fn score_rows<T>(&self, tokens: &[u32], from: usize, temperature: f32, mut each: impl FnMut(usize, &[f32]) -> T) -> Result<Vec<T>, String> {
         if from == 0 || from > tokens.len() {
             return Err(format!("ouro: scoring from {from} of {} tokens: the first scored position is 1 to the length", tokens.len()));
         }
@@ -603,16 +604,18 @@ impl Engine {
         self.linear(&mut steps, &x, "lm_head.weight", &logits, m, d as u32, v as u32);
         self.gpu.submit(&[], &steps);
         let logits = self.gpu.read(&logits, m as usize * v);
-        Ok(logits
-            .chunks(v)
-            .zip(&tokens[from..])
-            .map(|(row, &t)| {
-                let scaled: Vec<f64> = row.iter().map(|&z| z as f64 / temperature as f64).collect();
-                let max = scaled.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                let lse = max + scaled.iter().map(|z| (z - max).exp()).sum::<f64>().ln();
-                (scaled[t as usize] - lse) as f32
-            })
-            .collect())
+        Ok(logits.chunks(v).enumerate().map(|(i, row)| each(from + i, row)).collect())
+    }
+
+    /// Why `tokens` cannot be scored in `namespace`: the looped path serves no adapters, so the base namespace is the only one.
+    fn check_scorable(&self, namespace: ::model::paged::KvNamespace, tokens: &[u32]) -> Result<(), String> {
+        if namespace != ::model::paged::BASE_KV_NAMESPACE {
+            return Err(format!("ouro: scoring under adapter namespace {namespace}: the looped path serves no adapters"));
+        }
+        match tokens.iter().find(|&&t| t >= self.cfg.vocab) {
+            Some(bad) => Err(format!("ouro: token {bad} is outside the model vocabulary ({})", self.cfg.vocab)),
+            None => Ok(()),
+        }
     }
 
     fn release_extras(&mut self, table: &mut BlockTable) {
@@ -672,15 +675,18 @@ impl PagedDecoder for Engine {
         true
     }
 
-    /// The looped path serves no adapters, so the base namespace is the only one.
     fn score_continuation(&mut self, namespace: ::model::paged::KvNamespace, tokens: &[u32], from: usize, temperature: f32) -> Result<Vec<f32>, String> {
-        if namespace != ::model::paged::BASE_KV_NAMESPACE {
-            return Err(format!("ouro: scoring under adapter namespace {namespace}: the looped path serves no adapters"));
-        }
-        if let Some(&bad) = tokens.iter().find(|&&t| t >= self.cfg.vocab) {
-            return Err(format!("ouro: token {bad} is outside the model vocabulary ({})", self.cfg.vocab));
-        }
-        self.score(tokens, from, temperature)
+        self.check_scorable(namespace, tokens)?;
+        self.score_rows(tokens, from, temperature, |p, row| ::model::logprobs::row_logprob_at(row, tokens[p] as usize, temperature))
+    }
+
+    fn scores_top_log_probs(&self) -> bool {
+        true
+    }
+
+    fn score_continuation_top(&mut self, namespace: ::model::paged::KvNamespace, tokens: &[u32], from: usize, temperature: f32, top: usize) -> Result<Vec<::model::logprobs::ScoredPosition>, String> {
+        self.check_scorable(namespace, tokens)?;
+        self.score_rows(tokens, from, temperature, |p, row| ::model::logprobs::scored_position(row, tokens[p], top, temperature))
     }
 
     fn prefill(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32> {

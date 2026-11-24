@@ -37,8 +37,16 @@ pub fn row_logprob_at(row: &[f32], idx: usize, temperature: f32) -> f32 {
 /// The `k` largest entries of `row`'s log-softmax as `(index, logprob)`, most likely first (ties toward the lower
 /// index). O(vocab) for the normaliser plus O(vocab log k) for the selection.
 pub fn row_top_logprobs(row: &[f32], k: usize) -> Vec<(u32, f32)> {
+    row_top_logprobs_at(row, k, 1.0)
+}
+
+/// [`row_top_logprobs`] of the row at `temperature`: the `k` largest entries of `log softmax(row / temperature)`, each
+/// computed with exactly the arithmetic of [`row_logprob_at`], so a token that is among them reads the same figure
+/// here as there, bit for bit. `temperature` must be finite and positive.
+pub fn row_top_logprobs_at(row: &[f32], k: usize, temperature: f32) -> Vec<(u32, f32)> {
+    assert!(temperature.is_finite() && temperature > 0.0, "the temperature must be finite and positive, got {temperature}");
     let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let lse = max + row.iter().map(|&v| (v - max).exp()).sum::<f32>().ln();
+    let log_mass = row.iter().map(|&v| ((v - max) / temperature).exp()).sum::<f32>().ln();
     let k = k.min(row.len());
     if k == 0 {
         return Vec::new();
@@ -51,9 +59,25 @@ pub fn row_top_logprobs(row: &[f32], k: usize) -> Vec<(u32, f32)> {
             heap.pop();
         }
     }
-    let mut top: Vec<(u32, f32)> = heap.into_iter().map(|std::cmp::Reverse((OrdF32(v), std::cmp::Reverse(i)))| (i, v - lse)).collect();
+    let mut top: Vec<(u32, f32)> = heap.into_iter().map(|std::cmp::Reverse((OrdF32(v), std::cmp::Reverse(i)))| (i, (v - max) / temperature - log_mass)).collect();
     top.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
     top
+}
+
+/// What scoring one generated position reports: the log-probability of the token generated there and the most likely
+/// tokens of the same distribution, both under `softmax(logits / temperature)` over the whole row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScoredPosition {
+    /// `log softmax(row / temperature)[token]` ([`row_logprob_at`]).
+    pub log_prob: f32,
+    /// The `k` most likely `(token, log-probability)` pairs, most likely first ([`row_top_logprobs_at`]); empty for `k = 0`.
+    pub top: Vec<(u32, f32)>,
+}
+
+/// The [`ScoredPosition`] of `token` in the logits `row`: the one place a scoring pass turns a row into the figures a
+/// policy trace carries, so every decoder reports a token's log-probability and its top list from the same arithmetic.
+pub fn scored_position(row: &[f32], token: u32, k: usize, temperature: f32) -> ScoredPosition {
+    ScoredPosition { log_prob: row_logprob_at(row, token as usize, temperature), top: row_top_logprobs_at(row, k, temperature) }
 }
 
 /// An `f32` ordered by [`f32::total_cmp`], for heaps.
@@ -120,7 +144,7 @@ pub fn token_logprobs_scaled<M: Model>(m: &M, tokens: &[u32], targets: &[u32], l
 
 #[cfg(test)]
 mod tests {
-    use super::{row_logprob, row_logprob_at, row_top_logprobs};
+    use super::{row_logprob, row_logprob_at, row_top_logprobs, row_top_logprobs_at, scored_position};
 
     #[test]
     fn row_logprob_at_is_the_log_softmax_of_the_scaled_row_and_row_logprob_at_one() {
@@ -144,6 +168,23 @@ mod tests {
         }
         assert_eq!(row_top_logprobs(&row, 9).len(), 5, "k is capped at the row");
         assert!(row_top_logprobs(&row, 0).is_empty());
+    }
+
+    #[test]
+    fn row_top_logprobs_at_a_temperature_are_the_figures_row_logprob_at_gives_the_same_tokens() {
+        let row = [1.0f32, 3.0, 2.0, 3.0, -1.0, 0.5];
+        for temperature in [0.5f32, 1.0, 1.7] {
+            let top = row_top_logprobs_at(&row, 4, temperature);
+            assert_eq!(top.len(), 4);
+            assert!(top.windows(2).all(|w| w[0].1 >= w[1].1), "most likely first");
+            for &(i, lp) in &top {
+                assert_eq!(lp.to_bits(), row_logprob_at(&row, i as usize, temperature).to_bits(), "token {i} at {temperature}");
+            }
+            let at = scored_position(&row, 2, 3, temperature);
+            assert_eq!(at.log_prob, row_logprob_at(&row, 2, temperature));
+            assert_eq!(at.top, row_top_logprobs_at(&row, 3, temperature));
+        }
+        assert_eq!(row_top_logprobs_at(&row, 3, 1.0), row_top_logprobs(&row, 3));
     }
 
     #[test]

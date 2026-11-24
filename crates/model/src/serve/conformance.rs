@@ -213,6 +213,24 @@ pub fn scoring_is_declared_exactly_when_it_works<D: PagedDecoder>(c: &Conformanc
     assert_eq!(sched.free_blocks(), free, "a scoring pass releases what it took");
     let mut other = Scheduler::new((c.make)(), 4);
     assert_eq!(other.score_continuation(None, &sequence, 6, 1.0).unwrap(), scored, "scoring is deterministic across decoders built alike");
+    // A decoder that declares the top list reports, for every scored token, the figure the plain pass gives it and its
+    // most probable tokens (most likely first, the token's own figure among them bit for bit when it is); one that does
+    // not declares it refuses by name of the gap.
+    if sched.scores_top_log_probs() {
+        let with_top = sched.score_continuation_top(None, &sequence, 6, 0.8, 5).expect("the decoder reports the top list it declares");
+        let plain = sched.score_continuation(None, &sequence, 6, 0.8).unwrap();
+        assert_eq!(with_top.len(), plain.len());
+        for (i, (got, want)) in with_top.iter().zip(&plain).enumerate() {
+            assert_eq!(got.log_prob.to_bits(), want.to_bits(), "position {i}: the figure of the plain pass");
+            assert!(got.top.len() == 5 && got.top.windows(2).all(|w| w[0].1 >= w[1].1), "position {i}: five, most likely first: {:?}", got.top);
+            if let Some(entry) = got.top.iter().find(|e| e.0 == sequence[6 + i]) {
+                assert_eq!(entry.1.to_bits(), got.log_prob.to_bits(), "position {i}: the token's figure is its entry");
+            }
+        }
+    } else {
+        let error = sched.score_continuation_top(None, &sequence, 6, 1.0, 5).expect_err("a decoder that declares no top list refuses");
+        assert!(error.contains("top log-probabilities"), "the refusal names the gap: {error}");
+    }
     if let Some(load) = c.load_adapter {
         let adapter = load(sched.decoder_mut());
         let under = sched.score_continuation(Some(adapter), &sequence, 6, 1.0).expect("the decoder scores under a resident adapter");

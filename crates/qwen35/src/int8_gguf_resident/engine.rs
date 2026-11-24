@@ -525,15 +525,15 @@ impl Qwen35GgufEngine {
         self.inst.teacher_forced_top(ids, k, LORA_SLOT_NONE)
     }
 
-    /// The log-probability of `tokens[p]`, `p` in `from..tokens.len()`, under the full distribution
-    /// `softmax(logits / temperature)` of position `p - 1` ([`PagedDecoder::score_continuation`]): one chunked prefill of
+    /// The figure `each(p, row)` makes of the head's logits row at position `p - 1`, for `p` in `from..tokens.len()`
+    /// ([`PagedDecoder::score_continuation`], [`PagedDecoder::score_continuation_top`]): one chunked prefill of
     /// `tokens` as a sequence of its own, in `namespace`, then the head over the scored rows.
     ///
     /// Unlike [`Self::score_supervised`] it does not reset the instance: the sequence takes a state row and KV blocks as a
     /// prompt being admitted does (and gives them back), and its recurrent state runs in the working copy and ends in that
     /// row, so no running sequence's pool row is touched. A prompt being read in the background owns the working copy and
     /// the prefill arena, so the call is refused while one is ([`PagedDecoder::scoring_ready`]).
-    fn score_tokens(&mut self, namespace: KvNamespace, tokens: &[u32], from: usize, temperature: f32) -> Result<Vec<f32>, String> {
+    fn score_rows<T>(&mut self, namespace: KvNamespace, tokens: &[u32], from: usize, mut each: impl FnMut(usize, &[f32]) -> T) -> Result<Vec<T>, String> {
         if self.background.is_some() {
             return Err(format!("{MODEL}: a prompt is being read in; scoring waits for it"));
         }
@@ -579,7 +579,7 @@ impl Qwen35GgufEngine {
         for first in (from - 1..tokens.len() - 1).step_by(SCORE_HEAD_ROWS) {
             let rows = SCORE_HEAD_ROWS.min(tokens.len() - 1 - first);
             let logits = self.inst.head_logits_rows(&hidden[first * d..(first + rows) * d], rows as u32);
-            out.extend(logits.chunks(v).enumerate().map(|(i, row)| model::logprobs::row_logprob_at(row, tokens[first + i + 1] as usize, temperature)));
+            out.extend(logits.chunks(v).enumerate().map(|(i, row)| each(first + i + 1, row)));
         }
         Ok(out)
     }
@@ -1409,7 +1409,13 @@ impl PagedDecoder for Qwen35GgufEngine {
         self.background.is_none()
     }
     fn score_continuation(&mut self, namespace: KvNamespace, tokens: &[u32], from: usize, temperature: f32) -> Result<Vec<f32>, String> {
-        self.score_tokens(namespace, tokens, from, temperature)
+        self.score_rows(namespace, tokens, from, |p, row| model::logprobs::row_logprob_at(row, tokens[p] as usize, temperature))
+    }
+    fn scores_top_log_probs(&self) -> bool {
+        true
+    }
+    fn score_continuation_top(&mut self, namespace: KvNamespace, tokens: &[u32], from: usize, temperature: f32, top: usize) -> Result<Vec<model::logprobs::ScoredPosition>, String> {
+        self.score_rows(namespace, tokens, from, |p, row| model::logprobs::scored_position(row, tokens[p], top, temperature))
     }
     fn release_table(&mut self, t: &mut BlockTable) {
         let row = t.take_state_row();

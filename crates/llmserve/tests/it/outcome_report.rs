@@ -259,3 +259,79 @@ fn a_reply_names_the_sampler_settings_its_tokens_were_drawn_with() {
         }
     }
 }
+
+/// `log softmax(row / temperature)` of a toy row in f64: the oracle the trace's figures are read against.
+fn host_log_softmax(previous: u32, temperature: f64) -> Vec<(u32, f64)> {
+    let scaled: Vec<(u32, f64)> = row(previous).into_iter().map(|(t, l)| (t, f64::from(l) / temperature)).collect();
+    let max = scaled.iter().map(|e| e.1).fold(f64::NEG_INFINITY, f64::max);
+    let lse = max + scaled.iter().map(|e| (e.1 - max).exp()).sum::<f64>().ln();
+    scaled.into_iter().map(|(t, z)| (t, z - lse)).collect()
+}
+
+/// SPEC: `policy_trace_top_log_probs: K` adds, for every generated position, the K most probable token ids of the row
+/// that position was drawn from and their log-probabilities under the whole row at the sampling temperature, most
+/// probable first. They equal an independent host softmax of the same logits row, and the figure the trace gives the
+/// sampled token is its entry whenever it is among them (one pass, one arithmetic).
+#[test]
+fn a_policy_trace_carries_the_top_log_probs_of_the_row_each_token_was_drawn_from() {
+    let spec = chat_spec();
+    let (temperature, k) = (0.9f64, 4usize);
+    let inv = Invocation::new().set("prompt", json!("t1t2t3t4")).set("chat", json!(false)).set("max_new", json!(12)).set("ignore_eos", json!(true)).set("seed", json!(5)).set("temp", json!(temperature)).set("top_k", json!(5)).set("policy_trace", json!(true)).set("policy_trace_top_log_probs", json!(k));
+    let inv = spec.validate(inv).expect("a valid request");
+    let front = Parsed { tok: tokenizer() };
+    let mut sched = Scheduler::new(Toy::new(BlockAllocator::new(128, 8), 0).sampling().scoring_top(), 4);
+    let out = run_batch_scheduled(&mut sched, &front, &[inv], &mut |_, _| {}).remove(0).expect("served").outputs;
+    let trace = &out["policy_trace"];
+    assert_eq!(trace["log_prob_source"], json!("score"), "the figures and their top list come from one scoring pass");
+    assert_eq!(trace["top_log_probs"], json!(k));
+    let prompt: Vec<u32> = serde_json::from_value(trace["prompt_token_ids"].clone()).unwrap();
+    let generated: Vec<u32> = serde_json::from_value(trace["generation_token_ids"].clone()).unwrap();
+    let traced: Vec<f32> = serde_json::from_value(trace["generation_log_probs"].clone()).unwrap();
+    let top_ids: Vec<Vec<u32>> = serde_json::from_value(trace["generation_top_ids"].clone()).unwrap();
+    let top_lps: Vec<Vec<f32>> = serde_json::from_value(trace["generation_top_log_probs"].clone()).unwrap();
+    assert_eq!((top_ids.len(), top_lps.len()), (generated.len(), generated.len()));
+    let mut previous = *prompt.last().unwrap();
+    for (j, &token) in generated.iter().enumerate() {
+        let oracle = host_log_softmax(previous, temperature);
+        let mut ranked = oracle.clone();
+        ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        assert_eq!(top_ids[j], ranked[..k].iter().map(|e| e.0).collect::<Vec<_>>(), "position {j}");
+        for (lp, want) in top_lps[j].iter().zip(&ranked) {
+            assert!((f64::from(*lp) - want.1).abs() < 1e-4, "position {j}: {lp} against {}", want.1);
+        }
+        let own = oracle.iter().find(|e| e.0 == token).unwrap().1;
+        assert!((f64::from(traced[j]) - own).abs() < 1e-4, "position {j}: the sampled token's figure");
+        if let Some(i) = top_ids[j].iter().position(|&t| t == token) {
+            assert_eq!(top_lps[j][i].to_bits(), traced[j].to_bits(), "position {j}: the sampled token's figure is its top entry");
+        }
+        previous = token;
+    }
+    // A plain `policy_trace` carries none of it.
+    let plain = spec.validate(Invocation::new().set("prompt", json!("t1t2t3t4")).set("chat", json!(false)).set("max_new", json!(3)).set("policy_trace", json!(true))).unwrap();
+    let mut sched = Scheduler::new(Toy::new(BlockAllocator::new(128, 8), 0).sampling().scoring_top(), 4);
+    let out = run_batch_scheduled(&mut sched, &front, &[plain], &mut |_, _| {}).remove(0).expect("served").outputs;
+    assert!(out["policy_trace"].get("generation_top_ids").is_none() && out["policy_trace"].get("top_log_probs").is_none());
+}
+
+/// SPEC: the top list is bounded and named: above the declared maximum or below one is refused by param name, so is a
+/// top list without a trace, and a decoder that scores but cannot report a top list refuses before decoding.
+#[test]
+fn a_top_log_probs_request_is_bounded_and_refused_by_name_where_it_cannot_be_served() {
+    let spec = chat_spec();
+    let base = || Invocation::new().set("prompt", json!("t1t2t3t4")).set("chat", json!(false)).set("max_new", json!(3)).set("policy_trace", json!(true));
+    let max = llmserve::MAX_TRACE_TOP_LOG_PROBS;
+    assert_eq!(max, 20);
+    assert!(spec.validate(base().set("policy_trace_top_log_probs", json!(max))).is_ok());
+    for bad in [json!(max + 1), json!(0), json!(-1), json!(2.5)] {
+        let error = spec.validate(base().set("policy_trace_top_log_probs", bad.clone())).expect_err("out of range");
+        assert!(error.contains("policy_trace_top_log_probs"), "{bad}: {error}");
+    }
+    let front = Parsed { tok: tokenizer() };
+    let run = |toy: Toy, inv: Invocation| run_batch_scheduled(&mut Scheduler::new(toy, 4), &front, &[spec.validate(inv).unwrap()], &mut |_, _| {}).remove(0);
+    let toy = || Toy::new(BlockAllocator::new(128, 8), 0).sampling();
+    let no_trace = Invocation::new().set("prompt", json!("t1t2t3t4")).set("chat", json!(false)).set("max_new", json!(3)).set("policy_trace_top_log_probs", json!(3));
+    let error = run(toy().scoring_top(), no_trace).expect_err("a top list needs a trace");
+    assert!(error.starts_with("[invalid-request]") && error.contains("policy_trace_top_log_probs") && error.contains("policy_trace"), "{error}");
+    let error = run(toy().scoring(), base().set("policy_trace_top_log_probs", json!(3))).expect_err("this decoder reports no top list");
+    assert!(error.starts_with("[unsupported-capability]") && error.contains("policy_trace_top_log_probs"), "{error}");
+}
