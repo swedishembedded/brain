@@ -21,6 +21,7 @@ use rl::env::{Environment, Reward, Step, Task, Verifier};
 use data::rng::Rng;
 use model::{Model, Objective, StepVerdict};
 use rl::objective::grpo::{Grpo, GrpoConfig, GrpoOptions};
+use rl::objective::pg_loss::PgLoss;
 
 pub const T: usize = 8;
 pub const PROMPT: [u32; 3] = [1, 2, 3];
@@ -72,14 +73,18 @@ pub fn parity_reward(c: &[u32], variable: bool) -> f32 {
 
 pub fn config(group: usize, temp: f32, options: GrpoOptions) -> GrpoConfig {
     GrpoConfig {
+        loss: PgLoss::ONLINE,
         group_size: group,
-        clip_eps: 0.2,
-        kl_beta: 0.0,
         seq_len: T,
         rollout: RolloutParams { max_new: 4, sample: SampleParams { temp, top_k: 0, top_p: 1.0, ..SampleParams::greedy() }, eos: None },
         max_attempts: 1,
         options,
     }
+}
+
+/// [`config`] training `loss`.
+pub fn config_loss(group: usize, temp: f32, options: GrpoOptions, loss: PgLoss) -> GrpoConfig {
+    GrpoConfig { loss, ..config(group, temp, options) }
 }
 
 pub fn always_variable(_: u64) -> bool {

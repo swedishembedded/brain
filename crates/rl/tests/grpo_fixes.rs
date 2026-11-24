@@ -24,9 +24,10 @@ use model::{Model, Objective, StepVerdict, IGNORE};
 use qwen3::{LoraCfg, Qwen, QwenConfig};
 mod grpo_common;
 
-use grpo_common::{always_variable, config, parity_reward, Env, Judge, T};
+use grpo_common::{always_variable, config, config_loss, parity_reward, Env, Judge, T};
 use rl::env::{Environment, Verifier};
 use rl::objective::grpo::{BehaviourRefusal, CycleLog, Grpo, GrpoConfig, GrpoOptions, LossAgg, NonFiniteSteps, RatioBasis, RowRefusal};
+use rl::objective::pg_loss::{PgLoss, MAX_CONSECUTIVE_GUARD_SKIPS};
 
 const EOS: u32 = 7;
 
@@ -151,8 +152,8 @@ fn token_level_normalisation_is_length_invariant() {
     for (agg, want) in [(LossAgg::TokenSum, 0.6f32), (LossAgg::SeqMean, 0.0)] {
         let (mut m, _, _) = lora_model(s);
         let (judge, _) = Judge::new(first_wins);
-        let options = GrpoOptions { loss_agg: agg, ..GrpoOptions::default() };
-        let mut obj = scripted(Env { variable: always_variable }, judge, config(2, 1.0, options), group.clone());
+        let loss = PgLoss { loss_agg: agg, ..PgLoss::ONLINE };
+        let mut obj = scripted(Env { variable: always_variable }, judge, config_loss(2, 1.0, GrpoOptions::default(), loss), group.clone());
         obj.prepare(&mut m).unwrap();
         // Advantages are +0.5 (1 token) and -0.5 (4 tokens); on policy the per-token loss is -A.
         // TokenSum: denominator 5/2 -> (-0.5*1 + 0.5*4) / 2.5 = 0.6. SeqMean: -0.5 + 0.5 = 0.
@@ -351,7 +352,7 @@ fn the_logged_clip_fraction_is_the_one_the_band_gives() {
     let group = vec![scripted_lp(&rewarded.0, &rewarded.1), scripted_lp(&punished.0, &punished.1)];
     let options = GrpoOptions { ratio_basis: RatioBasis::Sampler, ..GrpoOptions::default() };
     let cfg = config(2, 1.0, options);
-    let (low, high) = (cfg.clip_eps, cfg.options.clip_eps_high);
+    let (low, high) = (cfg.loss.clip_eps, cfg.loss.clip_eps_high.expect("online GRPO clips higher"));
     let mut obj = scripted(Env { variable: always_variable }, judge, cfg, group);
     obj.prepare(&mut m).unwrap();
     obj.micro_steps(&m, &mut Rng::new(s), 2);
@@ -530,7 +531,7 @@ fn an_incomplete_reference_is_refused_not_padded_with_behaviour_logprobs() {
     let (judge, _) = Judge::new(first_wins);
     let group = vec![completion(&[4, 4]), completion(&[5, 5])];
     let mut cfg = config(2, 1.0, GrpoOptions::default());
-    cfg.kl_beta = 0.1;
+    cfg.loss.kl_beta = 0.1;
     let mut obj = scripted(Env { variable: always_variable }, judge, cfg, group).with_reference(|_, _| vec![-1.0]);
     obj.prepare(&mut m).unwrap();
     obj.micro_steps(&m, &mut Rng::new(s), 2);
@@ -546,7 +547,7 @@ fn a_reference_without_the_stop_token_position_is_complete() {
     let (mut m, _, _) = lora_model(s);
     let (judge, _) = Judge::new(first_wins);
     let mut cfg = config(2, 1.0, GrpoOptions::default());
-    cfg.kl_beta = 0.1;
+    cfg.loss.kl_beta = 0.1;
     cfg.rollout.eos = Some(EOS);
     let group = vec![stopped(&[4, 5]), completion(&[5, 5, 5])];
     let mut obj = scripted(Env { variable: always_variable }, judge, cfg, group).with_reference(|_, c| vec![-1.0; c.tokens.len()]);
@@ -560,10 +561,10 @@ fn a_reference_without_the_stop_token_position_is_complete() {
 fn numeric_settings_no_run_can_honour_are_refused() {
     let base = config(2, 1.0, GrpoOptions::default());
     let cases: [(&str, GrpoConfig); 5] = [
-        ("kl_beta", GrpoConfig { kl_beta: -0.1, ..base }),
-        ("kl_beta", GrpoConfig { kl_beta: f32::NAN, ..base }),
-        ("clip_eps", GrpoConfig { clip_eps: 0.0, ..base }),
-        ("clip_eps_high", GrpoConfig { options: GrpoOptions { clip_eps_high: f32::INFINITY, ..base.options }, ..base }),
+        ("kl_beta", GrpoConfig { loss: PgLoss { kl_beta: -0.1, ..base.loss }, ..base }),
+        ("kl_beta", GrpoConfig { loss: PgLoss { kl_beta: f32::NAN, ..base.loss }, ..base }),
+        ("clip_eps", GrpoConfig { loss: PgLoss { clip_eps: 0.0, ..base.loss }, ..base }),
+        ("clip_eps_high", GrpoConfig { loss: PgLoss { clip_eps_high: Some(f32::INFINITY), ..base.loss }, ..base }),
         ("temp", config(2, f32::NAN, GrpoOptions::default())),
     ];
     for (field, cfg) in cases {
@@ -578,7 +579,7 @@ fn numeric_settings_no_run_can_honour_are_refused() {
     // The same refusals, through the plan every entry point builds before it allocates anything.
     let opts = model::FitOpts { block_size: base.seq_len as u32, batch_size: 1, ..Default::default() };
     assert!(model::training_plan::ValidatedTrainingPlan::build(opts.clone(), &[&base]).is_ok());
-    let bad = GrpoConfig { kl_beta: -0.1, ..base };
+    let bad = GrpoConfig { loss: PgLoss { kl_beta: -0.1, ..base.loss }, ..base };
     assert!(model::training_plan::ValidatedTrainingPlan::build(opts, &[&bad]).unwrap_err().to_string().contains("kl_beta"));
 }
 
@@ -614,7 +615,7 @@ fn every_run_reports_the_serve_train_gap_of_its_rollouts() {
     let (mut m, _, _) = lora_model(s);
     let (judge, _) = Judge::new(first_wins);
     let group = vec![completion(&[4, 5, 6]), completion(&[6, 6, 5, 4])];
-    let mut obj = scripted(Env { variable: always_variable }, judge, config(2, 1.0, GrpoOptions { log_kl: false, ..GrpoOptions::default() }), group.clone());
+    let mut obj = scripted(Env { variable: always_variable }, judge, config_loss(2, 1.0, GrpoOptions::default(), PgLoss { log_kl: false, ..PgLoss::ONLINE }), group.clone());
     obj.prepare(&mut m).unwrap();
     // The weights before the step are the ones the rows were scored under.
     let mut gaps = Vec::new();
@@ -767,8 +768,8 @@ fn a_replaying_trainer_gets_each_rows_recorded_routing_around_its_forwards() {
     };
     let group = vec![recorded(&[4, 5, 6]), recorded(&[6, 6, 5, 4])];
     let (judge, _) = Judge::new(first_wins);
-    let options = GrpoOptions { routing_replay: true, log_kl: false, ..GrpoOptions::default() };
-    let mut obj = Grpo::try_new(Env { variable: always_variable }, judge, config(2, 1.0, options)).expect("a valid GRPO configuration").with_rollout(Box::new(Scripted { group: group.clone() }), 1);
+    let options = GrpoOptions { routing_replay: true, ..GrpoOptions::default() };
+    let mut obj = Grpo::try_new(Env { variable: always_variable }, judge, config_loss(2, 1.0, options, PgLoss { log_kl: false, ..PgLoss::ONLINE })).expect("a valid GRPO configuration").with_rollout(Box::new(Scripted { group: group.clone() }), 1);
     obj.prepare(&mut m).unwrap();
     obj.micro_steps(&m, &mut Rng::new(s), 2);
     let st = obj.stats().clone();
@@ -787,4 +788,86 @@ fn a_replaying_trainer_gets_each_rows_recorded_routing_around_its_forwards() {
         assert_eq!(*start, 0);
         assert!(group.iter().any(|c| c.routing.as_ref() == Some(&**record)), "the record is a completion's own");
     }
+}
+
+/// The sum of the magnitudes of every gradient of `m`.
+fn grad_l1(m: &Qwen) -> f64 {
+    m.param_names().iter().flat_map(|n| m.read_grad(n)).map(|g| f64::from(g.abs())).sum()
+}
+
+/// EC-2: online GRPO trains the one policy-gradient loss, dual clip included. On the sampler's ratio basis the
+/// behaviour log-probabilities are the scripted ones: every token scripted at `-12`, far below the policy's own (about
+/// `-ln 23`), has a ratio past any bound. The rewarded completion's tokens are clipped at the upper edge; the punished
+/// completion's tokens, a negative advantage at a ratio past `c`, keep their full gradient under the plain clipped
+/// surrogate and give none under the dual clip, which counts each of them.
+#[test]
+fn a_dual_clipped_token_gives_no_gradient_in_online_grpo() {
+    let s = seed();
+    let step = |dual_clip: Option<f32>| {
+        let (mut m, _, _) = lora_model(s);
+        let (judge, _) = Judge::new(first_wins);
+        let far = |tokens: &[u32]| Completion { logprobs: vec![-12.0; tokens.len()], ..completion(tokens) };
+        let mut cfg = config(2, 1.0, GrpoOptions { ratio_basis: RatioBasis::Sampler, ..GrpoOptions::default() });
+        cfg.loss.dual_clip = dual_clip;
+        let mut obj = scripted(Env { variable: always_variable }, judge, cfg, vec![far(&[4, 5, 6]), far(&[6, 6, 5, 4])]);
+        obj.prepare(&mut m).unwrap();
+        obj.micro_steps(&m, &mut Rng::new(s), 2);
+        assert!(matches!(verdict(&mut obj), StepVerdict::Apply));
+        let st = obj.stats();
+        (grad_l1(&m), st.signed_tokens, st.clipped_high, st.clipped_dual)
+    };
+    let (plain, signed, high, dual) = step(None);
+    assert_eq!((signed, high, dual), (7, 3, 0), "the rewarded tokens clip high, the punished ones are inside the plain surrogate");
+    assert!(plain > 0.0, "the punished tokens train at their full ratio");
+    let (bounded, signed, high, dual) = step(Some(3.0));
+    assert_eq!((signed, high, dual), (7, 3, 4), "every punished token is bounded by the dual clip");
+    assert_eq!(bounded, 0.0, "a dual-clipped token gives no gradient");
+}
+
+/// EC-2: online GRPO's step guard. A step whose KL to the reference (the adapter-disabled model, which the randomised
+/// adapter is off) or whose gradient norm is over its bound is skipped, logged with the values and counted; bounds
+/// above the step let it through; none is set by default; every step over the bound ends the run after
+/// `MAX_CONSECUTIVE_GUARD_SKIPS`.
+#[test]
+fn a_step_over_a_guard_bound_is_skipped_and_logged_in_online_grpo() {
+    let s = seed();
+    let run = |max_step_kl: Option<f32>, max_step_grad_norm: Option<f32>, steps: u32| {
+        let (mut m, _, _) = lora_model(s);
+        let (judge, _) = Judge::new(first_wins);
+        let mut cfg = config(2, 1.0, GrpoOptions::default());
+        assert_eq!((cfg.loss.max_step_kl, cfg.loss.max_step_grad_norm, cfg.loss.dual_clip), (None, None, None), "online GRPO guards nothing and clips no dual by default");
+        (cfg.loss.max_step_kl, cfg.loss.max_step_grad_norm) = (max_step_kl, max_step_grad_norm);
+        let mut obj = scripted(Env { variable: always_variable }, judge, cfg, vec![completion(&[4, 4]), completion(&[5, 5])]);
+        obj.prepare(&mut m).unwrap();
+        let mut rng = Rng::new(s);
+        let verdicts: Vec<StepVerdict> = (0..steps)
+            .map(|_| {
+                m.zero_grads();
+                obj.micro_steps(&m, &mut rng, 2);
+                verdict(&mut obj)
+            })
+            .collect();
+        (verdicts, obj.stats().steps_skipped_guard, obj.stats().mean_kl())
+    };
+    let (v, skipped, kl) = run(None, None, 1);
+    assert!(matches!(v[..], [StepVerdict::Apply]) && skipped == 0, "no bound, no skip: {v:?}");
+    assert!(kl.is_some_and(|kl| kl > 1e-6), "the adapter is off the base, so there is a KL to bound: {kl:?}");
+
+    let (v, skipped, _) = run(Some(1e-9), None, 1);
+    let [StepVerdict::Skip(why)] = &v[..] else { panic!("a KL over the bound is skipped: {v:?}") };
+    assert!(why.contains("KL") && why.contains("bound"), "{why}");
+    assert_eq!(skipped, 1);
+
+    let (v, skipped, _) = run(None, Some(1e-12), 1);
+    let [StepVerdict::Skip(why)] = &v[..] else { panic!("a gradient norm over the bound is skipped: {v:?}") };
+    assert!(why.contains("gradient norm") && why.contains("bound"), "{why}");
+    assert_eq!(skipped, 1);
+
+    let (v, skipped, _) = run(Some(100.0), Some(1e9), 1);
+    assert!(matches!(v[..], [StepVerdict::Apply]) && skipped == 0, "bounds above the step let it through: {v:?}");
+
+    let (v, skipped, _) = run(None, Some(1e-12), MAX_CONSECUTIVE_GUARD_SKIPS);
+    assert!(v[..v.len() - 1].iter().all(|v| matches!(v, StepVerdict::Skip(_))), "{v:?}");
+    assert!(matches!(v.last(), Some(StepVerdict::Abort(_))), "every step over the bound: the run ends instead of idling: {v:?}");
+    assert_eq!(skipped, MAX_CONSECUTIVE_GUARD_SKIPS as usize);
 }

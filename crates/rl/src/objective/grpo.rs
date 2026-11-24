@@ -52,7 +52,8 @@ pub use super::advantage::{group_advantages_with, AdvantageNorm};
 pub use super::grpo_stats::{BehaviourRefusal, CycleLog, GrpoStats, NonFiniteSteps, RowRefusal, MAX_CONSECUTIVE_NONFINITE};
 pub use super::grpo_term::{k3_kl, near_clip_boundary, token_term, token_term_banded, ClipBand, TokenTerm, MAX_LOG_RATIO};
 use super::numerics::NumericsAccumulator;
-use super::pg_batch::{backward_weighted, with_adapters_disabled, PgBatch, PgSpec};
+use super::pg_batch::{backward_weighted, with_adapters_disabled, PgBatch};
+use super::pg_loss::{GuardVerdict, PgLoss, StepGuard};
 use crate::env::{Environment, Task, Verifier};
 
 /// How a row's per-token loss terms are normalised.
@@ -169,17 +170,9 @@ pub enum RatioBasis {
     Sampler,
 }
 
-/// The knobs beyond the classic GRPO set. [`Default`] is the recommended
-/// configuration; the legacy behaviour is `advantage: ZScore`, `loss_agg:
-/// SeqMean` and `clip_eps_high` equal to `clip_eps`.
+/// The knobs of online sampling beyond the loss. [`Default`] is the recommended configuration.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GrpoOptions {
-    /// How group rewards become advantages.
-    pub advantage: AdvantageNorm,
-    /// How token terms are normalised across the rows of a step.
-    pub loss_agg: LossAgg,
-    /// Upper edge of the clip band (`[1 - clip_eps, 1 + clip_eps_high]`).
-    pub clip_eps_high: f32,
     /// Dynamic sampling: a step may draw up to this many times the groups it
     /// nominally needs (`ceil(grad_accum / group_size)`) while it holds fewer
     /// than `grad_accum` non-zero-advantage rows.
@@ -189,9 +182,6 @@ pub struct GrpoOptions {
     pub staleness_bound: u32,
     /// The distribution of the importance ratio; leave at [`RatioBasis::Trainer`].
     pub ratio_basis: RatioBasis,
-    /// Compute and log the KL to the adapter-disabled reference even when
-    /// `kl_beta` is zero (needs a model with LoRA tensors or `with_reference`).
-    pub log_kl: bool,
     /// Train every row whose completion carries the routing its rollout recorded
     /// ([`model::rollout::Completion::routing`]) with that routing forced in each MoE call, and score its behaviour
     /// log-probabilities the same way, so a near-tie the engine and the trainer break differently no longer moves the
@@ -202,7 +192,7 @@ pub struct GrpoOptions {
 
 impl Default for GrpoOptions {
     fn default() -> GrpoOptions {
-        GrpoOptions { advantage: AdvantageNorm::default(), loss_agg: LossAgg::default(), clip_eps_high: 0.28, resample_factor: 3, staleness_bound: 1, ratio_basis: RatioBasis::Trainer, log_kl: true, routing_replay: false }
+        GrpoOptions { resample_factor: 3, staleness_bound: 1, ratio_basis: RatioBasis::Trainer, routing_replay: false }
     }
 }
 
@@ -216,12 +206,11 @@ pub struct GrpoConfig {
     /// Completions sampled per prompt. `1` selects the RFT/STaR degenerate
     /// path; `>= 2` is ordinary GRPO.
     pub group_size: usize,
-    /// Lower clip-band half-width (`eps` in `clip(r, 1-eps, 1+eps_high)`).
-    pub clip_eps: f32,
-    /// k3 KL-to-reference coefficient. `0.0` puts no KL term in the loss.
-    /// The term is k3 weighted by the importance ratio to the behaviour policy, so its value and its expected
-    /// gradient are those of `KL(pi || ref)`, the divergence reported (`grpo_term::token_term_weighted`).
-    pub kl_beta: f32,
+    /// The policy-gradient loss, the one the recorded-rollout objective trains too: the clip band
+    /// `clip(r, 1 - eps, 1 + eps_high)` with its optional dual clip, the k3 KL term, the aggregation, the advantages
+    /// and the step guards ([`PgLoss::ONLINE`] is the recommended one; the legacy behaviour is `advantage_norm:
+    /// ZScore`, `loss_agg: SeqMean` and `clip_eps_high` equal to `clip_eps`).
+    pub loss: PgLoss,
     /// Packed row length (`t`): prompt length + completion, at least.
     pub seq_len: usize,
     /// Sampling policy + stopping conditions for every rollout. A sampler that
@@ -265,13 +254,12 @@ impl GrpoConfig {
         if self.group_size < 1 {
             return Err(BehaviourRefusal::InvalidCount { field: "group_size", got: self.group_size, least: 1 });
         }
-        if self.options.loss_agg == LossAgg::ConstantLength(0) {
-            return Err(BehaviourRefusal::InvalidCount { field: "loss_agg constant-length", got: 0, least: 1 });
-        }
-        for (field, value, allows_zero) in [("kl_beta", self.kl_beta, true), ("clip_eps", self.clip_eps, false), ("clip_eps_high", self.options.clip_eps_high, false), ("temp", sample.temp, true)] {
-            if !(value.is_finite() && (value > 0.0 || (allows_zero && value == 0.0))) {
-                return Err(BehaviourRefusal::InvalidNumeric { field, value });
-            }
+        self.loss.validate().map_err(|refusal| match refusal.field {
+            "loss_agg" => BehaviourRefusal::InvalidCount { field: "loss_agg constant-length", got: 0, least: 1 },
+            field => BehaviourRefusal::InvalidNumeric { field, value: refusal.value, why: refusal.why },
+        })?;
+        if !(sample.temp.is_finite() && sample.temp >= 0.0) {
+            return Err(BehaviourRefusal::InvalidNumeric { field: "temp", value: sample.temp, why: format!("temp must be finite and not negative, got {}", sample.temp) });
         }
         if sample.is_greedy() || self.options.ratio_basis != RatioBasis::Trainer {
             return Ok(());
@@ -404,6 +392,7 @@ pub struct Grpo<E: Environment, V: Verifier> {
     version: u64,
     verdict: Option<StepVerdict>,
     consecutive_nonfinite: u32,
+    guard: StepGuard,
     /// Why the next step must abort instead of training what was sampled.
     refusal: Option<BehaviourRefusal>,
     /// The model's vocabulary, known once [`Objective::check_data`] ran: ids past it are refused.
@@ -432,6 +421,7 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
             version: 0,
             verdict: None,
             consecutive_nonfinite: 0,
+            guard: StepGuard::default(),
             refusal: None,
             vocab: None,
             serve_gap: NumericsAccumulator::default(),
@@ -488,10 +478,6 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
     fn truncating_sampler(&self) -> bool {
         let s = self.cfg.rollout.sample;
         !s.is_greedy() && (s.top_k > 0 || (s.top_p > 0.0 && s.top_p < 1.0))
-    }
-
-    fn band(&self) -> ClipBand {
-        ClipBand::new(self.cfg.clip_eps, self.cfg.options.clip_eps_high)
     }
 
     /// Rollout parameters for the model's own rollout: its logits already
@@ -569,7 +555,7 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
             advs
         } else {
             let rewards: Vec<f64> = rewards.iter().map(|&r| f64::from(r)).collect();
-            group_advantages_with(self.cfg.options.advantage, &rewards).into_iter().map(|a| a as f32).collect()
+            self.cfg.loss.advantage_floor.apply(group_advantages_with(self.cfg.loss.advantage_norm, &rewards)).into_iter().map(|a| a as f32).collect()
         };
         let zero_variance = advs.iter().all(|&a| a == 0.0);
 
@@ -672,7 +658,7 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
     /// sampled text, not the stop the trainer learns), which takes its own
     /// behaviour log-probability.
     fn attach_references<M: Model>(&self, model: &M, task: &Task, kept: &[Completion], advs: &[f32], rows: &mut [PackedRow]) -> Result<(), BehaviourRefusal> {
-        let wanted = self.cfg.kl_beta > 0.0 || self.cfg.options.log_kl;
+        let wanted = self.cfg.loss.wants_reference();
         if !wanted || rows.is_empty() {
             return Ok(());
         }
@@ -699,7 +685,7 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
                     row.has_ref = true;
                 }
             }
-            None => assert!(self.cfg.kl_beta <= 0.0, "Grpo: kl_beta > 0.0 requires with_reference() or a model with LoRA adapters to disable"),
+            None => assert!(self.cfg.loss.kl_beta <= 0.0, "Grpo: kl_beta > 0.0 requires with_reference() or a model with LoRA adapters to disable"),
         }
         Ok(())
     }
@@ -749,7 +735,7 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
         self.last_mean_reward = drawn.rewards.iter().sum::<f32>() / drawn.rewards.len().max(1) as f32;
         self.last_kept_frac = if drawn.zero_variance { 0.0 } else { 1.0 };
         self.stats.record_group(drawn.attempts, drawn.zero_variance, drawn.truncated, drawn.eos_targets, drawn.truncated_sampling_rows, drawn.sampler_gap);
-        let band = self.band();
+        let band = self.cfg.loss.band();
         for g in &drawn.gaps {
             self.serve_gap.add_sequence(&g.sampler, &g.trainer, band);
             if let Some(replayed) = &g.replayed {
@@ -806,39 +792,64 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
         let total_tokens: usize = rows.iter().map(|r| r.supervised).sum();
         // Each micro-step (one row) is divided by this, then by the loop's k: under TokenSum a mean over all the
         // step's tokens, under ConstantLength a mean over the rows of each row's sum over the constant.
-        let denominator = self.cfg.options.loss_agg.denominator(1, total_tokens, k);
+        let denominator = self.cfg.loss.loss_agg.denominator(1, total_tokens, k);
         let mut loss = 0.0;
         let mut finite = true;
+        let (mut kl_sum, mut kl_tokens) = (0.0f64, 0usize);
         for row in &rows {
             self.log.push_trained(row.completion.clone());
-            let (l, ok) = self.train_row(model, row, denominator);
+            let (l, ok, kl) = self.train_row(model, row, denominator);
             loss += l;
             finite &= ok;
+            if let Some((sum, tokens)) = kl {
+                kl_sum += f64::from(sum);
+                kl_tokens += tokens;
+            }
         }
         finite &= model.gradients_finite().unwrap_or(true);
-        self.verdict = Some(self.rule(finite));
+        // The step's mean KL to the reference over the tokens it measured, and the norm of the step's gradient
+        // (averaged over its k micro-steps, as the loop applies it), read only when a guard bounds it.
+        let kl = (kl_tokens > 0).then(|| (kl_sum / kl_tokens as f64) as f32);
+        let grad_norm = self.cfg.loss.max_step_grad_norm.map(|_| (super::pg_loss::gradient_scan(model).1.sqrt() / k.max(1) as f64) as f32);
+        self.verdict = Some(self.rule(finite, kl, grad_norm));
         self.log.set_stats(&self.stats);
         loss
     }
 
-    fn rule(&mut self, finite: bool) -> StepVerdict {
-        if finite {
-            self.consecutive_nonfinite = 0;
-            return StepVerdict::Apply;
+    /// The verdict on the step just trained: a non-finite loss or gradient skips it (the run aborts after
+    /// [`MAX_CONSECUTIVE_NONFINITE`] in a row), and so does a KL or gradient norm over the loss's step guard, logged
+    /// with the values and counted ([`GrpoStats::steps_skipped_guard`]; the run aborts after
+    /// [`super::pg_loss::MAX_CONSECUTIVE_GUARD_SKIPS`] in a row).
+    fn rule(&mut self, finite: bool, kl: Option<f32>, grad_norm: Option<f32>) -> StepVerdict {
+        if !finite {
+            self.guard.reset();
+            self.consecutive_nonfinite += 1;
+            self.stats.steps_skipped_nonfinite += 1;
+            return if self.consecutive_nonfinite >= MAX_CONSECUTIVE_NONFINITE {
+                StepVerdict::Abort(std::io::Error::new(std::io::ErrorKind::InvalidData, NonFiniteSteps { consecutive: self.consecutive_nonfinite }))
+            } else {
+                StepVerdict::Skip(format!("non-finite loss or gradient ({} in a row)", self.consecutive_nonfinite))
+            };
         }
-        self.consecutive_nonfinite += 1;
-        self.stats.steps_skipped_nonfinite += 1;
-        if self.consecutive_nonfinite >= MAX_CONSECUTIVE_NONFINITE {
-            StepVerdict::Abort(std::io::Error::new(std::io::ErrorKind::InvalidData, NonFiniteSteps { consecutive: self.consecutive_nonfinite }))
-        } else {
-            StepVerdict::Skip(format!("non-finite loss or gradient ({} in a row)", self.consecutive_nonfinite))
+        self.consecutive_nonfinite = 0;
+        match self.guard.judge(&self.cfg.loss, kl, grad_norm) {
+            GuardVerdict::Pass => StepVerdict::Apply,
+            GuardVerdict::Skip(why) => {
+                self.stats.steps_skipped_guard += 1;
+                StepVerdict::Skip(why)
+            }
+            GuardVerdict::Abort { error, .. } => {
+                self.stats.steps_skipped_guard += 1;
+                StepVerdict::Abort(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+            }
         }
     }
 
     /// One row: forward, token weights, backward. Returns the row's share of
-    /// the loss and whether everything it computed was finite (a row with a
-    /// non-finite log-probability is not differentiated).
-    fn train_row<M: Model>(&mut self, model: &M, row: &PackedRow, denominator: Option<f32>) -> (f32, bool) {
+    /// the loss, whether everything it computed was finite (a row with a
+    /// non-finite log-probability is not differentiated), and its KL sum and
+    /// supervised tokens when it was measured against a reference.
+    fn train_row<M: Model>(&mut self, model: &M, row: &PackedRow, denominator: Option<f32>) -> (f32, bool, Option<(f32, usize)>) {
         let replay = row.routing.as_ref().filter(|_| self.cfg.options.routing_replay);
         if let Some(record) = replay {
             set_replay(model, Some(row_replay(record, row.tokens.len())));
@@ -847,15 +858,16 @@ impl<E: Environment, V: Verifier> Grpo<E, V> {
         model.set_batch(Batch::Lm { tokens: &row.tokens, targets: &row.targets });
         let _ = model.forward();
         let batch = PgBatch { targets: &row.targets, old_lp: &row.old_lp, ref_lp: row.has_ref.then_some(&row.ref_lp[..]), advantage: &row.advantage, is_weight: None, top: None };
-        let spec = PgSpec::clipped(self.band(), self.cfg.kl_beta);
+        let spec = self.cfg.loss.spec();
         let terms = backward_weighted(model, &batch, &spec, denominator);
         if replay.is_some() {
             set_replay(model, None);
         }
         let ratio_dev = if row.version == self.version { terms.max_ratio_dev } else { 0.0 };
-        self.stats.record_row(ratio_dev, row.has_ref.then_some((terms.kl_sum, row.supervised)));
+        let kl = row.has_ref.then_some((terms.kl_sum, row.supervised));
+        self.stats.record_row(ratio_dev, kl);
         self.stats.record_clipping(&terms);
-        (terms.normalised_loss(denominator), terms.finite)
+        (terms.normalised_loss(denominator), terms.finite, kl)
     }
 }
 
@@ -1000,7 +1012,7 @@ impl<M: Model, E: Environment, V: Verifier> Objective<M> for Grpo<E, V> {
         for row in &drawn.rows {
             let lp = trainer_logprobs(model, row);
             for i in (0..row.tokens.len()).filter(|&i| row.targets[i] != IGNORE) {
-                total += token_term_banded(row.old_lp[i], lp[i], row.advantage[i], self.band(), None, 0.0).loss;
+                total += token_term_banded(row.old_lp[i], lp[i], row.advantage[i], self.cfg.loss.band(), None, 0.0).loss;
                 count += 1;
             }
         }
@@ -1060,10 +1072,15 @@ mod tests {
         assert_eq!(targets, vec![IGNORE, 3, 4, IGNORE]);
     }
 
+    /// The recommended online loss is the one online GRPO trained before it shared the recorded-rollout objective's
+    /// loss: mean-centred advantages, token-sum, clip-higher 0.28, the KL logged; the dual clip, the advantage floor
+    /// and the step guards it gained are off.
     #[test]
     fn the_defaults_are_the_recommended_configuration() {
         let o = GrpoOptions::default();
-        assert_eq!((o.advantage, o.loss_agg), (AdvantageNorm::MeanCentered, LossAgg::TokenSum));
-        assert_eq!((o.clip_eps_high, o.resample_factor, o.staleness_bound), (0.28, 3, 1));
+        assert_eq!((o.resample_factor, o.staleness_bound), (3, 1));
+        let l = PgLoss::ONLINE;
+        assert_eq!((l.advantage_norm, l.loss_agg, l.clip_eps_high, l.log_kl), (AdvantageNorm::MeanCentered, LossAgg::TokenSum, Some(0.28), true));
+        assert_eq!((l.dual_clip, l.advantage_floor, l.max_step_kl, l.max_step_grad_norm), (None, crate::objective::advantage::AdvantageFloor::None, None, None));
     }
 }

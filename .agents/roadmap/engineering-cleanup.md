@@ -10,7 +10,7 @@ safety nets each item names. Prefer deleting a declaration over adding a layer t
 
 ## Order
 
-EC-1 first (it also closes a resume-identity hazard; done). EC-2 after EC-1 (it changes the type EC-1 tabulates). EC-3
+EC-1 first (it also closes a resume-identity hazard; done). EC-2 after EC-1 (it changes the type EC-1 tabulates; done). EC-3
 independently. EC-4 is incremental, by class. EC-5 and EC-6 any time.
 
 ## EC-1 One table for the policy-gradient settings (M, done 2026-11-24)
@@ -46,22 +46,36 @@ independently. EC-4 is incremental, by class. EC-5 and EC-6 any time.
   and is refused for sft by name (`trainjob`); every named flag likewise (`cli`). The existing `request.rs` tests and
   `trainjob/tests/it/run.rs` pass unchanged.
 
-## EC-2 Online GRPO and the recorded-rollout objective share one loss configuration (M, open; needs EC-1)
+## EC-2 Online GRPO and the recorded-rollout objective share one loss configuration (M, done 2026-11-24)
 
-- **Problem.** The objective family is sound: one `Objective` trait (`crates/model/src/objective.rs:52`) implemented
-  by `Grpo`, `ExternalPolicyGradient`, `Dpo`, `Feedback` (KTO), `DistillTopK` and `Mixture`, sharing
-  `grpo_term`, `pg_batch` and `advantage`. But the two policy-gradient objectives configure the same loss with two
-  types. `GrpoConfig` (`grpo.rs:185`, with `GrpoOptions`) has `clip_eps`, a plain `clip_eps_high`, `kl_beta`,
-  `loss_agg`, `advantage`; `PolicyGradientConfig` adds `dual_clip`, `importance`, `max_step_kl`,
-  `max_step_grad_norm` and the numerics gate. Online GRPO builds its band without the dual clip
-  (`ClipBand::new(clip_eps, clip_eps_high)`, `grpo.rs:445`) and has no step guard, the guard that removed the damage
-  of record-driven ratio spikes in the recorded-rollout path.
-- **Target.** One `PgLoss { band (with dual clip), kl_beta, loss_agg, advantage_norm, advantage_floor, step guards,
-  numerics }` embedded in both configs; the variation that is real (sampled online from an environment against read
-  from records) stays in the two objectives. `Grpo` and `ExternalPolicyGradient` are not merged.
-- **Safety net.** `crates/rl/src/conformance.rs` (token-term parity), `crates/rl/tests/grpo_fixes.rs`,
-  `crates/rl/tests/it/policy_gradient_stability.rs` and gradcheck on both backends, run before and after; a new test
-  that online GRPO honours the dual clip and a step guard.
+- **Problem (was).** `GrpoConfig` (with `GrpoOptions`) and `PolicyGradientConfig` configured the same loss with two
+  types: online GRPO built its band without the dual clip and had no step guard, the guard that removed the damage of
+  record-driven ratio spikes in the recorded-rollout path.
+- **Done.** `rl::objective::pg_loss::PgLoss { clip_eps, clip_eps_high, dual_clip, kl_beta, log_kl, loss_agg,
+  advantage_norm, advantage_floor, max_step_kl, max_step_grad_norm }` (re-exported as `brain::PgLoss`) is embedded as
+  `loss` in both `GrpoConfig` and `PolicyGradientConfig`; its `band()`/`spec()` build the clip band (dual clip
+  included) once, its `validate()` is both objectives' range check, and its `StepGuard` (with
+  `MAX_CONSECUTIVE_GUARD_SKIPS`) and `gradient_scan` are the one step guard. What differs stays in the objectives:
+  sampling (`GrpoOptions`: resampling, staleness, ratio basis, routing replay) against records (importance correction,
+  behaviour source, reference, teacher, truncation, numerics gate, KV round trip). `Grpo` and
+  `ExternalPolicyGradient` are not merged; the numerics gate stays the recorded-rollout objective's (online GRPO
+  re-scores its own samples). The policy-gradient table's rows read `loss.*`; the identity pins hold.
+- **Behaviour change, online GRPO only.** It gains the dual clip, the advantage floor and the step guards, each off by
+  default (`PgLoss::ONLINE` keeps every default it had: clip-higher 0.28, token-sum, mean-centred, the KL logged), and
+  reports `clipped_dual`, `steps_skipped_guard` and the metrics `grpo_clip_frac_dual`, `grpo_steps_skipped_guard`
+  (resume cursors written before read them as zero). Its loss settings are now held to the recorded-rollout objective's
+  ranges (`clip_eps` in (0, 1), `clip_eps_high` in [`clip_eps`, 10)); `BehaviourRefusal::InvalidNumeric` carries the
+  reason. `rl::continual::StudyConfig` gains `grpo_loss`.
+- **Breaking for SDK callers.** `PolicyGradientConfig`'s loss fields moved under `loss` (`PolicyGradientConfig { loss:
+  PgLoss { kl_beta: 0.0, ..PgLoss::RECORDED }, ..Default::default() }`), and `GrpoConfig::{clip_eps, kl_beta}` and
+  `GrpoOptions::{advantage, loss_agg, clip_eps_high, log_kl}` under `GrpoConfig::loss`. No wire, CLI or identity change.
+- **What proved it.** Before and after: `rl` `conformance`, `grpo_fixes`, `it` (with `policy_gradient_stability`),
+  the GRPO, DAPO, Dr. GRPO and RLOO gradchecks and `grpo_objective`; the EC-1 pins (identity, settings, served params).
+  New spec tests in `grpo_fixes`: a token dual-clipped in online GRPO gives no gradient (7 signed tokens, 3 clipped
+  high, the 4 punished ones dual-clipped, gradient L1 exactly 0, against 0 dual-clipped and a non-zero gradient
+  without it), and a step over a KL or gradient-norm bound is skipped, logged and counted, bounds above it pass, and
+  `MAX_CONSECUTIVE_GUARD_SKIPS` in a row abort. Both fail against the pre-EC-2 band and guard (checked by reverting
+  the two lines).
 
 ## EC-3 One max-batch policy for every served language model (M, open)
 
@@ -115,7 +129,7 @@ independently. EC-4 is incremental, by class. EC-5 and EC-6 any time.
 
 ## Not now
 
-- **The `Objective` trait and the objective family:** sound; only their configuration is duplicated (EC-1, EC-2).
+- **The `Objective` trait and the objective family:** sound; their configuration was duplicated (EC-1, EC-2, done).
 - **`ChatScanner` (`crates/data/src/qwen_chat.rs`, 2892 lines):** one scanner already serves every chat format and
   `toolcall::parse_tool_call` delegates to it. Splitting the file by responsibility (render, scan, split) is worth
   doing when a non-Qwen chat format arrives and gives the seam a second implementation, not before.

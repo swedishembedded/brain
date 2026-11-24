@@ -844,7 +844,7 @@ impl ChatFineTune {
     /// Each record is one model call of an agent (its trained assistant turn is the action) and carries the
     /// `"reward"` of the rollout it belongs to and the `"group"` of rollouts it is compared with, optionally with
     /// `"behavior_logprobs"` on the action ([`data::chat_rollout`], training-record contract v2). The run turns each
-    /// group's rewards into the advantages of its rollouts by [`PolicyGradientConfig::advantage_norm`]. A record whose
+    /// group's rewards into the advantages of its rollouts by [`crate::PgLoss::advantage_norm`]. A record whose
     /// rollout's advantage is negative lowers the probability of its action, a positive one raises it; a record
     /// without a reward is imitated. The records the run trains on (the dataset and its replay sets together) are
     /// held to the contract's rules between records: a group holds at least two rollouts that reached an outcome, the
@@ -2690,25 +2690,16 @@ mod tests {
     fn every_setting_off_default() -> PolicyGradientConfig {
         let tokenizer = br#"{"model": {"type": "BPE", "vocab": {"a": 0, "b": 1}, "merges": []}}"#;
         PolicyGradientConfig {
-            clip_eps: 0.3,
-            clip_eps_high: Some(0.35),
-            dual_clip: Some(4.0),
+            loss: crate::PgLoss { clip_eps: 0.3, clip_eps_high: Some(0.35), dual_clip: Some(4.0), kl_beta: 0.05, log_kl: false, loss_agg: rl::objective::grpo::LossAgg::ConstantLength(512), advantage_norm: crate::AdvantageNorm::ZScore, advantage_floor: crate::AdvantageFloor::Zero, max_step_kl: Some(0.1), max_step_grad_norm: Some(5.0) },
             importance: crate::ImportanceCorrection::Truncate { cap: 2.0 },
-            max_step_kl: Some(0.1),
             numerics: Some(crate::NumericsBounds { max_abs_gap: Some(1.5), ..Default::default() }),
             kv_roundtrip: Some(crate::KvElement::Int8),
-            max_step_grad_norm: Some(5.0),
-            kl_beta: 0.05,
             reference: crate::ReferencePolicy::StartOfRun,
             behaviour: crate::BehaviourSource::StartOfRunProxy,
-            loss_agg: rl::objective::grpo::LossAgg::ConstantLength(512),
             temperature: 0.7,
-            log_kl: false,
             teacher: crate::ReferencePolicy::StartOfRun,
             advantage_bound: Some(2.0),
             sequence_advantage_cap: Some(3.0),
-            advantage_norm: crate::AdvantageNorm::ZScore,
-            advantage_floor: crate::AdvantageFloor::Zero,
             truncated: crate::TruncatedRollouts::Keep,
             teacher_tokenizer: Some(data::tokenizer_identity::TokenizerIdentity::of_json(tokenizer, tokenizer).unwrap()),
         }

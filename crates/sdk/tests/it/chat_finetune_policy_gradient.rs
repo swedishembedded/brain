@@ -151,7 +151,7 @@ fn records_and_settings_a_policy_gradient_run_cannot_honour_are_refused_before_t
     let why = refused(policy_gradient(&model, &plain, &out, Default::default()));
     assert!(why.contains("no record") && why.contains("reward"), "{why}");
 
-    let why = refused(policy_gradient(&model, &dataset, &out, PolicyGradientConfig { clip_eps: 1.5, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }));
+    let why = refused(policy_gradient(&model, &dataset, &out, PolicyGradientConfig { loss: brain::PgLoss { clip_eps: 1.5, ..brain::PgLoss::RECORDED }, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }));
     assert!(why.contains("clip_eps"), "{why}");
     let why = refused(policy_gradient(&model, &dataset, &out, Default::default()).eval_every(2));
     assert!(why.contains("eval_every"), "{why}");

@@ -26,6 +26,7 @@ use model::{fit_controlled, FitControl, FitOpts, Model};
 use qwen3::{Qwen, QwenConfig};
 use rl::env::{Environment, Reward, Step, Task, Verifier};
 use rl::objective::grpo::{Grpo, GrpoConfig, GrpoOptions};
+use rl::objective::pg_loss::PgLoss;
 
 /// The prompt is `[1, 2, state]`, the completion `MAX_NEW` tokens: a row holds both.
 const PROMPT_LEN: usize = 3;
@@ -74,9 +75,8 @@ fn p_even(m: &Qwen, state: u32) -> f64 {
 fn train(m: Qwen, states: &'static [u32], reward: fn(u32, &[u32]) -> f32, max_new: usize, steps: u32, lr: f32, seed: u64) -> Qwen {
     let group = 8;
     let cfg = GrpoConfig {
+        loss: PgLoss::ONLINE,
         group_size: group,
-        clip_eps: 0.2,
-        kl_beta: 0.0,
         seq_len: PROMPT_LEN + max_new,
         rollout: RolloutParams { max_new, sample: SampleParams { temp: 1.0, top_k: 0, top_p: 1.0, ..SampleParams::greedy() }, eos: None },
         max_attempts: 1,

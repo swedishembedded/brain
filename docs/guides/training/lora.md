@@ -149,13 +149,13 @@ k3 KL to the base or to the adapter the run started from) and the SDK call are i
 
 The call an orchestrator makes is `ChatFineTune` with `.policy_gradient(..)`; the clip half-width, the KL coefficient,
 the reference policy (`Base`, or `StartOfRun`: the adapter the run begins from), the loss normalisation and the sampling
-temperature are fields of `PolicyGradientConfig`, and `.continue_from(adapter)` continues an existing adapter:
+temperature are fields of `PolicyGradientConfig` (the loss's in its `loss`, a `PgLoss`), and `.continue_from(adapter)` continues an existing adapter:
 
 ```rust
 brain::ChatFineTune::from_pretrained("Qwen/Qwen3.8-27B-FP8").arch("qwen35").base_format("bf16")
     .dataset("rollouts.jsonl").continue_from("round-3.safetensors").out_dir("runs/round-4")
     .steps(40).grad_accum(8)
-    .policy_gradient(brain::PolicyGradientConfig { clip_eps: 0.2, kl_beta: 0.02, reference: brain::ReferencePolicy::Base, ..Default::default() })
+    .policy_gradient(brain::PolicyGradientConfig { loss: brain::PgLoss { clip_eps: 0.2, kl_beta: 0.02, ..brain::PgLoss::RECORDED }, reference: brain::ReferencePolicy::Base, ..Default::default() })
     .run()?;
 ```
 

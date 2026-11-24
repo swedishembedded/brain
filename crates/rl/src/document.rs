@@ -425,6 +425,7 @@ pub fn run_document_study<M: Model>(spec: &StudySpec, curr: &DocumentCurriculum,
         verbose: cfg.verbose,
         regime: Regime::Sft(cfg.sft.clone()),
         grpo: GrpoOptions::default(),
+        grpo_loss: crate::objective::pg_loss::PgLoss::ONLINE,
     };
 
     let gated = continual::run_study::<M, _>(spec, curr, &arm(GatePolicy::Real, cfg.work_dir.join("gated")))?;

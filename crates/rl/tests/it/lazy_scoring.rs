@@ -20,6 +20,7 @@ use model::{Batch, FitOpts, Model, Objective, StepVerdict};
 use qwen35::config::{lora_cfg, Qwen35Config};
 use qwen35::model::{pipelines, Qwen35};
 use rl::objective::external::{BehaviourSource, ExternalPolicyGradient, PolicyGradientConfig, ReferencePolicy};
+use rl::objective::pg_loss::PgLoss;
 
 const T: usize = 8;
 const ANSWER_FROM: usize = 3;
@@ -107,7 +108,7 @@ fn teacher_logprobs(m: &Qwen35, e: usize, policy: impl Fn(&Qwen35, &[u32], usize
 }
 
 fn config() -> PolicyGradientConfig {
-    PolicyGradientConfig { kl_beta: 0.02, log_kl: true, clip_eps: 0.5, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }
+    PolicyGradientConfig { loss: PgLoss { kl_beta: 0.02, log_kl: true, clip_eps: 0.5, ..PgLoss::RECORDED }, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }
 }
 
 fn opts() -> FitOpts {

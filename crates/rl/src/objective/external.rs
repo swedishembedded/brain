@@ -10,7 +10,7 @@
 //! An orchestrator runs an agent, turns every model call into a chat record (the assistant turn of the call is the
 //! action), scores each rollout with an independent verifier and writes the rollout's reward and its group (the
 //! rollouts it is compared with) on each of the rollout's records ([`data::chat_rollout`]). [`ExternalPolicyGradient`]
-//! turns the rewards of each group into the rollouts' advantages ([`PolicyGradientConfig::advantage_norm`],
+//! turns the rewards of each group into the rollouts' advantages ([`PgLoss::advantage_norm`],
 //! [`super::advantage::group_advantages_with`]) and trains a LoRA adapter on the prepared dataset with the clipped
 //! policy-gradient objective of GRPO/PPO on the supervised (action) tokens: records with a negative advantage push
 //! their actions' probability down, those with a positive one pull it up. The per-token term
@@ -34,7 +34,7 @@
 //! * **`ref`, the reference policy** ([`ReferencePolicy`]): the base model (the adapter disabled), or the adapter the
 //!   run started from. They are the same for a fresh adapter. Measured by a forward pass over the example the first
 //!   time a step draws it; the KL term is the k3 estimator `e^u - u - 1`, `u = ref - new`, at the sampled tokens. Its mean is
-//!   reported even when `kl_beta` is zero ([`PolicyGradientConfig::log_kl`]).
+//!   reported even when `kl_beta` is zero ([`PgLoss::log_kl`]).
 //! * **Normalisation** ([`LossAgg`]): `SeqMean` divides each sequence's token terms by its own supervised-token
 //!   count (GRPO as published: needs a batch of one sequence); `TokenSum` divides every token of an optimiser step by
 //!   the step's mean count per micro-step, so all tokens weigh the same; `ConstantLength(n)` divides each sequence's
@@ -93,25 +93,9 @@ use super::grpo_stats::{NonFiniteSteps, MAX_CONSECUTIVE_NONFINITE};
 use super::grpo_term::ClipBand;
 use super::onpolicy_distill::{sequence_advantages, token_advantage, DistillEstimator};
 use super::numerics::{NumericsAccumulator, NumericsBounds, NumericsReport};
+use super::pg_loss::{gradient_scan, GuardVerdict, PgLoss, StepGuard};
 use super::pg_batch::{adapters_are_zero, adapters_can_be_disabled, backward_weighted_lp, weigh, with_adapters_disabled, AdapterState, BatchTerms, PgBatch, PgSpec};
 use super::score_cache::{ExampleScores, ScoreCache, TokenAdvantages};
-
-/// Consecutive optimiser steps the step guard may skip before the run is aborted.
-pub const MAX_CONSECUTIVE_GUARD_SKIPS: u32 = 8;
-
-/// Whether every gradient of the model is finite, and the sum of their squares (in f64), read back once. A model that
-/// does not expose its gradients counts as finite with a zero norm.
-fn gradient_scan<M: Model>(model: &M) -> (bool, f64) {
-    let Some(names) = model.optimized_params() else { return (true, 0.0) };
-    let (mut finite, mut sum_sq) = (true, 0.0f64);
-    for name in names {
-        for g in model.read_grad(&name) {
-            finite &= g.is_finite();
-            sum_sq += f64::from(g) * f64::from(g);
-        }
-    }
-    (finite, sum_sq)
-}
 
 /// The policy the KL term keeps the trained policy close to.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -327,25 +311,11 @@ fn coverage_note(opts: &FitOpts, records: usize) -> Option<String> {
 /// The knobs of [`ExternalPolicyGradient`]. [`Default`] is the recommended configuration.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PolicyGradientConfig {
-    /// Half-width of the clip band `[1 - eps, 1 + eps]` of the importance ratio, in `(0, 1)`: its lower edge, and its
-    /// upper edge too unless [`Self::clip_eps_high`] widens it.
-    pub clip_eps: f32,
-    /// The upper edge `1 + eps_high` of the band when it is wider than the lower one ("clip-higher"): a low-probability
-    /// token that turns out well can then keep gaining mass instead of being clipped at `1 + clip_eps`, which
-    /// counters the entropy collapse a symmetric band causes. `None`: symmetric. At least `clip_eps`.
-    pub clip_eps_high: Option<f32>,
-    /// Dual-clip PPO's bound `c` on a negative advantage's term (Ye et al. 2020): the surrogate is
-    /// `max(min(r*A, clip(r)*A), c*A)` there, so a token whose ratio ran past `c` costs at most `c*|A|` and gives no
-    /// gradient. A token the behaviour policy all but never drew (a re-rendered proxy weighed against the start of the
-    /// run) otherwise reaches a step at its full ratio: 1.6e6 and a gradient norm of 1.4e5 on real agent rollouts.
-    /// Each step reports the share of terms it bounded. `None`: the plain clipped surrogate. Above one.
-    pub dual_clip: Option<f32>,
+    /// The policy-gradient loss, the one online GRPO trains too: the clip band with its dual clip, the KL term, the
+    /// aggregation, the advantages and the step guards ([`PgLoss::RECORDED`] by default).
+    pub loss: PgLoss,
     /// The engine-versus-trainer correction ([`ImportanceCorrection`]).
     pub importance: ImportanceCorrection,
-    /// Skip, and log, the optimiser step of a step whose mean KL to the reference (the step's `kl`) exceeds this: a rare step with a
-    /// few extreme log-ratios (KL 0.50 among neighbours of 0.003) must not reach the weights. Needs a reference
-    /// measurement ([`Self::log_kl`] or a KL weight). `None`: no bound.
-    pub max_step_kl: Option<f32>,
     /// Run as the numerics gate ([`super::numerics`]): no optimiser step is taken, and the run measures the gap between
     /// the recorded behaviour log-probabilities and the trainer's own, the effective sample size and the gradient norms of
     /// the batches it draws, judged against these bounds (`NumericsBounds::default()` reports and enforces nothing).
@@ -357,25 +327,13 @@ pub struct PolicyGradientConfig {
     /// the noise (knowledge #446). `None`: the trainer's own precision. A trace names the cache it was served with
     /// (`brain.kv_cache`); a model whose trainer cannot apply it refuses the run.
     pub kv_roundtrip: Option<model::kv_tier::KvElement>,
-    /// Skip, and log, the optimiser step of a step whose global gradient norm (after averaging over the step's
-    /// micro-batches, before the optimiser's clip) exceeds this. `None`: no bound.
-    pub max_step_grad_norm: Option<f32>,
-    /// Coefficient of the k3 KL to the reference policy; `0.0` puts no KL term in the loss.
-    /// The term is k3 weighted by the importance ratio to the behaviour policy, so its value and its expected
-    /// gradient are those of `KL(pi || ref)`, the divergence reported (`grpo_term::token_term_weighted`).
-    pub kl_beta: f32,
+    /// The policy the KL term is taken against.
     pub reference: ReferencePolicy,
     /// Where the behaviour log-probabilities come from: the sampler's recorded ones ([`BehaviourSource::Recorded`],
     /// the default, exact) or, where none were recorded, the start-of-run policy's (an explicit, recorded proxy).
     pub behaviour: BehaviourSource,
-    /// How token terms are normalised ([`LossAgg::SeqMean`], as GRPO publishes it, by default).
-    pub loss_agg: LossAgg,
     /// The temperature the collector sampled with; the policy trained is `softmax(logits / temperature)`.
     pub temperature: f32,
-    /// Measure and report the KL to the reference even when `kl_beta` is zero. Cost: one forward pass over each
-    /// example the first time a step draws it (none after; the per-token KL comes from the step's own forward), and a
-    /// second one only when a run that continues an adapter is measured against the base.
-    pub log_kl: bool,
     /// Which frozen policy scores the student's tokens in the privileged context (records with a teacher context).
     pub teacher: ReferencePolicy,
     /// Clip each token's teacher advantage to `[-bound, bound]`; `None` leaves it unbounded.
@@ -383,11 +341,6 @@ pub struct PolicyGradientConfig {
     /// Cap the sum of `|A_t|` over a sequence's tokens (after clipping) by scaling the sequence's advantages down;
     /// `None` leaves it uncapped.
     pub sequence_advantage_cap: Option<f32>,
-    /// How each group's rewards become the advantages of its rollouts.
-    pub advantage_norm: AdvantageNorm,
-    /// What is done with those advantages once computed against the whole group ([`AdvantageFloor::Zero`]: a rollout
-    /// under the baseline sets it but carries no policy gradient; the KL term, when on, still reaches its tokens).
-    pub advantage_floor: AdvantageFloor,
     /// What a rollout marked `"truncated": true` does: [`TruncatedRollouts::Mask`] (the default) never trains and takes
     /// no part in its group (DAPO's overlong filtering); [`TruncatedRollouts::Keep`] trains with its reward counted.
     pub truncated: TruncatedRollouts,
@@ -400,7 +353,7 @@ pub struct PolicyGradientConfig {
 
 impl Default for PolicyGradientConfig {
     fn default() -> PolicyGradientConfig {
-        PolicyGradientConfig { clip_eps: 0.2, clip_eps_high: None, dual_clip: Some(DEFAULT_DUAL_CLIP), importance: ImportanceCorrection::None, max_step_kl: None, max_step_grad_norm: None, numerics: None, kv_roundtrip: None, kl_beta: 0.02, reference: ReferencePolicy::Base, behaviour: BehaviourSource::Recorded, loss_agg: LossAgg::SeqMean, temperature: 1.0, log_kl: true, teacher: ReferencePolicy::Base, advantage_bound: None, sequence_advantage_cap: None, advantage_norm: AdvantageNorm::MeanCentered, advantage_floor: AdvantageFloor::None, truncated: TruncatedRollouts::Mask, teacher_tokenizer: None }
+        PolicyGradientConfig { loss: PgLoss::RECORDED, importance: ImportanceCorrection::None, numerics: None, kv_roundtrip: None, reference: ReferencePolicy::Base, behaviour: BehaviourSource::Recorded, temperature: 1.0, teacher: ReferencePolicy::Base, advantage_bound: None, sequence_advantage_cap: None, truncated: TruncatedRollouts::Mask, teacher_tokenizer: None }
     }
 }
 
@@ -446,11 +399,12 @@ impl PolicyGradientAlgorithm {
     /// The configuration the algorithm names, for a run whose longest row is `max_block` tokens (Dr. GRPO's constant).
     pub fn config(self, max_block: u32) -> PolicyGradientConfig {
         let d = PolicyGradientConfig::default();
+        let loss = |loss: PgLoss| PolicyGradientConfig { loss, ..d };
         match self {
-            PolicyGradientAlgorithm::Grpo => PolicyGradientConfig { advantage_norm: AdvantageNorm::ZScore, loss_agg: LossAgg::SeqMean, clip_eps: 0.2, clip_eps_high: None, ..d },
-            PolicyGradientAlgorithm::DrGrpo => PolicyGradientConfig { advantage_norm: AdvantageNorm::MeanCentered, loss_agg: LossAgg::ConstantLength(max_block), kl_beta: 0.0, ..d },
-            PolicyGradientAlgorithm::Dapo => PolicyGradientConfig { advantage_norm: AdvantageNorm::ZScore, clip_eps: 0.2, clip_eps_high: Some(0.28), loss_agg: LossAgg::TokenSum, truncated: TruncatedRollouts::Mask, kl_beta: 0.0, ..d },
-            PolicyGradientAlgorithm::Rloo => PolicyGradientConfig { advantage_norm: AdvantageNorm::LeaveOneOut, loss_agg: LossAgg::TokenSum, ..d },
+            PolicyGradientAlgorithm::Grpo => loss(PgLoss { advantage_norm: AdvantageNorm::ZScore, loss_agg: LossAgg::SeqMean, clip_eps: 0.2, clip_eps_high: None, ..d.loss }),
+            PolicyGradientAlgorithm::DrGrpo => loss(PgLoss { advantage_norm: AdvantageNorm::MeanCentered, loss_agg: LossAgg::ConstantLength(max_block), kl_beta: 0.0, ..d.loss }),
+            PolicyGradientAlgorithm::Dapo => PolicyGradientConfig { truncated: TruncatedRollouts::Mask, ..loss(PgLoss { advantage_norm: AdvantageNorm::ZScore, clip_eps: 0.2, clip_eps_high: Some(0.28), loss_agg: LossAgg::TokenSum, kl_beta: 0.0, ..d.loss }) },
+            PolicyGradientAlgorithm::Rloo => loss(PgLoss { advantage_norm: AdvantageNorm::LeaveOneOut, loss_agg: LossAgg::TokenSum, ..d.loss }),
         }
     }
 }
@@ -465,24 +419,10 @@ impl model::training_plan::PlanCheck for PolicyGradientConfig {
     }
 }
 
-/// The dual clip [`PolicyGradientConfig`] defaults to: the `c = 3` of dual-clip PPO.
-pub const DEFAULT_DUAL_CLIP: f32 = 3.0;
-
 impl PolicyGradientConfig {
     /// Refuse a setting that has no meaning.
     pub fn validate(&self) -> Result<(), String> {
-        if let Some(c) = self.dual_clip.filter(|c| !(c.is_finite() && *c > 1.0)) {
-            return Err(format!("dual_clip is {c}; it must be a finite number above 1 (leave it unset for the plain clipped surrogate)"));
-        }
-        if !(self.clip_eps.is_finite() && self.clip_eps > 0.0 && self.clip_eps < 1.0) {
-            return Err(format!("clip_eps is {}; it must lie in (0, 1)", self.clip_eps));
-        }
-        if let Some(high) = self.clip_eps_high.filter(|h| !(h.is_finite() && *h >= self.clip_eps && *h < 10.0)) {
-            return Err(format!("clip_eps_high is {high}; it must be finite, at least clip_eps ({}) and below 10 (leave it unset for a symmetric band)", self.clip_eps));
-        }
-        if !(self.kl_beta.is_finite() && self.kl_beta >= 0.0) {
-            return Err(format!("kl_beta is {}; it must be a finite number, at least 0", self.kl_beta));
-        }
+        self.loss.validate().map_err(|refusal| refusal.why)?;
         if let ImportanceCorrection::Truncate { cap } | ImportanceCorrection::Mask { cap } = self.importance {
             if !(cap.is_finite() && cap > 1.0) {
                 return Err(format!("the importance correction's cap is {cap}; it must be finite and above 1"));
@@ -501,19 +441,10 @@ impl PolicyGradientConfig {
             if self.behaviour != BehaviourSource::Recorded || self.importance.is_on() {
                 return Err("the numerics gate compares the trainer with the recorded behaviour log-probabilities; it needs behaviour \"recorded\" and no importance correction".to_string());
             }
-            if self.max_step_kl.is_some() || self.max_step_grad_norm.is_some() {
+            if self.loss.guards_steps() {
                 return Err("the numerics gate takes no optimiser step, so a step guard has nothing to guard; set the gate's own bounds".to_string());
             }
         }
-        for (name, value) in [("max_step_kl", self.max_step_kl), ("max_step_grad_norm", self.max_step_grad_norm)] {
-            if let Some(v) = value.filter(|v| !(v.is_finite() && *v > 0.0)) {
-                return Err(format!("{name} is {v}; it must be finite and positive (leave it unset for no guard)"));
-            }
-        }
-        if self.max_step_kl.is_some() && !self.wants_reference() {
-            return Err("max_step_kl bounds the KL to the reference, which is measured only with log_kl or a positive kl_beta".to_string());
-        }
-        self.loss_agg.validate()?;
         if !(self.temperature.is_finite() && self.temperature > 0.0) {
             return Err(format!("temperature is {}; it must be finite and positive", self.temperature));
         }
@@ -523,10 +454,6 @@ impl PolicyGradientConfig {
             }
         }
         Ok(())
-    }
-
-    fn wants_reference(&self) -> bool {
-        self.kl_beta > 0.0 || self.log_kl
     }
 }
 
@@ -598,7 +525,7 @@ pub struct PolicyGradientStats {
     /// Optimiser steps not taken because a loss or gradient was not finite.
     pub steps_skipped_nonfinite: usize,
     /// Optimiser steps not taken because the step's KL or gradient norm was over its bound
-    /// ([`PolicyGradientConfig::max_step_kl`], [`PolicyGradientConfig::max_step_grad_norm`]).
+    /// ([`PgLoss::max_step_kl`], [`PgLoss::max_step_grad_norm`]).
     pub steps_skipped_guard: usize,
     /// The numerics gate's measurements and verdict, for a run that was one ([`PolicyGradientConfig::numerics`]).
     pub numerics: Option<NumericsReport>,
@@ -817,7 +744,7 @@ pub struct ExternalPolicyGradient {
     accumulating: StepAccumulator,
     stats: PolicyGradientStats,
     consecutive_nonfinite: u32,
-    consecutive_guard: u32,
+    guard: StepGuard,
     gate: NumericsAccumulator,
     /// The serve-vs-train gap every run reports ([`PolicyGradientStats::serve_train_gap`]), and the examples measured.
     serve_gap: NumericsAccumulator,
@@ -835,7 +762,7 @@ impl ExternalPolicyGradient {
     pub fn open(dir: &Path, opts: &FitOpts, cfg: PolicyGradientConfig) -> std::io::Result<ExternalPolicyGradient> {
         let invalid = |why: String| std::io::Error::new(std::io::ErrorKind::InvalidInput, why);
         cfg.validate().map_err(invalid)?;
-        if cfg.loss_agg == LossAgg::SeqMean && opts.batch_size != 1 {
+        if cfg.loss.loss_agg == LossAgg::SeqMean && opts.batch_size != 1 {
             return Err(invalid(format!("a sequence-mean objective trains one sequence per batch row group, the batch holds {}; use loss_agg TokenSum or a batch of 1", opts.batch_size)));
         }
         let (train, _val, batch_cfg, _vocab, _itos) = model::load_rollout_dataset(dir, opts)?;
@@ -855,7 +782,7 @@ impl ExternalPolicyGradient {
                 None => format!("{}: the training split carries no rollouts, so a policy gradient would train every record as imitation; use the supervised objective, or prepare the dataset from records with a \"reward\" and \"group\"", dir.display()),
             }));
         };
-        let advantage = advantages(&recorded, cfg.advantage_norm, cfg.advantage_floor, cfg.truncated).map_err(|why| invalid(format!("{}: {why}", dir.display())))?;
+        let advantage = advantages(&recorded, cfg.loss.advantage_norm, cfg.loss.advantage_floor, cfg.truncated).map_err(|why| invalid(format!("{}: {why}", dir.display())))?;
         let (behavior, truncated) = (recorded.behavior, recorded.truncated);
         let eligible: Vec<usize> = (0..starts.len()).filter(|&e| cfg.truncated.counts(truncated[e])).collect();
         if let Some(t) = behavior.iter().position(|b| b.is_infinite() || *b > 1e-3) {
@@ -924,7 +851,7 @@ impl ExternalPolicyGradient {
         let rows = Rows { starts, ends, advantage, eligible, behavior, teacher, teacher_logprobs };
         let cache = ScoreCache::create(dir, rows.starts.len())?;
         let max_token = tokens.iter().copied().chain(rows.teacher.iter().flat_map(|t| (0..rows.starts.len()).filter_map(|e| t.example(e)).flat_map(|(ids, _)| ids.iter().copied()))).max().unwrap_or(0);
-        Ok(ExternalPolicyGradient { cfg, train, batch_cfg, rows, mask, tag_examples, order: None, cache, max_token, anchors: None, weights_moved: false, work: None, scoring_seconds: 0.0, accumulating: StepAccumulator::default(), stats, consecutive_nonfinite: 0, consecutive_guard: 0, gate: NumericsAccumulator::default(), serve_gap: NumericsAccumulator::default(), serve_gap_seen: HashSet::new(), verdict: None })
+        Ok(ExternalPolicyGradient { cfg, train, batch_cfg, rows, mask, tag_examples, order: None, cache, max_token, anchors: None, weights_moved: false, work: None, scoring_seconds: 0.0, accumulating: StepAccumulator::default(), stats, consecutive_nonfinite: 0, guard: StepGuard::default(), gate: NumericsAccumulator::default(), serve_gap: NumericsAccumulator::default(), serve_gap_seen: HashSet::new(), verdict: None })
     }
 
     /// The scalar advantage example `example` of the training split trains with: its rollout's, computed from the
@@ -945,7 +872,7 @@ impl ExternalPolicyGradient {
     }
 
     fn spec(&self) -> PgSpec {
-        PgSpec::clipped(ClipBand { low: self.cfg.clip_eps, high: self.cfg.clip_eps_high.unwrap_or(self.cfg.clip_eps), dual: self.cfg.dual_clip }, self.cfg.kl_beta)
+        self.cfg.loss.spec()
     }
 
     fn upload<M: Model>(&self, model: &M, tokens: &[u32], targets: &[u32], picks: &[Option<usize>]) {
@@ -1293,7 +1220,7 @@ impl ExternalPolicyGradient {
 
     /// The verdict on the step just closed: a non-finite loss or gradient skips it (the run aborts after
     /// [`MAX_CONSECUTIVE_NONFINITE`] in a row), and so does a KL or gradient norm over the configured bound, logged
-    /// with the values and counted (the run aborts after [`MAX_CONSECUTIVE_GUARD_SKIPS`] in a row: a bound that
+    /// with the values and counted (the run aborts after [`super::pg_loss::MAX_CONSECUTIVE_GUARD_SKIPS`] in a row: a bound that
     /// skips every step is wrong, or the policy has left the region it can be trained in).
     fn rule(&mut self, finite: bool) -> StepVerdict {
         if self.cfg.numerics.is_some() {
@@ -1302,7 +1229,7 @@ impl ExternalPolicyGradient {
             return StepVerdict::Skip("numerics gate: measuring, no optimiser step is taken".to_string());
         }
         if !finite {
-            self.consecutive_guard = 0;
+            self.guard.reset();
             self.consecutive_nonfinite += 1;
             self.stats.steps_skipped_nonfinite += 1;
             return if self.consecutive_nonfinite >= MAX_CONSECUTIVE_NONFINITE {
@@ -1313,23 +1240,14 @@ impl ExternalPolicyGradient {
         }
         self.consecutive_nonfinite = 0;
         let last = self.stats.steps.last_mut().expect("close_step ran");
-        let over_kl = self.cfg.max_step_kl.zip(last.kl).filter(|(bound, kl)| kl > bound);
-        let over_grad = self.cfg.max_step_grad_norm.filter(|bound| last.grad_norm > *bound);
-        let why = match (over_kl, over_grad) {
-            (Some((bound, kl)), _) => format!("the step's KL {kl:.4} is over the bound {bound} (gradient norm {:.3})", last.grad_norm),
-            (None, Some(bound)) => format!("the step's gradient norm {:.3} is over the bound {bound}", last.grad_norm),
-            (None, None) => {
-                self.consecutive_guard = 0;
-                return StepVerdict::Apply;
-            }
+        let (why, verdict) = match self.guard.judge(&self.cfg.loss, last.kl, Some(last.grad_norm)) {
+            GuardVerdict::Pass => return StepVerdict::Apply,
+            GuardVerdict::Skip(why) => (why.clone(), StepVerdict::Skip(why)),
+            GuardVerdict::Abort { why, error } => (why, StepVerdict::Abort(std::io::Error::new(std::io::ErrorKind::InvalidData, error))),
         };
-        last.skipped = Some(why.clone());
+        last.skipped = Some(why);
         self.stats.steps_skipped_guard += 1;
-        self.consecutive_guard += 1;
-        if self.consecutive_guard >= MAX_CONSECUTIVE_GUARD_SKIPS {
-            return StepVerdict::Abort(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{MAX_CONSECUTIVE_GUARD_SKIPS} optimiser steps in a row were skipped by the step guard ({why}); the bound is too tight for this policy, or the policy has diverged")));
-        }
-        StepVerdict::Skip(why)
+        verdict
     }
 
     fn draw(&mut self) -> Vec<Option<usize>> {
@@ -1354,7 +1272,7 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
         if self.cfg.kv_roundtrip.is_some() {
             objectives.set_kv_roundtrip(self.cfg.kv_roundtrip).map_err(|_| Unsupported::of::<M>(Capability::KvRoundtrip))?;
         }
-        let wants_reference = self.cfg.wants_reference() && self.stats.sequences_with_advantage > 0;
+        let wants_reference = self.cfg.loss.wants_reference() && self.stats.sequences_with_advantage > 0;
         let start = if adapters_are_zero(model) { StartPolicy::Base } else { StartPolicy::Frozen(AdapterState::capture(model)) };
         // A frozen base is read by switching adapters off, which needs adapters to switch off.
         let base_is_read = matches!(start, StartPolicy::Base) || (wants_reference && self.cfg.reference == ReferencePolicy::Base) || (self.stats.sequences_with_teacher > 0 && self.cfg.teacher == ReferencePolicy::Base);
@@ -1436,7 +1354,7 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
         let supervised: usize = laid.iter().map(|l| l.targets.iter().filter(|&&t| t != IGNORE).count()).sum();
         let useful = laid.iter().flat_map(|l| l.picks.iter().flatten()).map(|&e| (self.rows.ends[e] - self.rows.starts[e]).min(self.batch_cfg.block_size) as u64).sum();
         let mut work = StepWork { useful_tokens: useful, supervised_positions: supervised as u64, prepare_secs: clock.elapsed().as_secs_f64(), ..StepWork::default() };
-        let denominator = self.cfg.loss_agg.denominator(self.batch_cfg.batch_size, supervised, laid.len());
+        let denominator = self.cfg.loss.loss_agg.denominator(self.batch_cfg.batch_size, supervised, laid.len());
         let spec = self.spec();
         let mut loss = 0.0;
         let mut finite = true;
@@ -1506,7 +1424,7 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
         let _ = model.forward();
         let batch = PgBatch { targets: &laid.targets, old_lp: &laid.old_lp, ref_lp: laid.has_ref.then_some(&laid.ref_lp[..]), advantage: &laid.advantage, is_weight: laid.is_weight.as_deref(), top: None };
         let (_, terms) = weigh(&training::objectives(model).batch_token_logprobs(), None, &batch, &self.spec());
-        terms.normalised_loss(self.cfg.loss_agg.denominator(self.batch_cfg.batch_size, terms.supervised, 1))
+        terms.normalised_loss(self.cfg.loss.loss_agg.denominator(self.batch_cfg.batch_size, terms.supervised, 1))
     }
 
     fn step_log(&self) -> Option<String> {
@@ -1562,16 +1480,16 @@ mod tests {
             let c = algorithm.config(1024);
             assert!(c.validate().is_ok(), "{algorithm:?}");
             // What no algorithm decides stays the default's.
-            assert_eq!((c.importance, c.reference, c.behaviour, c.temperature, c.teacher, c.max_step_kl), (d.importance, d.reference, d.behaviour, d.temperature, d.teacher, d.max_step_kl), "{algorithm:?}");
+            assert_eq!((c.importance, c.reference, c.behaviour, c.temperature, c.teacher, c.loss.max_step_kl), (d.importance, d.reference, d.behaviour, d.temperature, d.teacher, d.loss.max_step_kl), "{algorithm:?}");
         }
-        let grpo = PolicyGradientAlgorithm::Grpo.config(1024);
-        assert_eq!((grpo.advantage_norm, grpo.loss_agg, grpo.clip_eps, grpo.clip_eps_high, grpo.kl_beta), (AdvantageNorm::ZScore, LossAgg::SeqMean, 0.2, None, d.kl_beta));
-        let dr = PolicyGradientAlgorithm::DrGrpo.config(1024);
+        let grpo = PolicyGradientAlgorithm::Grpo.config(1024).loss;
+        assert_eq!((grpo.advantage_norm, grpo.loss_agg, grpo.clip_eps, grpo.clip_eps_high, grpo.kl_beta), (AdvantageNorm::ZScore, LossAgg::SeqMean, 0.2, None, d.loss.kl_beta));
+        let dr = PolicyGradientAlgorithm::DrGrpo.config(1024).loss;
         assert_eq!((dr.advantage_norm, dr.loss_agg, dr.kl_beta), (AdvantageNorm::MeanCentered, LossAgg::ConstantLength(1024), 0.0));
         let dapo = PolicyGradientAlgorithm::Dapo.config(1024);
-        assert_eq!((dapo.advantage_norm, dapo.clip_eps, dapo.clip_eps_high, dapo.loss_agg, dapo.truncated, dapo.kl_beta), (AdvantageNorm::ZScore, 0.2, Some(0.28), LossAgg::TokenSum, TruncatedRollouts::Mask, 0.0));
-        let rloo = PolicyGradientAlgorithm::Rloo.config(1024);
-        assert_eq!((rloo.advantage_norm, rloo.loss_agg, rloo.kl_beta), (AdvantageNorm::LeaveOneOut, LossAgg::TokenSum, d.kl_beta));
+        assert_eq!((dapo.loss.advantage_norm, dapo.loss.clip_eps, dapo.loss.clip_eps_high, dapo.loss.loss_agg, dapo.truncated, dapo.loss.kl_beta), (AdvantageNorm::ZScore, 0.2, Some(0.28), LossAgg::TokenSum, TruncatedRollouts::Mask, 0.0));
+        let rloo = PolicyGradientAlgorithm::Rloo.config(1024).loss;
+        assert_eq!((rloo.advantage_norm, rloo.loss_agg, rloo.kl_beta), (AdvantageNorm::LeaveOneOut, LossAgg::TokenSum, d.loss.kl_beta));
         assert!(PolicyGradientAlgorithm::parse("ppo").unwrap_err().contains("grpo, dr-grpo, dapo, rloo"));
     }
 

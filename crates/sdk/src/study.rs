@@ -1623,7 +1623,7 @@ fn run_improve_for<A: StudyArch, E: Environment, V: Verifier + Clone>(
     let eval_verifier = verifier.clone();
 
     let rollout = RolloutParams { max_new: opts.max_new, sample: SampleParams { temp: opts.temperature, ..SampleParams::greedy() }, eos: None };
-    let grpo_cfg = GrpoConfig { group_size: opts.group_size, clip_eps: opts.clip_eps, kl_beta: 0.0, seq_len: train_block as usize, rollout, max_attempts: 8, options: Default::default() };
+    let grpo_cfg = GrpoConfig { loss: crate::PgLoss { clip_eps: opts.clip_eps, ..crate::PgLoss::ONLINE }, group_size: opts.group_size, seq_len: train_block as usize, rollout, max_attempts: 8, options: Default::default() };
     let objective = Grpo::try_new(env, verifier, grpo_cfg)?;
     let objective = match opts.model_rollouts {
         true => objective,

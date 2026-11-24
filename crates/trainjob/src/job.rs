@@ -302,7 +302,7 @@ pub(crate) fn policy_gradient_config(params: &crate::request::Params) -> Result<
     let mut config = algorithm(params)?.map_or_else(brain::PolicyGradientConfig::default, |a| a.config(params.max_block));
     params.policy_gradient.apply(&mut config).map_err(|e| format!("train: {e}"))?;
     // The aggregation and its constant are two params; an omitted constant is the longest row the run trains.
-    config.loss_agg = brain::LossAgg::resolve(params.loss_agg.as_deref(), params.loss_agg_length, Some(params.max_block), config.loss_agg, ("loss_agg", "loss_agg_length", "max_block")).map_err(|e| format!("train: {e}"))?;
+    config.loss.loss_agg = brain::LossAgg::resolve(params.loss_agg.as_deref(), params.loss_agg_length, Some(params.max_block), config.loss.loss_agg, ("loss_agg", "loss_agg_length", "max_block")).map_err(|e| format!("train: {e}"))?;
     Ok(config)
 }
 

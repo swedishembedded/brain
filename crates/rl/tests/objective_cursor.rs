@@ -161,12 +161,12 @@ impl rl::env::Verifier for LowTokens {
 #[test]
 fn a_resumed_grpo_run_continues_its_rollout_stream() {
     use rl::objective::grpo::{Grpo, GrpoConfig};
+    use rl::objective::pg_loss::PgLoss;
     for stop_after in 2..=5 {
         let (straight, resumed) = assert_resume_after("grpo", 1, stop_after, || {
             let cfg = GrpoConfig {
+                loss: PgLoss::ONLINE,
                 group_size: 3,
-                clip_eps: 0.2,
-                kl_beta: 0.0,
                 seq_len: SEQ_LEN,
                 rollout: model::rollout::RolloutParams { max_new: 4, sample: model::serve::SampleParams { temp: 1.0, top_k: 0, top_p: 1.0, ..model::serve::SampleParams::greedy() }, eos: None },
                 max_attempts: 1,

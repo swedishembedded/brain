@@ -60,9 +60,9 @@ fn every_named_algorithm_trains_and_the_result_records_the_settings_it_expanded_
         assert_eq!((&outcome.outputs["status"], &outcome.outputs["algorithm"]), (&json!("completed"), &json!(algorithm.name())));
         let settings = &outcome.outputs["policy_gradient"]["settings"];
         let want = brain::PolicyGradientAlgorithm::config(algorithm, 128);
-        assert_eq!(settings["loss_agg"], json!(want.loss_agg.to_string()), "{}: {settings}", algorithm.name());
-        assert_eq!((settings["advantage_norm"].as_str(), settings["truncated"].as_str()), (Some(want.advantage_norm.name()), Some(want.truncated.name())), "{}", algorithm.name());
-        assert_eq!((settings["kl_beta"].as_f64(), settings["clip_eps_high"].as_f64()), (Some(f64::from(want.kl_beta)), want.clip_eps_high.map(f64::from)), "{}", algorithm.name());
+        assert_eq!(settings["loss_agg"], json!(want.loss.loss_agg.to_string()), "{}: {settings}", algorithm.name());
+        assert_eq!((settings["advantage_norm"].as_str(), settings["truncated"].as_str()), (Some(want.loss.advantage_norm.name()), Some(want.truncated.name())), "{}", algorithm.name());
+        assert_eq!((settings["kl_beta"].as_f64(), settings["clip_eps_high"].as_f64()), (Some(f64::from(want.loss.kl_beta)), want.loss.clip_eps_high.map(f64::from)), "{}", algorithm.name());
         assert_eq!((settings["behaviour"].as_str(), settings["temperature"].as_f64().map(|t| (t * 1e6).round() / 1e6)), (Some("start_of_run_proxy"), Some(0.9)), "the request's own settings are laid over the algorithm's");
         assert_eq!(outcome.outputs["policy_gradient"]["steps_taken"], 2);
     }

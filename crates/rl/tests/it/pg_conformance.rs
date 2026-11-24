@@ -36,6 +36,7 @@ use rl::objective::external::{ExternalPolicyGradient, PolicyGradientConfig};
 use rl::objective::grpo::LossAgg;
 use rl::objective::grpo_term::ClipBand;
 use rl::objective::pg_batch::{weigh, PgBatch, PgSpec};
+use rl::objective::pg_loss::PgLoss;
 use serde_json::Value;
 
 use super::external_policy_gradient::{no_kl, opts};
@@ -237,7 +238,7 @@ fn run_advantages(rollouts: &[(&str, f64)], norm: AdvantageNorm) -> Vec<f64> {
     data::chat::write_split(dir.path(), "train", &split).unwrap();
     data::chat::write_split(dir.path(), "val", &split).unwrap();
     std::fs::write(dir.path().join("meta.json"), data::binio::Meta::vocab_only(29)).unwrap();
-    let obj = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), PolicyGradientConfig { advantage_norm: norm, ..no_kl() }).unwrap();
+    let obj = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), PolicyGradientConfig { loss: PgLoss { advantage_norm: norm, ..no_kl().loss }, ..no_kl() }).unwrap();
     (0..rollouts.len()).map(|e| f64::from(obj.advantage(e).unwrap())).collect()
 }
 

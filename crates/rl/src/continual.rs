@@ -66,6 +66,7 @@ use crate::env::{Environment, Task, Verifier};
 use crate::gate::{Decision, GateConfig, GateReport};
 use crate::improve::{self, AdapterMeta, ArmScores, CycleArtifacts, Evaluation, ProvenanceInput};
 use crate::objective::grpo::{CycleLog, Grpo, GrpoConfig, GrpoOptions};
+use crate::objective::pg_loss::PgLoss;
 use crate::objective::mixture::{Anchor, Mixture};
 
 /// Base seed for the frozen evaluation probes. Probe seeds are a pure
@@ -432,6 +433,8 @@ pub struct StudyConfig {
     /// The GRPO objective's options ([`Regime::Grpo`] only; [`Regime::Sft`] has
     /// no use for them). [`GrpoOptions::default`] is the recommended setting.
     pub grpo: GrpoOptions,
+    /// The GRPO objective's loss ([`Regime::Grpo`] only). [`PgLoss::ONLINE`] is the recommended one.
+    pub grpo_loss: PgLoss,
 }
 
 /// Architecture-specific facts [`run_study`] cannot derive.
@@ -905,8 +908,7 @@ fn sft_objective<M: Model, C: Curriculum>(curr: &C, sft: &SftConfig, cycle: usiz
 fn grpo_cfg(cfg: &StudyConfig, block: usize, completion_len: usize) -> GrpoConfig {
     GrpoConfig {
         group_size: cfg.group_size,
-        clip_eps: 0.2,
-        kl_beta: 0.0,
+        loss: cfg.grpo_loss,
         seq_len: block,
         rollout: RolloutParams { max_new: completion_len, sample: SampleParams { temp: cfg.explore_temp, top_k: 0, top_p: 1.0, ..SampleParams::greedy() }, eos: None },
         max_attempts: 1,
@@ -1732,6 +1734,7 @@ mod tests {
             verbose: false,
             regime: Regime::default(),
             grpo: GrpoOptions::default(),
+            grpo_loss: PgLoss::ONLINE,
         }
     }
 

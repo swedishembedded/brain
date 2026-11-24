@@ -364,7 +364,7 @@ fn policy_gradient_setting(flag: &str) -> Option<&'static brain::policy_gradient
 fn policy_gradient_config(a: &Args) -> Result<brain::PolicyGradientConfig, String> {
     let mut config = algorithm_config(a)?;
     a.pg_settings.apply(&mut config).map_err(|e| format!("brain finetune: {e}"))?;
-    config.loss_agg = brain::LossAgg::resolve(a.loss_agg.as_deref(), a.loss_agg_length, a.max_block, config.loss_agg, ("--loss-agg", "--loss-agg-length", "--max-block")).map_err(|e| format!("brain finetune: {e}"))?;
+    config.loss.loss_agg = brain::LossAgg::resolve(a.loss_agg.as_deref(), a.loss_agg_length, a.max_block, config.loss.loss_agg, ("--loss-agg", "--loss-agg-length", "--max-block")).map_err(|e| format!("brain finetune: {e}"))?;
     config.numerics = a.numerics_gate.then_some(a.gate);
     Ok(config)
 }
@@ -727,7 +727,7 @@ mod tests {
         let err = parse(&argv("base --held-out h.jsonl")).unwrap_err();
         assert!(err.contains("--lora"), "{err}");
         let a = parse(&argv("base --lora 4 --policy-gradient --kl-beta 0.1 --held-out h.jsonl")).unwrap();
-        assert!(a.policy_gradient && policy_gradient_config(&a).unwrap().kl_beta == 0.1 && a.held_out.as_deref() == Some("h.jsonl"));
+        assert!(a.policy_gradient && policy_gradient_config(&a).unwrap().loss.kl_beta == 0.1 && a.held_out.as_deref() == Some("h.jsonl"));
     }
 
     /// The help lists exactly the values `--activations` accepts, from the one list the parser and every capability
@@ -767,12 +767,12 @@ mod tests {
         assert!(err.contains("--max-step-kl") && err.contains("--policy-gradient"), "{err}");
         let a = parse(&argv("base --lora 4 --policy-gradient --ratio-clip-high 0.28 --importance truncate:2 --max-step-kl 0.1 --max-step-grad-norm 5 --advantage-norm leave-one-out")).unwrap();
         let c = policy_gradient_config(&a).unwrap();
-        assert_eq!(c.advantage_norm, brain::AdvantageNorm::LeaveOneOut);
+        assert_eq!(c.loss.advantage_norm, brain::AdvantageNorm::LeaveOneOut);
         assert!(parse(&argv("base --lora 4 --advantage-norm z-score")).unwrap_err().contains("--policy-gradient"));
         assert!(parse(&argv("base --lora 4 --policy-gradient --advantage-norm standardised")).unwrap_err().contains("leave-one-out"));
-        assert_eq!((c.clip_eps_high, c.max_step_kl, c.max_step_grad_norm), (Some(0.28), Some(0.1), Some(5.0)));
+        assert_eq!((c.loss.clip_eps_high, c.loss.max_step_kl, c.loss.max_step_grad_norm), (Some(0.28), Some(0.1), Some(5.0)));
         assert_eq!(c.importance, brain::ImportanceCorrection::Truncate { cap: 2.0 });
-        assert_eq!(config("base --lora 4 --policy-gradient --dual-clip 5").unwrap().dual_clip, Some(5.0));
+        assert_eq!(config("base --lora 4 --policy-gradient --dual-clip 5").unwrap().loss.dual_clip, Some(5.0));
         assert!(parse(&argv("base --lora 4 --dual-clip 5")).unwrap_err().contains("--policy-gradient"));
         let err = parse(&argv("base --lora 4 --policy-gradient --importance sometimes")).unwrap_err();
         assert!(err.contains("--importance") && err.contains("truncate:CAP"), "{err}");
@@ -780,7 +780,7 @@ mod tests {
 
     #[test]
     fn the_constant_length_aggregation_takes_its_length_or_the_max_block() {
-        let agg = |s: &str| config(s).map(|c| c.loss_agg);
+        let agg = |s: &str| config(s).map(|c| c.loss.loss_agg);
         assert_eq!(agg("base --lora 4 --policy-gradient --loss-agg constant-length --loss-agg-length 512"), Ok(brain::LossAgg::ConstantLength(512)));
         assert_eq!(agg("base --lora 4 --policy-gradient --loss-agg constant-length --max-block 1024"), Ok(brain::LossAgg::ConstantLength(1024)));
         assert_eq!(agg("base --lora 4 --policy-gradient --loss-agg token-sum"), Ok(brain::LossAgg::TokenSum));
@@ -790,7 +790,7 @@ mod tests {
         assert_eq!(config("base --lora 4 --policy-gradient --truncated keep").unwrap().truncated, brain::TruncatedRollouts::Keep);
         assert!(parse(&argv("base --lora 4 --truncated keep")).unwrap_err().contains("--policy-gradient"));
         assert!(parse(&argv("base --lora 4 --policy-gradient --truncated drop")).unwrap_err().contains("mask"));
-        assert_eq!(config("base --lora 4 --policy-gradient --advantage-floor zero").unwrap().advantage_floor, brain::AdvantageFloor::Zero);
+        assert_eq!(config("base --lora 4 --policy-gradient --advantage-floor zero").unwrap().loss.advantage_floor, brain::AdvantageFloor::Zero);
         assert!(parse(&argv("base --lora 4 --advantage-floor zero")).unwrap_err().contains("--policy-gradient"));
     }
 
@@ -798,13 +798,13 @@ mod tests {
     fn a_named_algorithm_is_the_base_the_flags_override() {
         let config = |s: &str| parse(&argv(s)).and_then(|a| algorithm_config(&a));
         assert_eq!(config("base --lora 4 --policy-gradient --algorithm dapo"), Ok(brain::PolicyGradientAlgorithm::Dapo.config(0)));
-        assert_eq!(config("base --lora 4 --policy-gradient --algorithm dr-grpo --max-block 256").map(|c| c.loss_agg), Ok(brain::LossAgg::ConstantLength(256)));
-        assert_eq!(config("base --lora 4 --policy-gradient --algorithm dr-grpo --loss-agg-length 64").map(|c| c.loss_agg), Ok(brain::LossAgg::ConstantLength(64)));
+        assert_eq!(config("base --lora 4 --policy-gradient --algorithm dr-grpo --max-block 256").map(|c| c.loss.loss_agg), Ok(brain::LossAgg::ConstantLength(256)));
+        assert_eq!(config("base --lora 4 --policy-gradient --algorithm dr-grpo --loss-agg-length 64").map(|c| c.loss.loss_agg), Ok(brain::LossAgg::ConstantLength(64)));
         assert!(config("base --lora 4 --policy-gradient --algorithm dr-grpo").unwrap_err().contains("--loss-agg-length"));
         assert!(parse(&argv("base --lora 4 --algorithm rloo")).unwrap_err().contains("--policy-gradient"));
         assert!(parse(&argv("base --lora 4 --policy-gradient --algorithm ppo")).unwrap_err().contains("dr-grpo"));
         let dapo = policy_gradient_config(&parse(&argv("base --lora 4 --policy-gradient --algorithm dapo --ratio-clip-high 0.4 --kl-beta 0.01")).unwrap()).unwrap();
-        assert_eq!((dapo.clip_eps_high, dapo.kl_beta, dapo.loss_agg), (Some(0.4), 0.01, brain::LossAgg::TokenSum));
+        assert_eq!((dapo.loss.clip_eps_high, dapo.loss.kl_beta, dapo.loss.loss_agg), (Some(0.4), 0.01, brain::LossAgg::TokenSum));
     }
 
     #[test]

@@ -776,6 +776,7 @@ fn main() {
         verbose: true,
         regime: regime.clone(),
         grpo: rl::objective::grpo::GrpoOptions::default(),
+        grpo_loss: rl::objective::pg_loss::PgLoss::ONLINE,
     };
     let curr = PositionCopy::new(args.rehearsal());
 

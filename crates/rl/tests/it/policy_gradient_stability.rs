@@ -12,7 +12,8 @@
 
 use model::{Objective, StepVerdict};
 use qwen35::model::Qwen35;
-use rl::objective::external::{BehaviourSource, ExternalPolicyGradient, ImportanceCorrection, PolicyGradientConfig, MAX_CONSECUTIVE_GUARD_SKIPS};
+use rl::objective::external::{BehaviourSource, ExternalPolicyGradient, ImportanceCorrection, PolicyGradientConfig};
+use rl::objective::pg_loss::{PgLoss, MAX_CONSECUTIVE_GUARD_SKIPS};
 
 use super::external_policy_gradient::{answer_logprobs, grad_l1, lora_model, no_kl, one_step, started, Row};
 
@@ -43,7 +44,7 @@ fn a_wider_upper_edge_keeps_the_gradient_of_a_token_the_symmetric_band_clips() {
     assert_eq!(grad_l1(&m), 0.0, "clipped at the upper edge");
 
     m.zero_grads();
-    let cfg = PolicyGradientConfig { clip_eps_high: Some(2.0), ..no_kl() };
+    let cfg = PolicyGradientConfig { loss: PgLoss { clip_eps_high: Some(2.0), ..no_kl().loss }, ..no_kl() };
     let (mut obj, _dir) = started(std::slice::from_ref(&row), cfg, &mut m);
     one_step(&mut obj, &m);
     let step = &obj.stats().steps[0];
@@ -136,22 +137,22 @@ fn the_step_guard_skips_a_step_over_its_kl_or_gradient_norm_bound_and_ends_a_run
     assert!(matches!(v, StepVerdict::Apply), "no bound, no skip");
     assert!(obj.stats().steps[0].kl.unwrap() > 1e-4, "the fixture's adapter is off the base, so there is a KL to bound");
 
-    let (v, obj) = verdict(PolicyGradientConfig { max_step_kl: Some(1e-6), ..base });
+    let (v, obj) = verdict(PolicyGradientConfig { loss: PgLoss { max_step_kl: Some(1e-6), ..base.loss }, ..base });
     let StepVerdict::Skip(why) = v else { panic!("a KL over the bound is skipped") };
     assert!(why.contains("KL") && why.contains("bound"), "{why}");
     assert_eq!((obj.stats().steps_skipped_guard, obj.stats().steps[0].skipped.as_deref()), (1, Some(why.as_str())));
     assert!(Objective::<Qwen35>::step_log(&obj).unwrap().contains("SKIPPED"));
 
-    let (v, _) = verdict(PolicyGradientConfig { max_step_kl: Some(100.0), max_step_grad_norm: Some(1e9), ..base });
+    let (v, _) = verdict(PolicyGradientConfig { loss: PgLoss { max_step_kl: Some(100.0), max_step_grad_norm: Some(1e9), ..base.loss }, ..base });
     assert!(matches!(v, StepVerdict::Apply), "bounds above the step let it through");
 
-    let (v, _) = verdict(PolicyGradientConfig { max_step_grad_norm: Some(1e-9), ..base });
+    let (v, _) = verdict(PolicyGradientConfig { loss: PgLoss { max_step_grad_norm: Some(1e-9), ..base.loss }, ..base });
     let StepVerdict::Skip(why) = v else { panic!("a gradient norm over the bound is skipped") };
     assert!(why.contains("gradient norm"), "{why}");
 
     // Every step over the bound: skipped, then the run ends instead of idling.
     let mut m = lora_model(7);
-    let (mut obj, _dir) = started(&[Row::new(&IDS, 3, Some(1.0))], PolicyGradientConfig { max_step_grad_norm: Some(1e-9), ..base }, &mut m);
+    let (mut obj, _dir) = started(&[Row::new(&IDS, 3, Some(1.0))], PolicyGradientConfig { loss: PgLoss { max_step_grad_norm: Some(1e-9), ..base.loss }, ..base }, &mut m);
     for _ in 0..MAX_CONSECUTIVE_GUARD_SKIPS - 1 {
         m.zero_grads();
         Objective::<Qwen35>::micro_steps(&mut obj, &m, &mut data::rng::Rng::new(1), 1);
@@ -178,8 +179,8 @@ fn a_run_whose_steps_the_guard_skips_leaves_every_parameter_unchanged() {
         (before == bits(&m), report.applied_steps, obj.stats().steps_skipped_guard)
     };
     let base = PolicyGradientConfig { behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() };
-    assert_eq!(run(PolicyGradientConfig { max_step_grad_norm: Some(1e-9), ..base }), (true, 0, 3), "(unchanged, applied, skipped) under a gradient-norm bound every step exceeds");
-    assert_eq!(run(PolicyGradientConfig { max_step_kl: Some(1e-9), ..base }), (true, 0, 3), "(unchanged, applied, skipped) under a KL bound every step exceeds");
+    assert_eq!(run(PolicyGradientConfig { loss: PgLoss { max_step_grad_norm: Some(1e-9), ..base.loss }, ..base }), (true, 0, 3), "(unchanged, applied, skipped) under a gradient-norm bound every step exceeds");
+    assert_eq!(run(PolicyGradientConfig { loss: PgLoss { max_step_kl: Some(1e-9), ..base.loss }, ..base }), (true, 0, 3), "(unchanged, applied, skipped) under a KL bound every step exceeds");
     assert_eq!(run(base), (false, 3, 0), "(unchanged, applied, skipped) without a bound");
 }
 
@@ -190,11 +191,11 @@ fn the_stability_settings_are_validated_by_name() {
     let run = super::external_policy_gradient::opts(1, 1, 1e-2);
     let proxy = PolicyGradientConfig { behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() };
     for (bad, named) in [
-        (PolicyGradientConfig { clip_eps_high: Some(0.1), ..proxy }, "clip_eps_high"),
-        (PolicyGradientConfig { clip_eps_high: Some(f32::NAN), ..proxy }, "clip_eps_high"),
-        (PolicyGradientConfig { max_step_kl: Some(0.0), ..proxy }, "max_step_kl"),
-        (PolicyGradientConfig { max_step_grad_norm: Some(-1.0), ..proxy }, "max_step_grad_norm"),
-        (PolicyGradientConfig { max_step_kl: Some(0.1), kl_beta: 0.0, log_kl: false, ..proxy }, "max_step_kl"),
+        (PolicyGradientConfig { loss: PgLoss { clip_eps_high: Some(0.1), ..proxy.loss }, ..proxy }, "clip_eps_high"),
+        (PolicyGradientConfig { loss: PgLoss { clip_eps_high: Some(f32::NAN), ..proxy.loss }, ..proxy }, "clip_eps_high"),
+        (PolicyGradientConfig { loss: PgLoss { max_step_kl: Some(0.0), ..proxy.loss }, ..proxy }, "max_step_kl"),
+        (PolicyGradientConfig { loss: PgLoss { max_step_grad_norm: Some(-1.0), ..proxy.loss }, ..proxy }, "max_step_grad_norm"),
+        (PolicyGradientConfig { loss: PgLoss { max_step_kl: Some(0.1), kl_beta: 0.0, log_kl: false, ..proxy.loss }, ..proxy }, "max_step_kl"),
         (PolicyGradientConfig { importance: ImportanceCorrection::Truncate { cap: 1.0 }, behaviour: BehaviourSource::Recorded, ..Default::default() }, "cap"),
         (PolicyGradientConfig { importance: ImportanceCorrection::Mask { cap: 2.0 }, ..proxy }, "recorded"),
     ] {
@@ -262,7 +263,7 @@ fn a_run_that_keeps_truncated_rollouts_trains_them_with_their_rewards_counted() 
 #[test]
 fn the_numerics_gate_measures_the_serve_train_gap_takes_no_step_and_names_the_bound_it_broke() {
     use rl::objective::numerics::NumericsBounds;
-    let gate = |bounds: NumericsBounds| PolicyGradientConfig { numerics: Some(bounds), behaviour: BehaviourSource::Recorded, kl_beta: 0.0, log_kl: false, ..Default::default() };
+    let gate = |bounds: NumericsBounds| PolicyGradientConfig { loss: PgLoss { kl_beta: 0.0, log_kl: false, ..PgLoss::RECORDED }, numerics: Some(bounds), behaviour: BehaviourSource::Recorded, ..Default::default() };
     let strict = NumericsBounds { max_mean_abs_gap: Some(1e-4), max_abs_gap: Some(1e-3), max_mismatch_kl: Some(1e-6), min_sequence_ess_fraction: Some(0.99), max_grad_norm: Some(1e6) };
     let run = |shift: f32| {
         let mut m = lora_model(31);
@@ -315,12 +316,12 @@ fn every_policy_gradient_run_reports_its_serve_train_gap() {
         assert_ne!(m.read_weight(&m.param_names()[0]), before, "the run trained");
         obj.stats().serve_train_gap.clone().expect("every run reports its serve/train gap")
     };
-    let plain = run(PolicyGradientConfig { behaviour: BehaviourSource::Recorded, kl_beta: 0.0, log_kl: false, ..Default::default() });
+    let plain = run(PolicyGradientConfig { loss: PgLoss { kl_beta: 0.0, log_kl: false, ..PgLoss::RECORDED }, behaviour: BehaviourSource::Recorded, ..Default::default() });
     assert_eq!(plain.sequences, 1, "only the sequence drawn before the first update was under the start-of-run weights");
     assert!((plain.gap_mean - 0.3).abs() < 1e-3 && (plain.gap_mean_abs - 0.3).abs() < 1e-3, "{plain:?}");
     assert!(plain.violations.is_empty(), "nothing is enforced outside the gate: {:?}", plain.violations);
 
-    let corrected = run(PolicyGradientConfig { behaviour: BehaviourSource::Recorded, importance: ImportanceCorrection::Truncate { cap: 2.0 }, kl_beta: 0.0, log_kl: false, ..Default::default() });
+    let corrected = run(PolicyGradientConfig { loss: PgLoss { kl_beta: 0.0, log_kl: false, ..PgLoss::RECORDED }, behaviour: BehaviourSource::Recorded, importance: ImportanceCorrection::Truncate { cap: 2.0 }, ..Default::default() });
     // The dataset holds the two rows and a group partner of each (the same tokens and record, the opposite reward).
     assert_eq!(corrected.sequences, 4, "the start-of-run scoring measures every sequence once");
     assert!((corrected.gap_mean - 0.3).abs() < 1e-3, "{corrected:?}");
@@ -338,7 +339,7 @@ fn the_numerics_gate_refuses_what_would_make_it_meaningless() {
     for (bad, named) in [
         (PolicyGradientConfig { numerics: gate, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }, "recorded"),
         (PolicyGradientConfig { numerics: gate, importance: ImportanceCorrection::Truncate { cap: 2.0 }, ..Default::default() }, "importance"),
-        (PolicyGradientConfig { numerics: gate, max_step_kl: Some(0.1), ..Default::default() }, "guard"),
+        (PolicyGradientConfig { loss: PgLoss { max_step_kl: Some(0.1), ..PgLoss::RECORDED }, numerics: gate, ..Default::default() }, "guard"),
     ] {
         let err = ExternalPolicyGradient::open(dir.path(), &run, bad).err().unwrap_or_else(|| panic!("{named} accepted"));
         assert!(err.to_string().contains(named), "{named}: {err}");

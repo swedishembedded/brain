@@ -690,12 +690,12 @@ mod tests {
         let named = request(params, &[]).expect("every declared default is a value the action accepts");
         assert_eq!(crate::job::policy_gradient_config(&named.params).unwrap(), brain::PolicyGradientConfig::default(), "the declared defaults are the trainer's");
         let pg = brain::PolicyGradientConfig::default();
-        assert_eq!((pg.clip_eps_high, pg.max_step_kl, pg.max_step_grad_norm, pg.advantage_bound, pg.sequence_advantage_cap), (None, None, None, None, None));
+        assert_eq!((pg.loss.clip_eps_high, pg.loss.max_step_kl, pg.loss.max_step_grad_norm, pg.advantage_bound, pg.sequence_advantage_cap), (None, None, None, None, None));
         assert_eq!(off, ["algorithm", "clip_eps_high", "max_step_kl", "max_step_grad_norm", "loss_agg_length", "distill_teacher", "advantage_bound", "sequence_advantage_cap"], "only the settings the trainer leaves off, or that depend on the request (the constant length is max_block's), are undeclared");
         for p in spec.params.iter().filter(|p| p.help.starts_with("preference") || p.help.starts_with("feedback:")) {
             assert!(defaults.contains_key(&p.name), "{}: a preference setting declares its default", p.name);
         }
-        assert_eq!(defaults["loss_agg"], json!(pg.loss_agg.name()), "read from the configuration, not the aggregation's own default");
+        assert_eq!(defaults["loss_agg"], json!(pg.loss.loss_agg.name()), "read from the configuration, not the aggregation's own default");
     }
 
     #[test]
@@ -799,7 +799,7 @@ mod tests {
         let data = json!({"train": {"digest": digest(1)}}).to_string();
         for norm in brain::AdvantageNorm::ALL {
             let named = request(json!({"base": "a/b", "data": data, "objective": "policy_gradient", "advantage_norm": norm.name()}), &[]).unwrap();
-            assert_eq!(crate::job::policy_gradient_config(&named.params).unwrap().advantage_norm, norm);
+            assert_eq!(crate::job::policy_gradient_config(&named.params).unwrap().loss.advantage_norm, norm);
         }
         assert!(request(json!({"base": "a/b", "data": data, "objective": "policy_gradient", "advantage_norm": "standardised"}), &[]).is_err(), "an unknown normalisation is refused by the spec");
         let e = request(json!({"base": "a/b", "data": data, "advantage_norm": "z-score"}), &[]).unwrap_err();
@@ -816,7 +816,7 @@ mod tests {
             p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
             request(p, &[])
         };
-        let config = |r: Request| crate::job::policy_gradient_config(&r.params).unwrap().loss_agg;
+        let config = |r: Request| crate::job::policy_gradient_config(&r.params).unwrap().loss.loss_agg;
         assert_eq!(config(pg(json!({"loss_agg": "constant-length"})).unwrap()), brain::LossAgg::ConstantLength(2048));
         assert_eq!(config(pg(json!({"loss_agg": "constant-length", "loss_agg_length": 512})).unwrap()), brain::LossAgg::ConstantLength(512));
         let e = pg(json!({"loss_agg": "token-sum", "loss_agg_length": 512})).unwrap_err();
@@ -832,7 +832,7 @@ mod tests {
         let data = json!({"train": {"digest": digest(1)}}).to_string();
         for f in brain::AdvantageFloor::ALL {
             let named = request(json!({"base": "a/b", "data": data, "objective": "policy_gradient", "advantage_floor": f.name()}), &[]).unwrap();
-            assert_eq!(crate::job::policy_gradient_config(&named.params).unwrap().advantage_floor, f);
+            assert_eq!(crate::job::policy_gradient_config(&named.params).unwrap().loss.advantage_floor, f);
         }
         assert!(request(json!({"base": "a/b", "data": data, "objective": "policy_gradient", "advantage_floor": "clip"}), &[]).is_err());
         let e = request(json!({"base": "a/b", "data": data, "advantage_floor": "zero"}), &[]).unwrap_err();
@@ -866,11 +866,11 @@ mod tests {
             assert_eq!(pg(json!({"algorithm": algorithm.name()})).unwrap(), algorithm.config(512), "{}", algorithm.name());
         }
         let dapo = pg(json!({"algorithm": "dapo", "clip_eps_high": 0.35, "kl_beta": 0.01, "truncated": "keep"})).unwrap();
-        assert_eq!((dapo.clip_eps_high, dapo.kl_beta, dapo.truncated, dapo.loss_agg), (Some(0.35), 0.01, brain::TruncatedRollouts::Keep, brain::LossAgg::TokenSum));
-        assert_eq!(pg(json!({"algorithm": "dr-grpo", "loss_agg_length": 64})).unwrap().loss_agg, brain::LossAgg::ConstantLength(64), "dr-grpo takes its constant alone");
+        assert_eq!((dapo.loss.clip_eps_high, dapo.loss.kl_beta, dapo.truncated, dapo.loss.loss_agg), (Some(0.35), 0.01, brain::TruncatedRollouts::Keep, brain::LossAgg::TokenSum));
+        assert_eq!(pg(json!({"algorithm": "dr-grpo", "loss_agg_length": 64})).unwrap().loss.loss_agg, brain::LossAgg::ConstantLength(64), "dr-grpo takes its constant alone");
         assert!(pg(json!({"algorithm": "dapo", "loss_agg_length": 64})).is_err(), "dapo's aggregation has no constant");
-        assert_eq!(pg(json!({})).unwrap().dual_clip, Some(brain::DEFAULT_DUAL_CLIP), "the dual clip is on by default");
-        assert_eq!(pg(json!({"dual_clip": 5.0})).unwrap().dual_clip, Some(5.0));
+        assert_eq!(pg(json!({})).unwrap().loss.dual_clip, Some(brain::DEFAULT_DUAL_CLIP), "the dual clip is on by default");
+        assert_eq!(pg(json!({"dual_clip": 5.0})).unwrap().loss.dual_clip, Some(5.0));
         assert!(pg(json!({"dual_clip": 1.0})).is_err(), "a dual clip of one or less is refused");
         assert!(pg(json!({"algorithm": "ppo"})).is_err());
         let e = request(json!({"base": "a/b", "data": data, "algorithm": "rloo"}), &[]).unwrap_err();

@@ -21,6 +21,7 @@ use qwen35::config::{lora_cfg, Qwen35Config};
 use qwen35::model::{pipelines, Qwen35};
 use rl::objective::external::{BehaviourSource, ExternalPolicyGradient, PolicyGradientConfig, ReferencePolicy};
 use rl::objective::pg_batch::with_adapters_disabled;
+use rl::objective::pg_loss::PgLoss;
 
 const T: usize = 12;
 const ANSWER_FROM: usize = 3;
@@ -63,7 +64,7 @@ fn opts(steps: u32, lr: f32) -> FitOpts {
 }
 
 fn config() -> PolicyGradientConfig {
-    PolicyGradientConfig { kl_beta: 0.0, log_kl: false, clip_eps: 0.5, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }
+    PolicyGradientConfig { loss: PgLoss { kl_beta: 0.0, log_kl: false, clip_eps: 0.5, ..PgLoss::RECORDED }, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }
 }
 
 /// The model's log-probability of each supervised token of `ids` (answer from [`ANSWER_FROM`]).

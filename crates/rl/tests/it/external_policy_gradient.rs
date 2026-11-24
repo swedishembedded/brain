@@ -21,6 +21,7 @@ use qwen35::model::{pipelines, Qwen35};
 use rl::objective::external::{BehaviourSource, ExternalPolicyGradient, PolicyGradientConfig, ReferencePolicy};
 use rl::objective::grpo::LossAgg;
 use rl::objective::grpo_term::k3_kl;
+use rl::objective::pg_loss::PgLoss;
 
 pub(crate) const T: usize = 8;
 
@@ -163,7 +164,7 @@ pub(crate) fn one_step(obj: &mut ExternalPolicyGradient, m: &Qwen35) -> f32 {
 }
 
 pub(crate) fn no_kl() -> PolicyGradientConfig {
-    PolicyGradientConfig { kl_beta: 0.0, log_kl: false, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }
+    PolicyGradientConfig { loss: PgLoss { kl_beta: 0.0, log_kl: false, ..PgLoss::RECORDED }, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }
 }
 
 #[test]
@@ -237,7 +238,7 @@ fn the_kl_term_is_the_k3_estimator_against_the_reference_it_names() {
     assert!(want > 1e-4, "the fixture's adapter must move the policy off the base: {want}");
 
     let beta = 0.5;
-    let cfg = PolicyGradientConfig { kl_beta: beta, reference: ReferencePolicy::Base, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() };
+    let cfg = PolicyGradientConfig { loss: PgLoss { kl_beta: beta, ..PgLoss::RECORDED }, reference: ReferencePolicy::Base, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() };
     let (mut obj, _dir) = started(std::slice::from_ref(&row), cfg, &mut m);
     let loss = one_step(&mut obj, &m);
     let step = &obj.stats().steps[0];
@@ -249,7 +250,7 @@ fn the_kl_term_is_the_k3_estimator_against_the_reference_it_names() {
     assert!(grad_l1(&m) > 0.0, "the KL term pulls the policy toward the base");
 
     // Against the policy the run started from, the first step has no KL at all.
-    let cfg = PolicyGradientConfig { kl_beta: beta, reference: ReferencePolicy::StartOfRun, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() };
+    let cfg = PolicyGradientConfig { loss: PgLoss { kl_beta: beta, ..PgLoss::RECORDED }, reference: ReferencePolicy::StartOfRun, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() };
     let (mut obj, _dir) = started(std::slice::from_ref(&row), cfg, &mut m);
     one_step(&mut obj, &m);
     assert!(obj.stats().steps[0].kl.unwrap().abs() < 1e-6);
@@ -358,14 +359,14 @@ fn a_mistaken_configuration_is_refused_before_anything_trains() {
     let dir = tempfile::tempdir().unwrap();
     write_dataset(dir.path(), &[Row::new(&[1, 2, 3, 4], 2, Some(1.0))]);
     let run = opts(1, 1, 1e-2);
-    for bad in [PolicyGradientConfig { clip_eps: 0.0, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }, PolicyGradientConfig { clip_eps: 1.5, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }, PolicyGradientConfig { kl_beta: -0.1, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }, PolicyGradientConfig { temperature: 0.0, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }] {
+    for bad in [PolicyGradientConfig { loss: PgLoss { clip_eps: 0.0, ..PgLoss::RECORDED }, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }, PolicyGradientConfig { loss: PgLoss { clip_eps: 1.5, ..PgLoss::RECORDED }, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }, PolicyGradientConfig { loss: PgLoss { kl_beta: -0.1, ..PgLoss::RECORDED }, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }, PolicyGradientConfig { temperature: 0.0, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }] {
         let err = ExternalPolicyGradient::open(dir.path(), &run, bad).err().expect("refused");
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{err}");
     }
     let wide = FitOpts { batch_size: 2, ..run.clone() };
     let err = ExternalPolicyGradient::open(dir.path(), &wide, PolicyGradientConfig { behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }).err().expect("a sequence mean needs one sequence per batch");
     assert!(err.to_string().contains("TokenSum"), "{err}");
-    assert!(ExternalPolicyGradient::open(dir.path(), &wide, PolicyGradientConfig { loss_agg: LossAgg::TokenSum, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }).is_ok());
+    assert!(ExternalPolicyGradient::open(dir.path(), &wide, PolicyGradientConfig { loss: PgLoss { loss_agg: LossAgg::TokenSum, ..PgLoss::RECORDED }, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() }).is_ok());
 }
 
 #[test]
@@ -383,7 +384,7 @@ fn a_supervised_trainer_refuses_a_dataset_of_rollouts() {
 fn every_step_reports_finite_statistics_and_the_step_log_line_carries_them() {
     let mut m = lora_model(data::rng::random_seed());
     let rows = [Row::rewarded(&[1, 2, 3, 4, 5, 6], 3, 1.0, "g"), Row::rewarded(&[2, 3, 4, 5, 6, 7], 3, -1.0, "g")];
-    let cfg = PolicyGradientConfig { reference: ReferencePolicy::StartOfRun, loss_agg: LossAgg::TokenSum, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() };
+    let cfg = PolicyGradientConfig { loss: PgLoss { loss_agg: LossAgg::TokenSum, ..PgLoss::RECORDED }, reference: ReferencePolicy::StartOfRun, behaviour: BehaviourSource::StartOfRunProxy, ..Default::default() };
     let (mut obj, _dir) = started(&rows, cfg, &mut m);
     assert_eq!(Objective::<Qwen35>::step_log(&obj), None, "nothing to say before the first step");
     for _ in 0..3 {
@@ -540,7 +541,7 @@ fn the_advantages_are_each_groups_rewards_under_the_runs_normalisation() {
     let (a, b) = ([1.0, 0.25], [0.9, 0.1, 0.4, 0.0]);
     let mut by_norm = Vec::new();
     for norm in AdvantageNorm::ALL {
-        let cfg = PolicyGradientConfig { advantage_norm: norm, ..no_kl() };
+        let cfg = PolicyGradientConfig { loss: PgLoss { advantage_norm: norm, ..no_kl().loss }, ..no_kl() };
         let obj = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), cfg).unwrap();
         let (want_a, want_b) = (oracle(norm, &a), oracle(norm, &b));
         let want = [want_a[0], want_a[1], want_a[0], want_b[0], want_b[1], want_b[2], want_b[3]];
@@ -551,7 +552,7 @@ fn the_advantages_are_each_groups_rewards_under_the_runs_normalisation() {
         assert_eq!(obj.stats().sequences_truncated, 1);
         by_norm.push((0..7).map(|e| f64::from(obj.advantage(e).unwrap())).collect::<Vec<_>>());
         // The zero floor clamps what the whole group gave: the failures still set the baseline.
-        let floored = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), PolicyGradientConfig { advantage_floor: rl::objective::advantage::AdvantageFloor::Zero, ..cfg }).unwrap();
+        let floored = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), PolicyGradientConfig { loss: PgLoss { advantage_floor: rl::objective::advantage::AdvantageFloor::Zero, ..cfg.loss }, ..cfg }).unwrap();
         for (e, w) in want.iter().enumerate() {
             let got = f64::from(floored.advantage(e).unwrap());
             assert!((got - w.max(0.0)).abs() <= 1e-6 * w.abs().max(1.0), "{norm:?} floored example {e}: {got} against {}", w.max(0.0));
@@ -583,7 +584,7 @@ fn a_baseline_only_outcome_sets_its_groups_baseline_and_is_never_trained() {
     data::chat::write_split(dir.path(), "val", &split).unwrap();
     std::fs::write(dir.path().join("meta.json"), data::binio::Meta::vocab_only(29)).unwrap();
     for (norm, want) in [(AdvantageNorm::MeanCentered, [0.5, 0.0]), (AdvantageNorm::LeaveOneOut, [1.0, 0.0])] {
-        let obj = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), PolicyGradientConfig { advantage_norm: norm, ..no_kl() }).unwrap();
+        let obj = ExternalPolicyGradient::open(dir.path(), &opts(1, 1, 1e-2), PolicyGradientConfig { loss: PgLoss { advantage_norm: norm, ..no_kl().loss }, ..no_kl() }).unwrap();
         let got: Vec<f32> = (0..2).map(|e| obj.advantage(e).unwrap()).collect();
         assert!(got.iter().zip(want).all(|(g, w)| (f64::from(*g) - w).abs() < 1e-6), "{norm:?}: {got:?} against {want:?}");
         assert_eq!(obj.stats().sequences_with_advantage, 2, "the baselines are no examples");

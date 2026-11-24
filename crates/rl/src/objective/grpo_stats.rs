@@ -35,8 +35,9 @@ pub enum BehaviourRefusal {
     /// supervised tokens (its stop token, which no reference scores, aside): substituting the
     /// behaviour log-probabilities for the missing ones would silently change the KL term.
     IncompleteReference { expected: usize, got: usize },
-    /// A numeric setting no run can honour (`field` is `kl_beta`, `clip_eps`, `clip_eps_high` or `temp`).
-    InvalidNumeric { field: &'static str, value: f32 },
+    /// A numeric setting no run can honour (`field` is a setting of the loss, [`super::pg_loss::PgLoss`], or `temp`;
+    /// `why` names the range it must keep to).
+    InvalidNumeric { field: &'static str, value: f32, why: String },
     /// A count no run can honour: `field` (`group_size`) is `got`, below the `least` it can be.
     InvalidCount { field: &'static str, got: usize, least: usize },
     /// A verifier returned a reward that is not a number (`NaN` or infinite): every advantage of its group would be.
@@ -60,7 +61,7 @@ impl fmt::Display for BehaviourRefusal {
                 "the rollout engine holds the policy of step {engine_version} but the trainer is at step {trainer_version}: the behaviour policy of its samples cannot be reconstructed; sync the engine every group (sync_every 1)"
             ),
             BehaviourRefusal::IncompleteReference { expected, got } => write!(f, "the reference log-probability source returned {got} values for a completion of {expected} tokens; an incomplete reference would silently change the KL term"),
-            BehaviourRefusal::InvalidNumeric { field, value } => write!(f, "{field} must be finite and {}, got {value}", if *field == "kl_beta" || *field == "temp" { "not negative" } else { "positive" }),
+            BehaviourRefusal::InvalidNumeric { why, .. } => f.write_str(why),
             BehaviourRefusal::InvalidCount { field, got, least } => write!(f, "{field} must be at least {least}, got {got}"),
             BehaviourRefusal::NonFiniteReward { value } => write!(f, "the verifier returned the reward {value}, which no advantage can be computed from"),
             BehaviourRefusal::TokenOutOfRange { id, vocab } => write!(f, "token id {id} is outside the model's vocabulary of {vocab}"),
@@ -151,6 +152,13 @@ pub struct GrpoStats {
     /// ([`super::grpo::GrpoOptions::routing_replay`]); the other trained rows routed themselves.
     #[serde(default)]
     pub rows_routing_replayed: usize,
+    /// Of the signed tokens, those whose negative-advantage term the loss's dual clip bounded (a ratio past `c`): no
+    /// gradient, and not counted in [`Self::clipped_high`] or [`Self::clipped_low`].
+    #[serde(default)]
+    pub clipped_dual: usize,
+    /// Optimiser steps the loss's step guard skipped (a KL or gradient norm over its bound).
+    #[serde(default)]
+    pub steps_skipped_guard: usize,
 }
 
 impl GrpoStats {
@@ -185,6 +193,7 @@ impl GrpoStats {
         self.signed_tokens += terms.signed_tokens;
         self.clipped_high += terms.clipped_high;
         self.clipped_low += terms.clipped_low;
+        self.clipped_dual += terms.dual_clipped;
     }
 
     pub(crate) fn refuse(&mut self, why: RowRefusal) {
@@ -219,6 +228,7 @@ impl GrpoStats {
             ("grpo_rows_trained", self.rows_trained as f32),
             ("grpo_rows_short", self.rows_short as f32),
             ("grpo_steps_skipped_nonfinite", self.steps_skipped_nonfinite as f32),
+            ("grpo_steps_skipped_guard", self.steps_skipped_guard as f32),
             ("grpo_rows_refused", self.rows_refused as f32),
             ("grpo_completions_truncated", self.completions_truncated as f32),
             ("grpo_sampler_gap", self.max_sampler_gap),
@@ -234,7 +244,7 @@ impl GrpoStats {
         }
         if let Some(clipped) = self.clip_fraction() {
             let share = |n: usize| n as f32 / self.signed_tokens as f32;
-            m.extend([("grpo_clip_frac", clipped), ("grpo_clip_frac_high", share(self.clipped_high)), ("grpo_clip_frac_low", share(self.clipped_low))]);
+            m.extend([("grpo_clip_frac", clipped), ("grpo_clip_frac_high", share(self.clipped_high)), ("grpo_clip_frac_low", share(self.clipped_low)), ("grpo_clip_frac_dual", share(self.clipped_dual))]);
         }
         m
     }

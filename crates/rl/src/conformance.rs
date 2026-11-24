@@ -31,8 +31,8 @@ use crate::objective::advantage::group_advantages_with;
 use crate::objective::external::{PolicyGradientAlgorithm, PolicyGradientConfig};
 use crate::objective::feedback::{weigh_feedback, Feedback, FeedbackConfig, PackedFeedback, FEEDBACK_ROWS};
 use crate::objective::grpo::{token_term, Grpo, GrpoConfig};
-use crate::objective::grpo_term::ClipBand;
-use crate::objective::pg_batch::{backward_weighted, PgBatch, PgSpec};
+use crate::objective::pg_batch::{backward_weighted, PgBatch};
+use crate::objective::pg_loss::PgLoss;
 
 /// The learning rate of the single step: large enough to move a rank-2
 /// adapter measurably, small enough to stay in the loss's linear regime.
@@ -166,11 +166,11 @@ fn policy_gradient_step<M: Model>(name: &str, regime: &str, config: &PolicyGradi
     m.forward();
     let start = model::training::objectives(m).batch_token_logprobs();
     let rewards: Vec<f64> = (0..BATCH).map(|r| if r == 0 { 1.0 } else { 0.0 }).collect();
-    let by_row = group_advantages_with(config.advantage_norm, &rewards);
+    let by_row = group_advantages_with(config.loss.advantage_norm, &rewards);
     let advantage: Vec<f32> = (0..tokens.len()).map(|i| by_row[i / row] as f32).collect();
     let supervised = targets.iter().filter(|&&t| t != IGNORE).count();
-    let denominator = config.loss_agg.denominator(BATCH as usize, supervised, 1);
-    let spec = PgSpec::clipped(ClipBand { low: config.clip_eps, high: config.clip_eps_high.unwrap_or(config.clip_eps), dual: config.dual_clip }, config.kl_beta);
+    let denominator = config.loss.loss_agg.denominator(BATCH as usize, supervised, 1);
+    let spec = config.loss.spec();
     lowers(name, regime, m, &mut || {
         m.set_batch(Batch::Lm { tokens, targets });
         m.forward();
@@ -229,8 +229,7 @@ fn refuses_every_objective<M: Model>(subject: &Subject<M>, seed: u64) -> Result<
     refused("distillation", Objective::<M>::prepare(&mut distill, &mut m))?;
     let grpo_cfg = GrpoConfig {
         group_size: 2,
-        clip_eps: CLIP_EPS,
-        kl_beta: 0.0,
+        loss: PgLoss { clip_eps: CLIP_EPS, ..PgLoss::ONLINE },
         seq_len: SEQ as usize,
         rollout: model::rollout::RolloutParams { max_new: 2, sample: model::serve::SampleParams::greedy(), eos: None },
         max_attempts: 1,

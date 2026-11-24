@@ -69,6 +69,7 @@ use rl::env::Environment;
 use rl::gate::{Decision, GateConfig};
 use rl::improve::{self, AdapterMeta};
 use rl::objective::grpo::{AdvantageNorm, GrpoOptions, LossAgg, RatioBasis};
+use rl::objective::pg_loss::PgLoss;
 
 // ---------------------------------------------------------------------------
 // PRE-REGISTERED CONSTANTS
@@ -360,6 +361,7 @@ fn study_config_for(seed: u64, cycles: usize, work_dir: PathBuf, plasticity_cont
         // else.
         regime: Regime::Grpo,
         grpo: GrpoOptions::default(),
+        grpo_loss: PgLoss::ONLINE,
     }
 }
 
@@ -711,7 +713,8 @@ fn reduced_ablation_of_the_ratio_basis_and_dynamic_sampling() {
     let targets = lora_targets();
     let seeds: Vec<u64> = (0..ABLATION_REPLICATES).map(|_| data::rng::random_seed()).collect();
     println!("E1 seeds {seeds:?}");
-    let legacy = GrpoOptions { advantage: AdvantageNorm::ZScore, loss_agg: LossAgg::SeqMean, clip_eps_high: 0.2, resample_factor: 1, log_kl: false, ..GrpoOptions::default() };
+    let legacy = GrpoOptions { resample_factor: 1, ..GrpoOptions::default() };
+    let legacy_loss = PgLoss { advantage_norm: AdvantageNorm::ZScore, loss_agg: LossAgg::SeqMean, clip_eps_high: Some(0.2), log_kl: false, ..PgLoss::ONLINE };
     let arms = [
         ("A sampler ratio", GrpoOptions { ratio_basis: RatioBasis::Sampler, ..legacy }),
         ("B trainer ratio", GrpoOptions { ratio_basis: RatioBasis::Trainer, ..legacy }),
@@ -721,7 +724,7 @@ fn reduced_ablation_of_the_ratio_basis_and_dynamic_sampling() {
     for (s, &seed) in seeds.iter().enumerate() {
         for (a, (name, options)) in arms.iter().enumerate() {
             let work = dir.join(format!("seed{s}-arm{a}"));
-            let cfg = StudyConfig { grpo: *options, ..study_config_for(seed, ABLATION_CYCLES, work, false, GatePolicy::Real) };
+            let cfg = StudyConfig { grpo: *options, grpo_loss: legacy_loss, ..study_config_for(seed, ABLATION_CYCLES, work, false, GatePolicy::Real) };
             let report = continual::run_study::<Qwen, _>(&spec(&base, &targets), &PositionCopy::new(0), &cfg).expect("run_study");
             acc[a][s] = report.acc;
             println!("seed {seed}  {name:<30}  ACC {:.3}  promotions {}  diagonal {:?}", report.acc, report.promotions, report.r_matrix.iter().enumerate().map(|(k, row)| (row[k] * 1000.0).round() / 1000.0).collect::<Vec<_>>());

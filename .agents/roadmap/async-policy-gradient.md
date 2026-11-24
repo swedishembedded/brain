@@ -70,7 +70,10 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
 - [ ] **One policy-gradient configuration** (A03-A04; `engineering-cleanup.md` EC-1, EC-2): settings declared once
       for objective, SDK, CLI and the served job; `Grpo` and the external objective share one loss config (dual clip,
       step guards included); the estimator (`ClippedSurrogate | ScoreCentred`) is a variant of the shared `pg_batch`
-      path, independent of the experience source and scheduling.
+      path, independent of the experience source and scheduling. Done: EC-1 (`rl::objective::pg_settings`, one row per
+      setting) and EC-2 (`rl::objective::pg_loss::PgLoss` in both configs). Open: the `estimator` setting (wire
+      `clipped` | `score-centred`) and its centring band (0.5 / 5.0) as three `WhenNotDefault` rows over a `PgLoss`
+      field, so they join the run identity only off their defaults.
 - [ ] **Model-free oracles** (A05-A06). Done: `it::pg_estimator_oracle::sampled_group_estimates_converge_to_their_exact_expectations`
       (four actions, groups of three with z-scored advantages, both estimators' means over 4000 sampled groups within
       5 standard errors of their exact expectations over all 64 groups; under a constant advantage the score-centred

@@ -64,6 +64,7 @@ use rl::curriculum::{self, ContentSplit, PositionCopyEnv, PositionCopyVerifier, 
 use rl::env::{Environment, Task};
 use rl::improve;
 use rl::objective::grpo::{CycleLog, Grpo, GrpoConfig};
+use rl::objective::pg_loss::PgLoss;
 
 /// Frozen held-out probes, drawn from the EVAL content split: the same rule,
 /// content tuples that the explore split can never produce (the partition is a
@@ -193,9 +194,8 @@ fn train_round(base: &Path, out: &Path, env: PositionCopyEnv, args: &Args, round
     let init = c.by_role("");
     let model = Qwen::new(cfg.clone(), 1, cfg.block_size(), &init);
     let grpo = GrpoConfig {
+        loss: PgLoss::ONLINE,
         group_size: args.group_size,
-        clip_eps: 0.2,
-        kl_beta: 0.0,
         seq_len: curriculum::SEQ_LEN,
         rollout: RolloutParams { max_new: curriculum::OUT_LEN, sample: SampleParams { temp: args.temp, top_k: 0, top_p: 1.0, ..SampleParams::greedy() }, eos: None },
         max_attempts: 1,

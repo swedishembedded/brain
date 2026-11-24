@@ -626,7 +626,7 @@ policy-gradient objective of GRPO/PPO on rollouts an orchestrator collected outs
 record. Each model call of an agent is one chat record whose trained assistant turn is the action; the orchestrator
 scores the rollout with an independent verifier and writes its reward, and the group of rollouts it is compared with,
 on every record of that rollout (training-record contract version 2). The run turns each group's rewards into the
-advantages of its rollouts (`PolicyGradientConfig::advantage_norm`). A record whose rollout's advantage is negative
+advantages of its rollouts (`PgLoss::advantage_norm`, in `PolicyGradientConfig::loss`). A record whose rollout's advantage is negative
 lowers the probability of its action, a positive one raises it.
 
 ```json
@@ -729,7 +729,7 @@ lowers the probability of its action, a positive one raises it.
   a supervised one); they train through the same vision path.
 
 ```rust
-use brain::{AdvantageFloor, AdvantageNorm, BehaviourSource, ChatFineTune, ImportanceCorrection, LossAgg, PolicyGradientConfig, ReferencePolicy, TruncatedRollouts};
+use brain::{AdvantageFloor, AdvantageNorm, BehaviourSource, ChatFineTune, ImportanceCorrection, LossAgg, PgLoss, PolicyGradientConfig, ReferencePolicy, TruncatedRollouts};
 
 let outcome = ChatFineTune::from_pretrained("Qwen/Qwen3.8-27B-FP8")
     .arch("qwen35")
@@ -740,23 +740,28 @@ let outcome = ChatFineTune::from_pretrained("Qwen/Qwen3.8-27B-FP8")
     .steps(40)
     .grad_accum(8)
     .policy_gradient(PolicyGradientConfig {
-        clip_eps: 0.2,                         // ratio clipped to [0.8, 1.2]
-        clip_eps_high: Some(0.28),             // widen the upper edge to 1.28 ("clip-higher"); None: symmetric
+        // The loss, the one online GRPO (`GrpoConfig::loss`) trains too.
+        loss: PgLoss {
+            clip_eps: 0.2,                         // ratio clipped to [0.8, 1.2]
+            clip_eps_high: Some(0.28),             // widen the upper edge to 1.28 ("clip-higher"); None: symmetric
+            dual_clip: Some(3.0),                  // a negative advantage's term bounded at 3|A|, no gradient past it
+            kl_beta: 0.02,                         // k3 KL to the reference; 0 for none
+            log_kl: true,                          // report the KL even when kl_beta is 0
+            loss_agg: LossAgg::SeqMean,            // per-sequence token mean (GRPO), TokenSum, or ConstantLength(n) (Dr. GRPO)
+            advantage_norm: AdvantageNorm::MeanCentered, // or ZScore, LeaveOneOut: how a group's rewards become advantages
+            advantage_floor: AdvantageFloor::None, // or Zero: clamp at 0 after the group's baseline (successes alone train)
+            max_step_kl: Some(0.1),                // skip (and log) a step whose KL to the reference is over this
+            max_step_grad_norm: Some(5.0),         // skip (and log) a step whose gradient norm is over this
+        },
         importance: ImportanceCorrection::Truncate { cap: 2.0 }, // engine-vs-trainer correction; None for none
-        max_step_kl: Some(0.1),                // skip (and log) a step whose KL to the reference is over this
-        max_step_grad_norm: Some(5.0),         // skip (and log) a step whose gradient norm is over this
-        kl_beta: 0.02,                         // k3 KL to the reference; 0 for none
         reference: ReferencePolicy::Base,      // the base, or StartOfRun: the adapter this run began from
         behaviour: BehaviourSource::Recorded,  // the sampler's recorded log-probs (exact), or StartOfRunProxy
-        loss_agg: LossAgg::SeqMean,            // per-sequence token mean (GRPO), TokenSum, or ConstantLength(n) (Dr. GRPO)
         temperature: 1.0,                      // the temperature the collector sampled with
-        log_kl: true,                          // report the KL even when kl_beta is 0
         teacher: ReferencePolicy::Base,        // self-distillation: Base, or StartOfRun, scores the privileged view
         advantage_bound: Some(5.0),            // clip each token's teacher advantage to [-5, 5]; None for none
         sequence_advantage_cap: Some(50.0),    // cap a sequence's summed |A_t| by scaling it down; None for none
-        advantage_norm: AdvantageNorm::MeanCentered, // or ZScore, LeaveOneOut: how a group's rewards become advantages
-        advantage_floor: AdvantageFloor::None, // or Zero: clamp at 0 after the group's baseline (successes alone train)
         truncated: TruncatedRollouts::Mask,    // or Keep: a truncated rollout trains, its reward counted in its group
+        ..Default::default()
     })
     .run()?;
 for step in &outcome.policy_gradient.unwrap().stats.steps {

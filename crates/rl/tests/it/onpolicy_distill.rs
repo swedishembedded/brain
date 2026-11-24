@@ -23,6 +23,7 @@ use qwen35::config::{lora_cfg, Qwen35Config};
 use qwen35::model::{pipelines, Qwen35};
 use rl::objective::external::{ExternalPolicyGradient, PolicyGradientConfig};
 use rl::objective::onpolicy_distill::{sequence_advantages, DistillRefusal};
+use rl::objective::pg_loss::PgLoss;
 
 const T: usize = 12;
 const ANSWER_FROM: usize = 3;
@@ -45,7 +46,7 @@ fn opts() -> FitOpts {
 }
 
 fn config(teacher_tokenizer: Option<TokenizerIdentity>) -> PolicyGradientConfig {
-    PolicyGradientConfig { kl_beta: 0.0, log_kl: false, teacher_tokenizer, ..Default::default() }
+    PolicyGradientConfig { loss: PgLoss { kl_beta: 0.0, log_kl: false, ..PgLoss::RECORDED }, teacher_tokenizer, ..Default::default() }
 }
 
 /// One rollout example: `ids`, supervised from [`ANSWER_FROM`], with recorded behaviour log-probabilities, the teacher's

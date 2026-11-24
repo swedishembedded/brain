@@ -22,8 +22,8 @@
 //! [`InReport::WhenNotDefault`]: it joins the identity and the settings only when its value is not the default, so a
 //! run that does not use it keeps the identity, and the adapter card, it had.
 //!
-//! **Adding a setting.** Add the field to [`PolicyGradientConfig`] and to [`FIELDS`] (a field missing there does not
-//! compile), and one row here: its served param, CLI flag and identity follow. The table's own test refuses a field
+//! **Adding a setting.** Add the field to [`PolicyGradientConfig`] (or its [`PgLoss`]) and to [`FIELDS`] (a field
+//! missing there does not compile), and one row here: its served param, CLI flag and identity follow. The table's own test refuses a field
 //! without a row, a row without a field, and a surface left out without a reason.
 
 use serde_json::{json, Value};
@@ -32,6 +32,7 @@ use super::advantage::{AdvantageFloor, AdvantageNorm};
 use super::external::{BehaviourSource, ImportanceCorrection, PolicyGradientConfig, ReferencePolicy};
 use super::grpo::LossAgg;
 use super::numerics::NumericsBounds;
+use super::pg_loss::PgLoss;
 use data::chat_rollout::TruncatedRollouts;
 use data::tokenizer_identity::TokenizerIdentity;
 use model::kv_tier::KvElement;
@@ -313,26 +314,26 @@ const NOT_ON_THE_CLI: &str = "brain finetune never took it (the served action an
 
 /// Every setting, in the order the served action lists them.
 pub static SETTINGS: &[PgSetting] = &[
-    row!("clip_eps", clip_eps, SettingKind::Float { min: 0.0, max: 1.0 }, "policy gradient: half-width of the clip band of the importance ratio",
+    row!("clip_eps", loss.clip_eps, SettingKind::Float { min: 0.0, max: 1.0 }, "policy gradient: half-width of the clip band of the importance ratio",
         served: Served::Param, flag: Flag::Named("--ratio-clip"), identity: InIdentity::Bits, report: InReport::Always, example: Some("0.3")),
-    row!("clip_eps_high", clip_eps_high, SettingKind::Float { min: 0.0, max: 10.0 }, "policy gradient: the upper edge of the clip band is 1 + this (clip-higher), at least clip_eps; omitted, the band is symmetric",
+    row!("clip_eps_high", loss.clip_eps_high, SettingKind::Float { min: 0.0, max: 10.0 }, "policy gradient: the upper edge of the clip band is 1 + this (clip-higher), at least clip_eps; omitted, the band is symmetric",
         served: Served::Param, flag: Flag::Named("--ratio-clip-high"), identity: InIdentity::Bits, report: InReport::Always, example: Some("0.35")),
-    row!("dual_clip", dual_clip, SettingKind::Float { min: 1.0, max: 1e9 }, "policy gradient: dual-clip PPO's bound c on a negative advantage's term, max(min(r*A, clip(r)*A), c*A): a token whose ratio ran past c costs at most c*|A| and gives no gradient (each step reports the share as clip_fraction_dual); above 1",
+    row!("dual_clip", loss.dual_clip, SettingKind::Float { min: 1.0, max: 1e9 }, "policy gradient: dual-clip PPO's bound c on a negative advantage's term, max(min(r*A, clip(r)*A), c*A): a token whose ratio ran past c costs at most c*|A| and gives no gradient (each step reports the share as clip_fraction_dual); above 1",
         served: Served::Param, flag: Flag::Named("--dual-clip"), identity: InIdentity::Bits, report: InReport::Always, example: Some("4.0")),
     row!("importance", importance, SettingKind::Text, "policy gradient: the correction for the sampling engine's gap to the trainer: `none`, `truncate:CAP` or `mask:CAP`; needs recorded behaviour log-probabilities",
         served: Served::Param, flag: Flag::Named("--importance"), identity: InIdentity::Legacy("importance", |c| serde_json::to_value(c.importance).unwrap_or_default()), report: InReport::Always, example: Some("\"truncate:2\"")),
-    row!("max_step_kl", max_step_kl, SettingKind::Float { min: 0.0, max: 1e9 }, "policy gradient: skip (and log) an optimiser step whose mean KL to the reference is over this",
+    row!("max_step_kl", loss.max_step_kl, SettingKind::Float { min: 0.0, max: 1e9 }, "policy gradient: skip (and log) an optimiser step whose mean KL to the reference is over this",
         served: Served::Param, flag: Flag::Named("--max-step-kl"), identity: InIdentity::Bits, report: InReport::Always, example: Some("0.1")),
-    row!("max_step_grad_norm", max_step_grad_norm, SettingKind::Float { min: 0.0, max: 1e12 }, "policy gradient: skip (and log) an optimiser step whose gradient norm is over this",
+    row!("max_step_grad_norm", loss.max_step_grad_norm, SettingKind::Float { min: 0.0, max: 1e12 }, "policy gradient: skip (and log) an optimiser step whose gradient norm is over this",
         served: Served::Param, flag: Flag::Named("--max-step-grad-norm"), identity: InIdentity::Bits, report: InReport::Always, example: Some("5.0")),
-    row!("kl_beta", kl_beta, SettingKind::Float { min: 0.0, max: 1000.0 }, "policy gradient: coefficient of the KL term to the reference policy",
+    row!("kl_beta", loss.kl_beta, SettingKind::Float { min: 0.0, max: 1000.0 }, "policy gradient: coefficient of the KL term to the reference policy",
         served: Served::Param, flag: Flag::Named("--kl-beta"), identity: InIdentity::Bits, report: InReport::Always, example: Some("0.05")),
     row!("reference", reference, SettingKind::Choice(|| ReferencePolicy::ALL.map(ReferencePolicy::name).to_vec()), "policy gradient: the policy the KL term is taken against",
         served: Served::Param, flag: Flag::No(NOT_ON_THE_CLI), identity: InIdentity::Wire, report: InReport::Always, example: Some("\"start\"")),
     row!("behaviour", behaviour, SettingKind::Choice(|| BehaviourSource::ALL.map(BehaviourSource::name).to_vec()), "policy gradient: where the behaviour log-probabilities of the importance ratio come from: `recorded` (default) the sampler's own, required on every supervised token; `start_of_run_proxy` the start-of-run policy's where none was recorded, exact only if the rollouts were sampled from it",
         served: Served::Param, flag: Flag::Named("--behaviour"), identity: InIdentity::Wire, report: InReport::Always, example: Some("\"start_of_run_proxy\"")),
-    row!("loss_agg", loss_agg, SettingKind::Choice(|| vec!["seq-mean", "token-sum", "constant-length"]), "policy gradient: how the token terms are normalised: `seq-mean` (each sequence by its own token count), `token-sum` (every token of a step by the step's count) or `constant-length` (each sequence's sum by loss_agg_length, averaged over the sequences: Dr. GRPO)",
-        served: Served::Own(|c| json!(c.loss_agg.name())), flag: Flag::Own("--loss-agg"), identity: InIdentity::Legacy("loss_agg", |c| json!(format!("{:?}", c.loss_agg))), report: InReport::Always, example: Some("\"token-sum\"")),
+    row!("loss_agg", loss.loss_agg, SettingKind::Choice(|| vec!["seq-mean", "token-sum", "constant-length"]), "policy gradient: how the token terms are normalised: `seq-mean` (each sequence by its own token count), `token-sum` (every token of a step by the step's count) or `constant-length` (each sequence's sum by loss_agg_length, averaged over the sequences: Dr. GRPO)",
+        served: Served::Own(|c| json!(c.loss.loss_agg.name())), flag: Flag::Own("--loss-agg"), identity: InIdentity::Legacy("loss_agg", |c| json!(format!("{:?}", c.loss.loss_agg))), report: InReport::Always, example: Some("\"token-sum\"")),
     row!("temperature", temperature, SettingKind::Float { min: 0.0, max: 100.0 }, "policy gradient: the temperature the rollouts were sampled at",
         served: Served::Param, flag: Flag::No(NOT_ON_THE_CLI), identity: InIdentity::Bits, report: InReport::Always, example: Some("0.7")),
     row!("teacher", teacher, SettingKind::Text, "policy gradient with teacher contexts: the frozen policy that scores the student's tokens in the privileged context, `base` or `start`; distill: the policy of the same base that teaches, `base`, `start` (the start_adapter) or `adapter:<blake3 digest>` (an adapter in the artifact store)",
@@ -341,11 +342,11 @@ pub static SETTINGS: &[PgSetting] = &[
         served: Served::Param, flag: Flag::No(NOT_ON_THE_CLI), identity: InIdentity::Bits, report: InReport::Always, example: Some("2.0")),
     row!("sequence_advantage_cap", sequence_advantage_cap, SettingKind::Float { min: 0.0, max: 1e9 }, "policy gradient with teacher contexts: the most the magnitudes of a sequence's token advantages may sum to",
         served: Served::Param, flag: Flag::No(NOT_ON_THE_CLI), identity: InIdentity::Bits, report: InReport::Always, example: Some("3.0")),
-    row!("advantage_floor", advantage_floor, SettingKind::Choice(|| AdvantageFloor::ALL.map(AdvantageFloor::name).to_vec()), "policy gradient: `none` (default) or `zero`: each advantage clamped at zero after it is computed against its whole group, so a rollout under the baseline sets it but carries no policy gradient (a positive-only run)",
+    row!("advantage_floor", loss.advantage_floor, SettingKind::Choice(|| AdvantageFloor::ALL.map(AdvantageFloor::name).to_vec()), "policy gradient: `none` (default) or `zero`: each advantage clamped at zero after it is computed against its whole group, so a rollout under the baseline sets it but carries no policy gradient (a positive-only run)",
         served: Served::Param, flag: Flag::Named("--advantage-floor"), identity: InIdentity::Wire, report: InReport::Always, example: Some("\"zero\"")),
     row!("truncated", truncated, SettingKind::Choice(|| TruncatedRollouts::ALL.map(TruncatedRollouts::name).to_vec()), "policy gradient: what a rollout marked `truncated` does: `mask` (never trained, its reward takes no part in its group: DAPO's overlong filtering) or `keep` (trained, its reward counted)",
         served: Served::Param, flag: Flag::Named("--truncated"), identity: InIdentity::Wire, report: InReport::Always, example: Some("\"keep\"")),
-    row!("advantage_norm", advantage_norm, SettingKind::Choice(|| AdvantageNorm::ALL.map(AdvantageNorm::name).to_vec()), "policy gradient: how each group's rewards become the advantages of its rollouts: `mean-centred` (r - mean), `z-score` ((r - mean) / (std + 1e-4)) or `leave-one-out` (r_i - the mean of the others)",
+    row!("advantage_norm", loss.advantage_norm, SettingKind::Choice(|| AdvantageNorm::ALL.map(AdvantageNorm::name).to_vec()), "policy gradient: how each group's rewards become the advantages of its rollouts: `mean-centred` (r - mean), `z-score` ((r - mean) / (std + 1e-4)) or `leave-one-out` (r_i - the mean of the others)",
         served: Served::Param, flag: Flag::Named("--advantage-norm"), identity: InIdentity::Wire, report: InReport::Always, example: Some("\"z-score\"")),
     row!("numerics", numerics, SettingKind::Document, "policy gradient: run as the numerics gate, no optimiser step, judged against these bounds",
         served: Served::No("the numerics gate is a measurement run (no optimiser step, no adapter worth serving) that brain finetune --numerics-gate runs on the trainer's host"),
@@ -354,7 +355,7 @@ pub static SETTINGS: &[PgSetting] = &[
     row!("kv_roundtrip", kv_roundtrip, SettingKind::Text, "policy gradient: read the trainer's attention keys and values through the encoding of the KV cache the rollouts were sampled with",
         served: Served::No("not offered on the served action: it trains in the trainer's own precision"), flag: Flag::Named("--kv-roundtrip"), identity: InIdentity::Wire, report: InReport::Always, example: Some("\"Int8\""),
         flag_value: |tier| model::kv_tier::KvTier::parse(tier).map(|t| t.element().to_wire())),
-    row!("log_kl", log_kl, SettingKind::Switch, "policy gradient: measure and report the KL to the reference when kl_beta is zero",
+    row!("log_kl", loss.log_kl, SettingKind::Switch, "policy gradient: measure and report the KL to the reference when kl_beta is zero",
         served: Served::No("the served action always measures the KL (the default)"), flag: Flag::No("brain finetune always measures the KL (the default)"),
         identity: InIdentity::Excluded("a measurement: it changes no weight by itself, and the KL bound it enables (max_step_kl) is in the identity"),
         report: InReport::Excluded("a measurement: each step's kl is null when it was not measured"), example: Some("false")),
@@ -362,20 +363,23 @@ pub static SETTINGS: &[PgSetting] = &[
         served: Served::No("the server compares the tokenizer of distill_teacher, the teacher model a request names"), flag: Flag::No("worked out from the teacher model, which the SDK names"), identity: InIdentity::Wire, report: InReport::Always, example: None),
 ];
 
-/// Every field of [`PolicyGradientConfig`], by name. `_EVERY_FIELD` destructures the config with each of them and no
-/// `..`, so a field added to the config does not compile until it is listed here, and the table's test then asks for
-/// its row.
+/// Every field of [`PolicyGradientConfig`] and of its [`PgLoss`], by name. `_EVERY_FIELD` destructures the config with
+/// each of them and no `..`, so a field added to either does not compile until it is listed here, and the table's test
+/// then asks for its row.
 macro_rules! fields {
-    ($($field:ident),* $(,)?) => {
-        /// Every field of [`PolicyGradientConfig`], by name.
-        pub const FIELDS: &[&str] = &[$(stringify!($field)),*];
+    (loss { $($loss:ident),* $(,)? }, $($field:ident),* $(,)?) => {
+        /// Every field of [`PolicyGradientConfig`] and of its [`PgLoss`], by name.
+        pub const FIELDS: &[&str] = &[$(stringify!($loss),)* $(stringify!($field)),*];
         const _EVERY_FIELD: fn(PolicyGradientConfig) = |c| {
-            let PolicyGradientConfig { $($field: _),* } = c;
+            let PolicyGradientConfig { loss: PgLoss { $($loss: _),* }, $($field: _),* } = c;
         };
     };
 }
 
-fields!(clip_eps, clip_eps_high, dual_clip, importance, max_step_kl, numerics, kv_roundtrip, max_step_grad_norm, kl_beta, reference, behaviour, loss_agg, temperature, log_kl, teacher, advantage_bound, sequence_advantage_cap, advantage_norm, advantage_floor, truncated, teacher_tokenizer);
+fields!(
+    loss { clip_eps, clip_eps_high, dual_clip, kl_beta, log_kl, loss_agg, advantage_norm, advantage_floor, max_step_kl, max_step_grad_norm },
+    importance, numerics, kv_roundtrip, reference, behaviour, temperature, teacher, advantage_bound, sequence_advantage_cap, truncated, teacher_tokenizer,
+);
 
 /// The row of the setting `name`.
 pub fn setting(name: &str) -> Option<&'static PgSetting> {
@@ -531,6 +535,6 @@ mod tests {
         assert_eq!(patch.names().collect::<Vec<_>>(), ["truncated", "kl_beta"]);
         let mut config = super::super::external::PolicyGradientAlgorithm::Dapo.config(64);
         patch.apply(&mut config).unwrap();
-        assert_eq!((config.kl_beta, config.truncated, config.loss_agg), (0.25, TruncatedRollouts::Keep, LossAgg::TokenSum));
+        assert_eq!((config.loss.kl_beta, config.truncated, config.loss.loss_agg), (0.25, TruncatedRollouts::Keep, LossAgg::TokenSum));
     }
 }

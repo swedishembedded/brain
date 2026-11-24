@@ -15,6 +15,7 @@
 use qwen3::{Qwen, QwenConfig};
 use rl::env::{Environment, Reward, Step, Task, Verifier};
 use rl::objective::grpo::{AdvantageNorm, Grpo, GrpoConfig, GrpoOptions};
+use rl::objective::pg_loss::PgLoss;
 
 /// A single fixed prompt whose target continuation is a fixed token
 /// sequence - `Task::answer` carries the target (what a verifier needs to
@@ -66,9 +67,8 @@ fn grpo_group_size_one_is_the_rft_star_path_and_runs_end_to_end() {
 
     let env = FixedTargetEnv { prompt: vec![1, 2, 3], target: vec![4, 5, 6] };
     let grpo_cfg = GrpoConfig {
+        loss: PgLoss::ONLINE,
         group_size: 1,
-        clip_eps: 0.2,
-        kl_beta: 0.0,
         seq_len: 8,
         rollout: model::rollout::RolloutParams {
             max_new: 3,
@@ -141,13 +141,12 @@ fn an_external_rollout_is_synced_on_schedule_and_its_logprobs_are_recomputed() {
     let mut model = Qwen::new(cfg, 1, 8, &init);
     let syncs = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let grpo_cfg = GrpoConfig {
+        loss: PgLoss { advantage_norm: AdvantageNorm::ZScore, ..PgLoss::ONLINE },
         group_size: 2,
-        clip_eps: 0.2,
-        kl_beta: 0.0,
         seq_len: 8,
         rollout: model::rollout::RolloutParams { max_new: 3, sample: model::serve::SampleParams { temp: 1.0, top_k: 0, top_p: 1.0, ..model::serve::SampleParams::greedy() }, eos: None },
         max_attempts: 1,
-        options: GrpoOptions { advantage: AdvantageNorm::ZScore, ..GrpoOptions::default() },
+        options: GrpoOptions::default(),
     };
     let env = FixedTargetEnv { prompt: vec![1, 2, 3], target: vec![4, 5, 6] };
     let mut obj = Grpo::try_new(env, FracMatchVerifier, grpo_cfg).expect("a valid GRPO configuration").with_rollout(Box::new(RecordingRollout { syncs: syncs.clone() }), 2);

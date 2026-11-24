@@ -18,6 +18,7 @@ use model::{FitOpts, Objective, StepVerdict};
 use qwen35::model::Qwen35;
 use rl::objective::external::{BehaviourSource, ExternalPolicyGradient, PolicyGradientConfig, ReferencePolicy};
 use rl::objective::grpo::LossAgg;
+use rl::objective::pg_loss::PgLoss;
 
 use super::external_policy_gradient::{answer_logprobs, lora_model, lora_model_rows, opts, write_dataset, Row};
 
@@ -79,7 +80,7 @@ fn step_gradient(m: &mut Qwen35, rows: &[Row], agg: LossAgg) -> Vec<Vec<f32>> {
     let dir = tempfile::tempdir().unwrap();
     write_dataset(dir.path(), rows);
     let run = opts(1, rows.len() as u32, 1e-2);
-    let cfg = PolicyGradientConfig { clip_eps: CLIP_EPS as f32, kl_beta: KL_BETA as f32, reference: ReferencePolicy::Base, behaviour: BehaviourSource::Recorded, loss_agg: agg, ..Default::default() };
+    let cfg = PolicyGradientConfig { loss: PgLoss { clip_eps: CLIP_EPS as f32, kl_beta: KL_BETA as f32, loss_agg: agg, ..PgLoss::RECORDED }, reference: ReferencePolicy::Base, behaviour: BehaviourSource::Recorded, ..Default::default() };
     let mut obj = ExternalPolicyGradient::open(dir.path(), &run, cfg).unwrap();
     Objective::<Qwen35>::prepare(&mut obj, m).unwrap();
     Objective::<Qwen35>::begin(&mut obj, 17, 0);
@@ -140,7 +141,7 @@ fn a_token_sum_steps_gradient_does_not_depend_on_how_its_records_are_split_into_
         write_dataset(dir.path(), &rows);
         let micro = rows.len() as u32 / rows_per_batch;
         let run = FitOpts { batch_size: rows_per_batch, ..opts(1, micro, 1e-2) };
-        let cfg = PolicyGradientConfig { clip_eps: CLIP_EPS as f32, kl_beta: KL_BETA as f32, reference: ReferencePolicy::Base, behaviour: BehaviourSource::Recorded, loss_agg: LossAgg::TokenSum, ..Default::default() };
+        let cfg = PolicyGradientConfig { loss: PgLoss { clip_eps: CLIP_EPS as f32, kl_beta: KL_BETA as f32, loss_agg: LossAgg::TokenSum, ..PgLoss::RECORDED }, reference: ReferencePolicy::Base, behaviour: BehaviourSource::Recorded, ..Default::default() };
         let mut obj = ExternalPolicyGradient::open(dir.path(), &run, cfg).unwrap();
         Objective::<Qwen35>::prepare(&mut obj, &mut m).unwrap();
         Objective::<Qwen35>::begin(&mut obj, 17, 0);
@@ -176,7 +177,7 @@ fn rescaling_every_advantage_does_not_change_the_step() {
         let dir = tempfile::tempdir().unwrap();
         write_dataset(dir.path(), &rows);
         let run = FitOpts { grad_clip: 0.0, ..opts(1, rows.len() as u32, 1e-3) };
-        let cfg = PolicyGradientConfig { kl_beta: 0.0, log_kl: false, behaviour: BehaviourSource::Recorded, ..Default::default() };
+        let cfg = PolicyGradientConfig { loss: PgLoss { kl_beta: 0.0, log_kl: false, ..PgLoss::RECORDED }, behaviour: BehaviourSource::Recorded, ..Default::default() };
         let mut obj = ExternalPolicyGradient::open(dir.path(), &run, cfg).unwrap();
         let (_, m) = model::fit_controlled(m, &mut obj, &run, None, model::FitControl::default()).unwrap();
         let after: Vec<Vec<f32>> = rows.iter().map(|r| answer_logprobs(&m, r)).collect();

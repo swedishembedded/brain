@@ -12,12 +12,13 @@
 mod grpo_common;
 
 use data::rng::Rng;
-use grpo_common::{always_variable, config, Env, Judge, PROMPT, T};
+use grpo_common::{always_variable, config_loss, Env, Judge, PROMPT, T};
 use inkling2::Inkling2Train;
 use model::rollout::{Completion, Rollout, RolloutParams, StopReason, SyncRollout};
 use model::routing::{RoutedCall, RoutingRecord};
 use model::{Model, Objective};
 use rl::objective::grpo::{Grpo, GrpoOptions};
+use rl::objective::pg_loss::PgLoss;
 
 fn seed() -> u64 {
     let s = data::rng::random_seed();
@@ -84,8 +85,8 @@ fn completion(tokens: &[u32], routing: RoutingRecord) -> Completion {
 
 fn run(m: &mut Inkling2Train, group: Vec<Completion>, s: u64) -> rl::objective::grpo::GrpoStats {
     let (judge, _) = Judge::new(first_wins);
-    let options = GrpoOptions { routing_replay: true, log_kl: false, ..GrpoOptions::default() };
-    let mut obj = Grpo::try_new(Env { variable: always_variable }, judge, config(2, 1.0, options)).expect("a valid GRPO configuration").with_rollout(Box::new(Scripted { group }), 1);
+    let options = GrpoOptions { routing_replay: true, ..GrpoOptions::default() };
+    let mut obj = Grpo::try_new(Env { variable: always_variable }, judge, config_loss(2, 1.0, options, PgLoss { log_kl: false, ..PgLoss::ONLINE })).expect("a valid GRPO configuration").with_rollout(Box::new(Scripted { group }), 1);
     Objective::<Inkling2Train>::prepare(&mut obj, m).unwrap();
     obj.micro_steps(m, &mut Rng::new(s), 2);
     obj.stats().clone()

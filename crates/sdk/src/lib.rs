@@ -196,7 +196,11 @@ pub use model::StepWork;
 /// The settings and statistics of [`ChatFineTune::policy_gradient`]: reinforcement learning from rollouts collected
 /// outside brain.
 #[cfg(feature = "study")]
-pub use rl::objective::external::{BehaviourSource, ImportanceCorrection, DEFAULT_DUAL_CLIP, PolicyGradientConfig, PolicyGradientStats, PolicyGradientStep, PolicyGradientAlgorithm, ReferencePolicy, TruncatedRollouts};
+pub use rl::objective::external::{BehaviourSource, ImportanceCorrection, PolicyGradientConfig, PolicyGradientStats, PolicyGradientStep, PolicyGradientAlgorithm, ReferencePolicy, TruncatedRollouts};
+/// The policy-gradient loss both policy-gradient objectives train ([`PolicyGradientConfig::loss`]): the clip band with
+/// its dual clip, the KL term, the aggregation, the advantages and the step guards.
+#[cfg(feature = "study")]
+pub use rl::objective::pg_loss::{PgLoss, DEFAULT_DUAL_CLIP, MAX_CONSECUTIVE_GUARD_SKIPS};
 /// The policy-gradient settings declared once ([`PolicyGradientConfig`]'s table): what the served action, the CLI, the
 /// run identity and the reported settings are generated from.
 #[cfg(feature = "study")]
@@ -210,7 +214,7 @@ pub use model::kv_tier::{KvElement, KvTier};
 pub use rl::objective::numerics::{NumericsBounds, NumericsReport};
 #[cfg(feature = "study")]
 pub use rl::objective::grpo::LossAgg;
-/// How a policy-gradient run turns each group's rewards into advantages ([`PolicyGradientConfig::advantage_norm`]).
+/// How a policy-gradient run turns each group's rewards into advantages ([`PgLoss::advantage_norm`]).
 #[cfg(feature = "study")]
 pub use rl::objective::advantage::{AdvantageFloor, AdvantageNorm};
 /// On-policy distillation from a teacher model ([`ChatFineTune::distill_teacher`]): which estimator a teacher's

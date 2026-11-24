@@ -20,6 +20,7 @@
 use model::Objective;
 use qwen35::model::Qwen35;
 use rl::objective::external::{BehaviourSource, ExternalPolicyGradient, PolicyGradientConfig};
+use rl::objective::pg_loss::PgLoss;
 
 use super::external_policy_gradient::{answer_logprobs, lora_model, no_kl, opts, write_dataset, Row, DRAW_SEED};
 
@@ -42,7 +43,7 @@ fn check_ratio_held_fixed(rescore: bool) -> Result<(), String> {
         let rows: Vec<Row> = ids.iter().zip(behaviour).zip([1.0, 0.0]).map(|((ids, b), r)| Row { behavior: Some(b.clone()), ..Row::rewarded(ids, 3, r, "g") }).collect();
         let dir = tempfile::tempdir().unwrap();
         write_dataset(dir.path(), &rows);
-        let cfg = PolicyGradientConfig { clip_eps: EPS, behaviour: BehaviourSource::Recorded, ..no_kl() };
+        let cfg = PolicyGradientConfig { loss: PgLoss { clip_eps: EPS, ..no_kl().loss }, behaviour: BehaviourSource::Recorded, ..no_kl() };
         let mut obj = ExternalPolicyGradient::open(dir.path(), &opts(1, 2, 1e-2), cfg).unwrap();
         Objective::<Qwen35>::prepare(&mut obj, &mut m).unwrap();
         Objective::<Qwen35>::begin(&mut obj, DRAW_SEED, 0);
