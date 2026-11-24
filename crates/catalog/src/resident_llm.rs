@@ -347,6 +347,13 @@ pub struct QwenServeConfig {
     /// holding it) the Qwen3 resident serves. `None` serves no such resident;
     /// the model store's Qwen3 checkpoints are served from the store scan.
     pub weights: Option<String>,
+    /// The model store a `--checkpoint` that names a `vendor/repo[-QUANT]`
+    /// reference (not a file path) is looked up in: the store the server
+    /// scans, which only the caller of [`crate::resident_llm`] wiring knows.
+    /// `None` (the default) leaves such a reference unresolvable - it then
+    /// travels on verbatim and `activate` reports it, as before this field
+    /// existed.
+    pub models_dir: Option<std::path::PathBuf>,
     /// `--tokenizer PATH`: the `tokenizer.json` for a `--checkpoint` that has
     /// none beside it. `None` uses the one beside the checkpoint (or a GGUF's
     /// embedded tokenizer).
@@ -511,7 +518,7 @@ pub const FALLBACK_MAX_BATCH: u32 = 16;
 
 impl Default for QwenServeConfig {
     fn default() -> QwenServeConfig {
-        QwenServeConfig { weights: None, tokenizer: None, ctx: None, auto_budget_bytes: None, card_budget_bytes: None, max_batch: None, kv_int8: true, kv_fp8: false, kv_calib_opt_in: false, kv_offload_gb: 0.0, weight_format: None, max_prefill_cap: None, kv_tokens: None, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, fuse_residual_norm: true, exact_decode: false, adapter_bank: None, adapter_targets_named: false, refused: None, sparse_attention: None, worker_hosting: None }
+        QwenServeConfig { weights: None, models_dir: None, tokenizer: None, ctx: None, auto_budget_bytes: None, card_budget_bytes: None, max_batch: None, kv_int8: true, kv_fp8: false, kv_calib_opt_in: false, kv_offload_gb: 0.0, weight_format: None, max_prefill_cap: None, kv_tokens: None, gemm_precision: gpu_core::provider::library::GemmPrecision::Auto, fuse_residual_norm: true, exact_decode: false, adapter_bank: None, adapter_targets_named: false, refused: None, sparse_attention: None, worker_hosting: None }
     }
 }
 
@@ -839,8 +846,8 @@ pub struct QwenResident {
 /// alone. Unresolvable is not fatal - the path travels on verbatim so
 /// `activate` reports it against the real open, which is where every other
 /// bad path is reported.
-fn resolve_served_base(spec: &str) -> (String, Option<std::path::PathBuf>, Option<String>) {
-    match loader::model_dir::resolve_base(spec, None) {
+fn resolve_served_base(spec: &str, models_dir: Option<&std::path::Path>) -> (String, Option<std::path::PathBuf>, Option<String>) {
+    match loader::model_dir::resolve_base(spec, models_dir) {
         Ok((weights, dir, id)) => (qwen3::store_checkpoint_path(&weights, &dir).to_string_lossy().into_owned(), Some(dir), Some(id)),
         Err(_) => (spec.to_string(), None, None),
     }
@@ -864,7 +871,7 @@ impl QwenResident {
     pub fn from_config(cfg: QwenServeConfig) -> Option<QwenResident> {
         let spec = cfg.weights.clone().filter(|p| !p.is_empty())?;
 
-        let (path, dir, base_id) = resolve_served_base(&spec);
+        let (path, dir, base_id) = resolve_served_base(&spec, cfg.models_dir.as_deref());
 
         let tokenizer = match cfg.tokenizer.clone().filter(|t| !t.is_empty()) {
             Some(t) => t,
@@ -1842,16 +1849,46 @@ mod tests {
         let card = checkpoint::st::ModelCard::new("Qwen/Qwen3-0.6B", "qwen");
         checkpoint::st::save_safetensors(native.join("model.brain.safetensors").to_str().unwrap(), &[("weight".to_string(), vec![2], vec![1.0, 2.0])], &serde_json::json!({"vocab_size": 23}), Some(&card)).unwrap();
 
-        let (path, dir, id) = resolve_served_base(hf.to_str().unwrap());
+        let (path, dir, id) = resolve_served_base(hf.to_str().unwrap(), None);
         assert_eq!(id.as_deref(), Some("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"), "resolved, not passed on verbatim");
         assert_eq!(dir.as_deref(), Some(hf.as_path()));
         assert_eq!(path, hf.to_str().unwrap());
 
-        let (path, _, _) = resolve_served_base(native.to_str().unwrap());
+        let (path, _, _) = resolve_served_base(native.to_str().unwrap(), None);
         assert_eq!(path, native.join("model.brain.safetensors").to_str().unwrap());
 
         let missing = root.join("absent");
-        assert_eq!(resolve_served_base(missing.to_str().unwrap()), (missing.to_str().unwrap().to_string(), None, None));
+        assert_eq!(resolve_served_base(missing.to_str().unwrap(), None), (missing.to_str().unwrap().to_string(), None, None));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// `--checkpoint` naming a pulled model by its store reference (not a
+    /// file path) resolves against the server's model store, so the
+    /// tokenizer beside the checkpoint is found: a ref with no store named
+    /// travels on verbatim (no tokenizer beside it, the pre-fix behaviour
+    /// that failed activation), which is why the store must be threaded in.
+    #[test]
+    fn a_checkpoint_named_by_store_reference_resolves_through_the_store() {
+        let root = std::env::temp_dir().join(format!("catalog-checkpoint-ref-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let repo = root.join("Qwen").join("Qwen3-0.6B");
+        std::fs::create_dir_all(&repo).unwrap();
+        let card = checkpoint::st::ModelCard::new("Qwen/Qwen3-0.6B", "qwen");
+        checkpoint::st::save_safetensors(repo.join("model.brain.safetensors").to_str().unwrap(), &[("weight".to_string(), vec![2], vec![1.0, 2.0])], &serde_json::json!({}), Some(&card)).unwrap();
+        std::fs::write(repo.join("tokenizer.json"), b"{}").unwrap();
+
+        // With the store: the reference resolves to the checkpoint, and the
+        // directory it sits in carries the tokenizer `from_config` picks up.
+        let (path, dir, id) = resolve_served_base("Qwen/Qwen3-0.6B", Some(&root));
+        assert_eq!(id.as_deref(), Some("Qwen/Qwen3-0.6B"));
+        assert_eq!(dir.as_deref(), Some(repo.as_path()));
+        assert_eq!(path, repo.join("model.brain.safetensors").to_str().unwrap());
+
+        // Without the store (the old signature's behaviour): the ref is not
+        // a file path, so it travels on verbatim and no tokenizer is found.
+        let (path, dir, id) = resolve_served_base("Qwen/Qwen3-0.6B", None);
+        assert_eq!((path.as_str(), dir.as_deref(), id.as_deref()), ("Qwen/Qwen3-0.6B", None, None));
+
         std::fs::remove_dir_all(&root).unwrap();
     }
 
