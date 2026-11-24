@@ -39,7 +39,7 @@ Helpers: :mod:`brain_py.image` saves/annotates brain's raw HWC-f32 image blobs
 from typing import Any
 
 from .annotate import annotate
-from .base import EXIT_SKIP, MIRAGE_MODEL, BrainBase, BrainError, Outcome, Perception, skip
+from .base import EXIT_SKIP, MIRAGE_MODEL, BrainBase, BrainError, EncodedAudio, Outcome, Perception, skip
 from .client import BrainClient, BrainStdio, Detection
 from .dbus import BrainDBus, RunResult, read_fd, sealed_memfd
 from .forecast import Forecast, Panel, Variate
@@ -78,6 +78,7 @@ __all__ = [
     "BrainError",
     "Outcome",
     "Perception",
+    "EncodedAudio",
     "MIRAGE_MODEL",
     "EXIT_SKIP",
     "skip",

@@ -43,6 +43,8 @@ const ENGINE_KEY: &str = "default";
 const TRAIN_KEY: &str = "train";
 /// Instance key of the provider's host-side actions (`batch`, `import`, `sim`).
 const HOST_KEY: &str = "host";
+/// Instance key of `encode`, which keeps its encoders loaded.
+const ENCODE_KEY: &str = "encode";
 
 /// Text-to-speech behind the scheduler, over one Qwen3-TTS checkpoint.
 pub struct TtsResident {
@@ -88,6 +90,7 @@ impl ResidentModel for TtsResident {
         let config = match action {
             a if qwen3tts::caps::RESIDENT_ACTIONS.contains(&a) => ENGINE_KEY,
             "finetune" => TRAIN_KEY,
+            "encode" => ENCODE_KEY,
             _ => HOST_KEY,
         };
         InstanceKey::new(qwen3tts::caps::MODEL, config)
@@ -100,6 +103,8 @@ impl ResidentModel for TtsResident {
             TRAIN_KEY => MemCost::new(self.f32_weights().max(1 << 30) * 4, self.ram()),
             // `batch` gives each request its own host decoder copy.
             HOST_KEY => MemCost::new(0, self.ram() * 2),
+            // Each encoder holds a codec and a speaker encoder, with a third on top for the working set.
+            ENCODE_KEY => MemCost::new(0, (self.paths.encoder_weight_bytes().max(1 << 30) * 4 / 3) * qwen3tts::encode::STREAMS as u64),
             // The hot engine's weights and working set, on whichever device holds it, and on a
             // card the KV pool its batched decoder serves every stream from.
             _ => MemCost::new(self.ram() + qwen3tts::batched::kv_pool_bytes(&self.paths, qwen3tts::engine::DEVICE_STREAMS).unwrap_or(0), 0),
@@ -113,6 +118,11 @@ impl ResidentModel for TtsResident {
     }
 
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
+        if key.config == ENCODE_KEY {
+            self.paths.require(true).map_err(|e| format!("tts encode: {e} (encoding needs a Base checkpoint, which ships the speaker encoder)"))?;
+            let encoders = residency::on_device(device, || (0..qwen3tts::encode::STREAMS).map(|_| qwen3tts::encode::Encoder::load(&self.paths)).collect::<Result<Vec<_>, _>>())??;
+            return Ok(Box::new(EncodeInstance { encoders, device }));
+        }
         if key.config != ENGINE_KEY {
             let provider = qwen3tts::caps::TtsProvider::new(Some(self.paths.clone()));
             return Ok(Box::new(ProviderInstance { provider, device }));
@@ -142,6 +152,48 @@ impl Instance for ProviderInstance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let act = self.provider.action(action).ok_or_else(|| format!("tts: unknown action '{action}'"))?;
         residency::on_device(self.device, || act.run(inv, progress))?
+    }
+}
+
+/// `encode` with its encoders loaded once: a batch of recordings is shared
+/// out over them, each encoder working through its share on its own thread.
+/// The codec encode is not yet one pass over several clips; side-by-side
+/// encoders are what lifts throughput on the CPU (`qwen3tts::encode::STREAMS`).
+struct EncodeInstance {
+    encoders: Vec<qwen3tts::encode::Encoder>,
+    device: Device,
+}
+
+impl EncodeInstance {
+    fn one(encoder: &qwen3tts::encode::Encoder, inv: &Invocation) -> ActionResult {
+        inv.cancel.check()?;
+        let req = qwen3tts::caps::encode_request(inv)?;
+        qwen3tts::caps::run_encode(encoder, inv, &req)
+    }
+}
+
+impl Instance for EncodeInstance {
+    fn run(&mut self, action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        if action != "encode" {
+            return Err(format!("tts: the encode instance runs encode, not '{action}'"));
+        }
+        residency::on_device(self.device, || Self::one(&self.encoders[0], inv))?
+    }
+
+    fn run_batch(&mut self, action: &str, invs: &[Invocation], _progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+        if action != "encode" {
+            return invs.iter().map(|_| Err(format!("tts: the encode instance runs encode, not '{action}'"))).collect();
+        }
+        let device = self.device;
+        let share = invs.len().div_ceil(self.encoders.len()).max(1);
+        std::thread::scope(|s| {
+            let workers: Vec<_> = invs
+                .chunks(share)
+                .zip(&self.encoders)
+                .map(|(chunk, encoder)| s.spawn(move || chunk.iter().map(|inv| residency::on_device(device, || Self::one(encoder, inv)).and_then(|r| r)).collect::<Vec<_>>()))
+                .collect();
+            workers.into_iter().flat_map(|w| w.join().unwrap_or_else(|_| vec![Err("tts encode: an encoder thread panicked".to_string())])).collect()
+        })
     }
 }
 
@@ -301,6 +353,17 @@ mod tests {
         assert!(cost("synth").vram > 0, "the hot engine goes on a card when one is budgeted");
         assert!(cost("finetune").vram >= cost("synth").vram, "training holds the weights four times over");
         assert!(cost("batch").ram > 0 && cost("batch").vram == 0, "a batch holds host decoders, one per request");
+        assert!(key("encode") != key("synth") && key("encode") != key("batch"), "encode keeps its own encoders loaded");
+        assert!(cost("encode").ram > 0 && cost("encode").vram == 0, "the encoders run on the host");
+    }
+
+    /// The encode instance refuses a checkpoint without a speaker encoder at
+    /// activation, not on the first clip.
+    #[test]
+    fn encode_needs_a_base_checkpoint_at_activation() {
+        let r = TtsResident::new("/nonexistent/tts", "/nonexistent/ckpt");
+        let e = r.activate(&r.instance_key("encode", &Invocation::new()), Device::Cpu).err().expect("no checkpoint, no instance");
+        assert!(e.contains("tts encode"), "{e}");
     }
 
     /// The resident manifest is the provider's, with the hot actions streaming.

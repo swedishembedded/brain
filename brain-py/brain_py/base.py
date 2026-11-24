@@ -25,6 +25,7 @@ rewriting: the high-level API is identical; only the wire underneath differs.
 
 from __future__ import annotations
 
+import array
 import json
 import sys
 from dataclasses import dataclass, field
@@ -92,11 +93,11 @@ class BrainError(RuntimeError):
 class Outcome:
     """The result of a capability action, materialised and transport-agnostic.
 
-    * ``outputs`` — the scalar JSON result (token counts, an embedding vector,
+    * ``outputs``: the scalar JSON result (token counts, an embedding vector,
       image dims, a transcript, …).
-    * ``blobs`` — named binary outputs, already copied into ``bytes`` (over D-Bus
+    * ``blobs``: named binary outputs, already copied into ``bytes`` (over D-Bus
       the fds are read and closed for you; over JSONL the base64 is decoded).
-    * ``meta`` — per-blob metadata (``{"media": …, "meta": {"w":…, "h":…}}``).
+    * ``meta``: per-blob metadata (``{"media": …, "meta": {"w":…, "h":…}}``).
     """
 
     outputs: dict[str, Any] = field(default_factory=dict)
@@ -133,6 +134,40 @@ class Outcome:
         if not (w and h):
             raise ValueError(f"blob {name!r} carries no w/h in its meta: {self.meta.get(name)!r}")
         return to_pil(raw, w, h, c)
+
+
+def _le_array(code: str, data: bytes) -> array.array:
+    """``data`` as a little-endian array of ``code`` (``H`` u16, ``I`` u32, ``f`` f32)."""
+    out = array.array(code)
+    out.frombytes(data)
+    if sys.byteorder != "little":
+        out.byteswap()
+    return out
+
+
+@dataclass
+class EncodedAudio:
+    """A recording as a speech model's ``encode`` returns it: what a training
+    shard records for one utterance.
+
+    * ``codes``: the codec codes, ``frames * codebooks`` u16, row-major.
+    * ``xvector``: the speaker encoder's x-vector (f32).
+    * ``text_ids``: the token ids of the transcript's assistant turn, exactly as
+      generation tokenises it (u32), or ``None`` when no text was given.
+    """
+
+    codes: array.array
+    frames: int
+    codebooks: int
+    frame_rate: float
+    xvector: array.array
+    text_ids: Optional[array.array]
+    sample_rate_in: int
+    seconds: float
+
+    def frame(self, i: int) -> list[int]:
+        """The ``codebooks`` codes of frame ``i``."""
+        return list(self.codes[i * self.codebooks:(i + 1) * self.codebooks])
 
 
 #: The model id of Mirage's structured perception actions (`describe`, `extract`).
@@ -326,6 +361,28 @@ class BrainBase:
 
     # image() is the natural verb for "give me the picture".
     image = text2image
+
+    # -- speech data ---------------------------------------------------------
+    def encode_audio(self, wav: bytes, text: Optional[str] = None, *, model: Optional[str] = None,
+                     timeout: float = 600.0) -> EncodedAudio:
+        """Encode a WAV recording (any sample rate) with a speech model's
+        ``encode`` action: its codec codes, its speaker x-vector and, given its
+        transcript, the token ids the checkpoint's own tokenizer makes of it.
+        ``model`` defaults to the first model advertising ``encode``."""
+        model = self._pick("encode", model)
+        params = {} if text is None else {"text": text}
+        out = self.run(model, "encode", params, blobs={"audio": wav}, timeout=timeout)
+        ids = out.blobs.get("text_ids")
+        return EncodedAudio(
+            codes=_le_array("H", out.blobs["codes"]),
+            frames=int(out.outputs["frames"]),
+            codebooks=int(out.outputs["codebooks"]),
+            frame_rate=float(out.outputs["frame_rate"]),
+            xvector=_le_array("f", out.blobs["xvector"]),
+            text_ids=None if ids is None else _le_array("I", ids),
+            sample_rate_in=int(out.outputs["sample_rate_in"]),
+            seconds=float(out.outputs["seconds"]),
+        )
 
     # -- structured perception (Mirage) ---------------------------------------
     def describe(self, image: Any, *, model: str = MIRAGE_MODEL, timeout: float = 600.0,

@@ -67,6 +67,25 @@ ledger is the engine work it needs.
 - [ ] `prepare`: utterance manifest (wav, transcript, speaker, voice,
       language) to shards, codes from the codec encoder and x-vectors from the
       speaker encoder on the device, batched.
+  - [x] The served `encode` action (`qwen3tts::encode`, `caps::encode_spec`):
+        WAV at any rate -> `codes` (u16), `xvector` (f32), `text_ids` (u32, the
+        generation tokenisation), `frames`, `sample_rate_in`, `seconds`; codes
+        gated equal to the CPU-path codec encode on a real clip
+        (`tests/it/encode.rs`). Resident: its own instance key, encoders loaded
+        once, a batch spread over `encode::STREAMS` side-by-side encoders;
+        `brain_py` `encode_audio`.
+  - Measured 2026-11-25, CPU backend, a 10 s clip, shared 288-core host at
+    load average ~170 (`tests/it/encode.rs` `encode_throughput`, ignored):
+    one encoder 3.2 audio s per wall s (codec encode about 2.1 s, speaker
+    encoder about 0.7 s of each 10 s clip), two side by side 5.2, four 6.7.
+    100 hours of audio is then about 15 h on this CPU at four streams: too
+    slow to repeat casually. What would fix it, not done: the codec encode
+    as one recorded device pass over several clips (it runs eager, one
+    submit per op, `mimi::Codec::encode`), and the encode instance placed on
+    a card (it pins the CPU path today so its codes equal the clone path's).
+  - [ ] Shard assembly from `encode` outputs: the caller writes
+        `brain-tts-shard-v1` itself today; the producers' digests the shard
+        records are not returned by `encode`.
 - [x] The speech SFT objective: the Talker full-weight on the teacher-forced
       prompt (cb0 next-frame CE, end of speech supervised on complete
       utterances only), the code predictor batched over frames (`[frames, 16]`

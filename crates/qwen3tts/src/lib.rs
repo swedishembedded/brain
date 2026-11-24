@@ -16,6 +16,7 @@ pub mod batch;
 pub mod batched;
 pub mod caps;
 pub mod config;
+pub mod encode;
 pub mod engine;
 pub mod export;
 pub mod gen;

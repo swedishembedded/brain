@@ -18,6 +18,8 @@
 //!     dataset, LoRA or full ([`crate::sft`]).
 //!   - `sim` - speaker-embedding cosine similarity of two utterances
 //!     ([`crate::reference::speaker_similarity`]).
+//!   - `encode` - a recording as a training shard records it: codec codes,
+//!     x-vector and, given its transcript, its token ids ([`crate::encode`]).
 //!
 //! The checkpoint is the provider's own, resolved from the model store through
 //! [`crate::spec::Qwen3TtsSpec`]'s `weights_dir` and `ckpt` roles (the roles
@@ -265,12 +267,59 @@ pub fn sim_spec() -> ActionSpec {
         .input(BlobSpec::new("b", Media::Bytes, "the second utterance: a WAV recording").required())
 }
 
+pub fn encode_spec() -> ActionSpec {
+    ActionSpec::new("encode", "a recording as training data: the codec's [frames,16] codes, the speaker encoder's x-vector and, given its transcript, the token ids generation tokenises it into")
+        .cancellable()
+        .input(BlobSpec::new("audio", Media::Bytes, "the recording: a WAV at any sample rate, mono or multi-channel (downmixed)").required())
+        .param(ParamSpec::new("text", ParamType::Str, "the recording's transcript; when given, its token ids are returned as text_ids"))
+        .output(BlobSpec::new("codes", Media::Bytes, "the codec codes, u16 little-endian, [frames, codebooks] row-major"))
+        .output(BlobSpec::new("xvector", Media::Bytes, "the speaker encoder's x-vector of the recording, f32 little-endian"))
+        .output(BlobSpec::new("text_ids", Media::Bytes, "with text: the ids of <|im_start|>assistant\\n{text}<|im_end|>\\n<|im_start|>assistant\\n, u32 little-endian"))
+}
+
+/// The outcome of an `encode`: the blobs, plus `frames`, `codebooks`,
+/// `frame_rate`, `xvector_dim`, `sample_rate_in` (the rate of the WAV given)
+/// and `seconds` (its duration).
+fn encode_outcome(encoder: &crate::encode::Encoder, req: &crate::encode::Request, out: crate::encode::Encoded) -> Outcome {
+    let codes: Vec<u8> = out.codes.iter().flat_map(|c| c.to_le_bytes()).collect();
+    let xvector: Vec<u8> = out.xvector.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let mut outcome = Outcome::new()
+        .set("frames", json!(out.frames))
+        .set("codebooks", json!(encoder.codebooks()))
+        .set("frame_rate", json!(encoder.frame_rate()))
+        .set("xvector_dim", json!(out.xvector.len()))
+        .set("sample_rate_in", json!(req.wav.sample_rate))
+        .set("seconds", json!(req.seconds()))
+        .blob("codes", Blob::new(Media::Bytes, codes).with_meta(json!({"dtype": "u16", "shape": [out.frames, encoder.codebooks()]})))
+        .blob("xvector", Blob::new(Media::Bytes, xvector).with_meta(json!({"dtype": "f32", "shape": [out.xvector.len()]})));
+    if let Some(ids) = out.text_ids {
+        let n = ids.len();
+        outcome = outcome.blob("text_ids", Blob::new(Media::Bytes, ids.iter().flat_map(|i| i.to_le_bytes()).collect()).with_meta(json!({"dtype": "u32", "shape": [n]})));
+    }
+    outcome
+}
+
+/// Encode `req` (validated from `inv`) on a loaded encoder: the one step the
+/// per-call action and a resident instance share.
+pub fn run_encode(encoder: &crate::encode::Encoder, inv: &Invocation, req: &crate::encode::Request) -> ActionResult {
+    inv.cancel.check()?;
+    let out = encoder.encode(req);
+    Ok(encode_outcome(encoder, req, out))
+}
+
+/// An `encode` invocation's validated request, checked before any weight is
+/// read.
+pub fn encode_request(inv: &Invocation) -> Result<crate::encode::Request, String> {
+    let audio = inv.get_blob("audio").ok_or("tts encode: missing required input 'audio' (a WAV recording)")?;
+    crate::encode::Request::parse(&audio.bytes, inv.get_str("text")).map_err(|e| format!("tts encode: {e}"))
+}
+
 /// The full, static capability manifest - safe to build with no weights loaded.
 pub fn manifest() -> Manifest {
     Manifest::new(
         MODEL,
         "Qwen3-TTS voice synthesis - text to 24 kHz speech (Talker + MTP + codec), voice cloning, import, fine-tuning and speaker similarity.",
-        vec![synth_spec(), clone_spec(), design_spec(), batch_spec(), import_spec(), finetune_spec(), sim_spec()],
+        vec![synth_spec(), clone_spec(), design_spec(), batch_spec(), import_spec(), finetune_spec(), sim_spec(), encode_spec()],
     )
 }
 
@@ -338,6 +387,7 @@ impl Provider for TtsProvider {
             "import" => Some(Arc::new(ImportAction)),
             "finetune" => Some(Arc::new(FinetuneAction { paths })),
             "sim" => Some(Arc::new(SimAction { paths })),
+            "encode" => Some(Arc::new(EncodeAction { paths })),
             _ => None,
         }
     }
@@ -588,6 +638,26 @@ impl Action for SimAction {
     }
 }
 
+/// `encode` with the components loaded for this one call; the resident
+/// adapter keeps an [`crate::encode::Encoder`] loaded instead.
+struct EncodeAction {
+    paths: Option<TtsPaths>,
+}
+
+impl Action for EncodeAction {
+    fn spec(&self) -> ActionSpec {
+        encode_spec()
+    }
+
+    fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        inv.cancel.check()?;
+        let req = encode_request(inv)?;
+        let paths = checkpoint(&self.paths, "encode", true)?;
+        let encoder = crate::encode::Encoder::load(&paths).map_err(|e| format!("tts encode: {e}"))?;
+        run_encode(&encoder, inv, &req)
+    }
+}
+
 #[cfg(test)]
 mod caps_tests {
     use super::*;
@@ -660,7 +730,7 @@ mod caps_tests {
         let m = manifest();
         assert_eq!(m.model, MODEL);
         let names: Vec<&str> = m.actions.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, ["synth", "clone", "design", "batch", "import", "finetune", "sim"]);
+        assert_eq!(names, ["synth", "clone", "design", "batch", "import", "finetune", "sim", "encode"]);
         for a in &m.actions {
             // The checkpoint is the provider's (the store's roles), never a param.
             for gone in ["weights_dir", "ckpt"] {
@@ -712,6 +782,32 @@ mod caps_tests {
         }
         let inputs: Vec<&str> = get("sim").inputs.iter().map(|i| i.name.as_str()).collect();
         assert_eq!(inputs, ["a", "b"]);
+    }
+
+    /// `encode` takes one WAV and an optional transcript, and returns the
+    /// three arrays a training shard records; a hostile input is refused
+    /// before the checkpoint is even looked for, and a cancelled call before
+    /// the input is read.
+    #[test]
+    fn encode_declares_its_arrays_and_refuses_hostile_input_before_any_weight() {
+        let spec = encode_spec();
+        assert!(spec.cancellable && !spec.training);
+        assert!(spec.inputs.iter().any(|i| i.name == "audio" && i.required));
+        assert!(spec.params.iter().any(|p| p.name == "text" && !p.required));
+        let outputs: Vec<&str> = spec.outputs.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(outputs, ["codes", "xvector", "text_ids"]);
+        let act = EncodeAction { paths: Some(missing_paths()) };
+        let run = |inv: Invocation| act.run(&inv, &mut |_| {}).unwrap_err();
+        assert!(run(Invocation::new()).contains("audio"));
+        assert!(run(Invocation::new().blob("audio", Blob::new(Media::Bytes, b"not a wav".to_vec()))).contains("not a readable WAV"));
+        let oversized = Blob::new(Media::Bytes, vec![0; crate::encode::MAX_WAV_BYTES + 1]);
+        assert!(run(Invocation::new().blob("audio", oversized)).contains("more than"));
+        let ok = Invocation::new().blob("audio", wav_blob(&[0.1; 2_400]));
+        assert!(run(ok.clone()).contains("tts encode"), "a valid clip reaches the checkpoint, which is missing");
+        let mut cancelled = ok.clone();
+        cancelled.cancel = capability::CancelToken::armed();
+        cancelled.cancel.cancel();
+        assert_eq!(run(cancelled), capability::failure::CANCELLED);
     }
 
     /// The sampling knobs declare no default - the checkpoint owns them - yet
@@ -833,7 +929,7 @@ mod caps_tests {
     fn the_resident_manifest_streams_the_hot_actions_and_keeps_the_rest() {
         let (m, plain) = (resident_manifest(), manifest());
         let names: Vec<&str> = m.actions.iter().map(|a| a.name.as_str()).collect();
-        assert_eq!(names, ["synth", "clone", "design", "batch", "import", "finetune", "sim"]);
+        assert_eq!(names, ["synth", "clone", "design", "batch", "import", "finetune", "sim", "encode"]);
         for a in &m.actions {
             let hot = RESIDENT_ACTIONS.contains(&a.name.as_str());
             let chunk = a.params.iter().find(|p| p.name == "stream_chunk");

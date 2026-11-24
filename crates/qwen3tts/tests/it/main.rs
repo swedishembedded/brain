@@ -12,6 +12,7 @@ mod batched;
 mod bench_inference;
 mod cached_parity;
 mod codec_decode_timing;
+mod encode;
 mod export;
 mod mtp;
 mod parity;

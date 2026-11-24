@@ -99,8 +99,16 @@ impl TtsPaths {
     pub fn f32_weight_bytes(&self) -> u64 {
         use checkpoint::weightio::WeightReader;
         let bytes = |r: Result<WeightReader, String>| r.map(|r| r.names().map(|n| r.shape(n).unwrap_or_default().iter().product::<u64>() * 4).sum()).unwrap_or(0);
+        bytes(crate::import::open_talker(&self.talker)) + bytes(crate::import::open_mtp(&self.mtp)) + self.encoder_weight_bytes()
+    }
+
+    /// The bytes the codec's and the speaker encoder's weights occupy as f32:
+    /// what one [`crate::encode::Encoder`] holds.
+    pub fn encoder_weight_bytes(&self) -> u64 {
+        use checkpoint::weightio::WeightReader;
+        let bytes = |r: Result<WeightReader, String>| r.map(|r| r.names().map(|n| r.shape(n).unwrap_or_default().iter().product::<u64>() * 4).sum()).unwrap_or(0);
         let speaker = if self.speaker.is_empty() { 0 } else { bytes(ecapatdnn::import::open(&self.speaker)) };
-        bytes(crate::import::open_talker(&self.talker)) + bytes(crate::import::open_mtp(&self.mtp)) + bytes(mimi::import::open(&self.codec)) + speaker
+        bytes(mimi::import::open(&self.codec)) + speaker
     }
 
     /// Where NPU graph exports and compiles are cached: beside imported brain

@@ -100,6 +100,20 @@ timbre-preservation metric, e.g. a quantized Talker's clone against its
 reference). The actions are in the capability manifest too (`brain caps
 brain/qwen3tts`), reachable over D-Bus/HTTP.
 
+`encode` turns a recording into what a training shard records for it: input
+blob `audio` (a WAV at any sample rate, at most 128 MiB and 600 s; resampled to
+the codec's 24 kHz), optional param `text` (its transcript). Outputs: blob
+`codes` (u16 little-endian, `[frames, 16]` row-major, the codec's codes), blob
+`xvector` (f32 little-endian, the speaker encoder's x-vector), with `text` blob
+`text_ids` (u32 little-endian: the checkpoint tokenizer's ids of
+`<|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n`, exactly what
+generation tokenises the same text into), and the values `frames`,
+`codebooks`, `frame_rate`, `xvector_dim`, `sample_rate_in` (the given WAV's
+rate) and `seconds` (its duration). It needs a Base checkpoint (the speaker
+encoder). Served, it keeps its encoders loaded and spreads concurrent requests
+over several of them. From Python, `encode_audio(wav_bytes, text)` on any
+`brain_py` client returns the decoded arrays.
+
 Resident serving for repeated calls without reloading weights each time:
 
 ```bash
@@ -119,7 +133,7 @@ arrives as an `audio` chunk of raw mono f32 little-endian PCM at 24 kHz while
 the rest is still generating, and the terminal `audio` blob is the whole clip
 as a WAV. A reference voice's conditioning is computed once per recording and
 kept, so repeat clones of one timbre skip the speaker encoder and the codec
-encode. The other actions (`batch`, `import`, `finetune`, `sim`) are the
+encode. The other actions (`batch`, `import`, `finetune`, `sim`, `encode`) are the
 provider's own, run on the device the scheduler assigned. This replaces the
 old `speak` action and the `BRAIN_QWEN3TTS_REF` environment variable: clone
 is its own action with the reference as an input.
