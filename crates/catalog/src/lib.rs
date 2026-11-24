@@ -926,7 +926,7 @@ pub fn models() -> Vec<ModelEntry> {
             manifest: qwen3tts::caps::manifest,
             provider: qwen3tts::caps::provider,
             spec: Some(("qwen3tts", &qwen3tts::spec::Qwen3TtsSpec)),
-            resident: crate::resident_in_store!(crate::resident_tts::TtsResident::from_store),
+            resident: crate::residents_in_store!(crate::resident_tts::TtsResident::all_from_store),
         },
         // MiniMax Music 3. Like flux2, its six roles are resolved through
         // `minimaxmusic3::spec::MinimaxMusic3Spec`, for the provider and the

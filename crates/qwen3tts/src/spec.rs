@@ -53,6 +53,12 @@ impl ArchSpec for Qwen3TtsSpec {
         Ok(AssembleOutcome::Assembled(AssembledVariant { id, variant: None }))
     }
 
+    /// Every checkpoint is a model of its own (two sizes, a trained release),
+    /// not one ambiguous choice; both roles come from its own repository.
+    fn instance_role(&self) -> Option<&'static str> {
+        Some("ckpt")
+    }
+
     fn validate(&self, _assembly: &Assembly) -> Result<(), String> {
         // Both roles are read straight off a manifest this resolver itself
         // wrote when the checkpoint was converted - there is no further
@@ -63,17 +69,19 @@ impl ArchSpec for Qwen3TtsSpec {
 }
 
 /// The complete Qwen3-TTS checkpoints (Talker, MTP, codec and speaker
-/// encoder) under the model store at `root`, smallest first. A store holding
-/// several does not resolve to one on its own; a caller that needs just one
+/// encoder) under the model store at `root`, smallest first: each one a model
+/// of its own ([`Qwen3TtsSpec::instance_role`]). A caller that needs just one
 /// and has no reason to prefer another (a test, a smoke run) takes the first.
 pub fn store_checkpoints(root: &Path) -> Vec<crate::TtsPaths> {
-    use brain_modelstore::resolve::{resolve, Resolution};
+    use brain_modelstore::resolve::{resolve_all, Resolution};
     let records = brain_modelstore::inventory::scan(root);
-    let assemblies: Vec<Assembly> = match resolve("qwen3tts", &records, &[&Qwen3TtsSpec], &BTreeMap::new()) {
-        Resolution::Resolved(a) => vec![*a],
-        Resolution::Ambiguous(a) => a.choices.into_iter().map(|c| *c.assembly).collect(),
-        Resolution::Missing(_) => Vec::new(),
-    };
+    let assemblies: Vec<Assembly> = resolve_all("qwen3tts", root, &records, &[&Qwen3TtsSpec], &BTreeMap::new())
+        .into_iter()
+        .filter_map(|(_, r)| match r {
+            Resolution::Resolved(a) => Some(*a),
+            Resolution::Ambiguous(_) | Resolution::Missing(_) => None,
+        })
+        .collect();
     let mut paths: Vec<crate::TtsPaths> = assemblies.iter().filter_map(|a| crate::TtsPaths::from_assembly(a).ok()).filter(|p| p.require(false).is_ok()).collect();
     paths.sort_by_key(crate::TtsPaths::f32_weight_bytes);
     paths
@@ -173,5 +181,25 @@ mod tests {
 
         let out = Qwen3TtsSpec.classify(&records, dir.as_path());
         assert!(out.is_empty(), "{out:?}");
+    }
+
+    /// A store holding several Qwen3-TTS checkpoints (two upstream sizes and a
+    /// trained release) holds several models: each is its own instance under
+    /// its own id, every role read from its own repository.
+    #[test]
+    fn every_checkpoint_in_a_store_is_its_own_model_with_its_own_files() {
+        let dir = tmp("several");
+        let repos = [("Qwen", "Qwen3-TTS-12Hz-0.6B-Base", "."), ("Qwen", "Qwen3-TTS-12Hz-1.7B-Base", "."), ("local", "sv-voices", "brain_tts")];
+        for (vendor, repo, weights_dir) in repos {
+            write_qwen3tts_checkpoint(&dir.join(vendor).join(repo), weights_dir);
+        }
+        let mut found: Vec<(String, PathBuf)> = store_checkpoints(&dir).into_iter().map(|p| (p.ckpt_dir.clone(), PathBuf::from(&p.talker))).collect();
+        found.sort();
+        assert_eq!(found.len(), 3, "{found:?}");
+        for ((ckpt, talker), (vendor, repo, _)) in found.iter().zip(repos) {
+            let own = dir.join(vendor).join(repo);
+            assert_eq!(Path::new(ckpt).components().collect::<PathBuf>(), own);
+            assert!(talker.starts_with(&own), "{repo}: its talker is its own: {}", talker.display());
+        }
     }
 }

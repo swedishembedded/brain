@@ -19,7 +19,12 @@ assistant pipeline - all running locally, no external TTS service.
 
 ## Getting the weights
 
-Model id: `brain/qwen3tts`. `Qwen/Qwen3-TTS-12Hz-0.6B-Base` (Base only, the
+Model id: `brain/qwen3tts` for `brain do` and `brain caps`. `brain serve`
+serves every Qwen3-TTS checkpoint in the model store as a model of its own,
+under its `<vendor>/<repo>` id (`Qwen/Qwen3-TTS-12Hz-0.6B-Base`,
+`local/<name>` for a trained one), each with its own languages and voices;
+checkpoint roles named outright are served as `brain/qwen3tts`.
+`Qwen/Qwen3-TTS-12Hz-0.6B-Base` (Base only, the
 variant with a speaker encoder for voice cloning) auto-fetches (⤓, opt-in `--autofetch`) on first
 CLI use - no env var, no manual `import` step. The checkpoint (including its
 nested `speech_tokenizer/` codec) is served exactly as downloaded: the

@@ -48,21 +48,29 @@ const ENCODE_KEY: &str = "encode";
 
 /// Text-to-speech behind the scheduler, over one Qwen3-TTS checkpoint.
 pub struct TtsResident {
+    /// The served model id: the checkpoint's own `<vendor>/<repo>` when the
+    /// store resolved it, [`qwen3tts::caps::MODEL`] when it was named outright.
+    id: String,
     paths: TtsPaths,
 }
 
 impl TtsResident {
-    /// The checkpoint the model store resolves for Qwen3-TTS, or `None` (not
-    /// served) when it holds none or several that cannot be told apart.
-    pub fn from_store(store: &loader::served::ServedStore) -> Option<TtsResident> {
-        let assembly = loader::served::served_assembly(store, "qwen3tts", &qwen3tts::spec::Qwen3TtsSpec)?;
-        Some(TtsResident { paths: TtsPaths::from_assembly(&assembly).ok()? })
+    /// One resident per Qwen3-TTS checkpoint the model store holds, each under
+    /// its own `<vendor>/<repo>` id (`qwen3tts::spec::Qwen3TtsSpec::instance_role`):
+    /// the upstream sizes and every trained release are models of their own,
+    /// each with its own languages and voices. Pinned roles serve exactly that
+    /// checkpoint, as [`qwen3tts::caps::MODEL`].
+    pub fn all_from_store(store: &loader::served::ServedStore) -> Vec<TtsResident> {
+        loader::served::served_assemblies(store, "qwen3tts", &qwen3tts::spec::Qwen3TtsSpec, qwen3tts::caps::MODEL)
+            .into_iter()
+            .filter_map(|assembly| Some(TtsResident { paths: TtsPaths::from_assembly(&assembly).ok()?, id: assembly.id }))
+            .collect()
     }
 
     /// Direct constructor for callers that already hold the two paths (e.g.
     /// `brain perf`'s `tts:<weights-dir>:<hf-ckpt-dir>` target).
     pub fn new(weights_dir: impl Into<String>, ckpt_dir: impl Into<String>) -> TtsResident {
-        TtsResident { paths: TtsPaths::new(weights_dir.into(), ckpt_dir) }
+        TtsResident { id: qwen3tts::caps::MODEL.to_string(), paths: TtsPaths::new(weights_dir.into(), ckpt_dir) }
     }
 
     /// The bytes every component's weights occupy as f32, the size both the
@@ -83,7 +91,7 @@ impl ResidentModel for TtsResident {
     fn manifest(&self) -> Manifest {
         // The spec lives in qwen3tts::caps, next to the provider's, so the two
         // surfaces cannot silently diverge.
-        qwen3tts::caps::resident_manifest()
+        Manifest { model: self.id.clone(), ..qwen3tts::caps::resident_manifest() }
     }
 
     fn instance_key(&self, action: &str, _inv: &Invocation) -> InstanceKey {
@@ -93,7 +101,7 @@ impl ResidentModel for TtsResident {
             "encode" => ENCODE_KEY,
             _ => HOST_KEY,
         };
-        InstanceKey::new(qwen3tts::caps::MODEL, config)
+        InstanceKey::new(&self.id, config)
     }
 
     fn estimate(&self, key: &InstanceKey) -> MemCost {
@@ -357,6 +365,31 @@ mod tests {
         assert!(cost("encode").ram > 0 && cost("encode").vram == 0, "the encoders run on the host");
     }
 
+    /// Two Qwen3-TTS checkpoints in one store (an upstream release and a
+    /// trained one) are two served models, each under its own id and over its
+    /// own files, with instances of their own.
+    #[test]
+    fn every_qwen3tts_checkpoint_in_the_store_is_its_own_served_model() {
+        let store = brain_testutil::Scratch::dir("brain-resident-tts-two");
+        for (id, weights_dir) in [("Qwen/Qwen3-TTS-12Hz-0.6B-Base", "."), ("local/sv-voices", ".")] {
+            let repo = store.path().join(id);
+            std::fs::create_dir_all(repo.join("speech_tokenizer")).unwrap();
+            std::fs::write(repo.join("config.json"), br#"{"architectures": ["Qwen3TTSForConditionalGeneration"]}"#).unwrap();
+            let manifest = brain_modelstore::CompoundManifest { id: id.to_string(), family: "qwen3tts".to_string(), roles: [("ckpt", "."), ("weights_dir", weights_dir)].into_iter().map(|(r, p)| (r.to_string(), p.to_string())).collect() };
+            std::fs::write(repo.join(brain_modelstore::MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
+        }
+        let mut served: Vec<(String, String)> = TtsResident::all_from_store(&loader::served::ServedStore::new(Some(store.path().to_path_buf()))).into_iter().map(|r| (r.manifest().model, r.paths.ckpt_dir.clone())).collect();
+        served.sort();
+        let ids: Vec<&str> = served.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["Qwen/Qwen3-TTS-12Hz-0.6B-Base", "local/sv-voices"]);
+        for (id, ckpt) in &served {
+            assert!(std::path::Path::new(ckpt).starts_with(store.path().join(id)), "{id} is served from its own files: {ckpt}");
+        }
+        let both = TtsResident::all_from_store(&loader::served::ServedStore::new(Some(store.path().to_path_buf())));
+        let keys: Vec<InstanceKey> = both.iter().map(|r| r.instance_key("synth", &Invocation::new())).collect();
+        assert_ne!(keys[0], keys[1], "each model has its own engine");
+    }
+
     /// The encode instance refuses a checkpoint without a speaker encoder at
     /// activation, not on the first clip.
     #[test]
@@ -386,11 +419,11 @@ mod tests {
     /// Skips cleanly when the model store holds no Qwen3-TTS checkpoint.
     #[test]
     fn synth_streams_chunks_that_reassemble_into_the_terminal_blob() {
-        let Some(r) = TtsResident::from_store(&loader::served::ServedStore::new(brain_modelstore::default_root())) else {
+        let Some(r) = TtsResident::all_from_store(&loader::served::ServedStore::new(brain_modelstore::default_root())).into_iter().next() else {
             brain_testutil::skip("no Qwen3-TTS checkpoint in the model store");
             return;
         };
-        let key = InstanceKey::new(qwen3tts::caps::MODEL, ENGINE_KEY);
+        let key = r.instance_key("synth", &Invocation::new());
         let t_load = std::time::Instant::now();
         let mut inst = r.activate(&key, Device::Cpu).expect("activate");
         let load_s = t_load.elapsed().as_secs_f64();

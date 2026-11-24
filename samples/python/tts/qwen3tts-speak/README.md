@@ -1,6 +1,7 @@
 # sample: tts/qwen3tts-speak (D-Bus)
 
-`qwen3tts_speak.py` drives `brain/qwen3tts`'s resident `synth`/`clone`/`design`
+`qwen3tts_speak.py` drives a served Qwen3-TTS checkpoint's resident (the first
+the server lists, or `--model <vendor>/<repo>`) `synth`/`clone`/`design`
 actions - all `.streaming()`: the server vocodes in chunks and sends each
 one as an out-of-band blob frame on the `Subscribe` stream while
 generation is still running, then sends the complete clip (a WAV) as the

@@ -551,7 +551,7 @@ pub fn resolve_under(root: &Path, arch: &str, records: &[ArtifactRecord], specs:
 }
 
 /// A `<vendor>/<repo>` (or, for a loose file with no repo subdirectory,
-/// `<vendor>/<file-stem>`) id from `path`'s own position under `root` - the
+/// `<vendor>/<file-stem>`; a repository directory keeps its whole name) id from `path`'s own position under `root` - the
 /// same identity a real HF release publishes under, and what
 /// `crate::inventory`'s store-layout scan already keys a plain single-file
 /// model's own [`crate::LocalModel::id`] with. `None` if `path` is not under
@@ -568,6 +568,9 @@ pub fn model_id_from_path(path: &Path, root: &Path) -> Option<String> {
     match comps.len() {
         0 => None,
         1 => Some(comps[0].to_string_lossy().into_owned()),
+        // A repository directory keeps its whole name (`Qwen3-TTS-12Hz-0.6B-Base` has a dot in it); only a loose
+        // file loses its extension.
+        2 if path.is_dir() => Some(format!("{}/{}", comps[0].to_string_lossy(), comps[1].to_string_lossy())),
         2 => Some(format!("{}/{}", comps[0].to_string_lossy(), Path::new(comps[1]).file_stem()?.to_string_lossy())),
         _ => Some(format!("{}/{}", comps[0].to_string_lossy(), comps[1].to_string_lossy())),
     }
@@ -580,7 +583,9 @@ pub fn model_id_from_path(path: &Path, root: &Path) -> Option<String> {
 /// doc for why that distinction is real. Every OTHER role is still resolved
 /// against the WHOLE store, so a `dit`-only checkpoint shares a `vae`/
 /// `tokenizer` published anywhere else exactly as [`resolve`] already lets
-/// it.
+/// it - unless the instance's own repository holds exactly one candidate of
+/// that role, which is then the instance's (a release's components belong
+/// together).
 ///
 /// Falls back to `vec![(format!("local/{arch}"), resolve_under(root, ...))]` -
 /// the single-instance behavior - when `spec` names no instance role, or the
@@ -603,12 +608,12 @@ pub fn resolve_all(arch: &str, root: &Path, records: &[ArtifactRecord], specs: &
         return single();
     }
 
+    let classified: Vec<(usize, String, Confidence)> = spec.classify(records, root).into_iter().filter(|(_, _, conf)| *conf > Confidence::Guessed).collect();
     let mut seen: BTreeSet<&Path> = BTreeSet::new();
-    let mut candidates: Vec<usize> = spec
-        .classify(records, root)
-        .into_iter()
-        .filter(|(_, role, conf)| role == instance_role && *conf > Confidence::Guessed)
-        .filter_map(|(idx, _, _)| seen.insert(records[idx].path.as_path()).then_some(idx))
+    let mut candidates: Vec<usize> = classified
+        .iter()
+        .filter(|(_, role, _)| role == instance_role)
+        .filter_map(|(idx, _, _)| seen.insert(records[*idx].path.as_path()).then_some(*idx))
         .collect();
     candidates.sort_by_key(|&idx| records[idx].path.clone());
     if candidates.is_empty() {
@@ -620,7 +625,16 @@ pub fn resolve_all(arch: &str, root: &Path, records: &[ArtifactRecord], specs: &
         .map(|idx| {
             let mut forced = overrides.clone();
             forced.insert(instance_role.to_string(), records[idx].path.to_string_lossy().into_owned());
-            let id = model_id_from_path(&records[idx].path, root).unwrap_or_else(|| format!("local/{arch}"));
+            let own = model_id_from_path(&records[idx].path, root);
+            // A role the instance's own repository holds exactly one candidate of is that one: a release's
+            // components belong together. Only a role its repository lacks is chosen across the store.
+            for role in spec.roles().iter().filter(|r| **r != instance_role && !overrides.contains_key(**r)) {
+                let mut mine = classified.iter().filter(|(i, r, _)| r == role && own.is_some() && model_id_from_path(&records[*i].path, root) == own).map(|(i, _, _)| records[*i].path.as_path()).collect::<BTreeSet<&Path>>().into_iter();
+                if let (Some(path), None) = (mine.next(), mine.next()) {
+                    forced.insert(role.to_string(), path.to_string_lossy().into_owned());
+                }
+            }
+            let id = own.unwrap_or_else(|| format!("local/{arch}"));
             (id, resolve_under(root, arch, records, specs, &forced))
         })
         .collect()
@@ -1699,6 +1713,17 @@ mod tests {
     /// Nesting deeper than `<vendor>/<repo>/<file>` (a diffusers-style
     /// per-role subdirectory) still keys on the first two components only -
     /// the id is the REPO, not the file's own position within it.
+    /// A repository directory is its repo's name whole, dots and all: the id
+    /// of the directory instance of `Qwen/Qwen3-TTS-12Hz-0.6B-Base` is that,
+    /// not `Qwen/Qwen3-TTS-12Hz-0`.
+    #[test]
+    fn model_id_from_path_keeps_a_repository_directorys_whole_name() {
+        let dir = tmp("model-id-dir");
+        let repo = dir.path().join("Qwen").join("Qwen3-TTS-12Hz-0.6B-Base");
+        std::fs::create_dir_all(&repo).unwrap();
+        assert_eq!(model_id_from_path(&repo, dir.path()), Some("Qwen/Qwen3-TTS-12Hz-0.6B-Base".to_string()));
+    }
+
     #[test]
     fn model_id_from_path_ignores_nesting_past_vendor_repo() {
         let root = Path::new("/models");
@@ -1773,6 +1798,48 @@ mod tests {
         for (id, resolution) in &got {
             assert!(matches!(resolution, Resolution::Resolved(_)), "{id}: expected Resolved, got {resolution:?}");
         }
+    }
+
+    /// Two repositories that each ship every role of the architecture are two
+    /// models, each made of its OWN files: the other roles of an instance come
+    /// from its own repository when it holds them (one Qwen3-TTS release's
+    /// codec beside its own Talker, never another release's), and only a role
+    /// its repository lacks is looked for across the store.
+    #[test]
+    fn resolve_all_takes_an_instances_other_roles_from_its_own_repository() {
+        struct TwoRoleSpec;
+        impl ArchSpec for TwoRoleSpec {
+            fn arch(&self) -> &'static str {
+                "toy"
+            }
+            fn roles(&self) -> &'static [&'static str] {
+                &["dit", "vae"]
+            }
+            fn classify(&self, records: &[ArtifactRecord], _root: &Path) -> Vec<(usize, String, Confidence)> {
+                let role = |r: &ArtifactRecord| ["dit", "vae"].into_iter().find(|role| r.path.to_string_lossy().ends_with(&format!(".{role}")));
+                records.iter().enumerate().filter_map(|(i, r)| role(r).map(|role| (i, role.to_string(), Confidence::Declared))).collect()
+            }
+            fn assemble(&self, chosen: &BTreeMap<String, usize>, _records: &[ArtifactRecord], _overrides: &BTreeMap<String, String>) -> Result<AssembleOutcome, String> {
+                chosen.get("vae").ok_or("no vae")?;
+                Ok(AssembleOutcome::Assembled(AssembledVariant { id: "local/toy".to_string(), variant: None }))
+            }
+            fn validate(&self, _assembly: &Assembly) -> Result<(), String> {
+                Ok(())
+            }
+            fn instance_role(&self) -> Option<&'static str> {
+                Some("dit")
+            }
+        }
+        let dir = tmp("resolve-all-own-roles");
+        let file = |repo: &str, f: &str| dir.path().join("v").join(repo).join(f).to_str().unwrap().to_string();
+        let records = vec![rec(&file("a", "m.dit")), rec(&file("a", "m.vae")), rec(&file("b", "m.dit")), rec(&file("b", "m.vae")), rec(&file("c", "m.dit"))];
+        let specs: [&dyn ArchSpec; 1] = [&TwoRoleSpec];
+        let got: BTreeMap<String, Resolution> = resolve_all("toy", dir.path(), &records, &specs, &BTreeMap::new()).into_iter().collect();
+        for repo in ["a", "b"] {
+            let Some(Resolution::Resolved(a)) = got.get(&format!("v/{repo}")) else { panic!("v/{repo}: {:?}", got.get(&format!("v/{repo}"))) };
+            assert_eq!(a.roles["vae"], PathBuf::from(file(repo, "m.vae")), "v/{repo} takes its own vae");
+        }
+        assert!(matches!(got.get("v/c"), Some(Resolution::Ambiguous(_))), "a repository without the role still chooses across the store: {:?}", got.get("v/c"));
     }
 
     /// An operator who already pinned the instance role explicitly (an

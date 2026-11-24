@@ -49,7 +49,10 @@ except ModuleNotFoundError:
 from brain_py.base import BrainError, skip  # noqa: E402
 from brain_py.dbus import BrainDBus  # noqa: E402
 
-MODEL = "brain/qwen3tts"
+#: The architecture whose served models this sample drives: every Qwen3-TTS
+#: checkpoint in the server's model store is a model of its own, under its own
+#: `<vendor>/<repo>` id.
+ARCHITECTURE = "qwen3tts"
 
 
 def main() -> int:
@@ -64,7 +67,7 @@ def main() -> int:
     ap.add_argument("--stream-chunk", type=int, default=0, help="codec frames per streamed chunk (0 = the engine's own default)")
     ap.add_argument("--max-frames", type=int, default=0, help="codec frame cap (0 = the action's own default)")
     ap.add_argument("--seed", type=int, default=None, help="RNG seed (omit: the server draws a random one and reports it)")
-    ap.add_argument("--model", default=MODEL)
+    ap.add_argument("--model", default="", help="the served model id (default: the first served Qwen3-TTS checkpoint)")
     ap.add_argument("--out", default="qwen3tts_speak.wav", help="output WAV path")
     args = ap.parse_args()
 
@@ -93,6 +96,11 @@ def main() -> int:
 
     with BrainDBus() as brain:
         models = brain.models()
+        if not args.model:
+            served = [m["model"] for m in brain.manifests() if m.get("architecture") == ARCHITECTURE]
+            if not served:
+                skip(f"no Qwen3-TTS checkpoint served (models: {models}); pull one into the model store")
+            args.model = served[0]
         if args.model not in models:
             skip(f"{args.model!r} not served (models: {models}); pull a Qwen3-TTS checkpoint into the model store")
         spec = next((a for m in brain.manifests() if m["model"] == args.model for a in m["actions"] if a["name"] == args.action), None)
