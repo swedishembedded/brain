@@ -23,6 +23,7 @@
 
 mod fast_conv;
 pub mod fast_ops;
+pub mod kquant_ops;
 pub mod host_gemm;
 pub mod roofline;
 
@@ -209,6 +210,21 @@ struct FastIdx {
     matmul_dx_reg: Option<usize>,
     matmul_dw: Option<usize>,
     matmul_dw_reg: Option<usize>,
+    /// Affine K-quant GEMMs (GGUF Q4_K/Q5_K): `matmul_kq_dyn#CODE_BITS=4/8`.
+    /// The WGSL kernels are multi-barrier, so the JIT never compiles them -
+    /// they run ONLY through `kquant_ops::matmul_kq_dyn` here. Registered
+    /// together with the `int8_dot: true` caps flip: a PackedInt8 candidate
+    /// the selector can pick for `Dtype::Q4K`/`Q8K` must have a native route.
+    matmul_kq4: Option<usize>,
+    matmul_kq8: Option<usize>,
+    /// `matmul_i8_dyn` and its `#QPG=1` sibling (the group=16 Q6_K-style
+    /// instantiation) - the WGSL kernels are multi-barrier work-group tiles
+    /// the JIT never compiles; the template knobs (`#TN=4` et al) change only
+    /// the GPU tile assignment, not the arithmetic, so every variant of the
+    /// family routes to the same `fast_ops::matmul_i8_dyn` (group=32) or
+    /// `kquant_ops::matmul_i8_dyn_g` (group=16).
+    matmul_i8: Option<usize>,
+    matmul_i8_g16: Option<usize>,
     conv2d: Option<usize>,
     conv_act: Option<usize>,
     silu: Option<usize>,
@@ -329,6 +345,17 @@ impl CpuBackend {
             let find = |k: &str| {
                 names.iter().position(|n| n == k).filter(|&i| all_native || !jit.is_compiled(i))
             };
+            // The i8 GEMM family: the base name plus any tile-knob template
+            // variant (`#TN=4` et al) is the same arithmetic - the knobs only
+            // change the GPU tile assignment, the one-graph rule the matmul
+            // family's own arm already precedents. `#QPG=1` (group=16) is a
+            // genuinely different reduction, so it is matched separately (also
+            // by prefix: a caller may combine it with tile knobs).
+            let find_i8 = |g16: bool| {
+                names.iter().position(|n| {
+                    n.starts_with("matmul_i8_dyn") && n.contains("QPG=1") == g16
+                }).filter(|&i| all_native || !jit.is_compiled(i))
+            };
             FastIdx {
                 matmul: find("matmul"),
                 matmul_tiled: find("matmul_tiled"),
@@ -336,6 +363,10 @@ impl CpuBackend {
                 matmul_reg2: find("matmul_reg2"),
                 matmul_reg3: find("matmul_reg3"),
                 matmul_reg3_grouped: find("matmul_reg3_grouped"),
+                matmul_kq4: find("matmul_kq_dyn#CODE_BITS=4"),
+                matmul_kq8: find("matmul_kq_dyn#CODE_BITS=8"),
+                matmul_i8: find_i8(false),
+                matmul_i8_g16: find_i8(true),
                 matmul_reg4: find("matmul_reg4"),
                 attn_scores_cross: find("attn_scores_cross"),
                 attn_scores_cross_kt: find("attn_scores_cross_kt"),
@@ -682,6 +713,72 @@ backend_api::check_binding_offsets(&self.shared.names[kind], offsets);
                 let b = std::slice::from_raw_parts(bufs[1] as *const f32, n * k);
                 let c = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, m * n);
                 fast_ops::matmul_abt(a, b, c, m, k, n);
+            }
+            return;
+        }
+        // matmul_kq_dyn#CODE_BITS=4/8: the affine K-quant GEMM (GGUF Q4_K /
+        // Q5_K weights). params = [m, k, n] (RAW LOGICAL k); bufs = [xq, wq,
+        // wsm, wd, xgs, sx, out] - the WGSL kernel's binding order, `sx` the
+        // activation scales and `xgs` the placeholder slot the dispatch site
+        // passes when a native kernel serves the product (this route computes
+        // the group sums itself, so it ignores that slot). The [m, n] rows
+        // dispatch over slices the same way the matmul family's own arm does.
+        if (Some(kind) == f.matmul_kq4 || Some(kind) == f.matmul_kq8) && bufs.len() >= 7 {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 3);
+                let (m, k, n) = (pu[0] as usize, pu[1] as usize, pu[2] as usize);
+                let bits = if Some(kind) == f.matmul_kq4 { 4 } else { 8 };
+                let xrow = k / 4;
+                let wrow = k * bits as usize / 32;
+                let ng = k / 32;
+                let wsm_r = ng.div_ceil(2);
+                let wd_r = ng / 8;
+                let xq = std::slice::from_raw_parts(bufs[0] as *const u32, m * xrow);
+                let wq = std::slice::from_raw_parts(bufs[1] as *const u32, n * wrow);
+                let wsm = std::slice::from_raw_parts(bufs[2] as *const u32, n * wsm_r);
+                let wd = std::slice::from_raw_parts(bufs[3] as *const u32, n * wd_r);
+                let xgs = std::slice::from_raw_parts_mut(bufs[4] as *mut f32, m * ng);
+                let sx = std::slice::from_raw_parts(bufs[5] as *const f32, m * ng);
+                let out = std::slice::from_raw_parts_mut(bufs[6] as *mut f32, m * n);
+                kquant_ops::matmul_kq_dyn(xq, wq, wsm, wd, xgs, sx, out, m, k, n, bits);
+            }
+            return;
+        }
+        // matmul_i8_dyn[+#QPG=1,+#TN=4]: the packed-int8 GEMM (`model::int8`'s
+        // group-wise codes). params = [m, kg, n] with kg = k/4 (packed int8
+        // words); bufs = [xq, w, sx, sw, out] - the WGSL kernel's binding
+        // order. Matched by NAME, not one kind index: the engine dispatches
+        // template variants (`#TN=4` et al) under their own indices, and the
+        // tile knobs change only GPU tile assignment, never the arithmetic -
+        // the one-graph rule the matmul family's own arm precedents. The
+        // group=16 sibling (`#QPG=1`) is the same arithmetic at half the
+        // group width. The FastIdx gate keeps `BRAIN_NO_FASTCONV` honest:
+        // with fast paths off, no family entry is Some and the JIT keeps
+        // every kernel it can compile (these it cannot, and panics with the
+        // same message as before the native route existed).
+        let kname = &self.shared.names[kind];
+        if kname.starts_with("matmul_i8_dyn")
+            && (f.matmul_i8.is_some() || f.matmul_i8_g16.is_some())
+            && bufs.len() >= 5
+        {
+            unsafe {
+                let pu = std::slice::from_raw_parts(uniform, 3);
+                let (m, kg, n) = (pu[0] as usize, pu[1] as usize, pu[2] as usize);
+                let group = if kname.contains("QPG=1") { 16 } else { 32 };
+                let ng = kg * 4 / group;
+                let xq = std::slice::from_raw_parts(bufs[0] as *const u32, m * kg);
+                let wq = std::slice::from_raw_parts(bufs[1] as *const u32, n * kg);
+                let sx = std::slice::from_raw_parts(bufs[2] as *const f32, m * ng);
+                let sw = std::slice::from_raw_parts(bufs[3] as *const f32, n * ng);
+                let out = std::slice::from_raw_parts_mut(bufs[4] as *mut f32, m * n);
+                // group=32 is the M8.11 AVX2 GEMM's native shape (8 words per
+                // group fold); the group=16 sibling is the scalar-generic
+                // fallback the kquant module's oracle tests cover.
+                if group == 32 {
+                    fast_ops::matmul_i8_dyn(xq, wq, sx, sw, out, m, kg, n);
+                } else {
+                    kquant_ops::matmul_i8_dyn_g(xq, wq, sx, sw, out, m, kg, n, group);
+                }
             }
             return;
         }
@@ -1503,7 +1600,16 @@ impl Backend for CpuBackend {
             // so `int8_dot: true` here would make EVERY int8-family matmul on
             // this backend select a kernel the JIT cannot correctly execute -
             // confirmed by reading `candidates`'s real match arm, not assumed.
-            numeric: NumericSupport { int8_dot: false, fp8_storage: true, ..arch.numeric_view() },
+            // M14: NOW TRUE. The three PackedInt8 kernels the selector can pick
+            // for the int8-family dtypes all have native routes on this backend:
+            // `matmul_i8_dyn`/`matmul_i8_dyn#QPG=1` -> `fast_ops::matmul_i8_dyn`
+            // (existing, AVX2/VNNI), `matmul_kq_dyn#CODE_BITS=4/8` ->
+            // `kquant_ops::matmul_kq_dyn` (new). `WorkgroupPerOutput` picks the
+            // GEMV kernels only below `i8_gemv_max_rows(caps)`, which
+            // `workgroup_reductions=false` here keeps at 0 - so the GEMV kernel
+            // names are never selected on CPU. The engine's `w8_on` gate reads
+            // this flag: serving no longer promotes int8 weights to fp32.
+            numeric: NumericSupport { int8_dot: true, fp8_storage: true, ..arch.numeric_view() },
             arch,
         }
     }

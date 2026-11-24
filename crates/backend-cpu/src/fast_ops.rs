@@ -643,7 +643,7 @@ pub fn matmul_i8_dyn(xq: &[u32], wq: &[u32], sx: &[f32], sw: &[f32], out: &mut [
 /// but no VNNI (or vice versa - both exist in the wild) impossible to
 /// express correctly through one shared tier.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Int8IsaTier {
+pub(crate) enum Int8IsaTier {
     Scalar,
     #[cfg(target_arch = "x86_64")]
     Avx2,
@@ -658,7 +658,7 @@ impl Int8IsaTier {
     /// Resolved once per process via a `OnceLock`, the same convention
     /// `fast_conv::isa_tier()` uses - call ONCE per hot-loop function
     /// (`matmul_i8_dyn` does), never per group.
-    fn current() -> Int8IsaTier {
+    pub(crate) fn current() -> Int8IsaTier {
         static TIER: std::sync::OnceLock<Int8IsaTier> = std::sync::OnceLock::new();
         *TIER.get_or_init(|| {
             #[cfg(target_arch = "x86_64")]
@@ -691,7 +691,7 @@ impl Int8IsaTier {
 /// non-x86_64 fallback and [`tests::avx2_int8_gemm_matches_scalar_reference`]'s
 /// oracle.
 #[inline]
-fn dot_group_scalar(a: &[u32], b: &[u32]) -> i32 {
+pub(crate) fn dot_group_scalar(a: &[u32], b: &[u32]) -> i32 {
     let mut acc = 0i32;
     for (&aw, &bw) in a.iter().zip(b) {
         for lane in 0..4 {
@@ -708,7 +708,7 @@ fn dot_group_scalar(a: &[u32], b: &[u32]) -> i32 {
 /// approximate. `a`/`b` are exactly 8 `u32` words (32 packed `i8` lanes each).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn dot32_i8_avx2(a: &[u32], b: &[u32]) -> i32 {
+pub(crate) unsafe fn dot32_i8_avx2(a: &[u32], b: &[u32]) -> i32 {
     use std::arch::x86_64::*;
     debug_assert_eq!(a.len(), 8);
     debug_assert_eq!(b.len(), 8);
@@ -751,7 +751,7 @@ unsafe fn dot32_i8_avx2(a: &[u32], b: &[u32]) -> i32 {
 /// `skip_unvalidated_capability` call. Compiled and shape-tested only.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512bw,avx512vnni")]
-unsafe fn dot32_i8_avx512vnni(a: &[u32], b: &[u32]) -> i32 {
+pub(crate) unsafe fn dot32_i8_avx512vnni(a: &[u32], b: &[u32]) -> i32 {
     use std::arch::x86_64::*;
     debug_assert_eq!(a.len(), 8);
     debug_assert_eq!(b.len(), 8);
@@ -787,7 +787,7 @@ unsafe fn dot32_i8_avx512vnni(a: &[u32], b: &[u32]) -> i32 {
 /// as `Int8IsaTier::Neon` whenever `fast_conv::neon_dotprod_available()`.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon,dotprod")]
-unsafe fn dot32_i8_neon(a: &[u32], b: &[u32]) -> i32 {
+pub(crate) unsafe fn dot32_i8_neon(a: &[u32], b: &[u32]) -> i32 {
     use std::arch::aarch64::*;
     debug_assert_eq!(a.len(), 8);
     debug_assert_eq!(b.len(), 8);

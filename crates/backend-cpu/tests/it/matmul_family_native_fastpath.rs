@@ -272,22 +272,31 @@ fn backward_matmul_family_native_fastpath_matches_scalar_reference() {
 /// proves it directly against the real CPU backend's own `caps()`, not a
 /// synthetic stand-in.
 #[test]
-fn matmul_i8_dyn_has_no_cpu_native_fastpath_and_is_unreachable_by_the_selector() {
+fn matmul_i8_dyn_is_jit_uncompilable_but_native_routed_and_selector_reachable() {
     assert_jit_uncompilable("matmul_i8_dyn", kernels::MATMUL_I8_DYN);
+    // M14: the kernel IS now reachable - it has a native dispatch route, and
+    // the caps flip makes the selector pick it. Assert the new reality (the
+    // doc comment above is historical): int8_dot=true, PackedInt8 candidates,
+    // and the kq kernels in the ALL list have native routes too.
 
     use backend_api::Backend;
     let cpu = backend_cpu::CpuBackend::new(&[("matmul_i8_dyn", kernels::MATMUL_I8_DYN)]);
     let caps = cpu.caps();
-    assert!(!caps.numeric.int8_dot, "backend-cpu now reports int8_dot=true; matmul_i8_dyn may be reachable");
+    assert!(
+        caps.numeric.int8_dot,
+        "backend-cpu reports int8_dot=false: the packed-int8 serving tiers would be \
+         unreachable on CPU (fp32-promoted) even though every kernel the selector \
+         can pick for them has a native dispatch route"
+    );
 
     use gpu_core::select::{candidates, Dtype, Op, OpShape};
     for m in [1u32, 8, 32, 33, 128, 4096] {
         let shape = OpShape { m, n: 512, k: 512, dtype: Dtype::I8 };
         let cands = candidates(Op::MatMul, shape, &caps);
         assert!(
-            !cands.contains(&gpu_core::select::KernelVariant::PackedInt8),
-            "m={m}: candidates() returned PackedInt8 (-> matmul_i8_dyn) for CPU caps, which has no \
-             native fast path for it - this would panic on real dispatch"
+            cands.contains(&gpu_core::select::KernelVariant::PackedInt8),
+            "m={m}: candidates() returned no PackedInt8 for CPU caps - the AVX2 native \
+             route makes it the runnable packed-int8 kernel on this backend"
         );
     }
 }

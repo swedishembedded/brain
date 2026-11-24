@@ -75,6 +75,18 @@ pub fn source_weight_tier(cfg: &QwenConfig, src: &dyn TensorSource) -> crate::Dt
     let mut held = cfg.param_list().into_iter().map(|(name, _)| name).filter(|name| crate::q8::Q8::is_i8_linear(name) || *name == head).map(|name| model::ops::stored_tier(src, &name));
     match held.next().flatten() {
         Some(first @ (Dtype::BF16 | Dtype::F16)) if held.all(|t| t == Some(first)) => first,
+        // M14: a GGUF checkpoint's linears are K-quant (Q4_K / Q5_K) - the
+        // loader builds `Weight::KQuant` from them directly, so the
+        // checkpoint's stored tier is Q4K/Q8K, not fp32. Without this arm
+        // the whole checkpoint plans as fp32 (~21 GiB on a 4B) and its fit
+        // refuses every device.
+        None => {
+            let mut kq = cfg.param_list().into_iter().map(|(name, _)| name).filter(|name| crate::q8::Q8::is_i8_linear(name)).map(|name| model::ops::stored_tier(src, &name));
+            match kq.next().flatten() {
+                Some(t @ (Dtype::Q4K | Dtype::Q8K)) if kq.all(|t2| t2 == Some(t) || t2.is_none()) => t,
+                _ => Dtype::F32,
+            }
+        }
         _ => Dtype::F32,
     }
 }

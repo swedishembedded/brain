@@ -304,6 +304,14 @@ pub fn held_weight_bytes_by(cfg: &QwenConfig, tier_of: impl Fn(&str) -> Dtype) -
         Dtype::BF16 | Dtype::F16 => n * 2,
         Dtype::I8 => n + (n / 32) * 4,
         Dtype::NF4 | Dtype::Q4 => n / 2 + (n / 32) * 4,
+        // M14: the affine K-quant tiers (GGUF Q4_K / Q5_K), priced at the
+        // bytes the device buffer actually holds - the packed codes (4.5 /
+        // 8 bits per element), the 6-bit scale/min pair per 32-group (18
+        // bytes per 32 groups), and one f16 (d, dmin) pair per 8 groups.
+        // Pricing these at the fp32 promotion (n * 4) is what made every
+        // GGUF plan ~21 GiB on a 4B model.
+        Dtype::Q4K => n * 9 / 16 + (n / 32) * 18 / 8 + (n / 256) * 4,
+        Dtype::Q8K => n + (n / 32) * 18 / 8 + (n / 256) * 4,
         _ => n * 4,
     };
     let head = cfg.head_weight();
@@ -333,8 +341,14 @@ pub fn held_weight_bytes_by(cfg: &QwenConfig, tier_of: impl Fn(&str) -> Dtype) -
 /// for bf16 weights on tensor cores, knowledge 326). A device that cannot hold a half tier widens it to fp32 at
 /// upload and says so. The serving resident, the SDK pipeline and the perf targets all decide by this.
 pub fn default_weight_tier(cfg: &QwenConfig, stored: Dtype, device_bytes: Option<u64>) -> Dtype {
+    // M14: a checkpoint that already stores a packed serving tier (a GGUF's
+    // Q4_K / Q5_K, brain-int4, or brain-int8) keeps it - the same tier the
+    // CPU backend can now execute natively (`kquant_ops`) and the fit
+    // estimator prices at its packed size (`Weight::bytes_for`), not the
+    // 4-bytes-per-parameter fp32 promotion that previously made every GGUF
+    // plan ~21 GiB. The floating tiers (BF16/F16) keep their old rule.
     let stored = match stored {
-        Dtype::BF16 | Dtype::F16 => stored,
+        Dtype::BF16 | Dtype::F16 | Dtype::Q4K | Dtype::Q8K | Dtype::Q4 | Dtype::I8 => stored,
         _ => Dtype::F32,
     };
     let fits = |bytes: u64| bytes >= held_weight_bytes(cfg, stored) + SERVE_HEADROOM_BYTES;

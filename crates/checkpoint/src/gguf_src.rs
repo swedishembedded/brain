@@ -110,6 +110,23 @@ impl TensorSource for GgufSource {
             self.mg.advise_drop(src);
         }
     }
+
+    fn packed_descriptor(&self, name: &str) -> Option<crate::packed::TensorDescriptor> {
+        // M14: the GGUF reader knows each tensor's GGML block format - the
+        // K-quant encodings (Q4_K/Q5_K) name the `Q4K`/`Q8K` tiers through
+        // `stored_tier`'s own arm, which is how a GGUF checkpoint's fit
+        // prices its linears at their packed size instead of promoting them
+        // to fp32 (4 bytes/elem). A tensor with no layout (fp32/f16) has no
+        // packed descriptor, as everywhere else.
+        let src = self.source_name(name)?;
+        let (layout, _bytes) = self.mg.raw_blocks(src)?;
+        let shape: Vec<u64> = self.mg.shape(src)?.iter().map(|&d| d as u64).collect();
+        Some(crate::packed::TensorDescriptor {
+            name: name.to_string(),
+            shape,
+            encoding: crate::packed::QuantEncoding::ggml(layout.ty),
+        })
+    }
 }
 
 #[cfg(test)]

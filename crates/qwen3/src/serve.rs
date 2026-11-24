@@ -1357,8 +1357,8 @@ impl Engine {
     /// F16), bf16 and f16 are not both used (one inline-decode kernel set is built), and the tensors
     /// fused into one GEMM ([`model::Model::coupled_tensors`]) take one tier. A refusal names the rule.
     pub fn check_tiers(cfg: &QwenConfig, tiers: &TierPolicy) -> Result<(), String> {
-        if let Some(bad) = tiers.dtypes().find(|t| !matches!(t, Dtype::F32 | Dtype::I8 | Dtype::BF16 | Dtype::F16 | Dtype::NF4 | Dtype::Q4)) {
-            return Err(format!("{bad:?} weights are not a serving tier (F32, I8, BF16, F16, NF4, Q4)"));
+        if let Some(bad) = tiers.dtypes().find(|t| !matches!(t, Dtype::F32 | Dtype::I8 | Dtype::BF16 | Dtype::F16 | Dtype::NF4 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K)) {
+            return Err(format!("{bad:?} weights are not a serving tier (F32, I8, BF16, F16, NF4, Q4, Q4K, Q8K)"));
         }
         if tiers.dtypes().any(|t| t == Dtype::BF16) && tiers.dtypes().any(|t| t == Dtype::F16) {
             return Err("bf16 and f16 linears cannot be served together; hold the half-precision linears at one of them".into());
