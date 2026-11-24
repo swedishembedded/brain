@@ -8,8 +8,8 @@
 
 //! The training shard: recorded speech as the Talker and code predictor read it.
 //!
-//! One shard is a directory of a few column files, never one file per
-//! utterance. Each record is one utterance:
+//! One shard is one file (an artifact a training job takes by digest), never
+//! one file per utterance. Each record is one utterance:
 //!
 //! * the tokenised assistant turn (`<|im_start|>assistant\n{text}<|im_end|>\n
 //!   <|im_start|>assistant\n`, the ids generation tokenises the request into),
@@ -21,20 +21,25 @@
 //! * whether the recording ends where the utterance ends (only then is the
 //!   end of speech a training target).
 //!
-//! | file | contents |
-//! |---|---|
-//! | `meta.json` | [`ShardMeta`] |
-//! | `text.u32`, `text_off.u64` | concatenated token ids; `records + 1` offsets into them |
-//! | `codes.u16`, `codes_off.u64` | concatenated frames; `records + 1` frame offsets |
-//! | `xvec.f32` | `records * xvector_dim` |
-//! | `voice.u32`, `language.u32`, `complete.u32` | one per record (`voice` is [`NO_VOICE`] for none) |
-//! | `ids.jsonl` | one [`RecordId`] per record, for provenance |
+//! The file is the 8 bytes [`MAGIC`], a little-endian `u64` header length, the
+//! JSON header `{"meta": ShardMeta, "columns": {name: {"dtype", "offset",
+//! "len"}}}` and the columns, each starting at a multiple of 8 bytes counted
+//! from the end of the header; `len` counts elements, all little-endian:
 //!
-//! Everything a shard holds is checked when it is opened ([`Shard::open`]):
-//! offsets start at zero, never decrease and end at the column's length, codes
-//! lie inside the codebook, voices and languages resolve, and the per-record
-//! columns agree on the record count. A shard that fails is refused naming the
-//! file and the record, never trained on.
+//! | column | dtype | contents |
+//! |---|---|---|
+//! | `text`, `text_off` | `u32`, `u64` | concatenated token ids; `records + 1` offsets into them |
+//! | `codes`, `codes_off` | `u16`, `u64` | concatenated frames; `records + 1` frame offsets |
+//! | `xvec` | `f32` | `records * xvector_dim` |
+//! | `voice`, `language`, `complete` | `u32` | one per record (`voice` is [`NO_VOICE`] for none) |
+//! | `ids` | `u8` | one JSON [`RecordId`] per record, one per line |
+//!
+//! Everything a shard holds is checked when it is read ([`Shard::from_bytes`]):
+//! column ranges lie inside the file, offsets start at zero, never decrease and
+//! end at the column's length, codes lie inside the codebook, voices and
+//! languages resolve, and the per-record columns agree on the record count. A
+//! shard that fails is refused naming the column and the record, never trained
+//! on.
 
 use std::fs;
 use std::io;
@@ -137,94 +142,164 @@ impl RecordView<'_> {
     }
 }
 
-fn invalid(path: &Path, what: impl std::fmt::Display) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, format!("{}: {what}", path.display()))
+/// The first 8 bytes of a shard file.
+pub const MAGIC: &[u8; 8] = b"BTTSHRD1";
+
+/// Where one column lies in the file.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Column {
+    pub dtype: String,
+    /// Bytes from the end of the header; a multiple of 8.
+    pub offset: u64,
+    /// Elements.
+    pub len: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Header {
+    meta: ShardMeta,
+    columns: std::collections::BTreeMap<String, Column>,
+}
+
+/// The columns, their element type and width, in the order they are written.
+const COLUMNS: &[(&str, &str, usize)] = &[
+    ("text", "u32", 4),
+    ("text_off", "u64", 8),
+    ("codes", "u16", 2),
+    ("codes_off", "u64", 8),
+    ("xvec", "f32", 4),
+    ("voice", "u32", 4),
+    ("language", "u32", 4),
+    ("complete", "u32", 4),
+    ("ids", "u8", 1),
+];
+
+fn invalid(what: impl std::fmt::Display) -> String {
+    format!("{FORMAT}: {what}")
 }
 
 /// Offsets must start at 0, never decrease, end at `len` and number `records + 1`.
-fn check_offsets(path: &Path, off: &[u64], records: u64, len: usize) -> io::Result<()> {
+fn check_offsets(column: &str, off: &[u64], records: u64, len: usize) -> Result<(), String> {
     if off.len() as u64 != records + 1 {
-        return Err(invalid(path, format!("{} offsets for {records} records, expected {}", off.len(), records + 1)));
+        return Err(invalid(format!("{column}: {} offsets for {records} records, expected {}", off.len(), records + 1)));
     }
     if off[0] != 0 {
-        return Err(invalid(path, format!("the first offset is {}, expected 0", off[0])));
+        return Err(invalid(format!("{column}: the first offset is {}, expected 0", off[0])));
     }
     if let Some(r) = off.windows(2).position(|w| w[1] < w[0]) {
-        return Err(invalid(path, format!("record {r}: offset {} is below the one before it, {}", off[r + 1], off[r])));
+        return Err(invalid(format!("{column}: record {r}: offset {} is below the one before it, {}", off[r + 1], off[r])));
     }
     if off[off.len() - 1] != len as u64 {
-        return Err(invalid(path, format!("the last offset is {}, the column holds {len}", off[off.len() - 1])));
+        return Err(invalid(format!("{column}: the last offset is {}, the column holds {len}", off[off.len() - 1])));
     }
     Ok(())
 }
 
+/// The bytes of column `name`, checked against its declared type and the file.
+fn column<'a>(columns: &std::collections::BTreeMap<String, Column>, body: &'a [u8], name: &str, dtype: &str, width: usize) -> Result<&'a [u8], String> {
+    let c = columns.get(name).ok_or_else(|| invalid(format!("no column {name:?}")))?;
+    if c.dtype != dtype {
+        return Err(invalid(format!("{name}: dtype {:?}, expected {dtype:?}", c.dtype)));
+    }
+    if !c.offset.is_multiple_of(8) {
+        return Err(invalid(format!("{name}: offset {} is not 8-byte aligned", c.offset)));
+    }
+    let bytes = c.len.checked_mul(width as u64).ok_or_else(|| invalid(format!("{name}: length overflows")))?;
+    let end = c.offset.checked_add(bytes).filter(|&e| e <= body.len() as u64).ok_or_else(|| invalid(format!("{name}: {} elements at {} run past the end of the file", c.len, c.offset)))?;
+    Ok(&body[c.offset as usize..end as usize])
+}
+
+fn le<const N: usize, T>(bytes: &[u8], f: fn([u8; N]) -> T) -> Vec<T> {
+    bytes.as_chunks::<N>().0.iter().map(|c| f(*c)).collect()
+}
+
 impl Shard {
-    /// Read and validate the shard at `dir`.
-    pub fn open(dir: &Path) -> io::Result<Shard> {
-        use data::binio::{read_f32_bin, read_u16_bin, read_u32_bin, read_u64_bin};
-        let meta_path = dir.join("meta.json");
-        let meta: ShardMeta = serde_json::from_slice(&fs::read(&meta_path)?).map_err(|e| invalid(&meta_path, e))?;
+    /// Read and validate the shard file at `path`.
+    pub fn open(path: &Path) -> io::Result<Shard> {
+        let bytes = fs::read(path)?;
+        Shard::from_bytes(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("{}: {e}", path.display())))
+    }
+
+    /// Read and validate a shard from its bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Shard, String> {
+        if bytes.len() < 16 || &bytes[..8] != MAGIC {
+            return Err(invalid("not a shard file (bad magic)"));
+        }
+        let hlen = u64::from_le_bytes(bytes[8..16].try_into().expect("8 bytes"));
+        let hend = 16u64.checked_add(hlen).filter(|&e| e <= bytes.len() as u64).ok_or_else(|| invalid(format!("a header of {hlen} bytes runs past the end of the file")))? as usize;
+        let header: Header = serde_json::from_slice(&bytes[16..hend]).map_err(|e| invalid(format!("header: {e}")))?;
+        let meta = header.meta;
         if meta.format != FORMAT {
-            return Err(invalid(&meta_path, format!("format {:?}, expected {FORMAT:?}", meta.format)));
+            return Err(invalid(format!("meta: format {:?}, expected {FORMAT:?}", meta.format)));
         }
         if meta.codebooks == 0 || meta.codebook_size == 0 || meta.codebook_size > u32::from(u16::MAX) + 1 || meta.xvector_dim == 0 {
-            return Err(invalid(&meta_path, "codebooks, codebook_size (at most 65536) and xvector_dim must be positive"));
+            return Err(invalid("meta: codebooks, codebook_size (at most 65536) and xvector_dim must be positive"));
         }
         if meta.languages.is_empty() {
-            return Err(invalid(&meta_path, "a shard names at least one language"));
+            return Err(invalid("meta: a shard names at least one language"));
         }
+        if let Some(extra) = header.columns.keys().find(|k| !COLUMNS.iter().any(|(n, _, _)| n == k)) {
+            return Err(invalid(format!("unknown column {extra:?}")));
+        }
+        let body = &bytes[hend..];
+        let col = |name: &str| -> Result<&[u8], String> {
+            let (_, dtype, width) = COLUMNS.iter().find(|(n, _, _)| *n == name).expect("a known column");
+            column(&header.columns, body, name, dtype, *width)
+        };
         let n = meta.records;
-        let text = read_u32_bin(&dir.join("text.u32"))?;
-        let text_off = read_u64_bin(&dir.join("text_off.u64"))?;
-        check_offsets(&dir.join("text_off.u64"), &text_off, n, text.len())?;
-        let codes = read_u16_bin(&dir.join("codes.u16"))?;
-        let codes_off = read_u64_bin(&dir.join("codes_off.u64"))?;
         let q = meta.codebooks as usize;
+        let text = le(col("text")?, u32::from_le_bytes);
+        let text_off = le(col("text_off")?, u64::from_le_bytes);
+        check_offsets("text_off", &text_off, n, text.len())?;
+        let codes = le(col("codes")?, u16::from_le_bytes);
         if !codes.len().is_multiple_of(q) {
-            return Err(invalid(&dir.join("codes.u16"), format!("{} codes are not whole frames of {q}", codes.len())));
+            return Err(invalid(format!("codes: {} codes are not whole frames of {q}", codes.len())));
         }
-        check_offsets(&dir.join("codes_off.u64"), &codes_off, n, codes.len() / q)?;
+        let codes_off = le(col("codes_off")?, u64::from_le_bytes);
+        check_offsets("codes_off", &codes_off, n, codes.len() / q)?;
         if let Some(i) = codes.iter().position(|&c| u32::from(c) >= meta.codebook_size) {
             let record = codes_off.partition_point(|&o| o as usize * q <= i) - 1;
-            return Err(invalid(&dir.join("codes.u16"), format!("record {record}: code {} is outside the codebook of {}", codes[i], meta.codebook_size)));
+            return Err(invalid(format!("codes: record {record}: code {} is outside the codebook of {}", codes[i], meta.codebook_size)));
         }
-        let xvec = read_f32_bin(&dir.join("xvec.f32"))?;
+        let xvec = le(col("xvec")?, f32::from_le_bytes);
         if xvec.len() as u64 != n * u64::from(meta.xvector_dim) {
-            return Err(invalid(&dir.join("xvec.f32"), format!("{} values, expected {n} x {}", xvec.len(), meta.xvector_dim)));
+            return Err(invalid(format!("xvec: {} values, expected {n} x {}", xvec.len(), meta.xvector_dim)));
         }
         if let Some(i) = xvec.iter().position(|x| !x.is_finite()) {
-            return Err(invalid(&dir.join("xvec.f32"), format!("record {}: a non-finite x-vector value", i / meta.xvector_dim as usize)));
+            return Err(invalid(format!("xvec: record {}: a non-finite x-vector value", i / meta.xvector_dim as usize)));
         }
-        let per_record = |name: &str| -> io::Result<Vec<u32>> {
-            let v = read_u32_bin(&dir.join(name))?;
+        let per_record = |name: &str| -> Result<Vec<u32>, String> {
+            let v = le(col(name)?, u32::from_le_bytes);
             if v.len() as u64 != n {
-                return Err(invalid(&dir.join(name), format!("{} values for {n} records", v.len())));
+                return Err(invalid(format!("{name}: {} values for {n} records", v.len())));
             }
             Ok(v)
         };
-        let voice = per_record("voice.u32")?;
+        let voice = per_record("voice")?;
         if let Some(r) = voice.iter().position(|&v| v != NO_VOICE && v as usize >= meta.voices.len()) {
-            return Err(invalid(&dir.join("voice.u32"), format!("record {r}: voice {} is not one of the {} named", voice[r], meta.voices.len())));
+            return Err(invalid(format!("voice: record {r}: voice {} is not one of the {} named", voice[r], meta.voices.len())));
         }
-        let language = per_record("language.u32")?;
+        let language = per_record("language")?;
         if let Some(r) = language.iter().position(|&l| l as usize >= meta.languages.len()) {
-            return Err(invalid(&dir.join("language.u32"), format!("record {r}: language {} is not one of the {} named", language[r], meta.languages.len())));
+            return Err(invalid(format!("language: record {r}: language {} is not one of the {} named", language[r], meta.languages.len())));
         }
-        let complete = per_record("complete.u32")?;
+        let complete = per_record("complete")?;
         if let Some(r) = complete.iter().position(|&c| c > 1) {
-            return Err(invalid(&dir.join("complete.u32"), format!("record {r}: complete is {}, expected 0 or 1", complete[r])));
+            return Err(invalid(format!("complete: record {r}: complete is {}, expected 0 or 1", complete[r])));
         }
-        let ids_path = dir.join("ids.jsonl");
-        let ids: Vec<RecordId> = fs::read_to_string(&ids_path)?
+        let ids_text = std::str::from_utf8(col("ids")?).map_err(|e| invalid(format!("ids: {e}")))?;
+        let ids: Vec<RecordId> = ids_text
             .lines()
             .enumerate()
-            .map(|(r, l)| serde_json::from_str(l).map_err(|e| invalid(&ids_path, format!("record {r}: {e}"))))
-            .collect::<io::Result<_>>()?;
+            .map(|(r, l)| serde_json::from_str(l).map_err(|e| invalid(format!("ids: record {r}: {e}"))))
+            .collect::<Result<_, _>>()?;
         if ids.len() as u64 != n {
-            return Err(invalid(&ids_path, format!("{} ids for {n} records", ids.len())));
+            return Err(invalid(format!("ids: {} ids for {n} records", ids.len())));
         }
         if let Some(r) = (0..n as usize).find(|&r| codes_off[r + 1] == codes_off[r] || text_off[r + 1] == text_off[r]) {
-            return Err(invalid(dir, format!("record {r} ({}): no frames or no text", ids[r].id)));
+            return Err(invalid(format!("record {r} ({}): no frames or no text", ids[r].id)));
         }
         Ok(Shard { meta, text, text_off, codes, codes_off, xvec, voice, language, complete, ids })
     }
@@ -264,7 +339,7 @@ impl Shard {
     }
 }
 
-/// Builds a shard in memory and writes it once complete.
+/// Builds a shard in memory.
 pub struct ShardWriter {
     meta: ShardMeta,
     text: Vec<u32>,
@@ -275,15 +350,15 @@ pub struct ShardWriter {
     voice: Vec<u32>,
     language: Vec<u32>,
     complete: Vec<u32>,
-    ids: Vec<String>,
+    ids: String,
 }
 
 impl ShardWriter {
     /// A writer for records described by `meta` (its `records` is ignored and
-    /// set by [`ShardWriter::finish`]).
+    /// set when the shard is written).
     #[must_use]
     pub fn new(meta: ShardMeta) -> ShardWriter {
-        ShardWriter { meta, text: Vec::new(), text_off: vec![0], codes: Vec::new(), codes_off: vec![0], xvec: Vec::new(), voice: Vec::new(), language: Vec::new(), complete: Vec::new(), ids: Vec::new() }
+        ShardWriter { meta, text: Vec::new(), text_off: vec![0], codes: Vec::new(), codes_off: vec![0], xvec: Vec::new(), voice: Vec::new(), language: Vec::new(), complete: Vec::new(), ids: String::new() }
     }
 
     /// Append one record; a record that does not fit the meta is refused.
@@ -316,31 +391,48 @@ impl ShardWriter {
         self.voice.push(r.voice);
         self.language.push(r.language);
         self.complete.push(u32::from(r.complete));
-        self.ids.push(serde_json::to_string(&r.id).map_err(|e| e.to_string())?);
+        self.ids.push_str(&serde_json::to_string(&r.id).map_err(|e| e.to_string())?);
+        self.ids.push('\n');
         Ok(())
     }
 
-    /// Write the shard into `dir` (created; an existing shard there is refused).
-    pub fn finish(mut self, dir: &Path) -> io::Result<()> {
-        use data::binio::{write_f32_bin, write_u16_bin, write_u32_bin, write_u64_bin};
-        if dir.join("meta.json").exists() {
-            return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{}: a shard is already there", dir.display())));
-        }
-        fs::create_dir_all(dir)?;
+    /// The shard's bytes.
+    #[must_use]
+    pub fn to_bytes(mut self) -> Vec<u8> {
         self.meta.records = self.voice.len() as u64;
-        write_u32_bin(&dir.join("text.u32"), &self.text)?;
-        write_u64_bin(&dir.join("text_off.u64"), &self.text_off)?;
-        write_u16_bin(&dir.join("codes.u16"), &self.codes)?;
-        write_u64_bin(&dir.join("codes_off.u64"), &self.codes_off)?;
-        write_f32_bin(&dir.join("xvec.f32"), &self.xvec)?;
-        write_u32_bin(&dir.join("voice.u32"), &self.voice)?;
-        write_u32_bin(&dir.join("language.u32"), &self.language)?;
-        write_u32_bin(&dir.join("complete.u32"), &self.complete)?;
-        let mut ids = self.ids.join("\n");
-        ids.push('\n');
-        fs::write(dir.join("ids.jsonl"), ids)?;
-        // meta.json last: a shard without it is an unfinished write, never opened.
-        fs::write(dir.join("meta.json"), serde_json::to_vec_pretty(&self.meta).map_err(io::Error::other)?)
+        let raw: Vec<Vec<u8>> = vec![
+            self.text.iter().flat_map(|v| v.to_le_bytes()).collect(),
+            self.text_off.iter().flat_map(|v| v.to_le_bytes()).collect(),
+            self.codes.iter().flat_map(|v| v.to_le_bytes()).collect(),
+            self.codes_off.iter().flat_map(|v| v.to_le_bytes()).collect(),
+            self.xvec.iter().flat_map(|v| v.to_le_bytes()).collect(),
+            self.voice.iter().flat_map(|v| v.to_le_bytes()).collect(),
+            self.language.iter().flat_map(|v| v.to_le_bytes()).collect(),
+            self.complete.iter().flat_map(|v| v.to_le_bytes()).collect(),
+            self.ids.into_bytes(),
+        ];
+        let mut columns = std::collections::BTreeMap::new();
+        let mut body = Vec::new();
+        for ((name, dtype, width), bytes) in COLUMNS.iter().zip(&raw) {
+            columns.insert((*name).to_string(), Column { dtype: (*dtype).to_string(), offset: body.len() as u64, len: (bytes.len() / width) as u64 });
+            body.extend_from_slice(bytes);
+            body.resize(body.len().next_multiple_of(8), 0);
+        }
+        let header = serde_json::to_vec(&Header { meta: self.meta, columns }).expect("a shard header serialises");
+        let mut out = Vec::with_capacity(16 + header.len() + body.len());
+        out.extend_from_slice(MAGIC);
+        out.extend_from_slice(&(header.len() as u64).to_le_bytes());
+        out.extend_from_slice(&header);
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// Write the shard to `path`; an existing file there is refused.
+    pub fn finish(self, path: &Path) -> io::Result<()> {
+        use std::io::Write;
+        let mut f = fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+        f.write_all(&self.to_bytes())?;
+        f.sync_all()
     }
 }
 
@@ -366,18 +458,32 @@ mod tests {
         RecordId { id: n.into(), speaker: "s1".into(), source: "test".into(), text: "hej".into() }
     }
 
-    fn written(dir: &Path) -> Shard {
+    fn writer() -> ShardWriter {
         let mut w = ShardWriter::new(meta());
         w.push(&Record { id: id("a"), text_ids: &[1, 2, 3], codes: &[0, 1, 2, 3], xvector: &[0.1, 0.2, 0.3], voice: 0, language: 0, complete: true }).unwrap();
         w.push(&Record { id: id("b"), text_ids: &[4], codes: &[7, 7], xvector: &[1.0, 1.0, 1.0], voice: NO_VOICE, language: 0, complete: false }).unwrap();
-        w.finish(dir).unwrap();
-        Shard::open(dir).unwrap()
+        w
+    }
+
+    /// The header and body of a written shard, for tests that corrupt one.
+    fn parts() -> (serde_json::Value, Vec<u8>) {
+        let bytes = writer().to_bytes();
+        let hlen = u64::from_le_bytes(bytes[8..16].try_into().unwrap()) as usize;
+        (serde_json::from_slice(&bytes[16..16 + hlen]).unwrap(), bytes[16 + hlen..].to_vec())
+    }
+
+    fn assemble(header: &serde_json::Value, body: &[u8]) -> Vec<u8> {
+        let h = serde_json::to_vec(header).unwrap();
+        let mut out = MAGIC.to_vec();
+        out.extend_from_slice(&(h.len() as u64).to_le_bytes());
+        out.extend_from_slice(&h);
+        out.extend_from_slice(body);
+        out
     }
 
     #[test]
     fn a_written_shard_reads_back_record_for_record() {
-        let dir = tempdir("roundtrip");
-        let s = written(&dir);
+        let s = Shard::from_bytes(&writer().to_bytes()).unwrap();
         assert_eq!(s.len(), 2);
         assert_eq!(s.meta.records, 2);
         let a = s.record(0);
@@ -408,47 +514,50 @@ mod tests {
     }
 
     #[test]
-    fn a_corrupted_shard_is_refused_naming_the_file_and_record() {
-        let dir = tempdir("corrupt");
-        written(&dir);
-        let mut codes = data::binio::read_u16_bin(&dir.join("codes.u16")).unwrap();
-        codes[4] = 9;
-        data::binio::write_u16_bin(&dir.join("codes.u16"), &codes).unwrap();
-        let e = Shard::open(&dir).unwrap_err().to_string();
-        assert!(e.contains("codes.u16") && e.contains("record 1") && e.contains("outside the codebook"), "{e}");
+    fn a_corrupted_shard_is_refused_naming_the_column_and_record() {
+        let refused = |bytes: Vec<u8>| Shard::from_bytes(&bytes).unwrap_err();
 
-        let dir = tempdir("offsets");
-        written(&dir);
-        data::binio::write_u64_bin(&dir.join("text_off.u64"), &[0, 3]).unwrap();
-        let e = Shard::open(&dir).unwrap_err().to_string();
-        assert!(e.contains("text_off.u64") && e.contains("2 offsets for 2 records"), "{e}");
+        let (h, mut body) = parts();
+        let codes_at = h["columns"]["codes"]["offset"].as_u64().unwrap() as usize;
+        body[codes_at + 8..codes_at + 10].copy_from_slice(&9u16.to_le_bytes());
+        let e = refused(assemble(&h, &body));
+        assert!(e.contains("codes: record 1") && e.contains("outside the codebook"), "{e}");
 
-        let dir = tempdir("voice");
-        written(&dir);
-        data::binio::write_u32_bin(&dir.join("voice.u32"), &[0, 5]).unwrap();
-        let e = Shard::open(&dir).unwrap_err().to_string();
-        assert!(e.contains("voice.u32") && e.contains("record 1"), "{e}");
+        let (mut h, body) = parts();
+        h["columns"]["text_off"]["len"] = serde_json::json!(2);
+        let e = refused(assemble(&h, &body));
+        assert!(e.contains("text_off: 2 offsets for 2 records"), "{e}");
 
-        let dir = tempdir("meta");
-        written(&dir);
-        let mut m: serde_json::Value = serde_json::from_slice(&fs::read(dir.join("meta.json")).unwrap()).unwrap();
-        m["extra"] = serde_json::json!(1);
-        fs::write(dir.join("meta.json"), m.to_string()).unwrap();
-        let e = Shard::open(&dir).unwrap_err().to_string();
-        assert!(e.contains("meta.json") && e.contains("unknown field"), "{e}");
+        let (h, mut body) = parts();
+        let voice_at = h["columns"]["voice"]["offset"].as_u64().unwrap() as usize;
+        body[voice_at + 4..voice_at + 8].copy_from_slice(&5u32.to_le_bytes());
+        let e = refused(assemble(&h, &body));
+        assert!(e.contains("voice: record 1"), "{e}");
+
+        let (mut h, body) = parts();
+        h["meta"]["extra"] = serde_json::json!(1);
+        let e = refused(assemble(&h, &body));
+        assert!(e.contains("header") && e.contains("unknown field"), "{e}");
+
+        let (mut h, body) = parts();
+        h["columns"]["ids"]["len"] = serde_json::json!(1u64 << 40);
+        let e = refused(assemble(&h, &body));
+        assert!(e.contains("ids") && e.contains("past the end"), "{e}");
+
+        let mut truncated = writer().to_bytes();
+        truncated.truncate(20);
+        assert!(refused(truncated).contains("past the end"));
+        assert!(refused(b"not a shard at all".to_vec()).contains("bad magic"));
     }
 
     #[test]
     fn a_shard_is_never_written_over_another() {
-        let dir = tempdir("twice");
-        written(&dir);
-        let e = ShardWriter::new(meta()).finish(&dir).unwrap_err();
+        let path = std::env::temp_dir().join(format!("qwen3tts-shard-{}.bttshrd", std::process::id()));
+        let _ = fs::remove_file(&path);
+        writer().finish(&path).unwrap();
+        assert_eq!(Shard::open(&path).unwrap().len(), 2);
+        let e = writer().finish(&path).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::AlreadyExists);
-    }
-
-    fn tempdir(tag: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("qwen3tts-shard-{tag}-{}-{:?}", std::process::id(), std::thread::current().id()));
-        let _ = fs::remove_dir_all(&d);
-        d
+        fs::remove_file(&path).unwrap();
     }
 }

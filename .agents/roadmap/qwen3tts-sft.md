@@ -56,8 +56,8 @@ ledger is the engine work it needs.
 ## Not yet done
 
 - [x] Training shard format `brain-tts-shard-v1` (`qwen3tts::shard`): token
-      ids, `[frames, 16]` codes, x-vector, voice, language, completeness, as a
-      few column files validated on open.
+      ids, `[frames, 16]` codes, x-vector, voice, language, completeness, in
+      one file (an artifact a job takes by digest), validated when read.
 - [ ] Prompt layouts as data: one builder that records, per prefix row, which
       codec rows, text tokens and x-vector it sums, for inference and for
       routing gradients; the non-streaming layout beside the streaming one.
