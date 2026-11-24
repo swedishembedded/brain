@@ -28,6 +28,7 @@ brain-mimi.workspace = true
 brain-npu.workspace = true
 brain-ecapatdnn.workspace = true
 brain-audio.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 bytemuck.workspace = true
 

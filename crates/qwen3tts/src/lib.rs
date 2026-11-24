@@ -33,6 +33,7 @@ pub mod serve;
 pub mod socket;
 pub mod prompt;
 pub mod sft;
+pub mod shard;
 pub mod train;
 pub mod spec;
 pub mod talker;

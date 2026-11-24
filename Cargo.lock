@@ -2818,6 +2818,7 @@ dependencies = [
  "brain-qwen3",
  "brain-testutil",
  "bytemuck",
+ "serde",
  "serde_json",
 ]
 
