@@ -16,6 +16,7 @@
 //! explicit Convert otherwise, never a whole-tensor f32 copy. A source without a packed view (or a tier
 //! the executor cannot produce) falls back to the f32 interface, which is bounded by one tensor.
 
+use checkpoint::gguf::GgmlType;
 use checkpoint::packed::{BoundedWorkspace, Element, FloatFormat, LoadConfig, LoadPolicy, LoadRequest, QuantEncoding, ScaleGranularity, TensorDescriptor};
 use checkpoint::TensorSource;
 
@@ -61,7 +62,28 @@ pub fn stored_tier(src: &dyn TensorSource, name: &str) -> Option<Dtype> {
         return Some(Dtype::F4E2M1);
     }
     let held = fp8_tiles_of(&stored).unwrap_or(stored);
+    // M14: the GGUF K-quant encodings (Q4_K / Q5_K affine) name the
+    // Q4K/Q8K tiers - `encoding_for` has no arm for them (the loader
+    // builds `Weight::KQuant` directly from `gguf::kquant`), so name them
+    // by their own encoding identity instead.
+    if let Some(tier) = kquant_tier_of(&held) {
+        return Some(tier);
+    }
     [Dtype::F32, Dtype::BF16, Dtype::F16, Dtype::I8, Dtype::NF4, Dtype::F8E4M3].into_iter().find(|d| encoding_for(*d).as_ref() == Some(&held) || (*d == Dtype::F8E4M3 && held == fp8_f32_tiles()))
+}
+
+/// The K-quant tier an encoding names, when it is one of the affine GGUF
+/// K-quants the loader builds `Weight::KQuant` from directly (Q4_K / Q5_K):
+/// `Dtype::Q4K` / `Dtype::Q8K`. `encoding_for` has no arm for these tiers
+/// (their device buffers are built by `gguf::kquant`'s relayout, not a tiled
+/// load), so they are identified by their own encoding here.
+pub fn kquant_tier_of(encoding: &QuantEncoding) -> Option<Dtype> {
+    match encoding.element {
+        Element::Ggml(GgmlType::Q4K) => Some(Dtype::Q4K),
+        Element::Ggml(GgmlType::Q5K) => Some(Dtype::Q8K),
+        Element::Ggml(GgmlType::Q8K) => Some(Dtype::Q8K),
+        _ => None,
+    }
 }
 
 /// The FP8 E4M3 tile grid with f32 scales: the encoding that holds a tensor stored with ONE static scale exactly (the
@@ -165,7 +187,28 @@ pub fn upload_fused_from_source(ops: &Ops, src: &dyn TensorSource, names: &[&str
         // Parts stored as f32 (a flat 1-D tensor the tiled load declines, say)
         // widen nothing on the f32 route below; a quantized part would.
         if !descs.iter().all(|d| d.encoding == QuantEncoding::f32()) {
-            return Err(format!("{names:?} cannot be fused as {want:?} without an f32 round trip: load the parts as separate weights"));
+            // M14: a quantized part (a GGUF's Q4_K linears) no longer blocks
+            // the fused group. Each part is quantized to `want` on its own
+            // (the same per-row group quantization the non-fused linears
+            // take), and the packed rows are concatenated in order - the
+            // same bit-identical row-concat the f32 route relies on (rows
+            // are self-contained: codes, scales and all). Only the I8 tier
+            // is wired here; other wants keep the old refusal.
+            if want != Dtype::I8 {
+                return Err(format!("{names:?}: parts stored in different encodings cannot be fused as {want:?} without an f32 round trip: load the parts as separate weights"));
+            }
+            let mut parts: Vec<Weight> = Vec::with_capacity(names.len());
+            for (name, desc) in names.iter().zip(descs.iter()) {
+                let (wn, wk) = (desc.shape[0] as usize, desc.shape[1] as usize);
+                let w = upload_from_source(ops, src, name, wn, wk, want, staging)
+                    .ok_or_else(|| format!("{names:?}: missing weight {name}"))?;
+                assert_eq!(w.n() as usize, wn, "{name}: packed conversion changed the row count");
+                assert_eq!(w.dtype(), Dtype::I8, "{name}: packed conversion returned {:?}, expected I8", w.dtype());
+                parts.push(w);
+            }
+            let acc = concat_i8_rows(ops, &parts)?;
+            assert_eq!(acc.n() as usize, n_total, "{names:?}: concat produced [{} x {k}], expected [{n_total}, {k}]", acc.n());
+            return Ok(acc);
         }
     }
     let mut parts: Vec<Vec<f32>> = Vec::with_capacity(names.len());
@@ -176,6 +219,38 @@ pub fn upload_fused_from_source(ops: &Ops, src: &dyn TensorSource, names: &[&str
     }
     let refs: Vec<&[f32]> = parts.iter().map(Vec::as_slice).collect();
     Ok(Weight::upload(ops, &super::concat_rows_parallel(&refs), n_total, k, want))
+}
+
+/// Concatenate same-`k` I8 weights row-wise into one packed weight. The I8
+/// layout is row-major in both planes (`w`: `[n, k/4]` u32 codes, `s`:
+/// `[n, k/32]` f32 scales - [`crate::int8`]'s module doc), so the concat is a
+/// host read-back of each part's planes, concatenation in row order, and one
+/// re-upload. Bit-identical to the f32 route above: quantizing each part's
+/// rows on their own and concatenating the packed rows yields exactly the
+/// weight `Weight::upload` builds from the concatenated f32 rows (rows are
+/// self-contained - codes, scales and all).
+fn concat_i8_rows(ops: &Ops, parts: &[Weight]) -> Result<Weight, String> {
+    let k = parts[0].k() as usize;
+    let mut words: Vec<u32> = Vec::new();
+    let mut scales: Vec<f32> = Vec::new();
+    for part in parts {
+        let Weight::I8 { w, s, n, k: pk } = part else {
+            return Err(format!("concat_rows: part is {:?} [{} x {}], expected I8", part.dtype(), part.n(), part.k()));
+        };
+        if *pk as usize != k {
+            return Err(format!("concat_rows: part is [{} x {pk}], expected [.. x {k}]", part.n()));
+        }
+        let n = *n as usize;
+        let wv = ops.gpu.read(w, n * k / 4);
+        let sv = ops.gpu.read(s, crate::int8::scale_len(n, k));
+        words.extend(wv.into_iter().map(f32::to_bits));
+        scales.extend(sv);
+    }
+    let total_n = words.len() * 4 / k;
+    let w = ops.gpu.storage(words.len() as u64);
+    ops.gpu.write(&w, &words);
+    let s = ops.gpu.storage_init("weight_scale_i8_concat", &scales);
+    Ok(Weight::I8 { w, s, n: total_n as u32, k: k as u32 })
 }
 
 /// A group of tensors that act as one fused projection, as resident weights.
