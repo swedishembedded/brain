@@ -1318,6 +1318,10 @@ pub fn run_serve(args: &[String]) {
     // Any surface replaces the stdio loop: it serves every registered model
     // over HTTP and/or `com.swedishembedded.Brain1` until Ctrl-C.
     if !stdio {
+        // The store the scan reads, resolved once: the checkpoint knob's
+        // `vendor/repo` reference is looked up in the SAME store (see the
+        // ServeKnobs literal below).
+        let resolved_models_dir = loader::model_dir::resolve(models_dir.as_deref());
         return run_apis(RunApis {
             dbus,
             dbus_system,
@@ -1347,7 +1351,13 @@ pub fn run_serve(args: &[String]) {
             knobs: {
                 let supervision = serve_supervision();
                 let worker_hosting = serve_worker_hosting(&worker_hosted, worker_deadline, &supervision);
-                serving::ServeKnobs { qwen: qwen_cfg, qwen35: qwen35_cfg, ricursive: ricursive_cfg, decision: decision_cfg, ocr: ocr_cfg, max_batch: policy.limits.max_batch, train, mock_delay_ms, supervision: Some(supervision), worker_hosting }
+                // The checkpoint knob resolves a `vendor/repo` --checkpoint
+                // against the SAME store the scan below reads (`loader::
+                // model_dir::resolve`'s precedence: the flag, then the env /
+                // XDG default), so naming a pulled model by reference finds
+                // its tokenizer beside the checkpoint instead of failing
+                // activation for lack of one.
+                serving::ServeKnobs { qwen: catalog::resident_llm::QwenServeConfig { models_dir: resolved_models_dir, ..qwen_cfg }, qwen35: qwen35_cfg, ricursive: ricursive_cfg, decision: decision_cfg, ocr: ocr_cfg, max_batch: policy.limits.max_batch, train, mock_delay_ms, supervision: Some(supervision), worker_hosting }
             },
         });
     }
