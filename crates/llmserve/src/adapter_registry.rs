@@ -64,7 +64,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use capability::{ActionResult, Invocation, Manifest, Progress};
-use crate::{run_batch_scheduled, run_open_scheduled, OpenGroup, scheduler_metrics, Frontend, TextFrontend};
+use crate::{run_batch_scheduled, run_open_scheduled, scheduler_metrics, Frontend, TextFrontend};
 use model::serve::{PagedDecoder, Scheduler};
 use brain_modelref::ModelRef;
 use model::serve::AdapterId;
@@ -633,8 +633,17 @@ enum Route {
 
 /// An instance's view of its registry: what the engine's bank holds, and the
 /// route from a serving id to it. See this module's doc.
+///
+/// [`Self::sync`] takes `&self`: a request front end reads the routes while an
+/// open group runs, and the group refreshes them between steps through the same
+/// shared view ([`crate::run_open_scheduled`]).
 pub struct AdapterSync {
     registry: Arc<AdapterRegistry>,
+    state: Mutex<SyncState>,
+}
+
+/// What an [`AdapterSync`] has made of the registry so far.
+struct SyncState {
     seen: Option<u64>,
     /// Engine id of every adapter the bank holds, by digest: the engine's
     /// identity for an adapter is its content.
@@ -649,44 +658,52 @@ impl AdapterSync {
     }
 
     pub fn new(registry: Arc<AdapterRegistry>) -> AdapterSync {
-        AdapterSync { registry, seen: None, loaded: HashMap::new(), routes: HashMap::new() }
+        AdapterSync { registry, state: Mutex::new(SyncState { seen: None, loaded: HashMap::new(), routes: HashMap::new() }) }
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, SyncState> {
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Whether the registry has changed since the last [`Self::sync`]: the
     /// routes may name a release that has been replaced.
     pub fn stale(&self) -> bool {
-        self.seen != Some(self.registry.generation.load(Ordering::SeqCst))
+        self.state().seen != Some(self.registry.generation.load(Ordering::SeqCst))
     }
 
     /// Bring `engine`'s bank in line with the registry: register what it
-    /// gained, unload what it lost. One atomic load when nothing changed.
-    pub fn sync<E: BankedEngine>(&mut self, engine: &mut E) {
-        if !self.stale() {
+    /// gained, unload what it lost. Cheap when nothing changed. Safe while
+    /// sequences run: a release that is replaced drains (its running sequences
+    /// finish on the weights they began on, the engine unloads it after the last)
+    /// and a new one is registered beside it.
+    pub fn sync<E: BankedEngine>(&self, engine: &mut E) {
+        let mut state = self.state();
+        if state.seen == Some(self.registry.generation.load(Ordering::SeqCst)) {
             return;
         }
         let (generation, offered) = self.registry.snapshot();
         let wanted: HashSet<&str> = offered.iter().map(|(_, a)| a.release.digest.as_str()).collect();
-        self.routes.clear();
+        state.routes.clear();
         for (id, adapter) in &offered {
             let digest = &adapter.release.digest;
-            if let Some(&engine_id) = self.loaded.get(digest) {
-                self.routes.insert(id.clone(), Route::Ready(engine_id, adapter.identity()));
+            if let Some(&engine_id) = state.loaded.get(digest) {
+                state.routes.insert(id.clone(), Route::Ready(engine_id, adapter.identity()));
                 continue;
             }
             match engine.load_adapter(adapter.as_ref().clone().into_engine()) {
                 Ok(engine_id) => {
-                    self.loaded.insert(digest.clone(), engine_id);
-                    self.routes.insert(id.clone(), Route::Ready(engine_id, adapter.identity()));
+                    state.loaded.insert(digest.clone(), engine_id);
+                    state.routes.insert(id.clone(), Route::Ready(engine_id, adapter.identity()));
                 }
                 Err(why) => {
                     eprintln!("serve: adapter {id} ({digest}) cannot be loaded into the bank, so requests for it fail: {why}");
-                    self.routes.insert(id.clone(), Route::Refused);
+                    state.routes.insert(id.clone(), Route::Refused);
                 }
             }
         }
-        let gone: Vec<String> = self.loaded.keys().filter(|d| !wanted.contains(d.as_str())).cloned().collect();
+        let gone: Vec<String> = state.loaded.keys().filter(|d| !wanted.contains(d.as_str())).cloned().collect();
         for digest in gone {
-            let engine_id = self.loaded.remove(&digest).expect("listed from the map");
+            let engine_id = state.loaded.remove(&digest).expect("listed from the map");
             // `Draining` finishes by itself when the last sequence under the
             // adapter is done; an unknown id was already gone.
             if let Err(why) = engine.unload_adapter(engine_id) {
@@ -695,7 +712,7 @@ impl AdapterSync {
                 }
             }
         }
-        self.seen = Some(generation);
+        state.seen = Some(generation);
     }
 
     /// The engine adapter a request for serving id `id` runs under, with the
@@ -706,7 +723,7 @@ impl AdapterSync {
     /// refused, is not something the caller can act on and its reason (logged
     /// where it happened) is the operator's.
     pub fn route(&self, id: &str) -> Result<(AdapterId, AdapterIdentity), String> {
-        match self.routes.get(id) {
+        match self.state().routes.get(id) {
             Some(Route::Ready(engine_id, identity)) => Ok((*engine_id, identity.clone())),
             Some(Route::Refused) | None => Err(format!("no model '{id}'")),
         }
@@ -717,10 +734,12 @@ impl AdapterSync {
 /// bank: every request names its adapter by the reserved param its model id
 /// stamped ([`ADAPTER_PARAM`]), and the group runs base and adapter rows in
 /// the same batched steps. The engine's bank is brought in line with the
-/// registry first, between groups, when no sequence is running, so a hot swap
-/// never changes what a running sequence reads. An adapter offered while a
-/// group runs is routable from the next group; a request naming it earlier is
-/// answered "no model".
+/// registry when a group starts and again, between steps, before an open group
+/// admits a request after the registry moved, so an id re-published under load
+/// routes every later request to its new release while running sequences keep
+/// the release they began on (a replaced release drains in the bank, and a
+/// reply names the identity captured at admission). A request naming an
+/// adapter before it was offered is answered "no model".
 pub struct AdaptedInstance<D: PagedDecoder + BankedEngine, F: Frontend = TextFrontend> {
     front: F,
     sched: Scheduler<D>,
@@ -759,14 +778,10 @@ impl<D: PagedDecoder + BankedEngine + Send, F: Frontend + Send> Instance for Ada
             return false;
         }
         self.adapters.sync(self.sched.decoder_mut());
-        let mut invs = invs;
-        // A group that idles while the registry has moved hands back: refresh the
-        // bank and routes, then go on with the jobs still queued on the feed.
-        let mut numbered = 0;
-        while let OpenGroup::Refresh { numbered: n } = run_open_scheduled(&mut self.sched, &AdaptedFrontend { front: &self.front, adapters: &self.adapters }, invs, self.capacity, numbered, progress, feed) {
-            self.adapters.sync(self.sched.decoder_mut());
-            (invs, numbered) = (&[], n);
-        }
+        // The bank and routes are refreshed whenever the registry has moved as a request is admitted, running
+        // sequences or not: a re-published id never waits for its lane to drain.
+        let adapters = &self.adapters;
+        run_open_scheduled(&mut self.sched, &AdaptedFrontend { front: &self.front, adapters }, invs, self.capacity, progress, feed, &mut |engine| adapters.sync(engine));
         true
     }
 

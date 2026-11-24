@@ -31,7 +31,7 @@ use serde_json::json;
 
 use llmserve::adapter_registry::{AdapterBankSettings, AdapterHost, AdapterMirror, AdapterRegistry, AdapterSync, AdapterView, ADAPTER_PARAM};
 use llmserve::adapter_release::{LoadedAdapter, ServedBase};
-use llmserve::{generate_spec, run_batch_scheduled, run_open_scheduled, OpenGroup, scheduler_metrics, Frontend};
+use llmserve::{generate_spec, run_batch_scheduled, run_open_scheduled, scheduler_metrics, Frontend};
 
 use std::sync::Arc;
 
@@ -1631,9 +1631,11 @@ impl Instance for QwenInstance {
     /// The same group as [`Self::run_batch`], open to requests that arrive
     /// while it runs: a long generation no longer holds back a short one that
     /// came after it. The adapter bank is brought in line with the registry
-    /// when the group starts (no sequence is running then); an adapter offered
-    /// while a group runs is routable from the next group, a request naming it
-    /// earlier is answered "no model".
+    /// when the group starts and again before the group admits a request after
+    /// the registry moved ([`run_open_scheduled`]): a re-published id routes
+    /// every later request to its new release while running sequences finish on
+    /// the one they began on. A request naming an adapter before it was offered
+    /// is answered "no model".
     fn run_open(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress), feed: &mut dyn residency::JobFeed) -> bool {
         // A scoring group is closed: it is answered by `run_batch`.
         if action == llmserve::SCORE_ACTION {
@@ -1641,14 +1643,10 @@ impl Instance for QwenInstance {
         }
         self.adapters.sync(self.engine.decoder_mut());
         let capacity = self.max_batch;
-        let mut invs = invs;
-        // A group that idles while the registry has moved hands back: refresh the
-        // bank and routes, then go on with the jobs still queued on the feed.
-        let mut numbered = 0;
-        while let OpenGroup::Refresh { numbered: n } = run_open_scheduled(&mut self.engine, &QwenFrontend { decoding: &self.decoding, adapters: &self.adapters }, invs, capacity, numbered, progress, feed) {
-            self.adapters.sync(self.engine.decoder_mut());
-            (invs, numbered) = (&[], n);
-        }
+        // The bank and routes are refreshed whenever the registry has moved as a request is admitted, running
+        // sequences or not: a re-published id never waits for its lane to drain.
+        let adapters = &self.adapters;
+        run_open_scheduled(&mut self.engine, &QwenFrontend { decoding: &self.decoding, adapters }, invs, capacity, progress, feed, &mut |engine| adapters.sync(engine));
         true
     }
 

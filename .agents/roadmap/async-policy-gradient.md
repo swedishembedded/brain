@@ -77,8 +77,16 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       decode steps: the device readout only keeps a candidate list for truncated draws, so a whole-row top-K from the
       decode would need a device top-k over every row. Open (profile first): serve the top list from the decode steps for
       whole-row draws, which removes the extra prefill (knowledge #528).
-- [ ] **Adapter routes refresh under load**: a re-published adapter id is routed to its new version for new requests
-      while older requests finish on the old one (today a route refreshes only when its lane is idle).
+- [x] **Adapter routes refresh under load**: an open group refreshed its adapter routes only when its lane went idle
+      (`OpenGroup::Refresh`), so a lane that never drained kept routing a re-published id to the old version. Verified
+      first (the new test failed: the first request after the swap named version 1). Now `run_open_scheduled` refreshes the
+      bank and routes (`AdapterSync::sync`, `&self`) before it admits a request while the frontend is stale: the bound is
+      "every request admitted after `LiveAdapters::serve` returned runs on the new version", with no wait for a drain.
+      Running sequences keep their weights (a replaced release drains in the bank; a job's identity is captured at
+      admission; KV namespaces stay per digest). `OpenGroup` and the idle hand-back are gone. Test:
+      `catalog/tests/it/multi_adapter.rs` (three back-to-back request streams on the tiny qwen3 resident, probe after the
+      swap, every reply's text equals its named release's folded server), `scheduled_batch.rs`. Not exercised: a bank with
+      fewer device slots than live releases (the new version may wait for a slot while the old one drains).
 - [ ] **Streaming policy-gradient job** (`crates/trainjob`): `brain/train` with `stream` instead of `data`; records of
       complete groups are appended to the running job (`POST /v1/jobs/{id}/records`, D-Bus equivalent), deduplicated
       by group key, held in a token-bounded queue (a full queue is a 429 naming the allowance); a step trains when its

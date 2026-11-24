@@ -82,9 +82,8 @@ pub trait Frontend {
     }
     /// Whether what [`Self::route`] answers from is out of date, so a request
     /// routed now could run on a release that has since been replaced. An open
-    /// group that is idle (nothing running, so nothing a refresh could change
-    /// under it) hands control back to its instance instead of admitting
-    /// further jobs, and the instance refreshes before it calls again.
+    /// group refreshes before it admits a request while this is `true`
+    /// ([`run_open_scheduled`]), running or not.
     fn stale(&self) -> bool {
         false
     }
@@ -373,23 +372,7 @@ struct AwaitingTrace {
 /// scoring pass off), before it fails as unavailable instead of waiting on.
 const TRACE_WAIT: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// How [`run_open_scheduled`] ended.
-#[derive(Debug, PartialEq, Eq)]
-pub enum OpenGroup {
-    /// The feed closed with nothing running.
-    Closed,
-    /// The group is idle and the frontend is stale; `numbered` jobs have been
-    /// numbered so far.
-    Refresh { numbered: usize },
-}
-
 impl<'a, D: PagedDecoder> Group<'a, D> {
-    /// Resume numbering after `n` jobs of an earlier call of the same open
-    /// group, all of which are finished: placeholders keep indices aligned.
-    fn skip_numbered(&mut self, n: usize) {
-        self.jobs.extend((0..n).map(|_| Job::placeholder()));
-    }
-
     fn new(sched: &'a mut Scheduler<D>, front: &'a dyn Frontend) -> Self {
         Group { sched, front, jobs: Vec::new(), open: std::collections::HashSet::new(), encoding: Vec::new(), awaiting: Vec::new() }
     }
@@ -788,38 +771,30 @@ pub fn run_batch_scheduled<D: PagedDecoder>(
 /// feed has closed - continuous batching across everything queued for the
 /// instance, not only what was queued when the call began.
 ///
-/// Job indices continue from `numbered` (0 for a new group): the feed numbers
-/// the jobs of one group across calls. Returns [`OpenGroup::Closed`] when the
-/// feed closed, or [`OpenGroup::Refresh`] when the group went idle while the
-/// frontend was [stale](Frontend::stale): no further job was taken, and the
-/// caller refreshes the frontend's routes and calls again with `invs` empty
-/// and the `numbered` it was given.
+/// `refresh` brings the decoder's registries in line with the frontend's routes whenever the frontend
+/// is [stale](Frontend::stale) as a request is about to be admitted, so it runs between steps, never inside one.
 pub fn run_open_scheduled<D: PagedDecoder>(
     sched: &mut Scheduler<D>,
     front: &dyn Frontend,
     invs: &[Invocation],
     capacity: usize,
-    numbered: usize,
     progress: &mut dyn FnMut(usize, Progress),
     feed: &mut dyn JobFeed,
-) -> OpenGroup {
+    refresh: &mut dyn FnMut(&mut D),
+) {
     residency::log::info(&format!("{} open batch: {} request(s) admitted to the scheduler", front.label(), invs.len()));
     let mut group = Group::new(sched, front);
-    group.skip_numbered(numbered);
     for inv in invs {
-        let (bi, immediate) = group.admit(inv, progress);
+        let (bi, immediate) = admit_fresh(&mut group, inv, progress, refresh);
         if let Some(result) = immediate {
             feed.finish(bi, result);
         }
     }
     loop {
-        if group.live() == 0 && front.stale() {
-            return OpenGroup::Refresh { numbered: group.jobs.len() };
-        }
         // Free slots are filled first: admission refuses a request that can never run with the
         // same message, so screening one about to be taken would only parse it twice.
         for inv in feed.take(capacity.saturating_sub(group.live())) {
-            let (bi, immediate) = group.admit(&inv, progress);
+            let (bi, immediate) = admit_fresh(&mut group, &inv, progress, refresh);
             if let Some(result) = immediate {
                 feed.finish(bi, result);
             }
@@ -829,7 +804,7 @@ pub fn run_open_scheduled<D: PagedDecoder>(
         feed.screen(&mut |inv| group.refusal(inv));
         if group.live() == 0 {
             if feed.close() {
-                return OpenGroup::Closed;
+                return;
             }
             continue;
         }
@@ -840,6 +815,17 @@ pub fn run_open_scheduled<D: PagedDecoder>(
             feed.finish(bi, result);
         }
     }
+}
+
+/// [`Group::admit`] after the frontend's routes are brought up to date: a request is routed by what the registry holds
+/// when it is admitted, so one that arrives after an adapter id was re-published runs on the new release however loaded
+/// the group is, while the requests already running keep the release they were admitted on (a job's identity is
+/// captured at admission, and the engine lets an unloaded adapter drain).
+fn admit_fresh<D: PagedDecoder>(group: &mut Group<'_, D>, inv: &Invocation, progress: &mut dyn FnMut(usize, Progress), refresh: &mut dyn FnMut(&mut D)) -> (usize, Option<ActionResult>) {
+    if group.front.stale() {
+        refresh(group.sched.decoder_mut());
+    }
+    group.admit(inv, progress)
 }
 
 /// The prefix-cache and speculation metrics every scheduler-backed resident
@@ -926,7 +912,7 @@ impl<D: PagedDecoder + Send, F: Frontend + Send> Instance for ScheduledInstance<
         let started = std::time::Instant::now();
         let capacity = self.capacity;
         let mut counting = CountingFeed { inner: feed, requests: invs.len(), tokens: 0 };
-        run_open_scheduled(&mut self.sched, &self.front, invs, capacity, 0, progress, &mut counting);
+        run_open_scheduled(&mut self.sched, &self.front, invs, capacity, progress, &mut counting, &mut |_| {});
         self.last = LastBatch { requests: counting.requests, tokens: counting.tokens, seconds: started.elapsed().as_secs_f64() };
         true
     }

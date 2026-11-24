@@ -423,3 +423,70 @@ fn the_bank_is_budgeted_and_what_it_cannot_hold_is_refused_with_the_setting() {
     exec.shutdown();
     exec_bare.shutdown();
 }
+
+/// SPEC (publication under continuous load): an adapter id re-published while its lane never drains is routed to the
+/// new version for every request admitted after the swap, while the requests running at the swap finish on the weights
+/// they began on and every reply names the release that decoded it.
+///
+/// The bound this test records: the first request submitted after `LiveAdapters::serve` returned is admitted on the
+/// new version, however loaded the lane is (the route is refreshed at admission, not when the lane happens to idle).
+/// The load is `PRESSURE` threads asking back to back, so a request is always running; the test fails rather than
+/// passes vacuously if the lane was not loaded when the probe was answered.
+#[test]
+fn a_republished_id_routes_new_requests_to_the_new_version_while_the_lane_never_drains() {
+    const PRESSURE: usize = 3;
+    const TOKENS: u64 = 48;
+    let f = fixture("multi-adapter-load");
+    let served = resident(&f, BASE, &f.base, Some(bank()));
+    let exec = executor(vec![served.clone()]);
+    let live = LiveAdapters::new(served.clone(), exec.clone());
+    offer(&live, &served, &f.adapters[0]);
+
+    // The reference servers: adapter one folded into the base, and the weights the id is re-published with (seed 22,
+    // the second fixture adapter's) folded into it.
+    let folded_old = executor(vec![resident(&f, BASE, &f.folded[0], None)]);
+    let folded_new = executor(vec![resident(&f, BASE, &f.folded[1], None)]);
+    let (want_old, want_new) = (ask(&folded_old, BASE, greedy(TOKENS)).unwrap(), ask(&folded_new, BASE, greedy(TOKENS)).unwrap());
+    assert_ne!(want_old, want_new, "the two releases must be told apart by their text");
+    let next = f.dir.join("one-v2.safetensors");
+    write_lora_adapter(&next, ONE, BASE, RANK, &attention_linears(&cfg()), 22);
+
+    // Continuous load: each thread asks again the moment it is answered, and records which release answered what.
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Progress ticks seen: a request that has ticked is running in the scheduler, not waiting to be admitted.
+    let ticks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let load: Vec<_> = (0..PRESSURE)
+        .map(|_| {
+            let (exec, stop, ticks) = (exec.clone(), stop.clone(), ticks.clone());
+            std::thread::spawn(move || {
+                let mut replies = Vec::new();
+                while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                    let ticks = ticks.clone();
+                    let out = exec.run_blocking(ONE, "generate", greedy(TOKENS), move |_| _ = ticks.fetch_add(1, std::sync::atomic::Ordering::SeqCst)).expect("the adapter answers under load");
+                    replies.push((out.outputs["adapter"]["version"].as_u64().expect("a reply names its version"), text(out)));
+                }
+                replies
+            })
+        })
+        .collect();
+    wait_for("the lane to be loaded and generating", || exec.in_flight().len() >= PRESSURE && ticks.load(std::sync::atomic::Ordering::SeqCst) >= 3 * PRESSURE);
+
+    offer(&live, &served, &next);
+    assert_eq!(exec.served_adapter(ONE).expect("still offered").version, 2);
+    let started = Instant::now();
+    let probe = exec.run_blocking(ONE, "generate", greedy(TOKENS), |_| {}).expect("the probe is answered");
+    let waited = started.elapsed();
+    assert!(!exec.in_flight().is_empty(), "the lane drained before the probe was answered, so this run proves nothing about a loaded lane");
+    assert_eq!(probe.outputs["adapter"]["version"], json!(2), "the first request after the swap decodes on the new version (waited {waited:?})");
+    assert_eq!(text(probe), want_new, "and with the new weights");
+
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    let replies: Vec<(u64, String)> = load.into_iter().flat_map(|t| t.join().unwrap()).collect();
+    assert!(replies.iter().any(|r| r.0 == 1) && replies.iter().any(|r| r.0 == 2), "the load spans the swap: {:?}", replies.iter().map(|r| r.0).collect::<Vec<_>>());
+    for (version, got) in &replies {
+        assert_eq!(got, if *version == 1 { &want_old } else { &want_new }, "a reply naming version {version} was decoded by that release's weights");
+    }
+    for e in [exec, folded_old, folded_new] {
+        e.shutdown();
+    }
+}

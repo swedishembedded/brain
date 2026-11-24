@@ -153,7 +153,7 @@ fn a_late_request_joins_the_running_group_and_is_answered_when_it_finishes() {
     let alone_short = texts(run_batch_scheduled(&mut scheduler(1), &front, std::slice::from_ref(&short), &mut |_, _| {}));
 
     let mut feed = ScriptedFeed { late: vec![(3, short)], polls: 0, finished: Vec::new() };
-    llmserve::run_open_scheduled(&mut scheduler(4), &InPlace(front), std::slice::from_ref(&long), 4, 0, &mut |_, _| {}, &mut feed);
+    llmserve::run_open_scheduled(&mut scheduler(4), &InPlace(front), std::slice::from_ref(&long), 4, &mut |_, _| {}, &mut feed, &mut |_| {});
 
     let order: Vec<usize> = feed.finished.iter().map(|(i, _)| *i).collect();
     assert_eq!(order, vec![1, 0], "the late short request ends before the long one it joined");
@@ -219,23 +219,22 @@ impl llmserve::Frontend for Stale<'_> {
     }
 }
 
-/// An open group that is idle while the frontend's routes are out of date
-/// takes no job: a request that arrives then is routed after the refresh, not
-/// on the release that was replaced (a re-offered adapter id answered as the
-/// old release when its predecessor's group had not yet closed).
+/// An open group refreshes a stale frontend before it admits a request, so a request that arrives after the routes
+/// changed is routed by the new ones (a re-offered adapter id answered as the old release when only an idle group
+/// refreshed), and does not refresh while the routes are fresh.
 #[test]
-fn an_idle_open_group_with_stale_routes_hands_back_before_taking_a_job() {
+fn an_open_group_refreshes_stale_routes_before_it_admits_a_request() {
     let plain = front();
     let front = Stale { inner: &plain, stale: std::cell::Cell::new(true) };
     let mut sched = scheduler(4);
     let mut feed = ScriptedFeed { late: vec![(1, inv("late", 3, 0.0, 1))], polls: 0, finished: Vec::new() };
-    let handed = llmserve::run_open_scheduled(&mut sched, &front, &[], 4, 0, &mut |_, _| {}, &mut feed);
-    assert_eq!(handed, llmserve::OpenGroup::Refresh { numbered: 0 }, "stale and idle: handed back");
-    assert_eq!(feed.polls, 0, "no job was taken while the routes were stale");
-
-    front.stale.set(false);
-    assert_eq!(llmserve::run_open_scheduled(&mut sched, &front, &[], 4, 0, &mut |_, _| {}, &mut feed), llmserve::OpenGroup::Closed);
-    assert_eq!(feed.finished.len(), 1, "the job is served once the routes are fresh");
+    let mut refreshed = 0;
+    llmserve::run_open_scheduled(&mut sched, &front, &[], 4, &mut |_, _| {}, &mut feed, &mut |_| {
+        refreshed += 1;
+        front.stale.set(false);
+    });
+    assert_eq!(refreshed, 1, "refreshed once, before the late request was admitted, and not again once fresh");
+    assert_eq!(feed.finished.len(), 1, "the request is served on the refreshed routes");
 }
 
 /// A request that asks for them gets the token ids it was decoded from and the
@@ -431,7 +430,7 @@ fn a_request_that_cannot_run_is_refused_while_the_group_is_full() {
     let too_long = inv(&"x".repeat(30), 4, 0.0, 2);
     let fits = inv("fits", 3, 0.0, 3);
     let mut feed = WaitingFeed { waiting: vec![(too_long, false), (fits, false)], events: Vec::new() };
-    llmserve::run_open_scheduled(&mut scheduler(1), &front, std::slice::from_ref(&running), 1, 0, &mut |_, _| {}, &mut feed);
+    llmserve::run_open_scheduled(&mut scheduler(1), &front, std::slice::from_ref(&running), 1, &mut |_, _| {}, &mut feed, &mut |_| {});
 
     assert_eq!(feed.events.len(), 3, "{:?}", feed.events);
     assert!(feed.events[0].starts_with("refused: test: needs 34 tokens, engine capacity is 24"), "the over-length request is refused first, before anything finishes: {:?}", feed.events);
@@ -455,7 +454,7 @@ fn a_request_with_a_free_slot_is_parsed_once() {
         }),
     );
     let mut feed = WaitingFeed { waiting: vec![(inv("late one", 2, 0.0, 5), false), (inv("late two", 2, 0.0, 6), false)], events: Vec::new() };
-    llmserve::run_open_scheduled(&mut scheduler(4), &front, &[inv("first", 2, 0.0, 4)], 4, 0, &mut |_, _| {}, &mut feed);
+    llmserve::run_open_scheduled(&mut scheduler(4), &front, &[inv("first", 2, 0.0, 4)], 4, &mut |_, _| {}, &mut feed, &mut |_| {});
     // Requests are built in parallel, so the two late ones may be admitted (and finish) in either order.
     let mut events = feed.events.clone();
     events.sort();
@@ -493,11 +492,11 @@ fn a_text_request_is_built_while_the_others_keep_decoding() {
     // The slow request arrives as the group starts (the feed's first poll), with every token of the fast one still to come.
     let mut feed = ScriptedFeed { late: vec![(1, inv("slow one", 3, 0.0, 7).set("slow", json!(true)))], polls: 0, finished: Vec::new() };
     let (b, g) = (began.clone(), gate.clone());
-    llmserve::run_open_scheduled(&mut scheduler(4), &front, &[inv("fast one", 14, 0.0, 8)], 4, 0, &mut |i, _| {
+    llmserve::run_open_scheduled(&mut scheduler(4), &front, &[inv("fast one", 14, 0.0, 8)], 4, &mut |i, _| {
         if i == 0 && b.load(Ordering::SeqCst) {
             g.store(true, Ordering::SeqCst);
         }
-    }, &mut feed);
+    }, &mut feed, &mut |_| {});
     assert!(released_by_gate.load(Ordering::SeqCst), "the slow request's build held the serving thread until its timeout: nothing decoded meanwhile");
     assert_eq!(feed.finished.len(), 2);
     assert!(feed.finished.iter().all(|(_, r)| r.is_ok()), "{:?}", feed.finished);
