@@ -66,27 +66,20 @@ impl TextProjection {
 
     /// Project `[n, in_dim]` text hidden states to `[n, out]` (the Talker
     /// `d_model`) via `fc2(model::hostmath::silu(fc1(x)))`. Matches `Qwen3TTSTalkerResizeMLP`.
+    /// Both products are the shared blocked host GEMM over all rows at once: a served prompt is
+    /// built while every other stream waits for its next frame.
     pub fn project(&self, hidden: &[f32]) -> Vec<f32> {
         let n = hidden.len() / self.in_dim;
-        let mut out = vec![0.0f32; n * self.out];
-        let mut mid = vec![0.0f32; self.inter];
-        for r in 0..n {
-            let x = &hidden[r * self.in_dim..(r + 1) * self.in_dim];
-            for (j, mj) in mid.iter_mut().enumerate() {
-                let w = &self.fc1_w[j * self.in_dim..(j + 1) * self.in_dim];
-                let mut acc = self.fc1_b[j];
-                for k in 0..self.in_dim {
-                    acc += w[k] * x[k];
-                }
-                *mj = model::hostmath::silu(acc);
+        let mut mid = model::hostmath::linear_rows(hidden, &self.fc1_w, n, self.in_dim, self.inter);
+        for row in mid.chunks_mut(self.inter) {
+            for (m, b) in row.iter_mut().zip(&self.fc1_b) {
+                *m = model::hostmath::silu(*m + b);
             }
-            for o in 0..self.out {
-                let w = &self.fc2_w[o * self.inter..(o + 1) * self.inter];
-                let mut acc = self.fc2_b[o];
-                for k in 0..self.inter {
-                    acc += w[k] * mid[k];
-                }
-                out[r * self.out + o] = acc;
+        }
+        let mut out = model::hostmath::linear_rows(&mid, &self.fc2_w, n, self.inter, self.out);
+        for row in out.chunks_mut(self.out) {
+            for (o, b) in row.iter_mut().zip(&self.fc2_b) {
+                *o += b;
             }
         }
         out
@@ -245,5 +238,28 @@ mod tests {
         assert!((y[1] - model::hostmath::silu(2.0)).abs() < 1e-6);
         let e = tp.embed_text(&[0, 1]);
         assert_eq!(e.len(), 6);
+    }
+
+    /// Rows projected together are each the reference MLP `fc2(silu(fc1(x)))`, computed here in f64.
+    #[test]
+    fn projected_rows_are_the_reference_mlp() {
+        let (in_dim, inter, out, n) = (37usize, 53usize, 29usize, 9usize);
+        let mut rng = data::rng::Rng::new(5); // seed: fixed fixture so a failure reproduces
+        let mut fill = |len: usize| -> Vec<f32> { (0..len).map(|_| rng.next_f32() * 2.0 - 1.0).collect() };
+        let tp = TextProjection { text_embedding: None, fc1_w: fill(inter * in_dim), fc1_b: fill(inter), fc2_w: fill(out * inter), fc2_b: fill(out), in_dim, inter, out, text_vocab: 0 };
+        let x = fill(n * in_dim);
+        let y = tp.project(&x);
+        for r in 0..n {
+            let mid: Vec<f64> = (0..inter)
+                .map(|j| {
+                    let a = f64::from(tp.fc1_b[j]) + (0..in_dim).map(|k| f64::from(tp.fc1_w[j * in_dim + k]) * f64::from(x[r * in_dim + k])).sum::<f64>();
+                    a / (1.0 + (-a).exp())
+                })
+                .collect();
+            for o in 0..out {
+                let want = f64::from(tp.fc2_b[o]) + (0..inter).map(|k| f64::from(tp.fc2_w[o * inter + k]) * mid[k]).sum::<f64>();
+                assert!((f64::from(y[r * out + o]) - want).abs() < 1e-4, "row {r} col {o}: {} vs {want}", y[r * out + o]);
+            }
+        }
     }
 }
