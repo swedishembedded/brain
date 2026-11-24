@@ -251,6 +251,7 @@ impl TtsEngine {
                 let ref_code = self.ref_code.as_ref().ok_or("clone engine missing ref codes")?;
                 let ref_ids = self.ref_ids.as_ref().unwrap();
                 let xvec = self.xvec.as_ref().unwrap();
+                req.opts.check_icl_layout()?;
                 prompt::build_icl_prompt(
                     &self.tables, &self.mtp, &self.sp, &role_ids, &text_ids, ref_ids, ref_code, xvec, lang_id,
                 )
@@ -263,11 +264,10 @@ impl TtsEngine {
                     self.tok.encode(&pipeline::instruct_text(&req.instruct))
                 };
                 let speaker_id = pipeline::resolve_speaker(&self.sp, req.speaker.as_deref())?;
-                prompt::build_instruct_prompt(
-                    &self.tables, &self.sp, &role_ids, &text_ids, &instruct_ids, speaker_id, lang_id,
-                )
+                let layout = req.opts.layout_or(prompt::TextLayout::default_for(pipeline::design_steering(&req.instruct, req.speaker.as_deref())));
+                prompt::build_instruct_prompt_in(&self.tables, &self.sp, &role_ids, &text_ids, &instruct_ids, speaker_id, lang_id, layout)
             }
-            Kind::Synth => prompt::build_xvector_prompt(&self.tables, &self.sp, &role_ids, &text_ids, None, lang_id),
+            Kind::Synth => prompt::build_xvector_prompt_in(&self.tables, &self.sp, &role_ids, &text_ids, None, lang_id, req.opts.layout_or(prompt::TextLayout::Streaming)),
         };
 
         // Clamp the request to the resident graph capacity (cap = prefix + frames).

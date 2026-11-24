@@ -104,6 +104,11 @@ fn generation_params(spec: ActionSpec) -> ActionSpec {
         .param(ParamSpec::new("residual_top_p", ParamType::Float, &format!("nucleus cutoff of the residual codebooks; {RESOLVED}")).min(0.0).max(capability::bounds::UNIT))
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed (reproducible run; omit for random, the outcome echoes the one used)").min(0.0))
         .param(ParamSpec::new("profile", ParamType::Bool, "report the resolved sampling plan and each stage's wall time on the serving machine's stderr").default(json!(false)))
+        .param(ParamSpec::new(
+            "text_layout",
+            ParamType::Enum(crate::prompt::TextLayout::CHOICES.map(String::from).to_vec()),
+            "how the text enters the model: streaming (one token per generated frame) or non_streaming (the whole text before the first frame); omitted, the checkpoint family's default for the request (non_streaming for a preset speaker or a designed voice, streaming otherwise)",
+        ))
 }
 
 /// [`generation_params`] plus the single-request `text`, shared by
@@ -153,6 +158,7 @@ pub fn gen_opts_from(inv: &Invocation) -> Result<GenOpts, String> {
     opts.sampling.subtalker.top_p = float("residual_top_p");
     opts.profile = inv.get_bool("profile").unwrap_or(false);
     opts.seed = inv.seed()?.unwrap_or_else(data::rng::random_seed);
+    opts.text_layout = inv.get_str("text_layout").map(|name| crate::prompt::TextLayout::parse(&name)).transpose()?;
     Ok(opts)
 }
 

@@ -5,6 +5,12 @@
 //!
 //! Reproduces the input-embedding prefix that `Qwen3TTSForConditionalGeneration.
 //! generate` builds in `qwen3_tts_model.py` for the *Base* (voice-clone) model.
+//! Every prompt but the in-context clone is first planned as data
+//! ([`PromptPlan`]: per prefix row, the codec rows, text tokens and x-vector it
+//! sums) and then materialised from the tables, so inference and training read
+//! one description of the rows. Two text layouts exist ([`TextLayout`]), as in
+//! the reference's `non_streaming_mode`.
+//!
 //! Two conditioning modes are supported, matching the reference:
 //!
 //!   * **x-vector-only** ([`build_xvector_prompt`]) — the speaker timbre comes
@@ -43,6 +49,12 @@ pub trait TalkerHost {
     fn d(&self) -> usize;
     fn text(&self) -> &TextProjection;
     fn codec_embed(&self, id: u32) -> &[f32];
+    /// `text_projection(text_embedding(ids))`, `[ids.len(), d]`: every row on
+    /// its own, so a host that caches projected tokens (the text path is
+    /// frozen in training) returns the same bits.
+    fn project_text(&self, ids: &[u32]) -> Vec<f32> {
+        self.text().project(&self.text().embed_text(ids))
+    }
 }
 
 /// CPU-table view a prompt builder needs from an MTP: the residual-codebook
@@ -262,7 +274,7 @@ pub struct Prompt {
 
 /// `text_projection(text_embedding(ids))` -> `[ids.len(), d_model]`.
 fn proj(gen: &(impl TalkerHost + ?Sized), ids: &[u32]) -> Vec<f32> {
-    gen.text().project(&gen.text().embed_text(ids))
+    gen.project_text(ids)
 }
 
 /// Elementwise `a += b` over `[d]` slices.
@@ -272,61 +284,227 @@ fn add_into(a: &mut [f32], b: &[f32]) {
     }
 }
 
-/// Build the codec prefix embedding (`codec_input_embedding` in the reference):
-/// the think/language tag tokens, the optional speaker x-vector, and
-/// `[codec_pad, codec_bos]`. Returns `[m, d]`.
-fn codec_prefix(
-    gen: &(impl TalkerHost + ?Sized),
-    sp: &TtsSpecials,
-    language_id: Option<u32>,
-    speaker: Option<&[f32]>,
-) -> Vec<f32> {
-    let d = gen.d();
-    let tag: Vec<u32> = match language_id {
+/// How the target text enters the Talker's input stream.
+///
+/// The reference generates in either layout (`non_streaming_mode`), and a
+/// checkpoint speaks best in the one it was trained on: its CustomVoice and
+/// VoiceDesign entry points default to [`TextLayout::NonStreaming`], voice
+/// cloning to [`TextLayout::Streaming`] ([`TextLayout::default_for`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TextLayout {
+    /// The first text token rides on the `codec_bos` row; every later token,
+    /// then `tts_eos`, is added to one generated frame's input row each, and
+    /// `tts_pad` once they run out.
+    Streaming,
+    /// The whole text, then `tts_eos`, sits in the prefix over `codec_pad`
+    /// rows, then `tts_pad + codec_bos`; every generated frame's row carries
+    /// `tts_pad`.
+    NonStreaming,
+}
+
+impl TextLayout {
+    /// The names [`Self::parse`] takes, as a speech action's param lists them.
+    pub const CHOICES: [&'static str; 2] = ["streaming", "non_streaming"];
+
+    /// The layout named `name` (one of [`Self::CHOICES`]).
+    pub fn parse(name: &str) -> Result<TextLayout, String> {
+        match name {
+            "streaming" => Ok(TextLayout::Streaming),
+            "non_streaming" => Ok(TextLayout::NonStreaming),
+            other => Err(capability::failure::tag(capability::failure::FailureClass::InvalidRequest, format!("text_layout {other:?}: expected one of {:?}", Self::CHOICES))),
+        }
+    }
+
+    /// This layout's name in [`Self::CHOICES`].
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            TextLayout::Streaming => Self::CHOICES[0],
+            TextLayout::NonStreaming => Self::CHOICES[1],
+        }
+    }
+
+    /// The reference's default for a request steered as `steering`: preset
+    /// speakers and designed voices speak non-streaming, a clone streaming.
+    #[must_use]
+    pub fn default_for(steering: Steering) -> TextLayout {
+        match steering {
+            Steering::Reference => TextLayout::Streaming,
+            Steering::Design { .. } => TextLayout::NonStreaming,
+        }
+    }
+}
+
+/// One term of a prompt row: every prefix row is the sum of its parts, in order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Part {
+    /// A text token through the frozen text path (`text_projection(text_embedding(id))`).
+    Text(u32),
+    /// A row of the Talker's `codec_embedding` (special, language and speaker
+    /// rows; codebook-0 codes).
+    Codec(u32),
+    /// The request's speaker x-vector, in the speaker slot.
+    XVector,
+}
+
+/// What fills the codec prefix's speaker slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpeakerSlot {
+    /// No speaker row at all (speaker-free synthesis, voice design).
+    None,
+    /// The request's x-vector (voice cloning).
+    XVector,
+    /// A named voice: its row of the Talker's `codec_embedding` (`spk_id`).
+    Codec(u32),
+}
+
+/// Everything a prompt is planned from.
+#[derive(Clone, Copy, Debug)]
+pub struct PromptSpec<'a> {
+    /// The role header (`input_id[..3]`).
+    pub role_ids: &'a [u32],
+    /// The target text (`input_id[3..len-5]`).
+    pub text_ids: &'a [u32],
+    /// The tokenised `<|im_start|>user\n{instruct}<|im_end|>\n` turn, or empty.
+    pub instruct_ids: &'a [u32],
+    pub speaker: SpeakerSlot,
+    /// The language row, `None` for the no-language ("nothink") prefix.
+    pub language_id: Option<u32>,
+    pub layout: TextLayout,
+}
+
+/// A prompt as data: for every prefix row the parts it sums, and the text
+/// token each generated frame's row adds (`tts_pad` once they run out).
+///
+/// Inference materialises it from the live tables ([`Self::materialise`]);
+/// training materialises it from the tables it trains and routes each row's
+/// gradient back to the codec rows its parts name, so the two always agree on
+/// what a row is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PromptPlan {
+    pub rows: Vec<Vec<Part>>,
+    /// Text tokens added to generated frames `0, 1, ..`.
+    pub trailing: Vec<u32>,
+    /// The text token every later frame adds.
+    pub tts_pad: u32,
+}
+
+impl PromptPlan {
+    /// The prompt the reference's `generate` builds for `spec` (see the module
+    /// documentation): `[instruct ; role ; codec prefix ; text body]`.
+    pub fn build(sp: &TtsSpecials, spec: &PromptSpec<'_>) -> Result<PromptPlan, String> {
+        if spec.role_ids.len() < 3 {
+            return Err(format!("the role header holds {} tokens, expected 3", spec.role_ids.len()));
+        }
+        if spec.text_ids.is_empty() {
+            return Err("the target text holds no tokens".to_string());
+        }
+        let mut rows = prefix_rows(sp, spec.role_ids, spec.instruct_ids, spec.speaker, spec.language_id);
+        let trailing = match spec.layout {
+            TextLayout::Streaming => {
+                // tts_text_first_token rides on the codec_bos row; the rest trail.
+                rows.push(vec![Part::Text(spec.text_ids[0]), Part::Codec(sp.codec_bos)]);
+                spec.text_ids[1..].iter().copied().chain([sp.tts_eos]).collect()
+            }
+            TextLayout::NonStreaming => {
+                for &t in spec.text_ids.iter().chain(&[sp.tts_eos]) {
+                    rows.push(vec![Part::Text(t), Part::Codec(sp.codec_pad)]);
+                }
+                rows.push(vec![Part::Text(sp.tts_pad), Part::Codec(sp.codec_bos)]);
+                vec![sp.tts_pad]
+            }
+        };
+        Ok(PromptPlan { rows, trailing, tts_pad: sp.tts_pad })
+    }
+
+    /// Prefix rows.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Whether the plan has no prefix row.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.rows.is_empty()
+    }
+
+    /// The text token frame `t`'s row adds.
+    #[must_use]
+    pub fn trailing_at(&self, t: usize) -> u32 {
+        self.trailing.get(t).copied().unwrap_or(self.tts_pad)
+    }
+
+    /// The prompt over `gen`'s tables: each row the sum of its parts in
+    /// order, `xvector` in the speaker slot of a plan that has one.
+    ///
+    /// # Panics
+    /// The plan has an x-vector slot and `xvector` is not one `d_model`-wide row.
+    pub fn materialise(&self, gen: &(impl TalkerHost + ?Sized), xvector: Option<&[f32]>) -> Prompt {
+        let d = gen.d();
+        let mut text: HashMap<u32, Vec<f32>> = HashMap::new();
+        let mut project = |id: u32| text.entry(id).or_insert_with(|| proj(gen, &[id])).clone();
+        let mut embeds = Vec::with_capacity(self.rows.len() * d);
+        for parts in &self.rows {
+            let mut row: Option<Vec<f32>> = None;
+            for part in parts {
+                let term = match *part {
+                    Part::Text(id) => project(id),
+                    Part::Codec(id) => gen.codec_embed(id).to_vec(),
+                    Part::XVector => {
+                        let x = xvector.expect("this prompt's speaker slot takes an x-vector");
+                        assert_eq!(x.len(), d, "speaker x-vector must be d_model");
+                        x.to_vec()
+                    }
+                };
+                match &mut row {
+                    None => row = Some(term),
+                    Some(r) => add_into(r, &term),
+                }
+            }
+            embeds.extend_from_slice(&row.expect("a prompt row has at least one part"));
+        }
+        let trailing = self.trailing.iter().flat_map(|&id| project(id)).collect();
+        Prompt { embeds, trailing, tts_pad: project(self.tts_pad) }
+    }
+}
+
+/// The rows every layout starts with: the instruction turn, the role header,
+/// then `(tts_pad x (m-2), tts_bos) + codec_prefix[0..m-1]` where the codec
+/// prefix (`codec_input_embedding` in the reference) is the think/language tag
+/// tokens, the speaker slot, and `[codec_pad, codec_bos]`; its last row
+/// (`codec_bos`) is the text body's to place.
+fn prefix_rows(sp: &TtsSpecials, role_ids: &[u32], instruct_ids: &[u32], speaker: SpeakerSlot, language_id: Option<u32>) -> Vec<Vec<Part>> {
+    let mut codec: Vec<Part> = match language_id {
         Some(l) => vec![sp.codec_think, sp.codec_think_bos, l, sp.codec_think_eos],
         None => vec![sp.codec_nothink, sp.codec_think_bos, sp.codec_think_eos],
-    };
-    let mut out = Vec::new();
-    for &id in &tag {
-        out.extend_from_slice(gen.codec_embed(id));
     }
-    if let Some(spk) = speaker {
-        assert_eq!(spk.len(), d, "speaker x-vector must be d_model");
-        out.extend_from_slice(spk);
+    .into_iter()
+    .map(Part::Codec)
+    .collect();
+    match speaker {
+        SpeakerSlot::None => {}
+        SpeakerSlot::XVector => codec.push(Part::XVector),
+        SpeakerSlot::Codec(id) => codec.push(Part::Codec(id)),
     }
-    out.extend_from_slice(gen.codec_embed(sp.codec_pad));
-    out.extend_from_slice(gen.codec_embed(sp.codec_bos));
-    out
+    codec.push(Part::Codec(sp.codec_pad));
+    let m = codec.len() + 1;
+    let mut rows: Vec<Vec<Part>> = instruct_ids.iter().chain(&role_ids[..3]).map(|&t| vec![Part::Text(t)]).collect();
+    for (r, c) in codec.into_iter().enumerate() {
+        let base = if r < m - 2 { sp.tts_pad } else { sp.tts_bos };
+        rows.push(vec![Part::Text(base), c]);
+    }
+    rows
 }
 
-/// Assemble the shared prefix up to (and excluding) the text/ICL body:
-/// `[role(3) ; (pad×(m-2), tts_bos) + cie[0..m-1]]`. Returns `(pre, cie)` where
-/// `cie` is the `[m, d]` codec prefix (so callers can reuse `cie[m-1]`).
-fn build_pre(
-    gen: &(impl TalkerHost + ?Sized),
-    sp: &TtsSpecials,
-    role_ids: &[u32],
-    language_id: Option<u32>,
-    speaker: Option<&[f32]>,
-    tts_bos: &[f32],
-    tts_pad: &[f32],
-) -> (Vec<f32>, Vec<f32>) {
-    let d = gen.d();
-    let cie = codec_prefix(gen, sp, language_id, speaker);
-    let m = cie.len() / d;
-    let role = proj(gen, &role_ids[..3]);
-    let mut pre = role; // [3, d]
-    // (tts_pad × (m-2), tts_bos) + cie[0..m-1]
-    for r in 0..(m - 1) {
-        let base = if r < m - 2 { tts_pad } else { tts_bos };
-        let mut row = base.to_vec();
-        add_into(&mut row, &cie[r * d..(r + 1) * d]);
-        pre.extend_from_slice(&row);
-    }
-    (pre, cie)
+/// [`PromptPlan::build`] then [`PromptPlan::materialise`], panicking on a
+/// malformed request as the builders below always have.
+fn planned(gen: &(impl TalkerHost + ?Sized), sp: &TtsSpecials, spec: &PromptSpec<'_>, xvector: Option<&[f32]>) -> Prompt {
+    PromptPlan::build(sp, spec).unwrap_or_else(|e| panic!("{e}")).materialise(gen, xvector)
 }
 
-/// **x-vector-only** (and speaker-free "synth") voice prompt — non-streaming.
+/// **x-vector-only** (and speaker-free "synth") voice prompt in the
+/// streaming text layout.
 ///
 /// `role_ids`/`text_ids` are the role header (`input_id[..3]`) and the target
 /// text content (`input_id[3..len-5]`). `speaker` is the 1024-d x-vector, or
@@ -339,44 +517,34 @@ pub fn build_xvector_prompt(
     speaker: Option<&[f32]>,
     language_id: Option<u32>,
 ) -> Prompt {
-    assert!(text_ids.len() >= 2, "target text too short");
-    let d = gen.d();
-    let tts3 = proj(gen, &[sp.tts_bos, sp.tts_eos, sp.tts_pad]);
-    let tts_bos = tts3[0..d].to_vec();
-    let tts_eos = tts3[d..2 * d].to_vec();
-    let tts_pad = tts3[2 * d..3 * d].to_vec();
-
-    let (mut embeds, cie) = build_pre(gen, sp, role_ids, language_id, speaker, &tts_bos, &tts_pad);
-    let m = cie.len() / d;
-    // tts_text_first_token: proj(text_ids[0]) + cie[m-1] (the codec_bos row).
-    let first = proj(gen, &text_ids[..1]);
-    let mut row = first;
-    add_into(&mut row, &cie[(m - 1) * d..m * d]);
-    embeds.extend_from_slice(&row);
-
-    // trailing_text_hidden = [proj(text_ids[1..]) ; tts_eos]
-    let mut trailing = proj(gen, &text_ids[1..]);
-    trailing.extend_from_slice(&tts_eos);
-
-    Prompt {
-        embeds,
-        trailing,
-        tts_pad,
-    }
+    build_xvector_prompt_in(gen, sp, role_ids, text_ids, speaker, language_id, TextLayout::Streaming)
 }
 
-/// **VoiceDesign / CustomVoice (instruct)** prompt — non-streaming. Built on top
-/// of [`build_xvector_prompt`] by prepending the projected **instruct** text
+/// [`build_xvector_prompt`] in the text layout `layout`.
+pub fn build_xvector_prompt_in(
+    gen: &(impl TalkerHost + ?Sized),
+    sp: &TtsSpecials,
+    role_ids: &[u32],
+    text_ids: &[u32],
+    speaker: Option<&[f32]>,
+    language_id: Option<u32>,
+    layout: TextLayout,
+) -> Prompt {
+    let slot = if speaker.is_some() { SpeakerSlot::XVector } else { SpeakerSlot::None };
+    planned(gen, sp, &PromptSpec { role_ids, text_ids, instruct_ids: &[], speaker: slot, language_id, layout }, speaker)
+}
+
+/// **VoiceDesign / CustomVoice (instruct)** prompt in the streaming text
+/// layout: [`build_xvector_prompt`] with the projected **instruct** text
 /// (`instruct_ids` = the tokenized `<|im_start|>user\n{instruct}<|im_end|>\n`
-/// turn) to the input-embedding prefix — exactly as `Qwen3TTSModel.generate`
-/// prepends `text_projection(text_embedding(instruct_id))`.
+/// turn) prepended - exactly as `Qwen3TTSModel.generate` prepends
+/// `text_projection(text_embedding(instruct_id))`.
 ///
 /// For **CustomVoice**, pass the preset speaker's codec-token id (from
-/// [`TtsSpecials::speaker_id`]) as `speaker_id` — it is looked up in the Talker's
-/// codec embedding table and placed in the codec prefix's speaker slot (the same
-/// slot the x-vector occupies). For **VoiceDesign**, pass `speaker_id = None`: the
+/// [`TtsSpecials::speaker_id`]) as `speaker_id`: its row of the Talker's codec
+/// embedding table takes the codec prefix's speaker slot (the same slot the
+/// x-vector occupies). For **VoiceDesign**, pass `speaker_id = None`: the
 /// model designs the voice purely from the instruction.
-#[allow(clippy::too_many_arguments)]
 pub fn build_instruct_prompt(
     gen: &(impl TalkerHost + ?Sized),
     sp: &TtsSpecials,
@@ -386,18 +554,26 @@ pub fn build_instruct_prompt(
     speaker_id: Option<u32>,
     language_id: Option<u32>,
 ) -> Prompt {
-    let speaker_embed: Option<Vec<f32>> = speaker_id.map(|id| gen.codec_embed(id).to_vec());
-    let mut base =
-        build_xvector_prompt(gen, sp, role_ids, text_ids, speaker_embed.as_deref(), language_id);
-    if !instruct_ids.is_empty() {
-        let mut embeds = proj(gen, instruct_ids);
-        embeds.extend_from_slice(&base.embeds);
-        base.embeds = embeds;
-    }
-    base
+    build_instruct_prompt_in(gen, sp, role_ids, text_ids, instruct_ids, speaker_id, language_id, TextLayout::Streaming)
 }
 
-/// **ICL** voice-clone prompt — non-streaming. Conditions on the reference
+/// [`build_instruct_prompt`] in the text layout `layout`.
+#[allow(clippy::too_many_arguments)]
+pub fn build_instruct_prompt_in(
+    gen: &(impl TalkerHost + ?Sized),
+    sp: &TtsSpecials,
+    role_ids: &[u32],
+    text_ids: &[u32],
+    instruct_ids: &[u32],
+    speaker_id: Option<u32>,
+    language_id: Option<u32>,
+    layout: TextLayout,
+) -> Prompt {
+    let slot = speaker_id.map_or(SpeakerSlot::None, SpeakerSlot::Codec);
+    planned(gen, sp, &PromptSpec { role_ids, text_ids, instruct_ids, speaker: slot, language_id, layout }, None)
+}
+
+/// **ICL** voice-clone prompt - streaming layout only. Conditions on the reference
 /// transcript (`ref_ids` = `ref_id[3..len-2]`) and the reference audio codec
 /// codes (`ref_code`, `[T_ref*16]` row-major, codebooks 0..15 per frame). The
 /// `mtp` provides the residual-codebook embedding tables.
@@ -417,13 +593,13 @@ pub fn build_icl_prompt(
     let ncode = 16usize;
     assert_eq!(ref_code.len() % ncode, 0, "ref_code must be [T,16]");
     let t_ref = ref_code.len() / ncode;
-    let tts3 = proj(gen, &[sp.tts_bos, sp.tts_eos, sp.tts_pad]);
-    let tts_bos = tts3[0..d].to_vec();
-    let tts_eos = tts3[d..2 * d].to_vec();
-    let tts_pad = tts3[2 * d..3 * d].to_vec();
+    let tts2 = proj(gen, &[sp.tts_eos, sp.tts_pad]);
+    let tts_eos = tts2[0..d].to_vec();
+    let tts_pad = tts2[d..2 * d].to_vec();
 
-    let (mut embeds, _cie) =
-        build_pre(gen, sp, role_ids, language_id, Some(speaker), &tts_bos, &tts_pad);
+    // The shared prefix, up to (and excluding) the codec_bos row the ICL body places.
+    let pre = PromptPlan { rows: prefix_rows(sp, role_ids, &[], SpeakerSlot::XVector, language_id), trailing: Vec::new(), tts_pad: sp.tts_pad };
+    let mut embeds = pre.materialise(gen, Some(speaker)).embeds;
 
     // text_embed = proj([ref_ids ; text_ids]) ; append tts_eos.
     let mut concat = ref_ids.to_vec();
@@ -522,5 +698,147 @@ mod steering_tests {
     fn an_unstated_kind_is_held_to_nothing_and_an_unknown_one_is_refused() {
         assert!(specials(None).check_steering(design(true, true)).is_ok());
         assert!(Checkpoint::from_config(&serde_json::json!({"tts_model_type": "duet"})).is_err());
+    }
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+
+    /// A host with tiny random tables: `d = 4`, 16 codec rows, 12 text tokens.
+    struct TinyHost {
+        text: TextProjection,
+        codec: Vec<f32>,
+    }
+
+    impl TinyHost {
+        fn new() -> TinyHost {
+            let mut rng = data::rng::Lcg::new(7);
+            let (in_dim, inter, out, vocab) = (3, 5, 4, 12);
+            let text = TextProjection {
+                text_embedding: Some(rng.vec(vocab * in_dim)),
+                fc1_w: rng.vec(inter * in_dim),
+                fc1_b: rng.vec(inter),
+                fc2_w: rng.vec(out * inter),
+                fc2_b: rng.vec(out),
+                in_dim,
+                inter,
+                out,
+                text_vocab: vocab,
+            };
+            TinyHost { text, codec: rng.vec(16 * out) }
+        }
+    }
+
+    impl TalkerHost for TinyHost {
+        fn d(&self) -> usize {
+            4
+        }
+        fn text(&self) -> &TextProjection {
+            &self.text
+        }
+        fn codec_embed(&self, id: u32) -> &[f32] {
+            &self.codec[id as usize * 4..(id as usize + 1) * 4]
+        }
+    }
+
+    const ROLE: [u32; 3] = [9, 10, 11];
+    const TEXT: [u32; 3] = [3, 4, 5];
+    const LANG: u32 = 12;
+
+    fn spec(speaker: SpeakerSlot, layout: TextLayout) -> PromptSpec<'static> {
+        PromptSpec { role_ids: &ROLE, text_ids: &TEXT, instruct_ids: &[], speaker, language_id: Some(LANG), layout }
+    }
+
+    /// The rows the reference's `generate` builds: role, `tts_pad`s then
+    /// `tts_bos` over the codec prefix (think tag, language, speaker, pad), then
+    /// the text body of the layout.
+    fn expected_prefix(sp: &TtsSpecials, speaker: Part) -> Vec<Vec<Part>> {
+        use Part::{Codec, Text};
+        let mut rows: Vec<Vec<Part>> = ROLE.iter().map(|&t| vec![Text(t)]).collect();
+        for c in [Codec(sp.codec_think), Codec(sp.codec_think_bos), Codec(LANG), Codec(sp.codec_think_eos), speaker] {
+            rows.push(vec![Text(sp.tts_pad), c]);
+        }
+        rows.push(vec![Text(sp.tts_bos), Codec(sp.codec_pad)]);
+        rows
+    }
+
+    #[test]
+    fn the_streaming_layout_puts_the_first_token_on_codec_bos_and_trails_the_rest() {
+        use Part::{Codec, Text};
+        let sp = crate::testsupport::tiny_specials();
+        let plan = PromptPlan::build(&sp, &spec(SpeakerSlot::XVector, TextLayout::Streaming)).unwrap();
+        let mut rows = expected_prefix(&sp, Part::XVector);
+        rows.push(vec![Text(TEXT[0]), Codec(sp.codec_bos)]);
+        assert_eq!(plan.rows, rows);
+        assert_eq!(plan.trailing, vec![TEXT[1], TEXT[2], sp.tts_eos]);
+        assert_eq!(plan.trailing_at(3), sp.tts_pad, "the text runs out into tts_pad");
+    }
+
+    #[test]
+    fn the_non_streaming_layout_holds_the_whole_text_in_the_prefix_over_codec_pad() {
+        use Part::{Codec, Text};
+        let sp = crate::testsupport::tiny_specials();
+        let plan = PromptPlan::build(&sp, &spec(SpeakerSlot::Codec(13), TextLayout::NonStreaming)).unwrap();
+        let mut rows = expected_prefix(&sp, Codec(13));
+        for t in TEXT.iter().chain(&[sp.tts_eos]) {
+            rows.push(vec![Text(*t), Codec(sp.codec_pad)]);
+        }
+        rows.push(vec![Text(sp.tts_pad), Codec(sp.codec_bos)]);
+        assert_eq!(plan.rows, rows);
+        assert!((0..5).all(|t| plan.trailing_at(t) == sp.tts_pad), "every frame carries tts_pad");
+    }
+
+    #[test]
+    fn an_instruction_leads_and_no_language_takes_the_nothink_tag() {
+        use Part::{Codec, Text};
+        let sp = crate::testsupport::tiny_specials();
+        let s = PromptSpec { instruct_ids: &[6, 7], language_id: None, ..spec(SpeakerSlot::None, TextLayout::Streaming) };
+        let plan = PromptPlan::build(&sp, &s).unwrap();
+        assert_eq!(&plan.rows[..5], &[vec![Text(6)], vec![Text(7)], vec![Text(9)], vec![Text(10)], vec![Text(11)]]);
+        assert_eq!(&plan.rows[5..9], &[vec![Text(sp.tts_pad), Codec(sp.codec_nothink)], vec![Text(sp.tts_pad), Codec(sp.codec_think_bos)], vec![Text(sp.tts_pad), Codec(sp.codec_think_eos)], vec![Text(sp.tts_bos), Codec(sp.codec_pad)]]);
+        assert!(PromptPlan::build(&sp, &PromptSpec { text_ids: &[], ..s }).is_err());
+    }
+
+    /// Each materialised row is the sum of its parts' rows, the trailing text
+    /// is projected token by token, and the x-vector fills its slot.
+    #[test]
+    fn a_plan_materialises_as_the_sum_of_its_parts() {
+        let sp = crate::testsupport::tiny_specials();
+        let host = TinyHost::new();
+        let xvec = [0.5f32, -0.25, 1.0, 2.0];
+        for layout in [TextLayout::Streaming, TextLayout::NonStreaming] {
+            let plan = PromptPlan::build(&sp, &spec(SpeakerSlot::XVector, layout)).unwrap();
+            let prompt = plan.materialise(&host, Some(&xvec));
+            assert_eq!(prompt.embeds.len(), plan.len() * 4);
+            for (r, parts) in plan.rows.iter().enumerate() {
+                let mut want = vec![0.0f32; 4];
+                for part in parts {
+                    let term = match *part {
+                        Part::Text(id) => host.project_text(&[id]),
+                        Part::Codec(id) => host.codec_embed(id).to_vec(),
+                        Part::XVector => xvec.to_vec(),
+                    };
+                    for (w, t) in want.iter_mut().zip(term) {
+                        *w += t;
+                    }
+                }
+                for (got, want) in prompt.embeds[r * 4..(r + 1) * 4].iter().zip(&want) {
+                    assert!((got - want).abs() < 1e-6, "{layout:?} row {r}: {got} vs {want}");
+                }
+            }
+            assert_eq!(prompt.trailing, host.project_text(&plan.trailing));
+            assert_eq!(prompt.tts_pad, host.project_text(&[sp.tts_pad]));
+        }
+    }
+
+    #[test]
+    fn the_layout_defaults_follow_the_reference_and_names_round_trip() {
+        assert_eq!(TextLayout::default_for(Steering::Reference), TextLayout::Streaming);
+        assert_eq!(TextLayout::default_for(Steering::Design { instruct: true, speaker: false }), TextLayout::NonStreaming);
+        for name in TextLayout::CHOICES {
+            assert_eq!(TextLayout::parse(name).unwrap().name(), name);
+        }
+        assert!(TextLayout::parse("chunked").is_err());
     }
 }

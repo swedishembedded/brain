@@ -22,7 +22,7 @@ use data::tokenizer::Tokenizer;
 use crate::gen::TalkerGen;
 use crate::genconfig::{GenerationConfig, GenerationPlan, SamplingRequest};
 use crate::mtp::MtpModel;
-use crate::prompt::{self, Prompt, TtsSpecials};
+use crate::prompt::{self, Prompt, Steering, TextLayout, TtsSpecials};
 use crate::placement::{MtpMode, NpuOpts, TalkerMode};
 use crate::reference::Reference;
 use crate::sampling::DegenerationWatch;
@@ -171,9 +171,32 @@ pub struct GenOpts {
     /// (`..GenOpts::default()`) across crate boundaries requires every field to
     /// be visible.
     pub resolved: Option<GenerationPlan>,
+    /// How the target text enters the Talker's input ([`TextLayout`]); `None`
+    /// takes the reference's default for the kind of request
+    /// ([`TextLayout::default_for`]; streaming for speaker-free synthesis).
+    pub text_layout: Option<TextLayout>,
 }
 
 impl GenOpts {
+    /// The text layout this request speaks in: the caller's choice, else `default`.
+    #[must_use]
+    pub fn layout_or(&self, default: TextLayout) -> TextLayout {
+        self.text_layout.unwrap_or(default)
+    }
+
+    /// Refuse a text layout the in-context clone does not build: it speaks
+    /// streaming only, and a non-streaming request is refused rather than
+    /// spoken in another layout than it asked for.
+    pub fn check_icl_layout(&self) -> Result<(), String> {
+        match self.text_layout {
+            Some(TextLayout::NonStreaming) => Err(capability::failure::tag(
+                capability::failure::FailureClass::UnsupportedCapability,
+                "in-context cloning (a reference transcript) speaks in the streaming text layout only; omit text_layout or the reference transcript",
+            )),
+            _ => Ok(()),
+        }
+    }
+
     /// Resolve this request against `ckpt_dir`'s `generation_config.json` and
     /// trace the result once. Idempotent: resolving twice re-resolves from the
     /// same request, never from an already-resolved plan, so precedence cannot
@@ -237,7 +260,7 @@ impl Default for GenOpts {
         // `max_frames` is a caller knob, not a config-resolved one: it sizes the
         // Talker KV cache and the NPU graph bucket, so it does not inherit the
         // reference's 8192-token budget. See [`GenerationPlan::max_new_tokens`].
-        GenOpts { max_frames: 256, seed: data::rng::random_seed(), min_new: 2, profile: false, sampling: SamplingRequest::default(), resolved: None }
+        GenOpts { max_frames: 256, seed: data::rng::random_seed(), min_new: 2, profile: false, sampling: SamplingRequest::default(), resolved: None, text_layout: None }
     }
 }
 
@@ -668,11 +691,13 @@ pub fn clone(
             return Err("ref_text tokenized too short".to_string());
         }
         let ref_ids = &ref_ids_full[3..ref_ids_full.len() - 2];
+        opts.check_icl_layout()?;
         prompt::build_icl_prompt(
             &gen, &mtp, &sp, &role_ids, &text_ids, ref_ids, &ref_code, &xvec, language_id,
         )
     } else {
-        prompt::build_xvector_prompt(&gen, &sp, &role_ids, &text_ids, Some(&xvec), language_id)
+        let layout = opts.layout_or(TextLayout::default_for(Steering::Reference));
+        prompt::build_xvector_prompt_in(&gen, &sp, &role_ids, &text_ids, Some(&xvec), language_id, layout)
     };
 
     let codes = generate(&gen, &mtp, &sp, &prompt, opts, cancel)?;
@@ -748,7 +773,7 @@ pub fn synth_codes(
 
     let gen = TalkerGen::load(&paths.talker, max_ctx(opts, 0));
     let mtp = MtpModel::load_inference(&paths.mtp);
-    let prompt = prompt::build_xvector_prompt(&gen, &sp, &role_ids, &text_ids, None, language_id);
+    let prompt = prompt::build_xvector_prompt_in(&gen, &sp, &role_ids, &text_ids, None, language_id, opts.layout_or(TextLayout::Streaming));
 
     generate(&gen, &mtp, &sp, &prompt, opts, cancel)
 }
@@ -803,11 +828,13 @@ pub fn clone_npu(
             return Err("ref_text tokenized too short".to_string());
         }
         let ref_ids = &ref_ids_full[3..ref_ids_full.len() - 2];
+        opts.check_icl_layout()?;
         prompt::build_icl_prompt(
             &tables, &mtp, &sp, &role_ids, &text_ids, ref_ids, &ref_code, &xvec, language_id,
         )
     } else {
-        prompt::build_xvector_prompt(&tables, &sp, &role_ids, &text_ids, Some(&xvec), language_id)
+        let layout = opts.layout_or(TextLayout::default_for(Steering::Reference));
+        prompt::build_xvector_prompt_in(&tables, &sp, &role_ids, &text_ids, Some(&xvec), language_id, layout)
     };
 
     run_npu(paths, &tables, &mut mtp, &sp, &prompt, opts, npu_cache, npu)
@@ -835,7 +862,7 @@ pub fn synth_npu(
 
     let tables = crate::npu_gen::TalkerTables::load(&paths.talker);
     let mut mtp = crate::gen_kv_mtp::CpuMtp::load(&paths.mtp);
-    let prompt = prompt::build_xvector_prompt(&tables, &sp, &role_ids, &text_ids, None, language_id);
+    let prompt = prompt::build_xvector_prompt_in(&tables, &sp, &role_ids, &text_ids, None, language_id, opts.layout_or(TextLayout::Streaming));
 
     run_npu(paths, &tables, &mut mtp, &sp, &prompt, opts, npu_cache, npu)
 }
@@ -1006,7 +1033,7 @@ pub fn design(
     let gen = TalkerGen::load(&paths.talker, max_t);
     let mtp = MtpModel::load_inference(&paths.mtp);
     let prompt =
-        prompt::build_instruct_prompt(&gen, &sp, &role_ids, &text_ids, &instruct_ids, speaker_id, language_id);
+        prompt::build_instruct_prompt_in(&gen, &sp, &role_ids, &text_ids, &instruct_ids, speaker_id, language_id, opts.layout_or(TextLayout::default_for(design_steering(instruct, speaker))));
 
     let codes = generate(&gen, &mtp, &sp, &prompt, opts, cancel)?;
     decode_codes(&paths.codec, &codes)
@@ -1045,7 +1072,7 @@ pub fn design_npu(
     let tables = crate::npu_gen::TalkerTables::load(&paths.talker);
     let mut mtp = crate::gen_kv_mtp::CpuMtp::load(&paths.mtp);
     let prompt =
-        prompt::build_instruct_prompt(&tables, &sp, &role_ids, &text_ids, &instruct_ids, speaker_id, language_id);
+        prompt::build_instruct_prompt_in(&tables, &sp, &role_ids, &text_ids, &instruct_ids, speaker_id, language_id, opts.layout_or(TextLayout::default_for(design_steering(instruct, speaker))));
 
     run_npu(paths, &tables, &mut mtp, &sp, &prompt, opts, npu_cache, npu)
 }

@@ -224,6 +224,18 @@ refused by name before the first step. Cancelling stops at a step boundary.
 
 Output is always mono 24 kHz f32 PCM WAV.
 
+### Text layout
+
+The text reaches the Talker in one of two layouts, as in the reference's
+`non_streaming_mode`: `streaming` adds one text token to each generated
+frame's input, `non_streaming` puts the whole text before the first frame.
+The speech actions take `text_layout` (`streaming` or `non_streaming`);
+omitted, a preset speaker or a designed voice (`design`) speaks
+non-streaming, as the reference's CustomVoice and VoiceDesign entry points
+default to, and `synth` and `clone` speak streaming. A checkpoint speaks best
+in the layout it was trained on. An in-context clone (`clone` with
+`ref_text`) builds the streaming layout only and refuses `non_streaming`.
+
 ### Where the sampling defaults come from
 
 `--temp`, `--top-k`, `--top-p`, `--repetition-penalty` and the three

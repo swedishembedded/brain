@@ -257,7 +257,7 @@ pub fn synth_batch(paths: &TtsPaths, reqs: &[BatchRequest], cancel: &CancelToken
             let (role_ids, text_ids) = pipeline::split_input_ids(&ids).map_err(|e| format!("tts batch: request {i}: {e}"))?;
             let language_id = sp.language_id(&r.lang)?;
             out.push((
-                prompt::build_xvector_prompt(&talker, &sp, &role_ids, &text_ids, None, language_id),
+                prompt::build_xvector_prompt_in(&talker, &sp, &role_ids, &text_ids, None, language_id, r.opts.layout_or(prompt::TextLayout::Streaming)),
                 // Resolve each request's sampling plan HERE: this is the batch's
                 // outermost layer that knows the checkpoint dir, the same place
                 // `pipeline::synth` resolves for a single request.
@@ -318,8 +318,11 @@ mod tests {
             repetition_penalty: Some(1.0),
             ..Default::default()
         };
-        let opts_a = GenOpts { max_frames: 5, min_new: 1, sampling, ..GenOpts::default() };
-        let opts_b = GenOpts { max_frames: 8, min_new: 1, sampling, ..GenOpts::default() };
+        // `min_new == max_frames` holds each request to its own length: with a
+        // drawn seed both could otherwise sample end of speech at the same
+        // frame, and the batch would not be ragged at all.
+        let opts_a = GenOpts { max_frames: 5, min_new: 5, sampling, ..GenOpts::default() };
+        let opts_b = GenOpts { max_frames: 8, min_new: 8, sampling, ..GenOpts::default() };
         let prompt_a = tiny_prompt(d, 3, 2, 101);
         let prompt_b = tiny_prompt(d, 4, 1, 202);
 

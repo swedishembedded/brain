@@ -319,7 +319,7 @@ impl Voices {
             Voice::Default => {
                 let language_id = self.sp.language_id(&req.lang)?;
                 let (role_ids, text_ids) = self.text_ids(&req.text)?;
-                Ok(prompt::build_xvector_prompt(talker, &self.sp, &role_ids, &text_ids, None, language_id))
+                Ok(prompt::build_xvector_prompt_in(talker, &self.sp, &role_ids, &text_ids, None, language_id, req.opts.layout_or(prompt::TextLayout::Streaming)))
             }
             Voice::Design { instruct, speaker } => {
                 self.sp.check_steering(pipeline::design_steering(instruct, speaker.as_deref()))?;
@@ -327,7 +327,8 @@ impl Voices {
                 let speaker_id = pipeline::resolve_speaker(&self.sp, speaker.as_deref())?;
                 let (role_ids, text_ids) = self.text_ids(&req.text)?;
                 let instruct_ids = if instruct.trim().is_empty() { Vec::new() } else { self.tok.encode(&pipeline::instruct_text(instruct)) };
-                Ok(prompt::build_instruct_prompt(talker, &self.sp, &role_ids, &text_ids, &instruct_ids, speaker_id, language_id))
+                let layout = req.opts.layout_or(prompt::TextLayout::default_for(pipeline::design_steering(instruct, speaker.as_deref())));
+                Ok(prompt::build_instruct_prompt_in(talker, &self.sp, &role_ids, &text_ids, &instruct_ids, speaker_id, language_id, layout))
             }
             Voice::Clone { reference, ref_text, ref_codes } => {
                 self.sp.check_steering(crate::prompt::Steering::Reference)?;
@@ -344,9 +345,10 @@ impl Voices {
                             return Err("ref_text tokenized too short".to_string());
                         }
                         let ref_ids = &full[3..full.len() - 2];
+                        req.opts.check_icl_layout()?;
                         Ok(prompt::build_icl_prompt(talker, mtp, &self.sp, &role_ids, &text_ids, ref_ids, codes, &cached.xvec, language_id))
                     }
-                    None => Ok(prompt::build_xvector_prompt(talker, &self.sp, &role_ids, &text_ids, Some(&cached.xvec), language_id)),
+                    None => Ok(prompt::build_xvector_prompt_in(talker, &self.sp, &role_ids, &text_ids, Some(&cached.xvec), language_id, req.opts.layout_or(prompt::TextLayout::default_for(prompt::Steering::Reference)))),
                 }
             }
         }

@@ -58,9 +58,12 @@ ledger is the engine work it needs.
 - [x] Training shard format `brain-tts-shard-v1` (`qwen3tts::shard`): token
       ids, `[frames, 16]` codes, x-vector, voice, language, completeness, in
       one file (an artifact a job takes by digest), validated when read.
-- [ ] Prompt layouts as data: one builder that records, per prefix row, which
+- [x] Prompt layouts as data: one builder that records, per prefix row, which
       codec rows, text tokens and x-vector it sums, for inference and for
-      routing gradients; the non-streaming layout beside the streaming one.
+      routing gradients; the non-streaming layout beside the streaming one
+      (`prompt::PromptPlan`, `TextLayout`; the speech actions take
+      `text_layout`, defaulting as the reference does; the in-context clone
+      stays streaming-only).
 - [ ] `prepare`: utterance manifest (wav, transcript, speaker, voice,
       language) to shards, codes from the codec encoder and x-vectors from the
       speaker encoder on the device, batched.
