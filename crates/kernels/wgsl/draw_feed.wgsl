@@ -11,7 +11,8 @@
 // @dtype f32
 //
 // Feed a keyed draw's tokens back as the next decode step's input, on the
-// device: tok[i] = the token draw_final (or draw_rows_f32) drew for row i, and
+// device: tok[i] = the token draw_final (or draw_rows_f32, or draw_list) drew for row i plus `offset` (the rows of
+// the next step's table when the steps read different tables stacked in one input table), and
 // the token and its log-probability recorded into the window history at step
 // `s`, so a sampled decode window reads its tokens back once at the end, as
 // the greedy window does (decode_feed). One invocation per row.
@@ -21,11 +22,12 @@
 //   hist   : [window, bsz] tokens (as f32)
 //   lphist : [window, bsz] log-probabilities
 //
-// params: bsz, s
+// params: bsz, s, offset
 
 struct Params {
     bsz: u32,
     s: u32,
+    offset: u32,
 };
 
 @group(0) @binding(0) var<uniform> p: Params;
@@ -40,7 +42,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>,
     let i = gid.y * (nwg.x * 64u) + gid.x;
     if (i >= p.bsz) { return; }
     let t = drawn[4u * i];
-    tok[i] = u32(t);
+    tok[i] = u32(t) + p.offset;
     hist[p.s * p.bsz + i] = t;
     lphist[p.s * p.bsz + i] = drawn[4u * i + 1u];
 }

@@ -11,7 +11,7 @@
 //! sending an email to info@swedishembedded.com.
 
 use data::rng::Lcg;
-use model::readout::{RowDrawer, DRAW_KERNELS};
+use model::readout::{RowDrawer, DRAW_KERNELS, READOUT_KERNELS};
 use model::serve::{draw_key, draw_row, Drawn, RowDraw};
 
 /// The distribution `sample_logits_row` defines: best first (equal logits lowest id first), the best `top_k`, the
@@ -44,6 +44,9 @@ fn exact_truncated(row: &[f32], temp: f32, min_p: f32, top_p: f32, top_k: usize)
     w
 }
 
+/// The draw kernels with the candidate extraction: a top-k row is then drawn from its candidates on the device.
+static WITH_CANDIDATES: std::sync::LazyLock<Vec<(&str, &str)>> = std::sync::LazyLock::new(|| [DRAW_KERNELS.as_slice(), READOUT_KERNELS.as_slice()].concat());
+
 fn uniform(rng: &mut Lcg) -> f32 {
     (rng.next_u32() >> 8) as f32 / 16_777_216.0
 }
@@ -53,15 +56,22 @@ fn uniform(rng: &mut Lcg) -> f32 {
 /// and every row that is not drawn comes back whole.
 #[test]
 fn the_device_draw_is_the_host_reference_row_for_row() {
-    let g = gpu_core::testgpu::dev(&DRAW_KERNELS);
+    // Without the candidate extraction a top-k row is read back and drawn whole; with it, it is drawn from its
+    // candidates on the device. Both answer the host's token.
+    for kernels in [&DRAW_KERNELS[..], &WITH_CANDIDATES[..]] {
+        draws_as_the_host_does(&gpu_core::testgpu::dev(kernels));
+    }
+}
+
+fn draws_as_the_host_does(g: &gpu_core::Gpu) {
     // A native kernel that fails to build falls back to the WGSL pair without a word: on a CUDA device the one-launch
     // kernel must be the one this test checks.
     if g.kind() == "cuda" {
-        assert!(model::readout::draws_natively(&g, 8, 151_936), "the CUDA device does not draw with draw_rows_f32");
+        assert!(model::readout::draws_natively(g, 8, 151_936), "the CUDA device does not draw with draw_rows_f32");
     }
     let mut rng = Lcg::new(23); // seed: fixed fixture so a failure reproduces on the same rows
     for (rows, vocab) in [(8usize, 151_936usize), (64, 1_000), (5, 37), (3, 300)] {
-        let drawer = RowDrawer::new(&g, rows as u32).expect("the kernels are registered");
+        let drawer = RowDrawer::new(g, rows as u32).expect("the kernels are registered");
         let mut host: Vec<f32> = (0..rows * vocab).map(|_| (uniform(&mut rng) * 24.0 - 12.0).round() / 2.0).collect();
         host[3] = f32::NAN;
         host[vocab + 1] = f32::NEG_INFINITY;
@@ -86,9 +96,9 @@ fn the_device_draw_is_the_host_reference_row_for_row() {
                 })
                 .collect();
             let shape = drawer.shape(&draws, vocab as u32);
-            let steps = drawer.steps(&g, &logits, &draws, vocab as u32);
+            let steps = drawer.steps(g, &logits, &draws, vocab as u32);
             g.submit(&[], &steps);
-            let got = drawer.answer(&g, &logits, &draws, vocab as u32, shape);
+            let got = drawer.answer(g, &logits, &draws, vocab as u32, shape);
             for (r, (d, got)) in draws.iter().zip(&got).enumerate() {
                 let row = &host[r * vocab..(r + 1) * vocab];
                 match (d, got) {
@@ -115,10 +125,15 @@ fn the_device_draw_is_the_host_reference_row_for_row() {
 /// `top_k` and both.
 #[test]
 fn the_device_draw_follows_the_exact_distribution() {
-    let g = gpu_core::testgpu::dev(&DRAW_KERNELS);
+    for kernels in [&DRAW_KERNELS[..], &WITH_CANDIDATES[..]] {
+        follows_the_exact_distribution(&gpu_core::testgpu::dev(kernels));
+    }
+}
+
+fn follows_the_exact_distribution(g: &gpu_core::Gpu) {
     let row = [2.0f32, 1.5, 1.5, 0.3, -1.0, f32::NAN, f32::NEG_INFINITY, -3.0, 0.0, 1.9, -0.5, 0.7, -2.0];
     let (rows, vocab) = (64usize, row.len());
-    let drawer = RowDrawer::new(&g, rows as u32).unwrap();
+    let drawer = RowDrawer::new(g, rows as u32).unwrap();
     for (temp, min_p, top_p, top_k) in [(1.0f32, 0.0f32, 1.0f32, 0usize), (1.4, 0.15, 1.0, 0), (1.0, 0.0, 0.8, 0), (1.2, 0.0, 1.0, 4), (1.0, 0.05, 0.9, 6)] {
         let w = exact_truncated(&row, temp, min_p, top_p, top_k);
         let z: f64 = w.iter().sum();
@@ -127,8 +142,8 @@ fn the_device_draw_follows_the_exact_distribution() {
             let draws: Vec<Option<RowDraw>> = (0..rows).map(|r| Some(RowDraw { temp, min_p, top_p, top_k, key: draw_key(r as u64, round, 0) })).collect();
             let logits = g.storage_init("logits", &row.repeat(rows));
             let shape = drawer.shape(&draws, vocab as u32);
-            g.submit(&[], &drawer.steps(&g, &logits, &draws, vocab as u32));
-            for d in drawer.answer(&g, &logits, &draws, vocab as u32, shape) {
+            g.submit(&[], &drawer.steps(g, &logits, &draws, vocab as u32));
+            for d in drawer.answer(g, &logits, &draws, vocab as u32, shape) {
                 let Drawn::Token(t, ..) = d else { panic!("every row is drawn") };
                 counts[t as usize] += 1;
             }

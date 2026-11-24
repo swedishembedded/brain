@@ -138,7 +138,7 @@ pub(crate) enum PlanOut {
     Argmax(DeviceBuffer),
     TopK(model::readout::TopkOut),
     /// The drawer, the logits it draws from (the rows a draw does not cover are read from them) and its shape.
-    Drawn(model::readout::RowDrawer, DeviceBuffer, model::readout::DrawShape),
+    Drawn(Box<model::readout::RowDrawer>, DeviceBuffer, model::readout::DrawShape),
 }
 
 /// One recorded step: layers and head as a single tape, its inputs and its outputs.

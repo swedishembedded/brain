@@ -35,7 +35,7 @@ pub mod rows;
 pub mod conformance;
 pub mod visit_state;
 pub use budget::{MixedLimits, StepCost};
-pub use draw::{draw_from_candidates, draw_key, draw_list, draw_row, draw_row_whole, draw_rows_host, mix32, token_gumbel, token_uniform, Drawn, RowDraw};
+pub use draw::{draw_key, draw_list, draw_row, draw_row_whole, draw_rows_host, mix32, token_gumbel, token_uniform, Drawn, RowDraw};
 pub use embeds::{ContentKey, PromptEmbeds};
 pub use fullrow::{best_candidates, sample_logits_row};
 pub use round_rows::{prefill_round_rows_for, PREFILL_ROUND_ROWS, TENSOR_CORE_PREFILL_ROUND_ROWS};

@@ -466,6 +466,8 @@ pub const DORA_GAIN: &str = include_str!("../wgsl/dora_gain.wgsl");
 pub const DORA_GAIN_BWD: &str = include_str!("../wgsl/dora_gain_bwd.wgsl");
 /// `wgsl/draw_feed.wgsl`
 pub const DRAW_FEED: &str = include_str!("../wgsl/draw_feed.wgsl");
+/// `wgsl/draw_list.wgsl`
+pub const DRAW_LIST: &str = include_str!("../wgsl/draw_list.wgsl");
 /// `wgsl/draw_final.wgsl`
 pub const DRAW_FINAL: &str = include_str!("../wgsl/draw_final.wgsl");
 /// `wgsl/draw_part.wgsl`
@@ -2042,6 +2044,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("dora_gain_bwd", DORA_GAIN_BWD),
     ("draw_feed", DRAW_FEED),
     ("draw_final", DRAW_FINAL),
+    ("draw_list", DRAW_LIST),
     ("draw_part", DRAW_PART),
     ("dw_splitk_reduce", DW_SPLITK_REDUCE),
     ("dwconv3d", DWCONV3D),

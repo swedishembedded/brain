@@ -517,6 +517,14 @@ pub mod fault {
     }
 }
 
+/// One step of a chained window ([`Engine::forward_batched_embed_chain`]): the head its logits come from, and what is
+/// added to the token it draws to make the next step's input id (the rows of the next step's table when the steps read
+/// different tables stacked in one input table).
+pub struct ChainStep<'a> {
+    pub head: &'a str,
+    pub feed_offset: u32,
+}
+
 /// A batched-forward input: token ids (embedded via `tok.weight`) or ready-made
 /// per-row embeddings written straight into the residual stream (the tts Talker
 /// feeds codec/text-conditioned embeddings rather than ids).
@@ -1184,6 +1192,9 @@ pub struct Engine {
     topk_idx_dev: DeviceBuffer,
     /// The keyed draw of a sampled step's rows from `logits_dev` (`None` on a device list without its kernels).
     drawer: Option<model::readout::RowDrawer>,
+    /// The most steps one decode window chains on the device ([`Engine::set_window_capacity`]); the scratch's
+    /// schedule and history and the drawer are sized for it.
+    window: usize,
     /// The recorded decode step (`gpu_core::tape::Tape` of what `batched_tape`
     /// builds), keyed by `(bsz, lora)` - a pure function of that key once
     /// `causal_chunk` is `false` and the input is `Tokens`/`Resident` (every
@@ -1789,6 +1800,7 @@ impl Engine {
             topk_vals_dev,
             topk_idx_dev,
             drawer,
+            window: DECODE_WINDOW,
             tape_cache: HashMap::new(),
             tape_scratch: gpu_core::tape::TapeScratch::new(),
             lsa: None,
@@ -2369,6 +2381,52 @@ impl Engine {
         steps.extend(drawer.dispatch(&self.gpu, &self.logits_dev, meta.bsz, n, shape));
         self.gpu.submit(&[], &steps);
         drawer.answer(&self.gpu, &self.logits_dev, draws, n, shape)
+    }
+
+    /// Let one decode window chain up to `k` steps on the device (the default is [`DECODE_WINDOW`]): the window's
+    /// schedule and token history and the drawer are rebuilt for it. Call before decoding.
+    pub fn set_window_capacity(&mut self, k: usize) {
+        let k = k.max(1);
+        let rows = u64::from(self.max_batch);
+        self.sc.sched_buf = self.gpu.storage((k as u64 - 1).max(1) * rows * 3);
+        self.sc.hist_buf = self.gpu.storage(k as u64 * rows);
+        if self.drawer.is_some() {
+            self.drawer = model::readout::RowDrawer::with_window(&self.gpu, self.max_batch, k as u32);
+        }
+        self.window = k;
+    }
+
+    /// Advance every sequence by `1 + steps.len()` positions with one host round trip, every draw made on the device:
+    /// position 0 reads `embeds` (`[bsz, d_model]`; no head is read there), position 1 the token ids `first`, and each
+    /// later position the token the step before drew plus that step's [`ChainStep::feed_offset`]. Step `s` reads head
+    /// `steps[s].head` and row `i` is drawn by `draws[i][s]`; a chain's steps differ only in their heads, offsets and
+    /// keys (a greedy row is a draw that keeps its best token). Answers row `i`'s `(token, log-probability)` at every
+    /// step. Needs the device draw kernels and a window capacity of `steps.len()` ([`Self::set_window_capacity`]).
+    pub fn forward_batched_embed_chain(&mut self, tables: &mut [&mut BlockTable], embeds: &[f32], first: &[u32], steps: &[ChainStep<'_>], draws: &[Vec<RowDraw>]) -> Vec<Vec<(u32, f32)>> {
+        let k = steps.len();
+        assert!(k >= 1, "a chain of no steps");
+        assert!(draws.len() == tables.len() && draws.iter().all(|d| d.len() == k), "one draw per row and step");
+        let meta = self.append_meta(tables);
+        assert_eq!(embeds.len(), meta.bsz as usize * self.cfg.d_model as usize);
+        self.run_batched_submit(&meta, Input::Embeds(embeds), false);
+        let n = self.head_rows(Some(steps[0].head)) as u32;
+        assert!(steps.iter().all(|s| self.head_rows(Some(s.head)) as u32 == n), "every head of a chain is as wide");
+        let drawer = self.drawer.take().expect("a chained window draws on the device (register model::readout::DRAW_KERNELS)");
+        let first_draws: Vec<Option<RowDraw>> = draws.iter().map(|d| Some(d[0])).collect();
+        let shape = drawer.shape(&first_draws, n);
+        drawer.upload(&self.gpu, &first_draws, n);
+        drawer.upload_window_keys(&self.gpu, &(1..k).map(|s| draws.iter().map(|d| d[s].key).collect()).collect::<Vec<Vec<u32>>>());
+        let rows = self.decode_window(tables, first, k, |e, bsz, s| {
+            let step = &steps[s as usize];
+            let mut out: Vec<Step> = Vec::new();
+            e.head_steps_with(&mut out, bsz, Some(step.head));
+            out.extend(drawer.dispatch_at(&e.gpu, &e.logits_dev, bsz, n, shape, s));
+            out.push(drawer.feed(&e.gpu, &e.sc.tok_buf, bsz, s, step.feed_offset));
+            e.gpu.submit(&[], &out);
+        });
+        let answer = drawer.read_window(&self.gpu, rows, k);
+        self.drawer = Some(drawer);
+        answer
     }
 
     /// The rows of `head`: the vocabulary for the LM head, else the extra head's.
@@ -3849,7 +3907,7 @@ impl Engine {
     /// sequence that finishes mid-window has its surplus tokens trimmed and
     /// its surplus K/V slots rolled back (`BlockTable::truncate`).
     ///
-    /// Requires `k <= DECODE_WINDOW` and enough free blocks for every append;
+    /// Requires `k` within the window capacity and enough free blocks for every append;
     /// the scheduler falls back to the single-step path when either fails.
     pub(crate) fn forward_batched_greedy_window(
         &mut self,
@@ -3896,7 +3954,7 @@ impl Engine {
             let mut steps: Vec<Step> = Vec::new();
             e.head_steps(&mut steps, bsz);
             steps.extend(drawer.dispatch_at(&e.gpu, &e.logits_dev, bsz, vocab, shape, s));
-            steps.push(drawer.feed(&e.gpu, &e.sc.tok_buf, bsz, s));
+            steps.push(drawer.feed(&e.gpu, &e.sc.tok_buf, bsz, s, 0));
             e.gpu.submit(&[], &steps);
         });
         let out = drawer.read_window(&self.gpu, n, k);
@@ -3907,9 +3965,9 @@ impl Engine {
     /// The `k` steps of a decode window over `tables` (row `i` fed `inputs[i]` first): the window's K/V slots taken up
     /// front and walked on the device (`decode_advance`), each step's layers replayed from its recorded tape, and
     /// `head(engine, rows, step)` submitted after each step's layers to leave the step's tokens in `sc.tok_buf` for the
-    /// next. Requires `k <= DECODE_WINDOW` and room in the pool for every append. Returns the row count.
+    /// next. Requires `k` within the window capacity and room in the pool for every append. Returns the row count.
     fn decode_window(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], k: usize, mut head: impl FnMut(&Engine, u32, u32)) -> usize {
-        assert!((1..=DECODE_WINDOW).contains(&k), "window {k} out of range");
+        assert!((1..=self.window).contains(&k), "window {k} out of range (capacity {})", self.window);
         let meta = self.append_meta(tables);
         let bsz = meta.bsz;
         let mbt = self.max_blocks_per_seq;
@@ -4845,7 +4903,7 @@ impl model::serve::PagedDecoder for Engine {
     }
     fn drawn_window_capacity(&self) -> usize {
         if self.drawer.is_some() {
-            DECODE_WINDOW
+            self.window
         } else {
             1
         }
@@ -4866,7 +4924,7 @@ impl model::serve::PagedDecoder for Engine {
         Engine::kv_pool_capacity_tokens(self)
     }
     fn decode_window_capacity(&self) -> usize {
-        DECODE_WINDOW
+        self.window
     }
     fn forward_batched_topk(&mut self, tables: &mut [&mut BlockTable], inputs: &[u32], k: usize) -> Vec<Vec<(u32, f32)>> {
         Engine::forward_batched_topk(self, tables, inputs, k as u32)

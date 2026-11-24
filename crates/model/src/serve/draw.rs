@@ -193,27 +193,6 @@ pub fn draw_list(list: &[(u32, f32)], d: RowDraw, full_mass: Option<f32>) -> (u3
     (list[pick].0, weights[pick].ln() - kept.ln())
 }
 
-/// The keyed draw of a row answered from its best-first `list` of candidates and its statistics (`best`, the row's
-/// largest `logit / temp`, and `mass`, the sum of `exp(logit / temp - best)` over the row), when the list holds every
-/// survivor: the `top_k` best are in it, or its mass reaches the nucleus. `None` when it does not, and the row itself
-/// must be drawn ([`draw_row`]). Only for a draw that [`RowDraw::truncates`] a `vocab`-wide row. The third figure is the
-/// token's log-probability under the whole row, `logit / temp - best - ln(mass)`: the drawn token is in the list, and
-/// `best` and `mass` are the row's own, so a cut draw's whole-distribution figure needs nothing more from the device.
-pub fn draw_from_candidates(list: &[(u32, f32)], best: f32, mass: f32, d: RowDraw, vocab: usize) -> Option<(u32, f32, f32)> {
-    if list.is_empty() || mass.is_nan() || mass <= 0.0 {
-        return None;
-    }
-    let temp = d.temp.max(1e-6);
-    let drawn = if d.keeps_top_k(vocab) {
-        (list.len() >= d.top_k).then(|| draw_list(&list[..d.top_k], d, None))?
-    } else {
-        let held: f64 = list.iter().map(|&(_, l)| if l.is_nan() { 0.0 } else { ((l / temp - best).exp()) as f64 }).sum();
-        (held >= d.top_p as f64 * mass as f64).then(|| draw_list(list, d, Some(mass)))?
-    };
-    let logit = list.iter().find(|&&(t, _)| t == drawn.0).map(|&(_, l)| l)?;
-    Some((drawn.0, drawn.1, logit / temp - best - mass.ln()))
-}
-
 /// Every row's answer to a keyed step whose rows were read back: `draws[i]` drawn from `rows[i]` where it is
 /// `Some`, the row handed back where it is `None`. The rows are drawn in parallel on the CPU pool.
 pub fn draw_rows_host(rows: Vec<Vec<f32>>, draws: &[Option<RowDraw>]) -> Vec<Drawn> {

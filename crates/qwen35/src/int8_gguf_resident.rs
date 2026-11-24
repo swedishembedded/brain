@@ -2365,7 +2365,7 @@ impl Qwen35GgufInstance {
             HeadKind::Drawn(shape) => {
                 let drawer = model::readout::RowDrawer::new(g, rows).expect("the keyed draw's kernels are in this model's list");
                 g.submit(&[], &drawer.dispatch(g, &logits, rows, self.cfg.vocab, shape));
-                PlanOut::Drawn(drawer, logits, shape)
+                PlanOut::Drawn(Box::new(drawer), logits, shape)
             }
         }
     }
