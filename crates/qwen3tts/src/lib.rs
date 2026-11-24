@@ -17,6 +17,7 @@ pub mod batched;
 pub mod caps;
 pub mod config;
 pub mod engine;
+pub mod export;
 pub mod gen;
 pub mod gen_kv;
 pub mod gen_kv_mtp;

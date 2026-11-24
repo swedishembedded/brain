@@ -96,10 +96,17 @@ ledger is the engine work it needs.
       a shared `Gpu` would let all three share one stream.
 - [ ] The in-context clone in the non-streaming layout (refused today), and
       training the text projection (frozen in this release).
-- [ ] Export to the upstream layout: one `model.safetensors` in upstream names
-      and BF16, `config.json` with the trained languages and voices and
-      `tts_model_type`, tokenizer and `speech_tokenizer/` carried over; gated
-      by a round trip (export, reload in brain, identical tensors).
+- [x] Export to the upstream layout (`qwen3tts::export`, over the generic
+      `checkpoint::rewrite::rewrite_safetensors`): one `model.safetensors` in
+      upstream names and the base's dtype, `config.json` with the trained
+      languages and voices and `tts_model_type`, tokenizer and
+      `speech_tokenizer/` carried over, atomic; gated on the real 0.6B Base
+      (`tests/it/export.rs`: unchanged export byte-identical, trained tensors
+      reload as their BF16 values, refusals leave nothing). A `custom_voice`
+      export leaves out `speaker_encoder.*` (upstream builds none for it and
+      its own fine-tuning drops it; keeping it would only draw an
+      unused-weights warning). Not yet checked by loading in the upstream
+      package itself (no torch on the build node).
 - [x] Store: a Qwen3-TTS repo is recognised by its own signature for any
       repo, not by a pin list, so the 1.7B Base and trained releases pull as
       `qwen3tts` (`modelstore::recipe::select`: at one tier a signature that

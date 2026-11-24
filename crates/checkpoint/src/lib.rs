@@ -34,6 +34,8 @@ pub mod gguf_src;
 pub mod license;
 pub mod load_progress;
 pub mod remap;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod rewrite;
 pub mod packed;
 pub mod split;
 pub mod srccheck;

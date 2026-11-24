@@ -197,6 +197,25 @@ not declared. The Talker rebuilds each layer in the backward whatever is
 asked, so `--activations recompute` is accepted and `--activations keep` is
 refused by name before the first step. Cancelling stops at a step boundary.
 
+## Trained checkpoints
+
+A checkpoint trained in brain is exported in the upstream layout of the base it
+was trained from (`qwen3tts::export`), so it loads unchanged in brain and in
+the upstream `qwen-tts` package:
+
+- `model.safetensors` holds every tensor of the base under its upstream name
+  and dtype (BF16 for the released checkpoints, rounded to nearest even); the
+  tensors training did not change are the base's bytes.
+- `config.json` is the base's, with the trained languages added to
+  `talker_config.codec_language_id` and the named voices to `spk_id` (each
+  with `spk_is_dialect: false`). Names are lowercase `[a-z0-9_-]`.
+- A checkpoint with named voices is a `custom_voice` checkpoint: it speaks as
+  one of its voices (`voice` = a voice name) and, like upstream's own
+  fine-tunes, carries no speaker encoder, so it does not clone a reference
+  recording.
+- `generation_config.json`, the tokenizer files and `speech_tokenizer/` are
+  the base's, and `brain.manifest.json` registers it as `qwen3tts`.
+
 ## Options
 
 - `--lang` - synthesis language (default `english`).
