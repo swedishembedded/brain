@@ -67,7 +67,7 @@ ledger is the engine work it needs.
 - [ ] `prepare`: utterance manifest (wav, transcript, speaker, voice,
       language) to shards, codes from the codec encoder and x-vectors from the
       speaker encoder on the device, batched.
-- [ ] The speech SFT objective: the Talker full-weight on the teacher-forced
+- [x] The speech SFT objective: the Talker full-weight on the teacher-forced
       prompt (cb0 next-frame CE, end of speech supervised on complete
       utterances only), the code predictor batched over frames (`[frames, 16]`
       positions, same-frame residual CE, weight `0.3` as upstream), gradients
@@ -75,9 +75,27 @@ ledger is the engine work it needs.
       and cb0 row; Talker input rows to every codec table), codec tables and
       named-voice rows on the host optimizer, text embedding and projection
       frozen in the first release. Through `fit_controlled` (resume, events).
-- [ ] New language and voice rows: allocate free codec rows, initialise a
+      `qwen3tts::speech_sft` (`speech_sft()`, `SpeechSftModel`,
+      `SpeechObjective`); gated on tiny random checkpoints (finite differences
+      of every parameter family, masking, exact resume, overfit) and on the
+      real 0.6B (training rows equal generation's rows bit for bit, both
+      layouts, x-vector and named-voice slot).
+- [x] New language and voice rows: allocate free codec rows, initialise a
       voice row from its speaker's robust x-vector centroid and a language row
-      from a configurable mix of existing rows.
+      from a configurable mix of existing rows (`speech_sft::rows`).
+- [ ] Measure the objective on a card: the real-checkpoint overfit and its
+      frames/s (`speech_sft::tests::the_real_checkpoint_overfits_one_utterance_and_reports_its_frame_rate`,
+      written, ignored, refused on the CPU backend) and the cost of the host
+      side (row materialisation and gradient routing per micro-batch).
+- [ ] Batches shorter than the build: with every row spliced in, `qwen3::Qwen`
+      runs its whole block (`needed_len` does not trim a spliced or
+      external-head batch), so every micro-batch pays the longest record's
+      rows; trim by the batch's own length or bucket records by length.
+- [ ] One device per run: each decoder (`qwen3::Qwen::new`) opens its own
+      device handle and the heads take a third (`new_like`); a constructor on
+      a shared `Gpu` would let all three share one stream.
+- [ ] The in-context clone in the non-streaming layout (refused today), and
+      training the text projection (frozen in this release).
 - [ ] Export to the upstream layout: one `model.safetensors` in upstream names
       and BF16, `config.json` with the trained languages and voices and
       `tts_model_type`, tokenizer and `speech_tokenizer/` carried over; gated

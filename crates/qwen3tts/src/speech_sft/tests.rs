@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 
 use data::rng::Lcg;
+use data::tokenizer::Tokenizer;
 use model::Model;
 
 use super::model::{residual_head, residual_table, Example, SftShape, SpeechSftModel, PROJECTION, TALKER_HEAD, TALKER_TABLE};
@@ -75,7 +76,7 @@ pub(crate) fn shard(d: u32, specs: &[Spec], seed: u64) -> Shard {
 
 /// A model over `shape` with weights drawn from `seed`.
 fn build(shape: &SftShape, seed: u64) -> SpeechSftModel {
-    SpeechSftModel::build(shape.clone(), &SpeechSftModel::init_weights(shape, seed), seed).unwrap()
+    SpeechSftModel::build(shape.clone(), SpeechSftModel::init_weights(shape, seed), seed).unwrap()
 }
 
 fn examples(s: &Shard, picks: &[(usize, TextLayout)]) -> Vec<Example> {
@@ -150,8 +151,8 @@ fn padding_prompt_rows_and_an_open_end_contribute_nothing() {
     let tight = shape(d, 1, block, 5);
     let padded = shape(d, 3, block + 9, 15);
     let init = SpeechSftModel::init_weights(&tight, 0x7a2); // seed: fixed fixture
-    let a = SpeechSftModel::build(tight, &init, 1).unwrap();
-    let b = SpeechSftModel::build(padded, &init, 2).unwrap();
+    let a = SpeechSftModel::build(tight, init.clone(), 1).unwrap();
+    let b = SpeechSftModel::build(padded, init, 2).unwrap();
     for (r, layout) in [(1, TextLayout::Streaming), (2, TextLayout::NonStreaming)] {
         a.load(examples(&s, &[(r, layout)])).unwrap();
         b.load(examples(&s, &[(r, layout)])).unwrap();
@@ -205,7 +206,7 @@ fn a_resumed_run_equals_the_straight_run() {
     let opts = fit_opts(4, 2, 1e-2, 0x5eed); // seed: fixed so both runs draw the same stream
     let objective = || SpeechObjective::new(&s, None, rows(), specials(), 2, 0.5, 0.3).unwrap();
     let run = |stop_at: Option<u32>, state: &std::path::Path| {
-        let model = SpeechSftModel::build(shape.clone(), &init, 3).unwrap();
+        let model = SpeechSftModel::build(shape.clone(), init.clone(), 3).unwrap();
         let mut stop = |r: &model::train::StepReport| stop_at != Some(r.step);
         let control = model::train::FitControl { on_step: Some(&mut stop), state: Some(state), state_every: 0, ..Default::default() };
         model::train::fit_controlled(model, objective(), &opts, None, control).unwrap()
@@ -270,4 +271,161 @@ fn the_new_rows_take_their_own_learning_rate() {
     assert_eq!(row(&before, VOICE), row(&after, VOICE), "the new row moved at a zero rate");
     assert_ne!(row(&before, LANGUAGES[0]), row(&after, LANGUAGES[0]), "a base row did not train");
     assert!(m.last_grad_norm().is_some_and(|n| n > 0.0));
+}
+
+/// A tiny release on disk, as a training run reads one: `config.json` naming
+/// the specials and one language, `model.safetensors` under upstream names.
+/// The Talker table's named rows are trained (norm ~1), the rest of its
+/// special band untrained (norm ~0.002).
+fn tiny_release(dir: &std::path::Path, d: u32) {
+    let s = shape(d, 1, 1, 1);
+    let mut tensors = SpeechSftModel::init_weights(&s, 0x7a6); // seed: fixed fixture
+    let table = tensors.get_mut(TALKER_TABLE).unwrap();
+    let sp = specials();
+    let named: Vec<u32> = [sp.codec_nothink, sp.codec_think, sp.codec_think_bos, sp.codec_think_eos, sp.codec_pad, sp.codec_bos, sp.codec_eos, LANGUAGES[0]].into();
+    for id in CODEBOOK..48 {
+        let scale = if named.contains(&id) { 1.0 } else { 0.002 };
+        table[id as usize * d as usize..(id as usize + 1) * d as usize].fill(scale);
+    }
+    let config = serde_json::json!({
+        "tts_bos_token_id": sp.tts_bos, "tts_eos_token_id": sp.tts_eos, "tts_pad_token_id": sp.tts_pad,
+        "tts_model_type": "base", "tts_model_size": "tiny",
+        "talker_config": {
+            "num_hidden_layers": s.talker.n_layers, "hidden_size": d, "head_dim": s.talker.head_dim,
+            "num_attention_heads": s.talker.n_heads, "num_key_value_heads": s.talker.n_kv_heads,
+            "intermediate_size": s.talker.d_ff, "vocab_size": 48, "num_code_groups": GROUPS,
+            "text_hidden_size": s.talker.text_hidden_size, "text_vocab_size": s.talker.text_vocab_size,
+            "codec_nothink_id": sp.codec_nothink, "codec_think_id": sp.codec_think, "codec_think_bos_id": sp.codec_think_bos,
+            "codec_think_eos_id": sp.codec_think_eos, "codec_pad_id": sp.codec_pad, "codec_bos_id": sp.codec_bos,
+            "codec_eos_token_id": sp.codec_eos, "codec_language_id": {"alpha": LANGUAGES[0]}, "spk_id": {},
+            "code_predictor_config": {
+                "num_hidden_layers": s.mtp.n_layers, "hidden_size": s.mtp.d_model, "head_dim": s.mtp.head_dim,
+                "num_attention_heads": s.mtp.n_heads, "num_key_value_heads": s.mtp.n_kv_heads,
+                "intermediate_size": s.mtp.d_ff, "vocab_size": CODEBOOK, "num_code_groups": GROUPS,
+            },
+        },
+    });
+    std::fs::write(dir.join("config.json"), serde_json::to_vec(&config).unwrap()).unwrap();
+    let mut names: Vec<&String> = tensors.keys().collect();
+    names.sort();
+    let plan: Vec<(String, Vec<u64>)> = names.iter().map(|n| ((*n).clone(), vec![tensors[*n].len() as u64])).collect();
+    let path = dir.join("model.safetensors");
+    let mut w = checkpoint::weightio::StWriter::create(path.to_str().unwrap(), &plan, &serde_json::Value::Null, None).unwrap();
+    for n in names {
+        w.write(n, &tensors[n]).unwrap();
+    }
+    w.finish().unwrap();
+}
+
+/// The whole run from a release on disk: a base language, a new language and a
+/// new voice; every trained tensor handed back under its upstream name and
+/// shape; the step and held-out reports; the new rows trained.
+#[test]
+fn a_run_from_a_release_trains_new_rows_and_hands_back_upstream_tensors() {
+    let d = 16;
+    let dir = brain_testutil::Scratch::dir("speech-sft-release");
+    tiny_release(dir.path(), d);
+    let s = shard(d, &RECORDS, 0x56); // seed: fixed fixture
+    let cfg: super::SpeechSftConfig = serde_json::from_value(serde_json::json!({
+        "base": dir.path().to_str().unwrap(),
+        "steps": 3, "lr": 1e-2, "batch": 2, "max_frames": 5, "eval_interval": 1,
+        "lr_multipliers": {"new_rows": 2.0},
+        "rows": {"languages": {"alpha": "base", "beta": "new"}, "voices": {"v1": "new"}},
+    }))
+    .unwrap();
+    let base = super::Base::open(dir.path()).unwrap();
+    let r = super::speech_sft(&cfg, &s, Some(&s), model::train::FitControl::default()).unwrap();
+    assert_eq!(r.languages["alpha"], LANGUAGES[0]);
+    let (beta, v1) = (r.languages["beta"], r.voices["v1"]);
+    assert!(beta > LANGUAGES[0] && beta < 48 && v1 < 48 && v1 != beta, "new rows {beta}, {v1}");
+    assert_eq!(r.report.steps.len(), 3);
+    for step in &r.report.steps {
+        assert!(step.loss.is_finite() && step.talker_ce > 0.0 && step.code_predictor_ce > 0.0 && step.frames_per_s > 0.0 && step.grad_norm.is_some(), "{step:?}");
+        let held = step.held_out.expect("an evaluation every step");
+        assert!(held.loss.is_finite() && held.talker_ce > 0.0);
+    }
+    let names: Vec<&str> = r.tensors.iter().map(|(n, _, _)| n.as_str()).collect();
+    assert!(names.contains(&"talker.model.layers.1.mlp.down_proj.weight") && names.contains(&TALKER_HEAD) && names.contains(&"talker.code_predictor.lm_head.2.weight"));
+    for (name, shape, values) in &r.tensors {
+        assert_eq!(shape, &base.shapes[name], "{name}");
+        assert_eq!(values.len() as u64, shape.iter().product::<u64>(), "{name}");
+    }
+    let table = &r.tensors.iter().find(|(n, _, _)| n == TALKER_TABLE).unwrap().2;
+    let row = |t: &[f32], id: u32| t[id as usize * 16..(id as usize + 1) * 16].to_vec();
+    let start = &base.tensors[TALKER_TABLE];
+    assert_ne!(row(table, v1), row(start, v1), "the new voice row started at its centroid and trained");
+    assert!(row(table, v1).iter().map(|x| x * x).sum::<f32>().sqrt() > 0.1, "the new voice row is not an untrained row");
+    let bad = serde_json::from_value::<super::SpeechSftConfig>(serde_json::json!({"base": "x", "steps": 1, "rows": {}, "learning_rate": 1.0}));
+    assert!(bad.unwrap_err().to_string().contains("unknown field"));
+}
+
+/// The rows a run trains on are the rows generation feeds, bit for bit, in both
+/// layouts and with a named voice in the speaker slot, on the real checkpoint.
+#[test]
+fn training_rows_are_inference_rows_on_the_real_checkpoint() {
+    let Some(paths) = crate::testsupport::store_paths() else {
+        brain_testutil::skip("no Qwen3-TTS checkpoint in the model store (brain pull Qwen/Qwen3-TTS-12Hz-0.6B-Base)");
+        return;
+    };
+    let base = super::Base::open(std::path::Path::new(&paths.ckpt_dir)).unwrap();
+    let shape = SftShape { talker: base.talker.clone(), mtp: base.mtp.clone(), specials: base.specials.clone(), batch: 1, block: 1, frames: 1, mtp_weight: 0.3, lr: Default::default(), new_rows: Vec::new(), text_inter: base.text_inter };
+    let train = super::model::host_tables(&shape, &mut base.tensors.clone()).unwrap();
+    let tables = crate::npu_gen::TalkerTables::load(&paths.talker);
+    let mtp = crate::gen_kv_mtp::CpuMtp::load(&paths.mtp);
+    let sp = &base.specials;
+    let tok = crate::prompt::load_tokenizer(&paths.ckpt_dir).unwrap();
+    let (role, text) = crate::pipeline::split_input_ids(&tok.encode(&crate::pipeline::assistant_text("Every row the trainer builds is the row generation feeds."))).unwrap();
+    let mut rng = Lcg::new(0x5eed_0001); // seed: fixed fixture
+    let xvec = rng.vec_scaled(base.talker.d_model as usize, 0.5);
+    let codes: Vec<u32> = (0..6 * 16).map(|_| (rng.next_u64() % 2048) as u32).collect();
+    let language = sp.language_id("english").unwrap();
+    let voice = sp.lang["chinese"]; // any trained row serves as a named voice's slot here
+    for layout in [TextLayout::Streaming, TextLayout::NonStreaming] {
+        for speaker in [crate::prompt::SpeakerSlot::XVector, crate::prompt::SpeakerSlot::Codec(voice)] {
+            let plan = crate::prompt::PromptPlan::build(sp, &crate::prompt::PromptSpec { role_ids: &role, text_ids: &text, instruct_ids: &[], speaker, language_id: language, layout }).unwrap();
+            let trained = crate::train::policy_rows(&train, &train, &plan.materialise(&train, Some(&xvec)), &codes, 16, Some(sp.codec_eos));
+            let inference = match speaker {
+                crate::prompt::SpeakerSlot::Codec(id) => crate::prompt::build_instruct_prompt_in(&tables, sp, &role, &text, &[], Some(id), language, layout),
+                _ => crate::prompt::build_xvector_prompt_in(&tables, sp, &role, &text, Some(&xvec), language, layout),
+            };
+            let served = crate::train::policy_rows(&tables, &mtp, &inference, &codes, 16, Some(sp.codec_eos));
+            assert_eq!(trained.targets, served.targets, "{layout:?} {speaker:?}");
+            assert!(trained.rows == served.rows, "{layout:?} {speaker:?}: the training rows differ from the rows generation feeds");
+        }
+    }
+}
+
+/// One real utterance overfits and the step runs at a measured frame rate:
+/// written for a card, refused on the CPU backend by name.
+#[test]
+#[ignore = "slow: trains the real checkpoint; run on a GPU"]
+fn the_real_checkpoint_overfits_one_utterance_and_reports_its_frame_rate() {
+    if brain_testutil::gpu_unavailable(gpu_core::testgpu::missing_gpu()) {
+        return;
+    }
+    let Some(paths) = crate::testsupport::store_paths() else {
+        brain_testutil::skip("no Qwen3-TTS checkpoint in the model store (brain pull Qwen/Qwen3-TTS-12Hz-0.6B-Base)");
+        return;
+    };
+    let base = super::Base::open(std::path::Path::new(&paths.ckpt_dir)).unwrap();
+    let d = base.talker.d_model;
+    let tok = crate::prompt::load_tokenizer(&paths.ckpt_dir).unwrap();
+    let ids = tok.encode(&crate::pipeline::assistant_text("One utterance, learned by heart."));
+    let mut rng = Lcg::new(0x5eed_0002); // seed: fixed fixture
+    let codes: Vec<u16> = (0..60 * 16).map(|_| (rng.next_u64() % 2048) as u16).collect();
+    let xvector = rng.vec_scaled(d as usize, 0.5);
+    let meta = ShardMeta { format: FORMAT.into(), codebooks: 16, codebook_size: 2048, xvector_dim: d, frame_rate: 12.5, languages: vec!["english".into()], voices: Vec::new(), records: 0, producers: Default::default() };
+    let mut w = ShardWriter::new(meta);
+    w.push(&Record { id: RecordId { id: "u".into(), speaker: "s".into(), source: "test".into(), text: String::new() }, text_ids: &ids, codes: &codes, xvector: &xvector, voice: NO_VOICE, language: 0, complete: true }).unwrap();
+    let s = Shard::from_bytes(&w.to_bytes()).unwrap();
+    let cfg: super::SpeechSftConfig = serde_json::from_value(serde_json::json!({
+        "base": paths.ckpt_dir, "steps": 40, "lr": 1e-4, "batch": 1, "max_frames": 60, "streaming_fraction": 1.0,
+        "rows": {"languages": {"english": "base"}},
+    }))
+    .unwrap();
+    let r = super::speech_sft(&cfg, &s, None, model::train::FitControl::default()).unwrap();
+    let (first, last) = (r.report.steps[0].loss, r.report.steps.last().unwrap().loss);
+    assert!(last < first / 3.0, "the loss fell from {first} to {last} only");
+    let rate = r.report.steps.last().unwrap().frames_per_s;
+    eprintln!("speech sft on the real checkpoint: {rate:.0} frames/s at one 60-frame utterance per step");
 }

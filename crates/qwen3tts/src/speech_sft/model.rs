@@ -466,19 +466,34 @@ pub struct SpeechSftModel {
     last_norm: Cell<Option<f32>>,
 }
 
-fn take(init: &HashMap<String, Vec<f32>>, name: &str, numel: usize) -> Result<Vec<f32>, String> {
-    let v = init.get(name).ok_or_else(|| format!("speech sft: no tensor {name}"))?;
+/// Move tensor `name` (of `numel` values) out of `init`.
+fn take(init: &mut HashMap<String, Vec<f32>>, name: &str, numel: usize) -> Result<Vec<f32>, String> {
+    let v = init.remove(name).ok_or_else(|| format!("speech sft: no tensor {name}"))?;
     if v.len() != numel {
         return Err(format!("speech sft: {name} holds {} values, the configuration needs {numel}", v.len()));
     }
-    Ok(v.clone())
+    Ok(v)
+}
+
+/// The host tables and the frozen text path of `shape`, moved out of `init`.
+pub(crate) fn host_tables(shape: &SftShape, init: &mut HashMap<String, Vec<f32>>) -> Result<HostTables, String> {
+    let d = shape.d();
+    let (th, inter) = (shape.talker.text_hidden_size as usize, shape.text_inter as usize);
+    let frozen = shape.frozen_params();
+    let mut get = |i: usize| take(init, &frozen[i].0, frozen[i].1);
+    let text = TextProjection { text_embedding: Some(get(0)?), fc1_w: get(1)?, fc1_b: get(2)?, fc2_w: get(3)?, fc2_b: get(4)?, in_dim: th, inter, out: d, text_vocab: shape.talker.text_vocab_size as usize };
+    let tparams = shape.table_params();
+    let codec = take(init, &tparams[0].0, tparams[0].1)?;
+    let residual = tparams[1..].iter().map(|(n, s)| take(init, n, *s)).collect::<Result<Vec<_>, _>>()?;
+    Ok(HostTables::new(d, text, codec, residual))
 }
 
 impl SpeechSftModel {
     /// Build from upstream-named tensors: every [`model::ModelConfig::param_list`]
-    /// entry and every [`SftShape::frozen_params`] one. `seed` fills the
-    /// decoders' unread token tables.
-    pub fn build(shape: SftShape, init: &HashMap<String, Vec<f32>>, seed: u64) -> Result<SpeechSftModel, String> {
+    /// entry and every [`SftShape::frozen_params`] one, each moved into the
+    /// part that holds it (a release's tensors are never held twice). `seed`
+    /// fills the decoders' unread token tables.
+    pub fn build(shape: SftShape, mut init: HashMap<String, Vec<f32>>, seed: u64) -> Result<SpeechSftModel, String> {
         shape.lr.validate()?;
         let d = shape.d();
         if shape.mtp.embedding_dim as usize != d {
@@ -487,7 +502,7 @@ impl SpeechSftModel {
         if shape.mtp.num_code_groups != shape.talker.num_code_groups {
             return Err(format!("speech sft: the code predictor fills {} codebooks, the Talker has {}", shape.mtp.num_code_groups, shape.talker.num_code_groups));
         }
-        let decoder = |cfg: &QwenConfig, which: Decoder| -> Result<Qwen, String> {
+        let mut decoder = |cfg: &QwenConfig, which: Decoder| -> Result<Qwen, String> {
             let mut weights = qwen3::init_weights(cfg, seed);
             for (hf, numel, owner) in shape.decoder_params() {
                 if owner != which {
@@ -498,7 +513,7 @@ impl SpeechSftModel {
                     Decoder::CodePredictor => mtp_hf_to_brain(&hf),
                 }
                 .expect("a listed parameter maps");
-                weights.insert(brain, take(init, &hf, numel)?);
+                weights.insert(brain, take(&mut init, &hf, numel)?);
             }
             let (b, t) = match which {
                 Decoder::Talker => (shape.batch, shape.block),
@@ -518,25 +533,16 @@ impl SpeechSftModel {
         let talker_norm = DeviceGradNorm::new(talker.gpu())?;
         let cp_norm = DeviceGradNorm::new(cp.gpu())?;
 
-        let text = {
-            let (th, inter) = (shape.talker.text_hidden_size as usize, shape.text_inter as usize);
-            let frozen = shape.frozen_params();
-            let get = |i: usize| take(init, &frozen[i].0, frozen[i].1);
-            TextProjection { text_embedding: Some(get(0)?), fc1_w: get(1)?, fc1_b: get(2)?, fc2_w: get(3)?, fc2_b: get(4)?, in_dim: th, inter, out: d, text_vocab: shape.talker.text_vocab_size as usize }
-        };
-        let tparams = shape.table_params();
-        let codec = take(init, &tparams[0].0, tparams[0].1)?;
-        let residual = tparams[1..].iter().map(|(n, s)| take(init, n, *s)).collect::<Result<Vec<_>, _>>()?;
         if let Some(&r) = shape.new_rows.iter().find(|&&r| r >= shape.talker.vocab) {
             return Err(format!("speech sft: new row {r} is past the Talker table's {} rows", shape.talker.vocab));
         }
-        let tables = HostTables::new(d, text, codec, residual);
+        let tables = host_tables(&shape, &mut init)?;
         let grads = HostGrads::zeros_like(&tables);
         let segments = segments(&shape, &tables);
         let host_params: Vec<(String, usize)> = segments.iter().map(|&(t, at, n, _)| (format!("table{t}@{at}"), n)).collect();
         let host_opt = model::hostopt::HostAdam::new(&host_params, ParamPrecision::FP32)?;
 
-        let aux = Self::build_aux(&shape, &talker, init)?;
+        let aux = Self::build_aux(&shape, &talker, &mut init)?;
         Ok(SpeechSftModel {
             shape,
             talker,
@@ -555,7 +561,7 @@ impl SpeechSftModel {
         })
     }
 
-    fn build_aux(shape: &SftShape, talker: &Qwen, init: &HashMap<String, Vec<f32>>) -> Result<Aux, String> {
+    fn build_aux(shape: &SftShape, talker: &Qwen, init: &mut HashMap<String, Vec<f32>>) -> Result<Aux, String> {
         let gpu = talker.gpu().new_like(&aux_kernels());
         let mut ops = Ops::new(gpu.share())?;
         ops.set_gemm_precision(gpu_core::provider::library::GemmPrecision::Fp32Reference);
@@ -844,7 +850,7 @@ impl model::Model for SpeechSftModel {
     type Config = SftShape;
 
     fn new(cfg: SftShape, _b: u32, _t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
-        SpeechSftModel::build(cfg, init, data::rng::random_seed()).unwrap_or_else(|e| panic!("{e}"))
+        SpeechSftModel::build(cfg, init.clone(), data::rng::random_seed()).unwrap_or_else(|e| panic!("{e}"))
     }
 
     /// Fresh weights for every tensor a build reads, upstream-named: the
