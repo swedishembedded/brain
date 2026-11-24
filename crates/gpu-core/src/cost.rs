@@ -924,6 +924,23 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         // params [n, src_base, dst_base]: a word copy with independent offsets.
         "splice_at" => f(0, 8 * n0()),
         "splice_bwd" => f(0, 12 * n0()),
+        // params [rows, vocab, valid, cap, row0, period, offset, width, heads, ..]: one thread per logit, in place
+        // (the soft cap's tanh, or a store of the floor); the backward also reads the transformed logits.
+        // params [rows * vocab, vocab, k, ignore]: per logit, the CE gradient's extra-target terms (k ids per row read).
+        "ce_sparse_targets" => {
+            let (n, k) = (p(0)?, p(2)?);
+            f(2 * k * n, 12 * n + 8 * k * n / p(1)?.max(1))
+        }
+        // params [rows * k, vocab, k, ignore]: one thread per extra target, reading its logit and the row's CE.
+        "ce_gather_logprob" => f(2 * n0(), 20 * n0()),
+        "logit_cap_mask" => {
+            let n = p(0)? * p(1)?;
+            f(4 * n, 8 * n)
+        }
+        "logit_cap_mask_bwd" => {
+            let n = p(0)? * p(1)?;
+            f(4 * n, 12 * n)
+        }
         "splice_add" => f(n0(), 12 * n0()),
         // params [n, src_base, dst_base]: same op as splice_add, independent offsets.
         "splice_add_offset_src" => f(n0(), 12 * n0()),

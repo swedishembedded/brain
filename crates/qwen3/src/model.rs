@@ -315,6 +315,16 @@ const STATIC_PIPELINES: &[(&str, &str)] = &[
 /// adapter, queue and compiled pipelines" (`Gpu::share`'s own doc) - which
 /// only works if the ORIGINAL handle already compiled every name `Ops::new`
 /// looks up; hence this function, not a second kernel list.
+/// Panic unless `parent` resolves every kernel of [`pipelines`] to the slot this crate's own handles do: a model built
+/// on it records steps by those slots, so a handle built from another kernel list would dispatch the wrong pipelines.
+fn assert_shares_pipelines(parent: &Gpu) {
+    let list = pipelines();
+    for (name, _) in list {
+        let want = list.iter().position(|(n, _)| n == name);
+        assert_eq!(parent.kernel_index(name), want, "qwen3: the parent device handle was not built from qwen3::pipelines() (kernel '{name}' sits elsewhere); build on another Qwen's gpu()");
+    }
+}
+
 pub fn pipelines() -> &'static [(&'static str, &'static str)] {
     static LIST: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
     LIST.get_or_init(|| {
@@ -359,6 +369,8 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         model::ops::extend_kernel_list(&mut v, &model::lsa::device::KERNELS);
         model::ops::extend_kernel_list(&mut v, &model::lsa::native::KERNELS);
         model::ops::extend_kernel_list(&mut v, &gpu_core::sort::KERNELS);
+        // The declared head transform of the chunked loss (`Qwen::set_head_transform`).
+        model::ops::extend_kernel_list(&mut v, &model::head_transform::KERNELS);
         v
     })
 }
@@ -644,6 +656,9 @@ pub struct Qwen {
     // and the backward routes those rows' gradient out (read via
     // `read_d_img_embeds`) instead of into `tok.weight`.
     splice: model::vlm::SpliceRuns,
+    // Every row of every sequence is an input embedding row the caller writes (`Qwen::enable_input_rows`): no token
+    // gather in the forward, no embedding scatter in the backward.
+    input_rows: bool,
     /// The decoder stops at its final-norm hidden states and a caller's own
     /// head takes over the loss ([`Self::enable_external_head`]).
     external_head: Cell<bool>,
@@ -1016,7 +1031,7 @@ impl Qwen {
     pub fn load(path: &str, b: u32, t: u32) -> Qwen {
         let (cfg, src) = crate::open_checkpoint(path).unwrap_or_else(|e| panic!("{e}"));
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, &*src, true, shard, &TierPolicy::uniform(Dtype::F32), false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient())
+        Qwen::new_impl(cfg, b, t, &*src, true, shard, &TierPolicy::uniform(Dtype::F32), false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient(), None)
     }
 
     /// Load an **inference-only** model: parameters are frozen (weights only, no
@@ -1033,7 +1048,7 @@ impl Qwen {
     pub fn from_reader_inference(reader: &checkpoint::weightio::WeightReader, b: u32, t: u32) -> Qwen {
         let cfg = Self::brain_config(reader);
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, reader, false, shard, &TierPolicy::uniform(Dtype::F32), false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient())
+        Qwen::new_impl(cfg, b, t, reader, false, shard, &TierPolicy::uniform(Dtype::F32), false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient(), None)
     }
 
     /// Streaming **decode-only** load: like [`Self::from_reader_inference`]
@@ -1050,7 +1065,7 @@ impl Qwen {
     pub fn from_reader_decode(reader: &checkpoint::weightio::WeightReader, ctx: u32) -> Qwen {
         let cfg = Self::brain_config(reader);
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, 1, ctx, reader, false, shard, &TierPolicy::uniform(Dtype::F32), true, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient())
+        Qwen::new_impl(cfg, 1, ctx, reader, false, shard, &TierPolicy::uniform(Dtype::F32), true, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient(), None)
     }
 
     /// [`Self::from_reader_decode`], but from an in-memory tensor map instead of
@@ -1060,7 +1075,7 @@ impl Qwen {
     /// without rebuilding, use [`Self::attach_adapter`] instead.
     pub fn from_tensors_decode(cfg: QwenConfig, tensors: &HashMap<String, Vec<f32>>, ctx: u32) -> Qwen {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, 1, ctx, tensors, false, shard, &TierPolicy::uniform(Dtype::F32), true, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient())
+        Qwen::new_impl(cfg, 1, ctx, tensors, false, shard, &TierPolicy::uniform(Dtype::F32), true, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient(), None)
     }
 
     /// [`Self::load_inference`] with the int8 numeric tier: group-wise weight
@@ -1082,7 +1097,7 @@ impl Qwen {
     fn load_inference_with(path: &str, b: u32, t: u32, dt: Dtype) -> Qwen {
         let (cfg, src) = crate::open_checkpoint(path).unwrap_or_else(|e| panic!("{e}"));
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, &*src, false, shard, &TierPolicy::uniform(dt), false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient())
+        Qwen::new_impl(cfg, b, t, &*src, false, shard, &TierPolicy::uniform(dt), false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient(), None)
     }
 
     /// The config of a brain checkpoint `reader` has open. The `from_reader_*`
@@ -1095,7 +1110,7 @@ impl Qwen {
 
     pub fn new(cfg: QwenConfig, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Qwen {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, init, true, shard, &TierPolicy::uniform(Dtype::F32), false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient())
+        Qwen::new_impl(cfg, b, t, init, true, shard, &TierPolicy::uniform(Dtype::F32), false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient(), None)
     }
 
     /// A LoRA training build whose frozen base linears are held at the
@@ -1121,7 +1136,7 @@ impl Qwen {
     /// base) where the device has them, `Fp32Reference` the exact fp32 kernels. The tapes are
     /// recorded at construction, so the choice is made here, not afterwards.
     pub fn new_lora_shard_dt_gemm(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, shard: Shard, dt: Dtype, gemm: GemmPrecision) -> Qwen {
-        Qwen::new_impl(cfg, b, t, init, true, shard, &TierPolicy::uniform(dt), false, gemm, SavedPolicy::Recompute, &FullFtBuild::ambient())
+        Qwen::new_impl(cfg, b, t, init, true, shard, &TierPolicy::uniform(dt), false, gemm, SavedPolicy::Recompute, &FullFtBuild::ambient(), None)
     }
 
     /// [`Self::new_lora_dt_gemm`] with the saved-activation policy chosen (`model::saved`, normally the planner's
@@ -1130,7 +1145,7 @@ impl Qwen {
     /// so [`SavedPolicy::Keep`] is refused.
     pub fn new_lora_dt_saved(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, dt: Dtype, gemm: GemmPrecision, saved: SavedPolicy) -> Qwen {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, init, true, shard, &TierPolicy::uniform(dt), false, gemm, saved, &FullFtBuild::ambient())
+        Qwen::new_impl(cfg, b, t, init, true, shard, &TierPolicy::uniform(dt), false, gemm, saved, &FullFtBuild::ambient(), None)
     }
 
     /// [`Self::new_lora_dt`] with the GEMM arithmetic chosen (see [`Self::new_lora_shard_dt_gemm`]).
@@ -1145,7 +1160,7 @@ impl Qwen {
     /// [`Self::linear_dtype_of`] and [`Self::precision_report`] state what landed.
     pub fn new_lora_tiers(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, tiers: &TierPolicy, gemm: GemmPrecision) -> Qwen {
         let shard = Shard::whole(cfg.n_layers as usize);
-        Qwen::new_impl(cfg, b, t, init, true, shard, tiers, false, gemm, SavedPolicy::Recompute, &FullFtBuild::ambient())
+        Qwen::new_impl(cfg, b, t, init, true, shard, tiers, false, gemm, SavedPolicy::Recompute, &FullFtBuild::ambient(), None)
     }
 
     /// A FULL fine-tune build with an explicit [`FullFtBuild`]: the precision of every trainable parameter, the
@@ -1153,6 +1168,11 @@ impl Qwen {
     /// this trainer does not run, or a plan that does not fit, is an `Err` naming the parameter or the category,
     /// returned before anything is allocated.
     pub fn new_full(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, gemm: GemmPrecision, full: &FullFtBuild) -> Result<Qwen, String> {
+        Qwen::new_full_on(None, cfg, b, t, init, gemm, full)
+    }
+
+    /// [`Self::new_full`] on `parent`'s device (see [`Self::new_training_on`]).
+    fn new_full_on(parent: Option<&Gpu>, cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, gemm: GemmPrecision, full: &FullFtBuild) -> Result<Qwen, String> {
         let shard = Shard::whole(cfg.n_layers as usize);
         if let Some(plan) = &full.resident {
             check_resident_store_precision(&cfg, &shard, &full.precision)?;
@@ -1160,7 +1180,22 @@ impl Qwen {
         } else {
             full.precision.resolve(&shard_param_list(&cfg, &shard), full.offload)?;
         }
-        Ok(Qwen::new_impl(cfg, b, t, init, true, shard, &TierPolicy::uniform(Dtype::F32), false, gemm, SavedPolicy::Recompute, full))
+        Ok(Qwen::new_impl(cfg, b, t, init, true, shard, &TierPolicy::uniform(Dtype::F32), false, gemm, SavedPolicy::Recompute, full, parent))
+    }
+
+    /// A training build on `parent`'s device (`parent` is another Qwen's [`Self::gpu`], or `None` for the ambient
+    /// device), so several decoders trained together are one device and one handle: a full fine-tune under `full`
+    /// when `cfg.lora` is `None`, else a LoRA build over an fp32 base (`full` must then be the ambient default).
+    /// Refuses, before allocating, what [`Self::new_full`] refuses.
+    pub fn new_training_on(parent: Option<&Gpu>, cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, gemm: GemmPrecision, full: &FullFtBuild) -> Result<Qwen, String> {
+        if cfg.lora.is_some() {
+            if full.resident.is_some() || full.offload {
+                return Err("a LoRA build freezes its base; a resident or offloaded full fine-tune does not apply to it".into());
+            }
+            let shard = Shard::whole(cfg.n_layers as usize);
+            return Ok(Qwen::new_impl(cfg, b, t, init, true, shard, &TierPolicy::uniform(Dtype::F32), false, gemm, SavedPolicy::Recompute, &FullFtBuild::ambient(), parent));
+        }
+        Qwen::new_full_on(parent, cfg, b, t, init, gemm, full)
     }
 
     /// A resident low-precision full fine-tune build (see [`ResidentPlan`]): whole model, fp32 norms, the per-layer
@@ -1185,7 +1220,7 @@ impl Qwen {
 
     /// [`Self::new_shard`] with the GEMM arithmetic chosen (see [`Self::new_lora_shard_dt_gemm`]).
     pub fn new_shard_gemm(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, train: bool, shard: Shard, gemm: GemmPrecision) -> Qwen {
-        Qwen::new_impl(cfg, b, t, init, train, shard, &TierPolicy::uniform(Dtype::F32), false, gemm, SavedPolicy::Recompute, &FullFtBuild::ambient())
+        Qwen::new_impl(cfg, b, t, init, train, shard, &TierPolicy::uniform(Dtype::F32), false, gemm, SavedPolicy::Recompute, &FullFtBuild::ambient(), None)
     }
 
     /// Inference-only shard with the 7 per-layer linears quantized to int8 (DP4A).
@@ -1231,7 +1266,7 @@ impl Qwen {
     /// kernel variants. The per-layer RMSNorm/QK-norm gains stay fp32: they
     /// are `[d]`/`[head_dim]` vectors consumed by norm kernels, not GEMMs.
     pub fn new_shard_dt(cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, shard: Shard, dt: Dtype) -> Qwen {
-        Qwen::new_impl(cfg, b, t, init, false, shard, &TierPolicy::uniform(dt), false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient())
+        Qwen::new_impl(cfg, b, t, init, false, shard, &TierPolicy::uniform(dt), false, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient(), None)
     }
 
     /// [`Self::new_shard_dt`] shaped for **KV-cache decode**, the way
@@ -1257,7 +1292,7 @@ impl Qwen {
     /// what landed. Calling a batched forward/backward entry point on the
     /// result panics loudly rather than running past the smaller buffers.
     pub fn new_shard_dt_decode(cfg: QwenConfig, ctx: u32, init: &dyn checkpoint::TensorSource, shard: Shard, dt: Dtype) -> Qwen {
-        Qwen::new_impl(cfg, 1, ctx, init, false, shard, &TierPolicy::uniform(dt), true, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient())
+        Qwen::new_impl(cfg, 1, ctx, init, false, shard, &TierPolicy::uniform(dt), true, GemmPrecision::Fp32Reference, SavedPolicy::Recompute, &FullFtBuild::ambient(), None)
     }
 
     /// The shared builder behind every constructor. `decode_only` (set only by
@@ -1266,7 +1301,7 @@ impl Qwen {
     /// `scores`/`probs` at `n_heads·ctx` (not `n_heads·ctx²`), no backward
     /// scratch, no `logits`/`d_logits`/CE buffers.
     #[allow(clippy::too_many_arguments)]
-    fn new_impl(cfg: QwenConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool, shard: Shard, tiers: &TierPolicy, decode_only: bool, gemm: GemmPrecision, saved: SavedPolicy, full: &FullFtBuild) -> Qwen {
+    fn new_impl(cfg: QwenConfig, b: u32, t: u32, src: &dyn checkpoint::TensorSource, train: bool, shard: Shard, tiers: &TierPolicy, decode_only: bool, gemm: GemmPrecision, saved: SavedPolicy, full: &FullFtBuild, parent: Option<&Gpu>) -> Qwen {
         let resident = full.resident.as_ref();
         // ONE reduced-precision build, parameterised by the per-linear tier policy - the int8 tier
         // is not a second code path, it is this one at `Dtype::I8`. Every
@@ -1292,7 +1327,12 @@ impl Qwen {
         // An explicitly-placed shard binds its canonical card through the
         // device registry; `Shard::ANY_GPU` (the `Shard::whole` default) keeps
         // the ambient selection (`--device` / scoped `with_gpu`).
-        let gpu = if shard.gpu_index == Shard::ANY_GPU {
+        // A build on a parent handle (another Qwen's [`Self::gpu`]) shares its device and compiled pipelines, so the
+        // two models' buffers live on one device a single handle can address (one gradient reduction over both).
+        let gpu = if let Some(parent) = parent {
+            assert_shares_pipelines(parent);
+            parent.share()
+        } else if shard.gpu_index == Shard::ANY_GPU {
             Gpu::new(pipelines())
         } else {
             Gpu::new_on_index(shard.gpu_index as u32, pipelines())
@@ -1658,6 +1698,7 @@ impl Qwen {
             res,
             layers,
             splice: model::vlm::SpliceRuns::none(),
+            input_rows: false,
             external_head: Cell::new(false),
             mrope: Cell::new(false),
             kv_roundtrip: Cell::new(None),
@@ -2434,7 +2475,7 @@ impl Qwen {
         // Token embedding, tiled over vocab so each `tok.weight` binding stays
         // under the backend's max-binding size (GL: 128MB). Only the embed stage
         // runs it; other stages receive `res[start]` from the previous stage.
-        if self.shard.embed {
+        if self.shard.embed && !self.input_rows {
             s.extend(self.embed_tiled(&self.gpu, &self.res[0], n));
             // Vision-language splice: overwrite the image-placeholder rows of the
             // freshly-gathered residual stream with the projected image tokens.
@@ -2852,7 +2893,7 @@ impl Qwen {
 
         // embedding backward (tied: accumulates onto the head grad in tok.weight);
         // only the embed stage, which owns the embedding rows and dres[0].
-        if let Some((dw, grad)) = self.table_grad("tok.weight").filter(|_| self.shard.embed) {
+        if let Some((dw, grad)) = self.table_grad("tok.weight").filter(|_| self.shard.embed && !self.input_rows) {
             let ids = self.tok_uniq.as_ref().expect("a training build's embed stage keeps the distinct ids");
             self.ops.embedding_grad(&mut s, &model::ops::EmbeddingGrad { tokens: &self.tokens, uniq: ids, n_uniq: n, d_x: &self.dres[0], n_rows: n, width: d, dw: &dw, grad });
         }
@@ -3048,6 +3089,42 @@ impl Qwen {
         }
     }
 
+    /// Feed every row of every sequence as an input embedding row ([`Self::write_input_rows`]) instead of a token's
+    /// embedding: the model of a stream that is not tokens (a speech decoder's per-frame sums of codebook embeddings
+    /// and projected text). The forward gathers no token and the backward scatters nothing into `tok.weight` (whose
+    /// gradient stays zero; freeze it with [`Self::freeze_params`] unless the head is tied to it). Unlike the image
+    /// splice, a batch is still trimmed to its last supervised position ([`Self::run_len`]): the rows are written at
+    /// the run length. Rebuilds the recorded passes; call once, before the first forward, on a whole-model build.
+    pub fn enable_input_rows(&mut self) {
+        assert!(self.splice.is_empty() && self.deepstack.get().is_none(), "Qwen::enable_input_rows: every row is already an input row; an image splice or DeepStack on top has nothing to overwrite");
+        assert!(self.shard.embed, "Qwen::enable_input_rows: only the embedding stage reads input rows");
+        assert!(self.res_saved.is_none(), "Qwen::enable_input_rows: quantized boundary residuals are sized for whole rows");
+        self.input_rows = true;
+        if !self.decode_only {
+            self.fwd_steps = self.forward_steps(self.b, self.t);
+            self.run_tapes.get_mut().clear();
+            if !self.bwd_steps.steps.is_empty() {
+                self.bwd_steps = self.build_backward_steps();
+            }
+        }
+    }
+
+    /// Write the input rows of the batch [`Self::set_batch`] last set: `[b·t, d_model]` row-major, row `r` of
+    /// sequence `s` at `s·t + r`, as the targets are laid out. Only each sequence's first [`Self::run_len`] rows are
+    /// computed, so only those are uploaded. Call after `set_batch` (which decides the run length) and before the
+    /// forward ([`Self::enable_input_rows`] builds only).
+    pub fn write_input_rows(&self, rows: &[f32]) {
+        assert!(self.input_rows, "Qwen::write_input_rows: call enable_input_rows first");
+        let (t, run, d) = (self.t as usize, self.run_len() as usize, self.cfg.d_model as usize);
+        assert_eq!(rows.len(), self.b as usize * t * d, "Qwen::write_input_rows: one [d_model] row per position of the [b, t] batch");
+        if run == t {
+            self.gpu.write_f32(&self.res[0], rows);
+        } else {
+            let packed: Vec<f32> = rows.chunks(t * d).flat_map(|seq| seq[..run * d].iter().copied()).collect();
+            self.gpu.write_f32(&self.res[0], &packed);
+        }
+    }
+
     /// Stop the decoder at its final-norm hidden states and let the caller
     /// own the head and the loss, as a model with an output head of its own
     /// needs (Janus-Pro's image-token head). [`Self::forward_hidden`] then
@@ -3237,6 +3314,39 @@ impl Qwen {
 
     fn sparse(&self) -> Result<&SparseTargets, String> {
         self.sparse_targets.as_ref().ok_or_else(|| "qwen3: extra targets need enable_sparse_targets first".to_string())
+    }
+
+    /// Declare the transform between the head's raw logits and the logits the loss reads
+    /// ([`model::head_transform::HeadTransform`]: a soft cap, a valid-vocabulary bound, a per-position head window),
+    /// in the forward, the backward and every readout of the chunked head. Rebuilds the recorded passes; call before
+    /// the first forward. An invalid declaration is an `Err` naming it.
+    pub fn set_head_transform(&mut self, transform: model::head_transform::HeadTransform) -> Result<(), String> {
+        let head = self.head_ce.as_mut().ok_or("qwen3: this build has no chunked LM head to transform (not the head stage, or decode-only)")?;
+        head.set_head_transform(&self.gpu, transform)?;
+        if !self.decode_only {
+            self.fwd_steps = self.forward_steps(self.b, self.t);
+            self.run_tapes.get_mut().clear();
+            if !self.bwd_steps.steps.is_empty() {
+                self.bwd_steps = self.build_backward_steps();
+            }
+        }
+        Ok(())
+    }
+
+    /// Withdraw every trainable parameter `pred` names from the optimizer (`paramstore::ParamStore::freeze_where`):
+    /// its weight is never stepped (weight decay included) and it leaves [`model::Model::param_names`], so a
+    /// gradient reduction skips it. For a table the forward never reads through its gradient path (an embedding every
+    /// row of which is spliced in, [`Self::enable_mm_splices`]). Returns how many were withdrawn.
+    pub fn freeze_params(&mut self, pred: impl Fn(&str) -> bool) -> usize {
+        self.ps.freeze_where(pred)
+    }
+
+    /// The final-norm hidden states of the batch the latest [`Self::forward`] ran (the input of the head): what a
+    /// second model conditioned on this one's hidden state reads. `[b·run, d_model]` row-major at the batch's run
+    /// length ([`Self::run_len`]): row `r` of sequence `s` at `s·run + r`.
+    pub fn final_hidden(&self) -> Vec<f32> {
+        assert!(!self.decode_only, "Qwen::final_hidden: a decode-only build keeps no batched hidden states");
+        self.gpu.read(&self.xn_final, (self.b * self.run_len()) as usize * self.cfg.d_model as usize)
     }
 
     /// Multiply the head's logits by `scale` before the softmax of the loss,

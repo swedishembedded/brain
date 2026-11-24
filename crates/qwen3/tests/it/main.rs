@@ -13,6 +13,7 @@ mod adapter_variants;
 mod batched_prefill;
 mod bf16_dx_reg;
 mod chunked_head;
+mod composite_seams;
 mod deepseek_chat_format;
 mod deepseek_gguf_parity;
 mod deepseek_parity;
@@ -102,4 +103,5 @@ mod step_parity_fixture;
 mod step_timing;
 mod train_cuda_matches_cpu;
 mod train_serve_prompt;
+
 mod trimmed_rows;
