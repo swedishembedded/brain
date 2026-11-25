@@ -90,3 +90,51 @@ pub fn mask_layers(ck: &mut Checkpoint, stack: &LayerStack, remove: &[usize]) ->
     }
     Ok(saved)
 }
+
+/// Choose `count` of `layers` layers to remove, one at a time: each round
+/// adds the layer whose removal, together with the layers already chosen,
+/// costs least by `cost` (the cost of removing a set of layers, lower is
+/// better); ties go to the lower index. Removal costs do not add up layer by
+/// layer (two layers that each cost little alone can cost much together), so
+/// every round measures again, `layers - round` candidates each. Answers the
+/// layers in the order chosen, each with the cost of the set it completes,
+/// and tells `on_round` each choice as it is made.
+pub fn greedy_removal(layers: usize, count: usize, cost: &mut dyn FnMut(&[usize]) -> Result<f64, String>, on_round: &mut dyn FnMut(usize, f64)) -> Result<Vec<(usize, f64)>, String> {
+    if count >= layers {
+        return Err(format!("greedy layer removal: {count} of {layers} layers leaves no stack"));
+    }
+    let mut chosen: Vec<(usize, f64)> = Vec::with_capacity(count);
+    for _ in 0..count {
+        let mut best: Option<(usize, f64)> = None;
+        for l in (0..layers).filter(|l| !chosen.iter().any(|(c, _)| c == l)) {
+            let set: Vec<usize> = chosen.iter().map(|(c, _)| *c).chain(std::iter::once(l)).collect();
+            let c = cost(&set)?;
+            if !c.is_finite() {
+                return Err(format!("greedy layer removal: removing {set:?} costs {c}"));
+            }
+            if best.is_none_or(|(_, b)| c < b) {
+                best = Some((l, c));
+            }
+        }
+        let (l, c) = best.expect("a stack longer than the count has a candidate");
+        on_round(l, c);
+        chosen.push((l, c));
+    }
+    Ok(chosen)
+}
+
+/// Run `f` on the built model `m` with layers `remove` of `stack` made the
+/// identity, their output leaves zeroed (what [`remove_layers`] computes on a
+/// pre-norm residual stack), and put the weights back after it.
+pub fn with_layers_masked<M: model::Model, T>(m: &M, stack: &LayerStack, remove: &[usize], f: impl FnOnce(&M) -> T) -> T {
+    let names: Vec<String> = remove.iter().flat_map(|l| stack.outputs.iter().map(move |leaf| format!("{}{l}.{leaf}", stack.prefix))).collect();
+    let saved: Vec<Vec<f32>> = names.iter().map(|n| m.read_weight(n)).collect();
+    for (n, v) in names.iter().zip(&saved) {
+        m.write_weight(n, &vec![0.0; v.len()]);
+    }
+    let out = f(m);
+    for (n, v) in names.iter().zip(&saved) {
+        m.write_weight(n, v);
+    }
+    out
+}

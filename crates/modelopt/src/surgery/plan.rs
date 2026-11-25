@@ -61,6 +61,10 @@ pub enum Edit {
         gain_tolerance: Option<f64>,
     },
     /// Remove `count` layers of a stack ranked by `by`, or exactly `layers`.
+    /// With `greedy` (`by` kl or loss) the layers are chosen one at a time,
+    /// each measured with those already chosen removed
+    /// ([`super::greedy_removal`]); the caller, which can measure,
+    /// resolves such an edit into its `layers` before [`apply`].
     RemoveLayers {
         stack: String,
         #[serde(default)]
@@ -69,6 +73,8 @@ pub enum Edit {
         by: Option<LayerScore>,
         #[serde(default)]
         layers: Option<Vec<usize>>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        greedy: bool,
     },
 }
 
@@ -195,8 +201,11 @@ pub fn apply(ck: &mut Checkpoint, plan: &[Edit], cal: &Calibration, vocab_keep: 
                 applied.inputs.streams.insert(stream.clone(), (b, *width));
                 (change, format!("{basis:?}").to_lowercase())
             }
-            Edit::RemoveLayers { stack, count, by, layers } => {
+            Edit::RemoveLayers { stack, count, by, layers, greedy } => {
                 let st = g.stack(stack)?;
+                if *greedy {
+                    return Err(format!("remove_layers {stack}: a greedy choice is measured on the model; resolve it into its layers first"));
+                }
                 let (remove, method) = match (count, by, layers) {
                     (None, None, Some(l)) => (l.clone(), "given".to_string()),
                     (Some(n), Some(by), None) => (cheapest_layers(cal, stack, *n, *by)?, format!("ablation_{by:?}").to_lowercase()),

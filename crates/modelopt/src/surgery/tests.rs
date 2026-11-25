@@ -325,3 +325,42 @@ fn a_trimmed_bpe_keeps_bytes_specials_the_corpus_and_its_merge_closure() {
     assert_eq!(trim.files.tokenizer_config["added_tokens_decoder"]["261"]["content"], "<|im_end|>");
     assert_eq!(trim.files.tokenizer_config["model_max_length"], 10);
 }
+
+#[test]
+fn greedy_layer_removal_measures_each_round_with_the_layers_already_chosen() {
+    // Layer 3 costs least alone and layer 0 next, but the two together cost far more than 3 with 1:
+    // a one-shot ranking by single costs would remove {3, 0}.
+    let cost = |set: &[usize]| -> f64 {
+        let mut s = set.to_vec();
+        s.sort_unstable();
+        match s.as_slice() {
+            [0] => 1.0,
+            [1] => 1.1,
+            [2] => 5.0,
+            [3] => 0.9,
+            [0, 3] => 10.0,
+            [1, 3] => 2.0,
+            [2, 3] => 6.0,
+            _ => 100.0,
+        }
+    };
+    let mut asked = Vec::new();
+    let mut told = Vec::new();
+    let chosen = greedy_removal(
+        4,
+        2,
+        &mut |set| {
+            asked.push(set.to_vec());
+            Ok(cost(set))
+        },
+        &mut |l, c| told.push((l, c)),
+    )
+    .unwrap();
+    assert_eq!(told, chosen, "each choice is told as it is made");
+    assert_eq!(chosen, vec![(3, 0.9), (1, 2.0)]);
+    assert_eq!(asked.len(), 4 + 3, "every remaining layer is measured in every round");
+    assert!(asked[4..].iter().all(|s| s[0] == 3), "the second round measures beside the first choice");
+    assert_eq!(greedy_removal(3, 1, &mut |_| Ok(1.0), &mut |_, _| {}).unwrap(), vec![(0, 1.0)], "a tie goes to the lower index");
+    assert!(greedy_removal(2, 2, &mut |_| Ok(1.0), &mut |_, _| {}).is_err());
+    assert!(greedy_removal(3, 1, &mut |_| Ok(f64::NAN), &mut |_, _| {}).is_err());
+}

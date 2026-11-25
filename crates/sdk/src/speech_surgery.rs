@@ -34,7 +34,10 @@
 //! to ([`modelopt::surgery::bpe`]); the held-out shard's texts and the probe
 //! measure how many texts outside it would tokenise differently, and only
 //! held-out records of kept tokens are measured on. The plan is applied
-//! ([`modelopt::surgery::plan::apply`]), each edit's loss and KL divergence
+//! ([`modelopt::surgery::plan::apply`]; a `greedy` layer removal is first
+//! chosen on the calibration records of the checkpoint as edited so far,
+//! each round measured with the layers already chosen removed,
+//! [`modelopt::surgery::greedy_removal`]), each edit's loss and KL divergence
 //! from the unedited predictions measured on the held-out shard (the
 //! calibration shard when none is given), and the result exported over the
 //! base ([`qwen3tts::export::export_edited`]) with `surgery.json` (the
@@ -268,11 +271,12 @@ impl SpeechSurgery {
         let kept: Option<std::collections::HashSet<u32>> = vocab_keep.get("text").map(|k| k.iter().map(|&i| i as u32).collect());
         let candidates: Vec<usize> = (0..measured_shard.len()).filter(|&r| kept.as_ref().is_none_or(|k| measured_shard.record(r).text_ids.iter().all(|t| k.contains(t)))).collect();
         let measured_records: Vec<usize> = cal::spread(candidates.len(), self.held_out_records).into_iter().map(|i| candidates[i]).collect();
-        let measure_on = match &held_out {
-            Some(h) => Evaluator::on_records(base_of(&ck)?, h, &measured_records, &opts(self.held_out_records)).map_err(backend)?.0,
-            None if kept.is_some() => Evaluator::on_records(base_of(&ck)?, &shard, &measured_records, &opts(self.held_out_records)).map_err(backend)?.0,
-            None => cal_ev,
+        let measured_ev = match &held_out {
+            Some(h) => Some(Evaluator::on_records(base_of(&ck)?, h, &measured_records, &opts(self.held_out_records)).map_err(backend)?.0),
+            None if kept.is_some() => Some(Evaluator::on_records(base_of(&ck)?, &shard, &measured_records, &opts(self.held_out_records)).map_err(backend)?.0),
+            None => None,
         };
+        let measure_on = measured_ev.as_ref().unwrap_or(&cal_ev);
         let baseline = measure_on.baseline();
         on_progress(&format!("held-out records, unedited: loss {:.4} over {} records ({} of {} held out records hold only kept tokens)", baseline.loss, measured_records.len(), candidates.len(), measured_shard.len()));
 
@@ -290,14 +294,24 @@ impl SpeechSurgery {
                 edited = ck.clone();
                 inputs = Inputs::default();
             }
-            let applied = plan::apply(&mut edited, std::slice::from_ref(edit), &calibration, &vocab_keep, &model).map_err(backend)?;
+            let (resolved, greedy_method) = match edit {
+                Edit::RemoveLayers { greedy: true, .. } => {
+                    let (e, method) = resolve_greedy(edit, &edited, &inputs, &cal_ev, self.mtp_weight, &mut on_progress)?;
+                    (e, Some(method))
+                }
+                _ => (edit.clone(), None),
+            };
+            let mut applied = plan::apply(&mut edited, std::slice::from_ref(&resolved), &calibration, &vocab_keep, &model).map_err(backend)?;
+            if let Some(method) = greedy_method {
+                applied.changes.iter_mut().for_each(|(_, m)| *m = method.clone());
+            }
             inputs.vocabularies.extend(applied.inputs.vocabularies);
             for (name, b) in applied.inputs.streams {
                 if inputs.streams.insert(name.clone(), b).is_some() {
                     return Err(backend(format!("the plan rotates stream {name} twice")));
                 }
             }
-            let measured = measure(&measure_on, &edited, &inputs)?;
+            let measured = measure(measure_on, &edited, &inputs)?;
             on_progress(&format!("measured: loss {:.4} kl {:.4}", measured.loss, measured.kl(self.mtp_weight)));
             for (change, method) in applied.changes {
                 costs.push(EditCost {
@@ -393,8 +407,9 @@ fn added_records(config: &serde_json::Value) -> serde_json::Value {
     serde_json::Value::Array(records)
 }
 
+/// A one-shot layer ranking reads the calibration's per-layer ablations; a greedy one measures its own.
 fn needs_ablation(e: &Edit) -> bool {
-    matches!(e, Edit::RemoveLayers { by: Some(plan::LayerScore::Kl | plan::LayerScore::Loss), .. })
+    matches!(e, Edit::RemoveLayers { by: Some(plan::LayerScore::Kl | plan::LayerScore::Loss), greedy: false, .. })
 }
 
 fn needs_curvature(e: &Edit) -> bool {
@@ -415,13 +430,42 @@ fn base_of(ck: &Checkpoint) -> Result<Base> {
 }
 
 /// Measure the edited `ck`, its inputs moved as the edits moved them.
-fn measure(ev: &Evaluator, ck: &Checkpoint, inputs: &Inputs) -> Result<Measurement> {
+/// Run `f` with the evaluator's view of how the edits so far moved the checkpoint's inputs.
+fn with_inputs<T>(inputs: &Inputs, f: impl FnOnce(&cal::Inputs<'_>) -> T) -> T {
     let text_map: Option<std::collections::HashMap<u32, u32>> = inputs.vocabularies.get("text").map(|keep| keep.iter().enumerate().map(|(new, &old)| (old as u32, new as u32)).collect());
     let text = text_map.as_ref().map(|m| move |id: u32| m.get(&id).copied());
     let xvector = inputs.streams.get("talker").map(|(b, k)| move |v: &[f32]| b.project(v, *k));
     let text_ref: Option<&cal::TextMap> = text.as_ref().map(|f| f as &cal::TextMap);
     let xvec_ref: Option<&cal::XVectorMap> = xvector.as_ref().map(|f| f as &cal::XVectorMap);
-    ev.measure(base_of(ck)?, &cal::Inputs { text: text_ref, xvector: xvec_ref }).map_err(backend)
+    f(&cal::Inputs { text: text_ref, xvector: xvec_ref })
+}
+
+fn measure(ev: &Evaluator, ck: &Checkpoint, inputs: &Inputs) -> Result<Measurement> {
+    with_inputs(inputs, |i| ev.measure(base_of(ck)?, i).map_err(backend))
+}
+
+/// A greedy `remove_layers` edit resolved into the layers it removes, chosen on the calibration records of the
+/// checkpoint as edited so far (one model built, each candidate set masked on it), so the held-out records stay a
+/// measurement only. Answers the resolved edit and the method the manifest names.
+fn resolve_greedy(edit: &Edit, ck: &Checkpoint, inputs: &Inputs, ev: &Evaluator, mtp_weight: f32, on_progress: &mut dyn FnMut(&str)) -> Result<(Edit, String)> {
+    let Edit::RemoveLayers { stack, count: Some(count), by: Some(by @ (plan::LayerScore::Kl | plan::LayerScore::Loss)), layers: None, greedy: true } = edit else {
+        return Err(backend("remove_layers: a greedy choice takes count and by (kl or loss), not layers"));
+    };
+    let graph = qwen3tts_graph(ck).map_err(backend)?;
+    let st = graph.stack(stack).map_err(backend)?;
+    let m = ev.build(base_of(ck)?).map_err(backend)?;
+    let mut cost = |set: &[usize]| -> std::result::Result<f64, String> {
+        let measured = modelopt::surgery::with_layers_masked(&m, st, set, |m| with_inputs(inputs, |i| ev.measure_model(m, i)))?;
+        Ok(if *by == plan::LayerScore::Kl { measured.kl(mtp_weight) } else { measured.loss })
+    };
+    let mut round = 0;
+    let chosen = modelopt::surgery::greedy_removal(st.count, *count, &mut cost, &mut |l, c| {
+        round += 1;
+        on_progress(&format!("{stack}: greedy round {round}: remove layer {l}, {} {c:.4}", format!("{by:?}").to_lowercase()));
+    })
+    .map_err(backend)?;
+    let layers: Vec<usize> = chosen.iter().map(|(l, _)| *l).collect();
+    Ok((Edit::RemoveLayers { stack: stack.clone(), count: None, by: None, layers: Some(layers), greedy: false }, format!("greedy_ablation_{by:?}").to_lowercase()))
 }
 
 /// The Fisher and group-Taylor scores of every MLP and KV-group dimension of both stacks, over the calibration batches.
