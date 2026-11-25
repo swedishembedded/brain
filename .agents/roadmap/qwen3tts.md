@@ -63,6 +63,14 @@ Target, in order (each a self-contained change, measured with nsys/ncu before th
       GH200; 300 h about an hour on one card, about 16 minutes projected on four, NCCL reduce about
       5 % of a step). `speech_sft` is to adopt them and be measured the same way.
 
+Measured training (`speech_sft_bench run`, the 0.6B Base, a synthetic shard of 400 utterances with a corpus's length
+spread, one GH200, 2026-11-25): 3,195 frames a second at the default 8 utterances a step (nsys: kernels 72 % of the
+steady window; per-tensor `gradnorm_part` and `adamw` 12 % of kernel time; the batch load 0.45 s of 4 s), 3,892 at 16,
+4,410 at 32 and 4,404 at 48 (device peak 21.5 GB at 32, 69 GB at 48): the step saturates at about 32 utterances, where
+300 h of audio is about 51 minutes an epoch on one card. Open: a multi-process NCCL run (`speech_sft` passes
+`FitControl::grad_sync` through, no launcher starts ranks), a multi-tensor optimizer step, and prefetching the next
+batch. The default batch is a training choice (learning rate, small corpora), so it stays with `speech_sft`'s ledger.
+
 Measured serving (HTTP, in-context clones of 8 s of speech, one GH200, 2026-11-25): solo 1.2 s
 (RTF 0.15); 32 concurrent 52 s of speech a second. Started at RTF 1.2 solo with requests serialised.
 
