@@ -229,3 +229,28 @@ fn requests_served_together_are_each_the_request_served_alone() {
         assert_eq!(pieces[i], t.len(), "request {i}'s streamed pieces make its whole clip");
     }
 }
+
+/// The codec's encoder on the device codes a recording as the same encoder on the CPU backend does: the codes are a
+/// training set's targets, so a device path that moved them would change what a model learns. Measured as the share of
+/// identical codes per codebook (a nearest-row search can flip at a near-tie when sums reassociate).
+#[test]
+fn the_device_encoder_codes_a_recording_as_the_cpu_backend_does() {
+    let _serial = brain_testutil::env_lock();
+    let Some(paths) = paths() else { return };
+    let device = mimi::Codec::load_inference_on(gpu_core::Gpu::new(mimi::PIPELINES), &paths.codec);
+    let host = mimi::Codec::load_inference_on(gpu_core::Gpu::new_cpu(mimi::PIPELINES), &paths.codec);
+    // A recording: speech the model makes, 2 s of it.
+    let mut engine = ResidentEngine::load_with(&paths, Placement::Device).unwrap();
+    let mut wav = engine.speak(TEXT, "english", &greedy(25), &CancelToken::default(), &mut |_, _| {}).unwrap();
+    drop(engine);
+    wav.truncate(48_000);
+    let (a, b) = (host.encode(&wav), device.encode(&wav));
+    assert_eq!(a.len(), b.len(), "the encoders answer different frame counts");
+    let frames = a.len() / 16;
+    let share = |q: usize| (0..frames).filter(|&t| a[t * 16 + q] == b[t * 16 + q]).count() as f64 / frames as f64;
+    let shares: Vec<f64> = (0..16).map(share).collect();
+    eprintln!("encoder codes identical per codebook (device vs CPU backend): {shares:.3?}");
+    assert!(shares[0] >= 0.98, "codebook 0: {:.3} of the codes agree", shares[0]);
+    let mean = shares.iter().sum::<f64>() / 16.0;
+    assert!(mean >= 0.95, "{mean:.3} of all codes agree");
+}

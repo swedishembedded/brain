@@ -38,7 +38,6 @@ use bytemuck::cast_slice;
 use gpu_core::{f, BufUsage, DeviceBuffer, Gpu, Step};
 use backend_cpu::par;
 use model::block::{self, Gqa, KernelIds};
-use model::hostmath::gelu_exact;
 use paramstore::{ParamStore, Role};
 
 use crate::config::CodecConfig;
@@ -73,6 +72,8 @@ const NCHW_NLC: usize = 23;
 const NLC_NCHW: usize = 24;
 const LAYERNORM: usize = 25;
 const GELU_ERF: usize = 26;
+// 27 is `nchw_nlc_at`, resolved by name by `audio::conv`.
+const ELU: usize = 28;
 
 /// The kernel set this decoder dispatches. `pub` so a caller building the
 /// codec on its own device handle (`Codec::load_inference_on`) can construct
@@ -108,6 +109,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("gelu_erf", kernels::GELU_ERF),
     // The tap-sum conv lowering places its input channels-last behind its padding (`audio::conv`).
     ("nchw_nlc_at", kernels::NCHW_NLC_AT),
+    // The encoder's activations on the device.
+    ("elu", kernels::ELU),
 ];
 
 /// SnakeBeta's `no_div_by_zero` (the reference's fixed epsilon).
@@ -116,17 +119,18 @@ const SNAKE_EPS: f32 = 1e-9;
 const LN_EPS: f32 = 1e-6;
 /// Element-count threshold below which host loops stay single-threaded (rayon
 /// fan-out costs more than it saves on tiny buffers). The host loops that
-/// remain (the final clamp, the encoder's LayerNorm/GELU/ELU) cross this once
+/// remain (the final clamp) cross this once
 /// the sequence grows, so they spread across all cores.
 const PAR_MIN: usize = 1 << 14;
 
-/// The codec model: frozen weights on device + small (≤1-D) tensors mirrored on
-/// the host for the encoder's host LayerNorm.
+/// The codec model: frozen weights on the device, the quantizer's codebooks cached on the host for the
+/// encoder's nearest-row search.
 pub struct Codec {
     pub gpu: Gpu,
     pub cfg: CodecConfig,
     ps: ParamStore,
-    host: HashMap<String, Vec<f32>>,
+    /// [`Self::rvq_tables`], read on the first encode.
+    rvq_tables: std::sync::OnceLock<Vec<Vec<f32>>>,
     /// The vendor GEMM the decode's products take where it is active, in binary32 (the codec is stored and gated in
     /// fp32); the encoder keeps the kernels until its codes are pinned against them.
     gemm: gpu_core::provider::library::LibraryGemmProvider,
@@ -168,18 +172,24 @@ impl Codec {
 
     /// [`Self::from_weights`] on an existing device handle.
     pub fn from_weights_on(gpu: Gpu, cfg: CodecConfig, init: HashMap<String, Vec<f32>>) -> Codec {
-        // Mirror small tensors (norms, scales) on the host: the encoder's host
-        // LayerNorm reads these.
-        let host: HashMap<String, Vec<f32>> = init
-            .iter()
-            .filter(|(_, v)| v.len() <= 8192)
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
         let roles: Vec<(String, usize, Role)> =
             init.iter().map(|(n, v)| (n.clone(), v.len(), Role::Frozen)).collect();
         let ps = ParamStore::new_with_roles(&gpu, roles, &init);
         let gemm = gpu_core::provider::library::LibraryGemmProvider::for_gpu(&gpu, gpu_core::provider::library::GemmPrecision::Auto);
-        Codec { gpu, cfg, ps, host, gemm }
+        Codec { gpu, cfg, ps, rvq_tables: std::sync::OnceLock::new(), gemm }
+    }
+
+    /// The quantizer's codebooks on the host, semantic then acoustic (`[codebook_size, codebook_dim]` each), read from
+    /// the device once: every encode's nearest-row search reads all of them.
+    fn rvq_tables(&self) -> &[Vec<f32>] {
+        self.rvq_tables.get_or_init(|| {
+            let e = &self.cfg.enc;
+            let (cs, cd) = (e.codebook_size as usize, e.codebook_dim as usize);
+            let n_sem = e.num_semantic_quantizers as usize;
+            let n_aco = self.cfg.num_quantizers as usize - n_sem;
+            let group = |name: &str, q: usize| self.gpu.read(self.ps.w(&format!("encoder.quantizer.{name}_residual_vector_quantizer.layers.{q}.table")), cs * cd);
+            (0..n_sem).map(|q| group("semantic", q)).chain((0..n_aco).map(|q| group("acoustic", q))).collect()
+        })
     }
 
     /// A pass that records its steps and submits them in a few batches: what
@@ -981,7 +991,7 @@ impl Pass<'_> {
         for layer in 0..e.num_hidden_layers as usize {
             let p = |leaf: &str| format!("encoder.encoder_transformer.layers.{layer}.{leaf}");
             // --- attention ---
-            let xn = self.host_ln(&x, t, d, &p("input_layernorm"), e.norm_eps);
+            let xn = self.layernorm(&x, &p("input_layernorm"), t, d, e.norm_eps);
             let q = self.matmul(&xn, &p("self_attn.q_proj.weight"), t, d, hq);
             let k = self.matmul(&xn, &p("self_attn.k_proj.weight"), t, d, hkv);
             let v = self.matmul(&xn, &p("self_attn.v_proj.weight"), t, d, hkv);
@@ -998,35 +1008,21 @@ impl Pass<'_> {
             let attn = self.scale_chan(&attn, &p("self_attn_layer_scale.scale"), t * d, d, 1);
             x = self.add2(&x, &attn, t * d);
             // --- MLP: fc2(gelu(fc1(x))) ---
-            let xn = self.host_ln(&x, t, d, &p("post_attention_layernorm"), e.norm_eps);
+            let xn = self.layernorm(&x, &p("post_attention_layernorm"), t, d, e.norm_eps);
             let g = self.matmul(&xn, &p("mlp.fc1.weight"), t, d, ff);
-            let mut gv = self.read(&g, (t * ff) as usize);
-            par_gelu(&mut gv);
-            let gbuf = self.upload(&gv);
-            let mlp = self.matmul(&gbuf, &p("mlp.fc2.weight"), t, ff, d);
+            let g = self.gelu(&g, t * ff);
+            let mlp = self.matmul(&g, &p("mlp.fc2.weight"), t, ff, d);
             let mlp = self.scale_chan(&mlp, &p("mlp_layer_scale.scale"), t * d, d, 1);
             x = self.add2(&x, &mlp, t * d);
         }
         x
     }
 
-    /// Host `nn.LayerNorm` (affine γ/β, given eps) over the last axis of a
-    /// token-major `[t, d]` device buffer; returns a fresh device buffer.
-    fn host_ln(&self, x: &DeviceBuffer, t: u32, d: u32, prefix: &str, eps: f32) -> DeviceBuffer {
-        let mut v = self.read(x, (t * d) as usize);
-        host_layernorm(&mut v, t as usize, d as usize, &self.host[&format!("{prefix}.weight")], &self.host[&format!("{prefix}.bias")], eps);
-        self.upload(&v)
-    }
-
-    /// Host ELU activation (α = 1): `x if x>0 else exp(x)-1`. `n` = element count.
+    /// ELU (α = 1) on the device: `x if x > 0 else exp(x) - 1`. `n` = element count.
     fn elu(&self, x: &DeviceBuffer, n: u32) -> DeviceBuffer {
-        let mut v = self.read(x, n as usize);
-        for val in &mut v {
-            if *val < 0.0 {
-                *val = val.exp() - 1.0;
-            }
-        }
-        self.upload(&v)
+        let out = self.st(n as usize);
+        self.run(self.gpu.step(ELU, &[x, &out], &[n, f(1.0)], n));
+        out
     }
 
     /// Split residual-vector-quantizer **encode**: project the `[hidden, T]`
@@ -1044,28 +1040,29 @@ impl Pass<'_> {
 
         let sem_p = self.matmul(&emb_tm, "encoder.quantizer.semantic_residual_vector_quantizer.input_proj.weight", t, h, cd);
         let aco_p = self.matmul(&emb_tm, "encoder.quantizer.acoustic_residual_vector_quantizer.input_proj.weight", t, h, cd);
-        let mut sem = self.read(&sem_p, (t * cd) as usize);
-        let mut aco = self.read(&aco_p, (t * cd) as usize);
+        let sem = self.read(&sem_p, (t * cd) as usize);
+        let aco = self.read(&aco_p, (t * cd) as usize);
 
         let (cd, tt) = (cd as usize, t as usize);
-        let mut codes = vec![0u32; tt * nq];
-        let mut encode_group = |buf: &mut [f32], group: &str, layers: usize, col0: usize| {
-            for q in 0..layers {
-                let table = self.read(self.w(&format!("encoder.quantizer.{group}_residual_vector_quantizer.layers.{q}.table")), cs * cd);
-                for ti in 0..tt {
-                    let v = &buf[ti * cd..(ti + 1) * cd];
-                    let idx = nearest(v, &table, cs, cd);
-                    codes[ti * nq + col0 + q] = idx as u32;
-                    let row = &table[idx * cd..(idx + 1) * cd];
-                    for c in 0..cd {
-                        buf[ti * cd + c] -= row[c];
+        let tables = self.rvq_tables();
+        // Every frame is quantised on its own (its residual walks the codebooks in order), so the frames run across the
+        // CPU pool: the same arithmetic, frame by frame, as one core did.
+        let per_frame: Vec<Vec<u32>> = par::map(tt, |ti| {
+            let mut frame = Vec::with_capacity(nq);
+            for (residual, group) in [(&sem[ti * cd..(ti + 1) * cd], &tables[..n_sem]), (&aco[ti * cd..(ti + 1) * cd], &tables[n_sem..])] {
+                let mut v = residual.to_vec();
+                for table in group {
+                    let idx = nearest(&v, table, cs, cd);
+                    frame.push(idx as u32);
+                    for (x, r) in v.iter_mut().zip(&table[idx * cd..(idx + 1) * cd]) {
+                        *x -= r;
                     }
                 }
             }
-        };
-        encode_group(&mut sem, "semantic", n_sem, 0);
-        encode_group(&mut aco, "acoustic", n_aco, n_sem);
-        codes
+            frame
+        });
+        debug_assert!(per_frame.iter().all(|f| f.len() == nq) && n_aco + n_sem == nq);
+        per_frame.into_iter().flatten().collect()
     }
 }
 
@@ -1117,39 +1114,6 @@ fn ids() -> KernelIds {
         rmsnorm_rows: block::UNREGISTERED,
     }
 }
-
-/// `nn.LayerNorm` over the last axis (C) of a row-major `[rows, C]` buffer,
-/// population variance, the caller's eps, with affine γ/β. In place. Rows are
-/// independent, so they fan out across cores for large buffers (the per-row sum
-/// order is unchanged — bit-identical to the serial path).
-fn host_layernorm(x: &mut [f32], rows: usize, c: usize, gamma: &[f32], beta: &[f32], eps: f32) {
-    let ln_row = |row: &mut [f32]| {
-        let mean = row.iter().sum::<f32>() / c as f32;
-        let var = row.iter().map(|&v| (v - mean) * (v - mean)).sum::<f32>() / c as f32;
-        let inv = 1.0 / (var + eps).sqrt();
-        for j in 0..c {
-            row[j] = (row[j] - mean) * inv * gamma[j] + beta[j];
-        }
-    };
-    if rows * c >= PAR_MIN {
-        par::rows_mut(x, c, |_, row| ln_row(row));
-    } else {
-        x.chunks_mut(c).for_each(ln_row);
-    }
-}
-
-/// Exact (erf) GELU over a host buffer, in place; element-independent, so it
-/// parallelizes for large buffers (the ConvNeXt pwconv1 activation, `[L, 4C]`).
-fn par_gelu(buf: &mut [f32]) {
-    if buf.len() >= PAR_MIN {
-        par::each_mut(buf, |_, v| *v = gelu_exact(*v));
-    } else {
-        for v in buf.iter_mut() {
-            *v = gelu_exact(*v);
-        }
-    }
-}
-
 
 #[cfg(test)]
 mod tests {
