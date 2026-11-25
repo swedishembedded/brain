@@ -4474,6 +4474,28 @@ async fn the_reserved_adapter_param_cannot_be_set_by_a_caller() {
     assert!(!caps.to_string().contains(ADAPTER_PARAM), "{caps}");
 }
 
+/// `GET /v1/capabilities` says what serves the actions it lists: the engine build (its version always; the commit and
+/// dirty flag only when the embedder knows them), the backend and the training-record contract, never a placeholder.
+#[tokio::test]
+async fn the_capability_list_names_the_server_build_and_its_record_contract() {
+    let (_, exec, key) = adapter_app(Provider::OpenAI);
+    let caps = |state: AppState, key: String| async move {
+        let (st, caps) = send(&router(state), auth(Request::builder().uri("/v1/capabilities"), Provider::OpenAI, &key).body(Body::empty()).unwrap()).await;
+        assert_eq!(st, StatusCode::OK);
+        caps["server"].clone()
+    };
+    let unknown = caps(AppState::new(exec.clone(), key.clone(), Provider::OpenAI), key.clone()).await;
+    assert_eq!(unknown, json!({"engine": {"version": env!("CARGO_PKG_VERSION")}}), "nothing the embedder did not say");
+    let commit = "0123456789abcdef0123456789abcdef01234567";
+    let server = apiserve::ServerIdentity {
+        engine: apiserve::EngineBuild { version: "6.0.0".into(), commit: Some(commit.into()), dirty: Some(false) },
+        backend: Some("cpu".into()),
+        training_records: Some(apiserve::RecordContract { contract: "training-records-v2".into(), version: 2, digest: format!("sha256:{}", "f".repeat(64)) }),
+    };
+    let known = caps(AppState::new(exec, key.clone(), Provider::OpenAI).with_server(Arc::new(server)), key).await;
+    assert_eq!(known, json!({"engine": {"version": "6.0.0", "commit": commit, "dirty": false}, "backend": "cpu", "training_records": {"contract": "training-records-v2", "version": 2, "digest": format!("sha256:{}", "f".repeat(64))}}));
+}
+
 // ------------------------------------------------- seed echo and served identity
 
 /// A reply names the seed it decoded with, so a caller that did not choose one

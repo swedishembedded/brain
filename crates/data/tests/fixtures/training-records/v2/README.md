@@ -11,7 +11,9 @@ These files are the contract brain's trainer holds a producer of training data t
 what it refuses, and why. brain's test `crates/sdk/tests/it/training_records.rs` checks every file against
 `check_dataset` (the `check_dataset` action of `brain/train` runs the same check), so a change to what brain accepts
 changes these files and, when an accepted record stops being accepted, the version. A producer copies the directory
-and checks its own output against the same rules.
+and checks its own output against the same rules. The set's digest (`data::chat_rollout::contract_digest`: SHA-256 of
+`<path>\0<sha256 of the file>\n` per file but this README, sorted by path) is `CONTRACT_DIGEST` and is what a server
+reports as `server.training_records.digest` (`GET /v1/capabilities`), so a producer compares it with its copy's.
 
 Version 2 replaces version 1's precomputed `advantage` with the rollout's `reward` and its `group`: the trainer
 computes each rollout's advantage from the rewards of its group, by the run's `advantage_norm` (`mean-centred`,

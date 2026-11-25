@@ -33,6 +33,44 @@ pub use residency::admission::{DEFAULT_ADMIT_DEADLINE, DEFAULT_COLD_BUILD_ADMIT_
 /// `Manager` uses (keyed by `u64` there instead).
 pub type JobRegistry = residency::jobs::JobRegistry<Uuid>;
 
+/// What a server says it is, for `GET /v1/capabilities`'s `server` object: the engine build that serves (its version
+/// and, when the build knew them, the commit and whether its tree was dirty), the compute backend and the
+/// training-record contract its trainer holds records to. A fact the embedder did not give is absent from the
+/// report, never filled in.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ServerIdentity {
+    pub engine: EngineBuild,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub training_records: Option<RecordContract>,
+}
+
+/// The engine build of a [`ServerIdentity`].
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct EngineBuild {
+    pub version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dirty: Option<bool>,
+}
+
+impl Default for EngineBuild {
+    /// This crate's version, with no commit known.
+    fn default() -> EngineBuild {
+        EngineBuild { version: env!("CARGO_PKG_VERSION").to_string(), commit: None, dirty: None }
+    }
+}
+
+/// The training-record contract of a [`ServerIdentity`]: its name, version and the digest of its example set.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct RecordContract {
+    pub contract: String,
+    pub version: u32,
+    pub digest: String,
+}
+
 /// Everything a request handler needs. Clone is cheap.
 #[derive(Clone)]
 pub struct AppState {
@@ -77,6 +115,8 @@ pub struct AppState {
     /// What the host knows of its devices beyond what the executor budgets ([`DeviceInventory`]); `None` reports
     /// the budgets alone.
     pub devices: Option<Arc<dyn DeviceInventory>>,
+    /// What the server says it is ([`ServerIdentity`]).
+    pub server: Arc<ServerIdentity>,
     /// Requests the router lets in at once before it sheds with 503: every decode slot of the models registered
     /// when the state was made, and as many again waiting for one ([`residency::admission::edge_concurrency`]).
     pub edge_concurrency: usize,
@@ -98,6 +138,7 @@ impl AppState {
             supplier: None,
             training: false,
             devices: None,
+            server: Arc::default(),
             edge_concurrency: residency::admission::edge_concurrency(exec.decode_slots()),
             exec,
         }
@@ -206,6 +247,12 @@ impl AppState {
     /// Describe the devices beyond their budgets (builder-style); see [`Self::devices`].
     pub fn with_devices(mut self, devices: Option<Arc<dyn DeviceInventory>>) -> AppState {
         self.devices = devices;
+        self
+    }
+
+    /// Say what the server is (builder-style); see [`ServerIdentity`].
+    pub fn with_server(mut self, server: Arc<ServerIdentity>) -> AppState {
+        self.server = server;
         self
     }
 

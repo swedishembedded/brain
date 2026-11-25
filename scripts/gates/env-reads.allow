@@ -674,7 +674,6 @@ crates/vision/src/blocks.rs	BRAIN_NAIVE_CONV
 crates/vision/src/blocks.rs	BRAIN_TILED_CONV
 crates/vqgan/tests/it/parity.rs	BRAIN_VQGAN_DEVICE
 crates/vqgan/tests/it/parity.rs	BRAIN_VQGAN_WEIGHTS
-crates/vulkan/build.rs	OUT_DIR
 crates/vulkan/src/context.rs	BRAIN_VK_DEVICE
 crates/vulkan/src/context.rs	BRAIN_VK_VALIDATE
 crates/vulkan/src/shader.rs	BRAIN_GPU_CHECKED

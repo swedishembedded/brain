@@ -237,6 +237,16 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       (api-security.md): no new route or param; the new fields are read-only facts of a release (no path, bounded,
       validated at the card), behind the key like the rest of the reply; the run id exposes a `resume_key` to callers
       that may use the adapter, which opens nothing (a key resumes only the identical request, `runs::open`).
+- [x] **Server build and record contract, for an orchestrator's revision manifest** (A01's brain side, lane
+      agrpo-prov): `GET /v1/capabilities` carries `server {engine {version, commit?, dirty?}, backend?,
+      training_records {contract, version, digest}?}` (`apiserve::ServerIdentity`, given by `brain serve`). The commit
+      and dirty flag are embedded by the SDK's build script (`brain::build`); the record contract's digest is
+      `data::chat_rollout::CONTRACT_DIGEST`, the digest of the v2 example set (`contract_digest`, held to the set by a
+      test), which a producer compares with its copy's. Tests: `apiserve`
+      `the_capability_list_names_the_server_build_and_its_record_contract`, `data`
+      `the_reported_contract_digest_is_the_digest_of_the_example_set`, `brain` `build::tests`. Open: D-Bus has no
+      method for it yet (`Version` stays the version string), and `tests/e2e/api_conformance.bats` does not assert
+      it (not run in this lane: e2e suites take a card).
 - [ ] End-to-end on Qwen3-4B (one card): serving and the streaming job in one process, rollouts from an orchestrator;
       profile (nsys) before optimising anything.
 - [ ] **Support replay for truncated samplers**: the sampler's support per position in the trace, the trainer's

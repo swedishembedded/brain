@@ -441,6 +441,17 @@ present on every surface and behind the same key, hooks and admission:
   fill in, but may carry `implied_default`: the value the action applies when the
   param is omitted, so a caller can record a run's full settings. Clients are
   generated from it.
+  Beside the list, `server` says what serves it: `engine` (`version`; `commit`, the full
+  git commit the build was made from, and `dirty`, whether its tree had uncommitted
+  changes, when the build knew them), `backend` (`cpu`, `cuda`, ...) and
+  `training_records` (`contract` `training-records-v2`, `version` 2 and `digest`, the
+  `sha256:` digest of the contract's example set in brain's source tree,
+  `crates/data/tests/fixtures/training-records/v2`, computed as
+  `data::chat_rollout::contract_digest` does: the SHA-256 of one line
+  `<path>\0<sha256 hex of the file>\n` per file but `README.md`, sorted by path). A
+  producer that keeps a copy of the set compares that digest with its copy's to know it
+  writes the records this server's trainer checks. Each key is absent when the server
+  does not know it.
 - `GET /v1/devices` lists the devices the server schedules work on, as `{"object": "list", "host": {...}, "data":
   [...]}`. Each entry has `id` (`cpu`, `gpu<i>`, `npu<i>`: the names `--device` takes), `kind` and `memory`
   (`total_bytes`, `reserved_bytes` held back by the operator, `used_bytes` held by resident models and runs,

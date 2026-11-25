@@ -161,6 +161,47 @@ pub enum RecordRule {
     TeacherScores,
 }
 
+/// The training-record contract this build of brain holds records to: its name, as the example set's `manifest.json`
+/// states it.
+pub const CONTRACT: &str = "training-records-v2";
+/// The contract's version number.
+pub const CONTRACT_VERSION: u32 = 2;
+/// The digest of the contract's example set (`crates/data/tests/fixtures/training-records/v2`, [`contract_digest`]):
+/// what a producer that keeps a copy of the set compares with the digest of its copy to know it writes the records
+/// this build checks. Any change to what the set accepts or refuses changes it; a test holds it to the set.
+pub const CONTRACT_DIGEST: &str = "sha256:fc3d95ec85ab3278fd93a04aab623ad1768038aea152178177d6901667b0ff75";
+
+/// The digest of a contract example set in `dir`: `sha256:<hex>` of the lines `<path>\0<sha256 hex of the file>\n`,
+/// one per file under `dir` but its `README.md` (the prose), `path` relative to `dir` with `/` separators, sorted by
+/// path. A producer computes the same over its copy.
+pub fn contract_digest(dir: &Path) -> io::Result<String> {
+    use sha2::{Digest, Sha256};
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) -> io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                walk(root, &path, out)?;
+                continue;
+            }
+            let relative = path.strip_prefix(root).map_err(io::Error::other)?;
+            let name = relative.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>().join("/");
+            if name != "README.md" {
+                let hex: String = Sha256::digest(std::fs::read(&path)?).iter().map(|b| format!("{b:02x}")).collect();
+                out.push((name, hex));
+            }
+        }
+        Ok(())
+    }
+    let mut files = Vec::new();
+    walk(dir, dir, &mut files)?;
+    files.sort();
+    let mut listing = Sha256::new();
+    for (name, hex) in &files {
+        listing.update(format!("{name}\0{hex}\n").as_bytes());
+    }
+    Ok(format!("sha256:{}", listing.finalize().iter().map(|b| format!("{b:02x}")).collect::<String>()))
+}
+
 impl RecordRule {
     /// The rule's name on the wire (`check_dataset`'s refusals).
     pub fn name(self) -> &'static str {

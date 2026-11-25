@@ -1935,7 +1935,7 @@ fn run_apis(a: RunApis) {
             eprintln!("brain serve: the surfaces did not drain within {}s of the shutdown signal; exiting", SHUTDOWN_DRAIN_TIMEOUT.as_secs());
             brain_shutdown::exit_now(0);
         });
-        let opts = apiserve::ServeOpts::new().with_shutdown(shutdown).with_supplier(supplier).with_ready(a.ready).with_deadlines(a.deadlines).with_record(Some(a.record)).with_tls(a.tls).with_training(training).with_callers(a.callers).with_devices(Some(std::sync::Arc::new(crate::devices_api::HostDevices))).with_video_jobs(a.video_jobs);
+        let opts = apiserve::ServeOpts::new().with_shutdown(shutdown).with_supplier(supplier).with_ready(a.ready).with_deadlines(a.deadlines).with_record(Some(a.record)).with_tls(a.tls).with_training(training).with_callers(a.callers).with_devices(Some(std::sync::Arc::new(crate::devices_api::HostDevices))).with_server(server_identity()).with_video_jobs(a.video_jobs);
         if let Err(e) = apiserve::serve_all(executor, surfaces, opts) {
             eprintln!("brain serve: {e}");
             std::process::exit(1);
@@ -1988,6 +1988,16 @@ pub(crate) fn query_gpu_mem() -> Vec<(u32, u64)> {
 /// tighter and more correct, never looser, than the old behaviour.
 pub(crate) fn query_ram_bytes() -> u64 {
     host_ram_available()
+}
+
+/// What `brain serve` says it is (`GET /v1/capabilities`'s `server`): this build's version, commit and dirty flag as
+/// the SDK's build embedded them, the backend it computes on and the training-record contract its trainer checks.
+fn server_identity() -> apiserve::ServerIdentity {
+    apiserve::ServerIdentity {
+        engine: apiserve::EngineBuild { version: brain::build::VERSION.to_string(), commit: brain::build::COMMIT.map(str::to_string), dirty: brain::build::dirty() },
+        backend: Some(gpu_core::backend_name().to_string()),
+        training_records: Some(apiserve::RecordContract { contract: data::chat_rollout::CONTRACT.to_string(), version: data::chat_rollout::CONTRACT_VERSION, digest: data::chat_rollout::CONTRACT_DIGEST.to_string() }),
+    }
 }
 
 #[cfg(test)]

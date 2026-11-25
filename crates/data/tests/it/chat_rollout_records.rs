@@ -590,3 +590,33 @@ fn policy_version_and_sampler_are_validated_and_kept_per_example() {
     let (rule, field, _) = refusal(&alone);
     assert_eq!((rule, field.as_str()), (chat_rollout::RecordRule::MissingReward, "policy_version"));
 }
+
+/// The contract this build reports (`CONTRACT_DIGEST`, served as `server.training_records`) is the digest of its own
+/// example set, and the digest is of what the set says, not of where it lies: a copy elsewhere digests the same, a
+/// changed record does not.
+#[test]
+fn the_reported_contract_digest_is_the_digest_of_the_example_set() {
+    use data::chat_rollout::{contract_digest, CONTRACT, CONTRACT_DIGEST};
+    let set = std::path::PathBuf::from(brain_testutil::repo_path("crates/data/tests/fixtures/training-records/v2"));
+    assert_eq!(contract_digest(&set).unwrap(), CONTRACT_DIGEST, "the example set changed: update CONTRACT_DIGEST (and the version, when an accepted record is now refused)");
+    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(set.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["contract"], CONTRACT);
+
+    let copy = brain_testutil::Scratch::dir("contract-digest-copy");
+    for entry in walk(&set) {
+        let to = copy.join(entry.strip_prefix(&set).unwrap());
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::copy(&entry, &to).unwrap();
+    }
+    std::fs::write(copy.join("README.md"), "prose is not the contract").unwrap();
+    assert_eq!(contract_digest(&copy).unwrap(), CONTRACT_DIGEST, "a copy digests the same; its README is prose");
+    std::fs::write(copy.join("chat.jsonl"), "{}\n").unwrap();
+    assert_ne!(contract_digest(&copy).unwrap(), CONTRACT_DIGEST);
+}
+
+fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(dir).unwrap().flat_map(|e| {
+        let path = e.unwrap().path();
+        if path.is_dir() { walk(&path) } else { vec![path] }
+    }).collect()
+}

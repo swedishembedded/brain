@@ -77,6 +77,7 @@
 /// Command-line option groups every application built on brain can compose -
 /// see [`options`]. The mechanism and the hardware selection are shared with
 /// the `brain` binary itself, so `--device` means one thing everywhere.
+pub mod build;
 pub mod options;
 
 /// The seed of a run whose caller gave none: random, and printed so the run

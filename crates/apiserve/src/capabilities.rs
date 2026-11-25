@@ -5,7 +5,9 @@
 //! embeddings or image dialect has a shape for.
 //!
 //! - `GET /v1/capabilities` lists every model's every action with its contract:
-//!   params, blob inputs and blob outputs. It is what a client is generated from.
+//!   params, blob inputs and blob outputs. It is what a client is generated from. Its `server` object says what
+//!   serves them ([`crate::state::ServerIdentity`]): `engine {version, commit?, dirty?}`, `backend?` and
+//!   `training_records {contract, version, digest}?`.
 //! - `GET /v1/devices` lists the devices the server schedules work on: each one's memory (total, reserved,
 //!   in use, free) and, where the host can say, what it is.
 //! - `POST /v1/run` runs one action and answers with its outputs and blobs.
@@ -230,7 +232,7 @@ async fn list(State(state): State<AppState>) -> Json<Value> {
             })
         })
         .collect();
-    Json(json!({ "object": "list", "data": data }))
+    Json(json!({ "object": "list", "data": data, "server": *state.server }))
 }
 
 /// `GET /v1/devices`: the devices the executor schedules on, each with its memory as the scheduler accounts it,

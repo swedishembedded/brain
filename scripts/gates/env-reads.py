@@ -43,6 +43,9 @@ def reads_in(text: str):
             continue
         found = set(BRAIN_CALL.findall(line))
         for m in STD_READ.finditer(line):
+            # A build script is handed `OUT_DIR` by cargo at its own run time, where `env!` cannot read it.
+            if m.group(2) == "OUT_DIR":
+                continue
             found.add(m.group(2) if m.group(2) is not None else "<" + m.group(1).strip() + ">")
         if STD_VARS.search(line):
             found.add("<all>")

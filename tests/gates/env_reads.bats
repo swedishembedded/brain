@@ -53,6 +53,13 @@ gate() {
   [ "$status" -eq 0 ]
 }
 
+@test "a build script's OUT_DIR, which cargo hands it, is not an env read" {
+  mkdir -p "$TREE/crates/b"
+  printf 'fn main() { let _ = std::env::var_os("OUT_DIR"); let _ = std::env::var("OUT_DIR"); }\n' >"$TREE/crates/b/build.rs"
+  gate
+  [ "$status" -eq 0 ]
+}
+
 @test "a path cargo compiles in is a read and points at the testutil path helpers" {
   printf 'fn d() -> &%sstatic str { env!("CARGO_MANIFEST_DIR") }\n' "'" >>"$TREE/crates/a/src/lib.rs"
   gate

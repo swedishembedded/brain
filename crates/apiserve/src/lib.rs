@@ -91,7 +91,7 @@ pub use hooks::{Call, CallResult, RequestHooks, Ticket};
 pub use listener::ConnectionLimits;
 pub use tls::Tls;
 pub use residency::DeviceInventory;
-pub use state::{AppState, JobRegistry, DEFAULT_ADMIT_DEADLINE};
+pub use state::{AppState, EngineBuild, JobRegistry, RecordContract, ServerIdentity, DEFAULT_ADMIT_DEADLINE};
 pub use surface::{write_keys, Provider, Surface};
 
 use residency::Executor;
@@ -219,6 +219,8 @@ pub struct ServeOpts {
     pub callers: Option<std::sync::Arc<Callers>>,
     /// What the host knows of its devices, for `GET /v1/devices` ([`AppState::with_devices`]).
     pub devices: Option<std::sync::Arc<dyn DeviceInventory>>,
+    /// What the server says it is, for `GET /v1/capabilities` ([`AppState::with_server`]).
+    pub server: std::sync::Arc<ServerIdentity>,
     /// Keep `/videos` jobs across restarts ([`video::VideoJobs::durable`]):
     /// each video surface keeps its jobs in its own subdirectory of
     /// [`VideoJobsConfig::dir`]. `None` keeps them in memory only.
@@ -276,6 +278,10 @@ impl ServeOpts {
         self.devices = devices;
         self
     }
+    pub fn with_server(mut self, server: ServerIdentity) -> ServeOpts {
+        self.server = std::sync::Arc::new(server);
+        self
+    }
     pub fn with_video_jobs(mut self, video_jobs: Option<VideoJobsConfig>) -> ServeOpts {
         self.video_jobs = video_jobs;
         self
@@ -320,7 +326,7 @@ pub const SHUTDOWN_DRAIN: std::time::Duration = std::time::Duration::from_secs(3
 /// concurrently on a [`tokio::task::JoinSet`]. Blocks the calling thread.
 pub fn serve_all(exec: Executor, surfaces: Vec<Surface>, opts: ServeOpts) -> anyhow::Result<()> {
     let shutdown = opts.shutdown.unwrap_or_else(brain_shutdown::Shutdown::from_signals);
-    let ServeOpts { supplier, ready, deadlines, record, limits, tls, training, callers, devices, video_jobs, .. } = opts;
+    let ServeOpts { supplier, ready, deadlines, record, limits, tls, training, callers, devices, server, video_jobs, .. } = opts;
     let scheme = if tls.is_some() { "https" } else { "http" };
     let publication = record.and_then(|path| {
         if let Err(e) = path.parent().map_or(Ok(()), surface::private_dir) {
@@ -361,7 +367,8 @@ pub fn serve_all(exec: Executor, surfaces: Vec<Surface>, opts: ServeOpts) -> any
                 .with_stream_stall(limits.stream_stall)
                 .with_supplier(supplier.clone())
                 .with_training(training)
-                .with_devices(devices.clone());
+                .with_devices(devices.clone())
+                .with_server(server.clone());
             let state = match stores.get(&s.provider) {
                 Some(jobs) => state.with_video_jobs(jobs.clone()),
                 None => state,
