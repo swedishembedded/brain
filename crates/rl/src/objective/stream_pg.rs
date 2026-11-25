@@ -52,11 +52,14 @@ use serde_json::{json, Value};
 use super::external::{advantages, BehaviourSource, ImportanceCorrection, PolicyGradientConfig, PolicyGradientStats, ReferencePolicy, StepAccumulator};
 use super::grpo::LossAgg;
 use super::grpo_stats::{NonFiniteSteps, MAX_CONSECUTIVE_NONFINITE};
-use super::pg_batch::{adapters_are_zero, adapters_can_be_disabled, backward_weighted_lp, install_sampler_ids, with_adapters_disabled, AdapterState, PgBatch, SamplerTop};
+use super::pg_batch::{adapters_are_zero, adapters_can_be_disabled, backward_weighted_lp, install_sampler_ids, with_adapters_disabled, AdapterState, PgBatch, SamplerSupport, SamplerTop};
 use super::pg_loss::{gradient_scan, GuardVerdict, StepGuard};
 
 /// The widest sampler top-K a stream centres over.
 pub const MAX_TOP_K: usize = 256;
+
+/// The widest sampler support a streamed record may carry per token ([`StreamSettings::support`]).
+pub const MAX_SUPPORT: usize = data::chat_rollout::MAX_BEHAVIOR_SUPPORT;
 
 /// How often a learner waiting for records checks whether it was stopped.
 const STOP_POLL: Duration = Duration::from_millis(100);
@@ -76,6 +79,10 @@ pub struct StreamSettings {
     /// The sampler's top-K every record carries, which the score-centred estimator centres over; `None` for the
     /// clipped surrogate. Fixed before the run, since the model's head is sized to it.
     pub top_k: Option<usize>,
+    /// The widest sampler support a record may carry per token (`behavior_support_*`), which the trainer renormalises
+    /// its log-probabilities over; `None` when the records carry none. Fixed before the run, since the model's head is
+    /// sized to it.
+    pub support: Option<usize>,
 }
 
 impl StreamSettings {
@@ -91,6 +98,9 @@ impl StreamSettings {
         }
         if self.top_k.is_some_and(|k| !(1..=MAX_TOP_K).contains(&k)) {
             return Err(format!("top_k must be 1 to {MAX_TOP_K}"));
+        }
+        if self.support.is_some_and(|n| !(1..=MAX_SUPPORT).contains(&n)) {
+            return Err(format!("support must be 1 to {MAX_SUPPORT}"));
         }
         Ok(())
     }
@@ -134,6 +144,8 @@ pub struct StreamExample {
     /// The sampler's top-K at each token (`[tokens * k]` ids, `NO_TOP_ID` where none, and log-probabilities), for the
     /// score-centred estimator.
     pub top: Option<(Vec<u32>, Vec<f32>)>,
+    /// The support each token's cut sampler drew it from, when the record carries one.
+    pub support: Option<data::chat_rollout::BehaviorSupport>,
 }
 
 impl StreamExample {
@@ -181,6 +193,19 @@ pub fn groups_of_split(split: &EncodedSplit, cfg: &PolicyGradientConfig, setting
     let ends: Vec<usize> = (0..split.starts.len()).map(|e| split.starts.get(e + 1).copied().unwrap_or(split.ids.len())).collect();
     // The score-centred estimator: every policy token carries the sampler's top-K, of the stream's K, from a sampler
     // that drew from the whole row (the recorded-rollout objective's own check).
+    // Supports, which the stream sizes its slots to: every one within the stream's width, every supervised token inside its
+    // own support.
+    let support = match (split.behavior_support.as_ref(), settings.support) {
+        (None, _) => None,
+        (Some(_), None) => return Err("behavior_support_ids: the records carry the supports of their cut samplers, and the stream was opened without a support width (stream.support)".to_string()),
+        (Some(s), Some(n)) if s.max > n => return Err(format!("behavior_support_ids: a record carries a support of {} ids, wider than the stream's {n} (stream.support)", s.max)),
+        (Some(s), Some(_)) => {
+            if let Some(t) = (0..split.ids.len()).find(|&t| split.mask[t] && !s.of(t).is_empty() && !s.of(t).contains(&split.ids[t])) {
+                return Err(format!("behavior_support_ids: token {t} of the records ({}) is not in the support its sampler drew it from", split.ids[t]));
+            }
+            Some(s)
+        }
+    };
     let top = match settings.top_k {
         None => None,
         Some(k) => {
@@ -189,7 +214,7 @@ pub fn groups_of_split(split: &EncodedSplit, cfg: &PolicyGradientConfig, setting
                 return Err(format!("behavior_top_ids: the records carry a top-{} and the stream centres over a top-{k} (stream.top_k)", top.k));
             }
             let eligible: Vec<usize> = (0..split.starts.len()).filter(|&e| cfg.truncated.counts(split.truncated[e])).collect();
-            super::external::check_centrable(top, &rollouts.examples, &advantage, &eligible, &split.starts, &ends, &split.mask).map_err(|why| format!("record {why}"))?;
+            super::external::check_centrable(top, &rollouts.examples, &advantage, &eligible, &split.starts, &ends, &split.mask, support).map_err(|why| format!("record {why}"))?;
             Some(top)
         }
     };
@@ -221,6 +246,13 @@ pub fn groups_of_split(split: &EncodedSplit, cfg: &PolicyGradientConfig, setting
             advantage: advantage[e],
             policy_version: example.and_then(|r| r.policy_version),
             top: top.map(|t| (t.ids[start * t.k..end * t.k].to_vec(), t.logprobs[start * t.k..end * t.k].to_vec())),
+            support: support.map(|s| {
+                let base = s.offsets[start];
+                let offsets: Vec<u64> = s.offsets[start..=end].iter().map(|o| o - base).collect();
+                let ids = s.ids[base as usize..s.offsets[end] as usize].to_vec();
+                let max = (start..end).map(|t| s.of(t).len()).max().unwrap_or(0);
+                data::chat_rollout::BehaviorSupport { offsets, ids, logprobs: s.logprobs[start..end].to_vec(), max }
+            }),
         });
     }
     // A group whose every rollout was truncated and masked trains nothing; it is still a group the client sent.
@@ -550,6 +582,8 @@ impl StreamedPolicyGradient {
                 let (mut old_lp, mut advantage) = (vec![0.0; targets.len()], vec![f32::NAN; targets.len()]);
                 let k = self.feed.settings.top_k;
                 let mut top = k.map(|k| (vec![IGNORE; targets.len() * k], vec![f32::NAN; targets.len() * k]));
+                let width = self.feed.settings.support;
+                let mut support = width.map(|n| (vec![IGNORE; targets.len() * n], vec![f32::NAN; targets.len()]));
                 for (b, e) in rows.iter().enumerate() {
                     for t in 0..block.min(e.ids.len() - 1) {
                         let at = b * block + t;
@@ -568,9 +602,16 @@ impl StreamedPolicyGradient {
                                 }
                             }
                         }
+                        if let (Some(n), Some((ids, lps)), Some(own)) = (width, support.as_mut(), e.support.as_ref()) {
+                            let of = own.of(t + 1);
+                            if !of.is_empty() {
+                                ids[at * n..at * n + of.len()].copy_from_slice(of);
+                                lps[at] = own.logprobs[t + 1];
+                            }
+                        }
                     }
                 }
-                Laid { tokens, targets, old_lp, advantage, ref_lp: None, rows: rows.len(), top }
+                Laid { tokens, targets, old_lp, advantage, ref_lp: None, rows: rows.len(), top, support }
             })
             .collect()
     }
@@ -630,12 +671,16 @@ struct Laid {
     rows: usize,
     /// The sampler's top-K at each position, `[rows * block * k]`, under the score-centred estimator.
     top: Option<(Vec<u32>, Vec<f32>)>,
+    /// The support of each position's target (`[rows * block * n]` ids, `[rows * block]` the sampler's figure within
+    /// it, NaN where none), when the stream takes supports.
+    support: Option<(Vec<u32>, Vec<f32>)>,
 }
 
 impl Laid {
-    fn batch(&self, k: Option<usize>) -> PgBatch<'_> {
-        let top = self.top.as_ref().zip(k).map(|((ids, logprobs), k)| SamplerTop { k, ids, logprobs });
-        PgBatch { targets: &self.targets, old_lp: &self.old_lp, ref_lp: self.ref_lp.as_deref(), advantage: &self.advantage, is_weight: None, top }
+    fn batch(&self, settings: &StreamSettings) -> PgBatch<'_> {
+        let top = self.top.as_ref().zip(settings.top_k).map(|((ids, logprobs), k)| SamplerTop { k, ids, logprobs });
+        let support = self.support.as_ref().zip(settings.support).map(|((ids, logprobs), k)| SamplerSupport { k, ids, logprobs });
+        PgBatch { targets: &self.targets, old_lp: &self.old_lp, ref_lp: self.ref_lp.as_deref(), advantage: &self.advantage, is_weight: None, top, support }
     }
 }
 
@@ -648,8 +693,10 @@ impl<M: Model> Objective<M> for StreamedPolicyGradient {
         let objectives = training::require_token_objectives(model)?;
         objectives.enable_weighted_loss();
         objectives.set_logit_scale(1.0 / self.cfg.temperature);
-        if let Some(k) = self.feed.settings.top_k {
-            objectives.enable_sparse_targets(k as u32).map_err(|_| Unsupported::of::<M>(Capability::SparseTargets))?;
+        // One slot width for the sampler's top-K and the supports, as the batch lays them out (`pg_batch::slot_width`).
+        let slots = self.feed.settings.top_k.unwrap_or(0).max(self.feed.settings.support.unwrap_or(0));
+        if slots > 0 {
+            objectives.enable_sparse_targets(slots as u32).map_err(|_| Unsupported::of::<M>(Capability::SparseTargets))?;
         }
         let start = if adapters_are_zero(model) { StartPolicy::Base } else { StartPolicy::Frozen(AdapterState::capture(model)) };
         let base_is_read = self.wants_reference && (matches!(start, StartPolicy::Base) || self.cfg.reference == ReferencePolicy::Base);
@@ -718,9 +765,13 @@ impl<M: Model> Objective<M> for StreamedPolicyGradient {
             self.verdict = Some(StepVerdict::Abort(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("behavior_top_ids: a record of this step names token id {id} but the model's vocabulary is {vocab}"))));
             return 0.0;
         }
+        if let Some(id) = laid.iter().filter_map(|l| l.support.as_ref()).flat_map(|(ids, _)| ids.iter().copied()).filter(|&id| id != IGNORE).find(|&id| id >= vocab) {
+            self.verdict = Some(StepVerdict::Abort(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("behavior_support_ids: a record of this step names token id {id} but the model's vocabulary is {vocab}"))));
+            return 0.0;
+        }
         for l in &laid {
             model.set_batch(Batch::Lm { tokens: &l.tokens, targets: &l.targets });
-            let batch = l.batch(self.feed.settings.top_k);
+            let batch = l.batch(&self.feed.settings);
             install_sampler_ids(model, &batch, &spec).expect("prepare enabled the extra targets and every sampler id is in the vocabulary");
             let pass = Instant::now();
             let _ = model.forward();
@@ -865,7 +916,7 @@ mod tests {
     use super::*;
 
     fn example(tokens: usize, version: Option<u64>) -> StreamExample {
-        StreamExample { ids: vec![1; tokens], mask: vec![true; tokens], behavior: vec![-1.0; tokens], advantage: 1.0, policy_version: version, top: None }
+        StreamExample { ids: vec![1; tokens], mask: vec![true; tokens], behavior: vec![-1.0; tokens], advantage: 1.0, policy_version: version, top: None, support: None }
     }
 
     fn group(key: &str, tokens: usize, version: Option<u64>) -> StreamGroup {
@@ -873,10 +924,45 @@ mod tests {
     }
 
     fn feed(step: usize, queue: usize, staleness: Option<u64>) -> Arc<RolloutFeed> {
-        let feed = RolloutFeed::new(StreamSettings { step_tokens: step, queue_tokens: queue, max_staleness: staleness, block: 64, top_k: None }, || true, Default::default()).unwrap();
+        let feed = RolloutFeed::new(StreamSettings { step_tokens: step, queue_tokens: queue, max_staleness: staleness, block: 64, top_k: None, support: None }, || true, Default::default()).unwrap();
         assert_eq!(feed.offer(vec![group("early", 1, None)]), Err(FeedRefusal::Starting), "nothing is taken before the learner is ready");
         feed.open();
         feed
+    }
+
+    /// A split of two rollouts of one group whose answers carry supports of `width` ids (the token and others).
+    fn supported_split(width: usize) -> EncodedSplit {
+        let mut split = EncodedSplit::default();
+        for (member, reward) in [("a", 1.0), ("b", 0.0)] {
+            let ids = vec![5u32, 6, 7, 8];
+            let mut support = data::chat_rollout::BehaviorSupport::none(1);
+            for &t in &ids[1..] {
+                let one = data::chat_rollout::BehaviorSupport { offsets: vec![0, width as u64], ids: std::iter::once(t).chain((1..width as u32).map(|j| 100 + j)).collect(), logprobs: vec![-0.5], max: width };
+                support.extend(&one);
+            }
+            let encoded = data::chat::EncodedSample { ids, mask: vec![false, true, true, true], behavior: vec![f32::NAN, -1.0, -1.0, -1.0], behavior_support: Some(support), ..Default::default() };
+            let outcome = data::chat_rollout::Outcome { reward, group: "g".to_string(), member: data::chat_rollout::Member::Named(member.to_string()), teacher_log_ratio: None };
+            split.push_rollout(&encoded, &[], Some(Some(outcome)));
+        }
+        split
+    }
+
+    /// Records carrying supports are taken by a stream opened with a support width at least as wide, each example with
+    /// its own supports; without a width, or with a narrower one, they are refused by name.
+    #[test]
+    fn a_stream_takes_supports_within_its_width_and_refuses_the_rest() {
+        let settings = |support: Option<usize>| StreamSettings { step_tokens: 4, queue_tokens: 64, max_staleness: None, block: 16, top_k: None, support };
+        let cfg = PolicyGradientConfig::default();
+        let split = supported_split(3);
+        let groups = groups_of_split(&split, &cfg, &settings(Some(4))).expect("within the width");
+        let example = &groups[0].examples[0];
+        let support = example.support.as_ref().expect("the example keeps its supports");
+        assert_eq!((support.tokens(), support.max, support.of(0).len(), support.of(1)), (4, 3, 0, &[6u32, 101, 102][..]));
+        let why = groups_of_split(&split, &cfg, &settings(None)).unwrap_err();
+        assert!(why.contains("behavior_support_ids") && why.contains("stream.support"), "{why}");
+        let why = groups_of_split(&split, &cfg, &settings(Some(2))).unwrap_err();
+        assert!(why.contains("3 ids") && why.contains("stream.support"), "{why}");
+        assert!(settings(Some(0)).validate().is_err() && settings(Some(data::chat_rollout::MAX_BEHAVIOR_SUPPORT + 1)).validate().is_err());
     }
 
     /// The queue refuses an offer only when it holds a step already and the offer would pass its bound; a key is taken

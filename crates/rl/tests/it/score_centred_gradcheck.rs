@@ -110,7 +110,7 @@ impl<M: Model> Harness<M> {
     }
 
     fn batch(&self) -> PgBatch<'_> {
-        PgBatch { targets: &self.targets, old_lp: &self.old_lp, ref_lp: None, advantage: &self.advantage, is_weight: None, top: Some(SamplerTop { k: K, ids: &self.top_ids, logprobs: &self.top_lp }) }
+        PgBatch { targets: &self.targets, old_lp: &self.old_lp, ref_lp: None, advantage: &self.advantage, is_weight: None, top: Some(SamplerTop { k: K, ids: &self.top_ids, logprobs: &self.top_lp }), support: None }
     }
 
     fn load(&self) {

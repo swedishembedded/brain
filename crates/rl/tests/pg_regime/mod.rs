@@ -142,7 +142,7 @@ impl CheckModel for Harness {
     fn loss(&self) -> f32 {
         self.load();
         let _ = self.m.forward();
-        let batch = PgBatch { targets: &self.targets, old_lp: &self.old_lp, ref_lp: Some(&self.ref_lp), advantage: &self.advantage, is_weight: None, top: None };
+        let batch = PgBatch { targets: &self.targets, old_lp: &self.old_lp, ref_lp: Some(&self.ref_lp), advantage: &self.advantage, is_weight: None, top: None, support: None };
         let denominator = self.denominator();
         let (terms, _) = install_weights(&self.m, &batch, &self.spec(), denominator);
         assert!(terms.finite);

@@ -233,7 +233,7 @@ fn a_full_queue_names_its_allowance_and_never_refuses_below_a_step() {
     let base = rig.dir.join("models").join("local").join("toy");
     let config = brain::PolicyGradientConfig { loss: brain::PgLoss { loss_agg: brain::LossAgg::TokenSum, ..brain::PolicyGradientConfig::default().loss }, ..Default::default() };
     // No learner takes from this stream: what is queued stays queued.
-    let stream = brain::ChatFineTune::from_pretrained(base.to_str().unwrap()).policy_gradient(config).max_block(128).open_rollout_stream(2 * tokens, 2 * tokens, None, None, || true, Default::default()).expect("a stream");
+    let stream = brain::ChatFineTune::from_pretrained(base.to_str().unwrap()).policy_gradient(config).max_block(128).open_rollout_stream(2 * tokens, 2 * tokens, None, None, None, || true, Default::default()).expect("a stream");
     let answer = |key: &str| trainjob::stream::answer(&stream, 3, "records", &json!({}), &group(sizes, key, 0));
     assert_eq!(answer("a").unwrap()["queued_tokens"], json!(tokens));
     // Below one step the offer is taken even though it passes the queue's bound.
@@ -353,7 +353,7 @@ fn a_stream_job_is_refused_where_it_could_not_publish_or_be_fed() {
     let rig = rig_stream("stream-refuse-unfed");
     let refused = crate::support::run(&rig, params.clone(), &[], &Frames::default()).unwrap_err();
     assert!(refused.contains("surface"), "{refused}");
-    for (field, value, why) in [("queue_tokens", json!(4), "queue_tokens"), ("publish_adapter", json!("local/toy"), "publish_adapter"), ("extra", json!(1), "unknown field")] {
+    for (field, value, why) in [("queue_tokens", json!(4), "queue_tokens"), ("publish_adapter", json!("local/toy"), "publish_adapter"), ("extra", json!(1), "unknown field"), ("support", json!(0), "support must be 1 to 1024"), ("support", json!(1025), "support must be 1 to 1024")] {
         let mut doc: Value = serde_json::from_str(params["stream"].as_str().unwrap()).unwrap();
         doc[field] = value;
         let mut bad = params.clone();

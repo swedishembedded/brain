@@ -362,6 +362,44 @@ impl SparseTargets {
     }
 }
 
+/// One position's log-probabilities renormalised over a sampler's support (TRL's `support_ids`): the support's ids in
+/// extra-target slots, their whole-row log-probabilities `l_j` read back by the forward ([`SparseTargets`]), and the
+/// label's `l_y`. `log Z = logsumexp_j l_j`, `pi_j = exp(l_j - log Z)` and the label's support log-probability
+/// `l_y - log Z` (accumulated in f64). Slots whose id is [`IGNORE`] take no part (`pi = 0`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SupportNorm {
+    pub log_z: f64,
+    /// The label's log-probability within the support.
+    pub label: f64,
+    /// Each slot's probability within the support.
+    pub pi: Vec<f64>,
+}
+
+/// [`SupportNorm`] of a position from its label's whole-row log-probability and its slots' (`slot_lps`, `slot_ids` of
+/// one position). `None` when no slot is used.
+pub fn renormalise_over_support(label_lp: f32, slot_lps: &[f32], slot_ids: &[u32]) -> Option<SupportNorm> {
+    let used = |j: &usize| slot_ids[*j] != IGNORE;
+    let max = (0..slot_ids.len()).filter(used).map(|j| f64::from(slot_lps[j])).fold(f64::NEG_INFINITY, f64::max);
+    if max == f64::NEG_INFINITY {
+        return None;
+    }
+    let log_z = max + (0..slot_ids.len()).filter(used).map(|j| (f64::from(slot_lps[j]) - max).exp()).sum::<f64>().ln();
+    let pi = (0..slot_ids.len()).map(|j| if used(&j) { (f64::from(slot_lps[j]) - log_z).exp() } else { 0.0 }).collect();
+    Some(SupportNorm { log_z, label: f64::from(label_lp) - log_z, pi })
+}
+
+/// The extra-target coefficients that make one backward the gradient of `omega_y (-log pi_S(y)) + sum_j omega_j
+/// (-log pi_S(s_j))`, cross-entropies of log-probabilities renormalised over the support (`norm`), when the label carries
+/// the weight `label_weight` (`omega_y`) and slot `j` the weight `slot_weights[j]` (`omega_j`, 0 for none). With
+/// `-log pi_S(x) = -log p(x) + log Z` and `d log Z = sum_j pi_j e_{s_j} - softmax`, the gradient is
+/// `-omega_y e_y - sum_j omega_j e_{s_j} + Omega sum_j pi_j e_{s_j}`, `Omega = omega_y + sum_j omega_j`: the label weight
+/// `omega_y` and the slot coefficients `c_j = omega_j - Omega pi_j` of [`SparseTargets`], whose row total
+/// `W = omega_y + sum_j c_j` is zero, so no whole-row softmax term remains.
+pub fn support_coefficients(norm: &SupportNorm, label_weight: f64, slot_weights: &[f64]) -> Vec<f32> {
+    let omega = label_weight + slot_weights.iter().sum::<f64>();
+    norm.pi.iter().zip(slot_weights).map(|(pi, w)| (w - omega * pi) as f32).collect()
+}
+
 /// Refuse extra-target ids that a head cannot read: not `labels.len() * k` of them, an id at or past `valid_vocab`
 /// (the served vocabulary), or an extra target on a position whose label is [`IGNORE`] (that row has no
 /// distribution in the loss, so the target would be dropped silently). The message names the position.

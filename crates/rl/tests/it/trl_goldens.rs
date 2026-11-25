@@ -12,6 +12,10 @@
 //!
 //! - one token's score-centred term ([`centred_term`]) against `compute_loss`'s locals: the mask, the weight at the
 //!   sampled token, the extra-target coefficients (`-A residual`), the tail and the per-token loss;
+//! - support replay against `compute_loss` over a cut sampler's support (`sampling_mask`), its model TRL's own fused
+//!   head (`ChunkedLogProbFunction`) over a logits row: the trainer's support-normalised log-probability, the
+//!   score-centred mask, tail and per-token loss, and the loss's gradient in the logits (TRL's autograd) against the one
+//!   backward brain installs for it ([`weigh`] over a [`SamplerSupport`], from the record's whole-row figures);
 //! - group advantages against `compute_advantages`. A rollout TRL scores NaN is a rollout that reached no outcome,
 //!   which the record contract masks (`truncated`): it takes no part in its group and trains nothing (TRL: advantage
 //!   0, also nothing). The one deliberate difference is the z-score's epsilon: brain divides by `std + 1e-4` (GRPO as
@@ -20,6 +24,9 @@
 
 use data::chat_rollout::{group_members, GroupEntry, GroupFault, TruncatedRollouts};
 use rl::objective::advantage::{group_advantages_with, AdvantageNorm};
+use model::IGNORE;
+use rl::objective::grpo_term::ClipBand;
+use rl::objective::pg_batch::{weigh, PgBatch, PgEstimator, PgSpec, SamplerSupport, SamplerTop};
 use rl::objective::score_centring::{centred_term, CentringBand};
 use serde_json::Value;
 
@@ -89,6 +96,51 @@ fn group_advantages_are_trls_up_to_the_named_epsilon() {
         }
         for i in (0..rewards.len()).filter(|i| !scored.contains(i)) {
             assert!(members.iter().all(|&(m, _)| m != i) && trl[i] == 0.0, "{group}: rollout {i} without a score takes no part");
+        }
+    }
+}
+
+#[test]
+fn support_replay_is_trls() {
+    let fixture = fixture();
+    let cases = fixture["support_replay"].as_array().expect("support-replay cases");
+    assert!(cases.len() >= 3, "the fixture holds the cases the tool writes");
+    for case in cases {
+        let name = case["name"].as_str().unwrap();
+        let logits: Vec<f64> = case["logits"].as_array().unwrap().iter().map(f).collect();
+        let label = case["label"].as_u64().unwrap() as u32;
+        let support: Vec<u32> = case["support"].as_array().unwrap().iter().map(|v| v.as_u64().unwrap() as u32).collect();
+        let top: Vec<u32> = case["top_ids"].as_array().unwrap().iter().map(|v| v.as_u64().map_or(IGNORE, |id| id as u32)).collect();
+        let btl: Vec<f32> = case["behavior_top_logprobs"].as_array().unwrap().iter().map(|v| v.as_f64().map_or(f32::NAN, |x| x as f32)).collect();
+        // The trainer's whole-row figures, as the forward reads them back: the label's and the support's.
+        let mx = logits.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let lse = mx + logits.iter().map(|z| (z - mx).exp()).sum::<f64>().ln();
+        let whole = |id: u32| (logits[id as usize] - lse) as f32;
+        let new_lp = [whole(label)];
+        let new_slots: Vec<f32> = support.iter().map(|&id| whole(id)).collect();
+        let (targets, old, adv, bsl) = ([label], [f(&case["behavior_logprob"]) as f32], [f(&case["advantage"]) as f32], [f(&case["behavior_support_logprob"]) as f32]);
+        let band = CentringBand { low: f(&case["low"]) as f32, high: f(&case["high"]) as f32 };
+        let spec = PgSpec { band: ClipBand::new(0.2, 0.2), kl_beta: 0.0, estimator: PgEstimator::ScoreCentred(band) };
+        let batch = PgBatch { targets: &targets, old_lp: &old, ref_lp: None, advantage: &adv, is_weight: None, top: Some(SamplerTop { k: top.len(), ids: &top, logprobs: &btl }), support: Some(SamplerSupport { k: support.len(), ids: &support, logprobs: &bsl }) };
+        let (weights, terms) = weigh(&new_lp, Some(&new_slots), &batch, &spec);
+        let norm = model::head_ce::renormalise_over_support(new_lp[0], &new_slots, &support).unwrap();
+        close(name, "support-normalised log-probability", norm.label, f(&case["log_prob"]));
+        assert_eq!(terms.centred_masked == 1, case["is_masked"].as_bool().unwrap(), "{name}: is_masked");
+        assert_eq!(terms.centred_tail == 1, case["tail"].as_bool().unwrap(), "{name}: tail");
+        close(name, "per-token loss", f64::from(terms.loss), f(&case["per_token_loss"]));
+        // The installed backward in the logits: W softmax - w e_y - sum_j c_j e_{s_j}, W = w + sum_j c_j.
+        let extra = weights.extra.as_ref().expect("a support takes extra targets");
+        let w = f64::from(weights.label[0]);
+        let big_w = w + extra.iter().map(|&c| f64::from(c)).sum::<f64>();
+        for (v, want) in case["grad_logits"].as_array().unwrap().iter().map(f).enumerate() {
+            let mut got = big_w * (logits[v] - lse).exp();
+            if v as u32 == label {
+                got -= w;
+            }
+            if let Some(j) = support.iter().position(|&id| id == v as u32) {
+                got -= f64::from(extra[j]);
+            }
+            close(name, &format!("gradient at logit {v}"), got, want);
         }
     }
 }

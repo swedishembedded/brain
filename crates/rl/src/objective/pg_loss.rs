@@ -74,7 +74,8 @@ pub enum Estimator {
     #[default]
     ClippedSurrogate,
     /// The score-centred estimator over the sampler's top-K ([`super::score_centring`]): needs records that carry it
-    /// (`behavior_top_ids`, `behavior_top_logprobs`) from an untruncated sampler, and a model whose LM head takes
+    /// (`behavior_top_ids`, `behavior_top_logprobs`) from an untruncated sampler or with the support of a cut one
+    /// (`behavior_support_*`, over which it then centres), and a model whose LM head takes
     /// extra targets.
     ScoreCentred,
 }

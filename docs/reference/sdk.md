@@ -705,6 +705,13 @@ lowers the probability of its action, a positive one raises it.
   support. A prepared split keeps them as `<split>.bso.bin` (`u64` offsets, `[tokens + 1]`, an empty range at a token
   without one), `<split>.bsi.bin` (`u32` ids) and `<split>.bsl.bin` (`f32` per token, NaN where none), and the widest
   support as `behavior_support_max` in `<split>.rollouts.json`; `data::chat_rollout::read_behavior_support` reads them.
+  A policy-gradient run trains such a token on its log-probability renormalised over its support (the support's ids
+  are extra targets of the LM head, one forward and one backward): the clipped surrogate's ratio is the policy's
+  probability within the support over the sampler's, which is one at the step that sampled it; the KL term stays on
+  the whole row. A model whose LM head takes no extra targets refuses such records by capability, and so does an
+  importance correction. Records from a truncating sampler without supports are still trained by the clipped
+  surrogate, against the whole-row figure, whose ratio starts at the support's mass instead of one: the run warns and
+  counts them (`sequences_cut_without_support` in its statistics).
 - `"token_ids"` (supervised assistant message, optional, beside `"behavior_logprobs"`): the ids the sampler generated
   for the answer, end-of-turn marker included. The trainer trains these ids, never the ids the answer's text renders
   to again (a model writes a call's arguments, its whitespace, its think block its own way; the parsed message renders
@@ -861,7 +868,9 @@ brain-sampled GRPO run and an external-rollout run cannot drift apart.
   bucket for the rest of the vocabulary, in the same LM-head backward. The clip band takes no part. It needs records
   that carry the sampler's top-K on every answer (`behavior_top_ids`, `behavior_top_logprobs`, from a policy trace with
   `top_log_probs`) and `behavior_logprobs` (behaviour `recorded`), and refuses, naming the cause, records without a
-  top-K, a record whose `sampler` truncated its distribution (`top_k`, `top_p < 1`, `min_p > 0`), an importance
+  top-K, a record whose `sampler` truncated its distribution (`top_k`, `top_p < 1`, `min_p > 0`) unless it carries the
+  support of every supervised token (`behavior_support_*`: the estimator then centres over the support, as TRL's does
+  with `sampling_mask`), an importance
   correction, a top-K id past the model's vocabulary, and a model whose LM head takes no extra targets. Online GRPO
   (in-process rollouts record no top-K) refuses it. Each step reports `sampler_mass` (the mean listed mass of the
   sampler) and `centred_masked_fraction` (the share of tokens whose ratio left the band). A run at the default

@@ -27,6 +27,7 @@ mod pg_conformance;
 mod pg_estimator_oracle;
 mod score_centred_gradcheck;
 mod score_centred_objective;
+mod support_replay;
 mod trl_goldens;
 #[cfg(feature = "qwen3")]
 mod pg_learning;

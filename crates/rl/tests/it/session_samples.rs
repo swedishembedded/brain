@@ -49,7 +49,7 @@ fn config(agg: LossAgg) -> PolicyGradientConfig {
 /// The adapters' gradient of one streamed step that takes exactly `groups`, read after the step's micro-batches.
 fn step_gradient(m: &mut Qwen, groups: Vec<StreamGroup>, agg: LossAgg, block: usize) -> Vec<Vec<f32>> {
     let tokens: usize = groups.iter().map(StreamGroup::policy_tokens).sum();
-    let settings = StreamSettings { step_tokens: tokens, queue_tokens: tokens, max_staleness: None, block, top_k: None };
+    let settings = StreamSettings { step_tokens: tokens, queue_tokens: tokens, max_staleness: None, block, top_k: None, support: None };
     let feed = RolloutFeed::new(settings, || true, Default::default()).unwrap();
     feed.open();
     let mut objective = StreamedPolicyGradient::new(Arc::clone(&feed), config(agg), ROWS as usize).unwrap();
@@ -69,7 +69,7 @@ fn call(prompt: &[u32], answer: &[u32], behavior: f32, advantage: f32) -> Stream
     let ids: Vec<u32> = prompt.iter().chain(answer).copied().collect();
     let mask: Vec<bool> = (0..ids.len()).map(|t| t >= prompt.len()).collect();
     let behavior = mask.iter().map(|&m| if m { behavior } else { f32::NAN }).collect();
-    StreamExample { ids, mask, behavior, advantage, policy_version: None, top: None }
+    StreamExample { ids, mask, behavior, advantage, policy_version: None, top: None, support: None }
 }
 
 /// The largest elementwise gap between `a` and `b`, relative to the largest magnitude in `b`.

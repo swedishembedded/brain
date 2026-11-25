@@ -15,8 +15,9 @@ mathematics first, then provenance, then the streaming job, then performance dri
 ## Invariants (each one is a model-free test before any GPU run)
 
 1. Behaviour: a record's behaviour log-probability is the distribution that drew the token (whole-row softmax at the
-   sampling temperature; a truncated sampler - top-k, top-p, min-p - is refused for this objective until its support
-   set is replayed).
+   sampling temperature; for a truncated sampler - top-k, top-p, min-p - the softmax over its support, which the record
+   carries and the trainer replays: the trainer's figure is renormalised over the same support, so the ratio at the
+   step that sampled is one).
 2. Trajectory: every sampled token is trained once, against the exact context it was sampled in.
 3. Normalisation: the gradient of one optimiser step is the sum over its policy tokens divided by the step's total
    policy-token count, however the tokens are split into micro-batches (and, once data-parallel, ranks).
@@ -30,9 +31,12 @@ mathematics first, then provenance, then the streaming job, then performance dri
 - A truncated sampler makes the policy trace the wrong behaviour denominator: the trace is the token's whole-row
   log-probability at the temperature (knowledge 520, 528), while agent runs sample with top_k/top_p cuts. The real
   behaviour probability is `p / mass(support)`, so the clipped surrogate on such records starts from a ratio of
-  `mass < 1`, not 1. Online runs therefore sample untruncated (top_k 0, top_p 1, min_p 0) until the trainer's
-  probabilities can be renormalised over the sampler's support (support replay, below); the score-centred estimator
-  refuses truncated records by name.
+  `mass < 1`, not 1. Support replay (below, lane agrpo-support) removes it: the trace reports each token's support and
+  its figure within it, the records carry them, and the trainer renormalises over the support, so both estimators train
+  cut samplers without bias (`rl` `it::support_replay`: ratio one at step 0 replayed, the support's mass without).
+  Without a support the score-centred estimator still refuses truncated records by name, and the clipped surrogate
+  trains them with a loud warning naming the bias (`sequences_cut_without_support`). Debt: that warning path stays
+  until online runs record supports by default; then the clipped surrogate refuses a truncated record without one too.
 - Leases mostly exist: a reply's adapter identity is captured at admission, a replaced adapter drains, each release has
   its own KV namespace. The gap is the route refresh under load.
 - The in-process `Grpo` stays the synchronous reference; asynchrony serves externally produced experience first.
@@ -309,7 +313,7 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       `/v1/models`).
 - [ ] **Lossy serving under a stream job** (knowledge 588, 589): refuse, or warn loudly about, a stream job whose
       policy is served over a lossy KV cache or has fallen back to the host; measure fp8 KV against f32 at version 1.
-- [ ] **Support replay for truncated samplers**: the sampler's support per position in the trace, the trainer's
+- [x] **Support replay for truncated samplers**: the sampler's support per position in the trace, the trainer's
       log-probabilities renormalised over it, so cut samplers can train without bias.
       Serving (lane agrpo-support, 2026-11-25): `policy_trace: {"support": N}` (N in 1..=256,
       `llmserve::MAX_TRACE_SUPPORT`; alone or beside `top_log_probs`; param `policy_trace_support` over D-Bus) returns
@@ -352,6 +356,38 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       `sha256:4fb13e2f610fb2d3d4ede4731c5da509d2ccfae1071143c796015e824a4bc20b`. Tests: `data`
       `it::chat_rollout_records` (positions in the sidecars, packing two widths, a 15-case refusal table, stale removal),
       the SDK's `it::training_records` (every fixture's verdict).
+      Training (lane agrpo-support): a position whose record carries a support (`pg_batch::SamplerSupport`) is trained
+      on `log pi_S = l_y - logsumexp_S l`: the support's ids are the head's extra targets (`slot_ids`: a position's
+      support, else its top-K under centring; one width `slot_width` = max(top K, widest support), enabled in
+      `prepare`), the forward reads the whole-row figures at them, `model::head_ce::renormalise_over_support`
+      renormalises on the host in f64, and `support_coefficients` (`c_j = omega_j - Omega pi_j`) make the one backward the
+      renormalised loss's gradient: the whole-row softmax cancels, no new kernel (knowledge #618). The clipped
+      surrogate's ratio is `pi_S / mu_S` against `behavior_support_logprobs`; the score-centred estimator centres over the
+      support (TRL's behaviour: `q_S = mu(v) / mass_mu(S)` from the record's whole-row top-K, `log mass = blp - bsl`, a
+      listed id outside the support dropped, the tail the rest of the support); the KL term stays on the whole row. Read
+      from `<split>.bso/.bsi/.bsl` in `ExternalPolicyGradient` and per example in the stream (`stream.support`, 1 to
+      1024, sizes the slots; a record with supports and no width, or a wider one, refused by name). Refused by name: a
+      supervised token outside its support, a support id past the vocabulary (`check_data`), supports under an importance
+      correction, a model whose head takes no extra targets. `external::check_centrable`'s truncated-sampler refusal is
+      lifted for an example whose every supervised token has a support, kept otherwise. Tests: `rl`
+      `it::support_replay` (a row drawn from tiny Qwen3.5 by `draw_row_supported` with top_k 5 / top_p 0.9: replayed,
+      the step-0 ratio is one within 2e-5 at every token; not replayed, it equals the support's mass, below 0.999; and
+      gradchecks of the support-normalised clipped and score-centred losses on tiny Qwen3 and Qwen3.5 at
+      `failures(2e-4, 2e-2)`, which a coefficient with `Omega` off by 10% fails), `it::score_centred_objective::
+      records_from_a_cut_sampler_train_when_their_supports_are_replayed` (both estimators step at ratio one on-policy,
+      every refusal, the warning count), `it::trl_goldens::support_replay_is_trls` (TRL's own `compute_loss` with
+      `sampling_mask` and its fused head `ChunkedLogProbFunction` from the pinned tree: the support-normalised
+      log-probability, mask, tail, per-token loss and the gradient in the logits, within 2e-6 relative; fixture extended
+      by `tools/goldens/trl_score_centring_reference.py`, the older cases unchanged), `rl::conformance_async::
+      support_replay` on every registered trainer (renormalised figure equals a softmax over the support of the model's
+      own `logits_all`, the installed weights one backward equal to their label equivalents; held where score centring
+      holds: qwen3, qwen35, ricursive, inkling2; qwen35moe refuses, no policy gradient), `model`
+      `it::head_ce_sparse::a_loss_renormalised_over_a_support_is_one_backward_of_its_extra_targets`, `stream_pg`
+      `a_stream_takes_supports_within_its_width_and_refuses_the_rest`.
+      Cost (`ce_sparse_targets`' per-logit scan of the K slots, measured on the CPU backend before using it at support
+      widths): 1024 rows x 32,000-token vocabulary, the sparse backward 0.45 s at K 1 and 0.52 s at K 256 against
+      0.42-0.44 s for the weighted backward, so the scan was kept (knowledge #618). Open: measure it on a card at K 256
+      (nsys); in-process online GRPO still records no supports (its sampler is the run's own).
 - [ ] Later, each driven by a profile and recorded as a knowledge entry (bottleneck, baseline, evidence, change,
       oracle, result, decision): colocated serve-and-train scheduling and whether the frozen base can be shared
       (A37-A39); merging append-only calls of one session and group-prefix packing in training, against the per-call

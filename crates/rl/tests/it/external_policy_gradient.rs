@@ -44,11 +44,13 @@ pub(crate) struct Row {
     pub(crate) top: Option<(usize, Vec<u32>, Vec<f32>)>,
     /// The sampling controls the record declares.
     pub(crate) sampler: Option<data::chat_rollout::SamplerDecl>,
+    /// The support each supervised token's cut sampler drew it from, and the token's log-probability within it.
+    pub(crate) support: Option<(Vec<Vec<u32>>, Vec<f32>)>,
 }
 
 impl Row {
     pub(crate) fn new(ids: &[u32], answer_from: usize, advantage: Option<f32>) -> Row {
-        Row { ids: ids.to_vec(), answer_from, advantage, group: None, behavior: None, truncated: false, top: None, sampler: None }
+        Row { ids: ids.to_vec(), answer_from, advantage, group: None, behavior: None, truncated: false, top: None, sampler: None, support: None }
     }
 
     /// A row whose `reward` is compared within `group` (the rows of the dataset that name it).
@@ -73,8 +75,20 @@ fn encoded(row: &Row) -> data::chat::EncodedSample {
         all_lps[row.answer_from * k..].copy_from_slice(lps);
         data::chat_rollout::BehaviorTop { k: *k, ids: all_ids, logprobs: all_lps }
     });
+    let behavior_support = row.support.as_ref().map(|(sets, lps)| {
+        assert_eq!(sets.len(), row.ids.len() - row.answer_from);
+        let mut s = data::chat_rollout::BehaviorSupport::none(row.answer_from);
+        let answer = data::chat_rollout::BehaviorSupport {
+            offsets: std::iter::once(0).chain(sets.iter().scan(0u64, |end, set| { *end += set.len() as u64; Some(*end) })).collect(),
+            ids: sets.concat(),
+            logprobs: lps.clone(),
+            max: sets.iter().map(Vec::len).max().unwrap_or(0),
+        };
+        s.extend(&answer);
+        s
+    });
     let provenance = data::chat_rollout::Provenance { policy_version: None, sampler: row.sampler };
-    data::chat::EncodedSample { ids: row.ids.clone(), mask, behavior, loss_weights: None, teacher: None, truncated: row.truncated, teacher_logprobs: Vec::new(), behavior_top, behavior_support: None, provenance }
+    data::chat::EncodedSample { ids: row.ids.clone(), mask, behavior, loss_weights: None, teacher: None, truncated: row.truncated, teacher_logprobs: Vec::new(), behavior_top, behavior_support, provenance }
 }
 
 /// The dataset of `rows` as the record contract lays it out. A row with an advantage and no group of its own is a
@@ -152,6 +166,22 @@ pub(crate) fn answer_logprobs(m: &Qwen35, row: &Row) -> Vec<f32> {
     let _ = m.forward();
     let lp = training::objectives(m).batch_token_logprobs();
     (row.answer_from - 1..row.ids.len() - 1).map(|t| lp[t]).collect()
+}
+
+/// The model's whole-row log-probability of each of `ids` at supervised token `i` of `row` (in the context the row
+/// gives it), one forward each, in f64.
+pub(crate) fn logprobs_at(m: &Qwen35, row: &Row, i: usize, ids: &[u32]) -> Vec<f64> {
+    ids.iter()
+        .map(|&id| {
+            let (mut tokens, mut targets) = (vec![0u32; T], vec![model::IGNORE; T]);
+            tokens[..row.ids.len()].copy_from_slice(&row.ids);
+            let at = row.answer_from - 1 + i;
+            targets[at] = id;
+            Model::set_batch(m, Batch::Lm { tokens: &tokens, targets: &targets });
+            let _ = m.forward();
+            f64::from(training::objectives(m).batch_token_logprobs()[at])
+        })
+        .collect()
 }
 
 pub(crate) fn grad_l1(m: &Qwen35) -> f32 {

@@ -285,8 +285,9 @@ fn async_conforms<M: model::Model>(subject: model::conformance::Subject<M>, poli
     // seed: fixed so a conformance failure reproduces
     let report = run_async(&subject, declares, publish.as_ref(), &dir, 41).unwrap_or_else(|e| panic!("{e}"));
     let holds = |v: &Verdict| *v == Verdict::Holds;
-    assert_eq!((holds(&report.online_policy_gradient), holds(&report.score_centring), holds(&report.policy_publication)), (online, centring, publication), "{name}: {report:?}");
-    for (verdict, what) in [(&report.online_policy_gradient, "online policy gradient"), (&report.score_centring, "score centring"), (&report.policy_publication, "policy publication")] {
+    // Support replay is the head's extra targets, as score centring is: it holds exactly where centring does.
+    assert_eq!((holds(&report.online_policy_gradient), holds(&report.score_centring), holds(&report.support_replay), holds(&report.policy_publication)), (online, centring, centring, publication), "{name}: {report:?}");
+    for (verdict, what) in [(&report.online_policy_gradient, "online policy gradient"), (&report.score_centring, "score centring"), (&report.support_replay, "support replay"), (&report.policy_publication, "policy publication")] {
         if let Verdict::Refused(why) = verdict {
             assert!(!why.is_empty(), "{name}: {what} is refused without a reason");
         }

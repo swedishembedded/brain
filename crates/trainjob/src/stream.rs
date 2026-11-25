@@ -66,6 +66,7 @@ struct StreamDoc {
     max_staleness: Option<u64>,
     max_steps: Option<u32>,
     top_k: Option<u64>,
+    support: Option<u64>,
     start_adapter: Option<SourceDoc>,
 }
 
@@ -81,6 +82,8 @@ pub struct StreamRefs {
     pub max_steps: Option<u32>,
     /// The sampler top-K every record carries, for the score-centred estimator.
     pub top_k: Option<usize>,
+    /// The widest sampler support a record may carry per token (`behavior_support_*`).
+    pub support: Option<usize>,
     pub start_adapter: Option<Source>,
 }
 
@@ -113,13 +116,16 @@ impl StreamRefs {
         if doc.top_k.is_some_and(|k| !(1..=brain::MAX_STREAM_TOP_K as u64).contains(&k)) {
             return refuse(format!("top_k must be 1 to {}", brain::MAX_STREAM_TOP_K));
         }
+        if doc.support.is_some_and(|n| !(1..=brain::MAX_STREAM_SUPPORT as u64).contains(&n)) {
+            return refuse(format!("support must be 1 to {}", brain::MAX_STREAM_SUPPORT));
+        }
         let start_adapter = doc.start_adapter.map(|s| s.resolve("start_adapter").map_err(|e| format!("stream: {}", e.trim_start_matches("data.")))).transpose()?;
         if let Some(Source::Blob(name)) = &start_adapter {
             if name != "adapter" {
                 return refuse(format!("start_adapter names the input blob {name:?}; the starting adapter is the input \"adapter\""));
             }
         }
-        Ok(StreamRefs { publish_adapter: doc.publish_adapter, publish_every: doc.publish_every, step_tokens: doc.step_tokens as usize, queue_tokens: doc.queue_tokens as usize, max_staleness: doc.max_staleness, max_steps: doc.max_steps, top_k: doc.top_k.map(|k| k as usize), start_adapter })
+        Ok(StreamRefs { publish_adapter: doc.publish_adapter, publish_every: doc.publish_every, step_tokens: doc.step_tokens as usize, queue_tokens: doc.queue_tokens as usize, max_staleness: doc.max_staleness, max_steps: doc.max_steps, top_k: doc.top_k.map(|k| k as usize), support: doc.support.map(|n| n as usize), start_adapter })
     }
 
     pub fn digests(&self) -> Vec<Digest> {
@@ -219,7 +225,7 @@ pub(crate) fn train(env: &JobEnv, request: &Request, inputs: &Inputs<'_>, files:
         ft = ft.continue_from(path);
     }
     let cancel = inv.cancel.clone();
-    let stream = Arc::new(ft.open_rollout_stream(refs.step_tokens, refs.queue_tokens, refs.max_staleness, refs.top_k, move || !cancel.is_cancelled(), inv.lease.clone()).map_err(job::trainer_failure)?);
+    let stream = Arc::new(ft.open_rollout_stream(refs.step_tokens, refs.queue_tokens, refs.max_staleness, refs.top_k, refs.support, move || !cancel.is_cancelled(), inv.lease.clone()).map_err(job::trainer_failure)?);
     let ft = ft.rollout_stream(&stream);
     let published_at_start = bank.identity(&refs.publish_adapter).map_or(0, |identity| identity.version);
     stream.set_version(published_at_start);

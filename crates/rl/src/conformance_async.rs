@@ -16,6 +16,10 @@
 //! * **score centring:** the score-centred estimator's weights, installed as the label weight and the extra targets of
 //!   one backward, give the gradient of the sum of label-equivalent weighted backwards (an extra target `(v, c)` adds
 //!   what the label `v` at weight `c` adds); a model whose head takes no extra targets refuses the estimator.
+//! * **support replay:** a position trained over the support its cut sampler drew it from reads the trainer's
+//!   log-probability renormalised over that support (one forward with the support's ids as extra targets, equal to a
+//!   softmax over the support's logits of the model's own `logits_all`), and the weights the estimator installs for it
+//!   are one backward equal to the sum of their label equivalents; a model whose head takes no extra targets refuses it.
 //! * **policy publication:** the adapter the run hands to its publisher every step is a file the architecture's own
 //!   serving bank takes (the check is the caller's, [`Publication::check`]: the bank lives above this crate).
 //!
@@ -32,7 +36,7 @@ use serde_json::Value;
 
 use crate::objective::external::PolicyGradientConfig;
 use crate::objective::grpo::LossAgg;
-use crate::objective::pg_batch::{weigh, PgBatch, SamplerTop};
+use crate::objective::pg_batch::{weigh, PgBatch, SamplerSupport, SamplerTop};
 use crate::objective::pg_loss::{Estimator, PgLoss};
 use crate::objective::stream_pg::{RolloutFeed, StreamExample, StreamGroup, StreamSettings, StreamedPolicyGradient};
 
@@ -70,6 +74,8 @@ pub enum Verdict {
 pub struct AsyncReport {
     pub online_policy_gradient: Verdict,
     pub score_centring: Verdict,
+    /// Support replay ([`support_replay`]): held exactly where score centring is (both are the head's extra targets).
+    pub support_replay: Verdict,
     pub policy_publication: Verdict,
 }
 
@@ -94,7 +100,7 @@ fn groups(vocab: u32) -> Vec<StreamGroup> {
                 .map(|(i, &advantage)| {
                     let ids: Vec<u32> = (0..SEQ).map(|t| (g as u32 * 7 + i as u32 * 3 + t * 5 + 1) % vocab).collect();
                     let mask: Vec<bool> = (0..SEQ as usize).map(|t| t >= 2).collect();
-                    StreamExample { ids, mask, behavior: vec![-(vocab as f32).ln(); SEQ as usize], advantage, policy_version: None, top: None }
+                    StreamExample { ids, mask, behavior: vec![-(vocab as f32).ln(); SEQ as usize], advantage, policy_version: None, top: None, support: None }
                 })
                 .collect();
             StreamGroup { key: format!("g{g}"), examples }
@@ -117,7 +123,7 @@ fn applied(events: &[Value]) -> Vec<String> {
 fn streamed<M: Model>(subject: &Subject<M>, seed: u64, state: &Path, stop_after: Option<u32>, publication: Option<&Publication<'_>>, dir: &Path, published: &Mutex<Vec<Result<(), String>>>) -> Result<(Vec<Value>, Vec<String>, M), String> {
     let (m, _) = build(subject, Some(RANK), BATCH, seed);
     let vocab = ModelConfig::vocab(m.config());
-    let settings = StreamSettings { step_tokens: GROUP_TOKENS, queue_tokens: GROUPS * GROUP_TOKENS, max_staleness: None, block: SEQ as usize, top_k: None };
+    let settings = StreamSettings { step_tokens: GROUP_TOKENS, queue_tokens: GROUPS * GROUP_TOKENS, max_staleness: None, block: SEQ as usize, top_k: None, support: None };
     let feed = RolloutFeed::new(settings, || true, Default::default())?;
     if !state.exists() {
         feed.open();
@@ -231,7 +237,7 @@ fn score_centring<M: Model>(subject: &Subject<M>, seed: u64) -> Result<Verdict, 
     // cancelled by the tail's.
     let loss = PgLoss { centring_low: 1e-6, centring_high: 1.5, ..config(Estimator::ScoreCentred).loss };
     let spec = loss.spec();
-    let batch = PgBatch { targets: &targets, old_lp: &old_lp, ref_lp: None, advantage: &advantage, is_weight: None, top: Some(SamplerTop { k: K, ids: &ids, logprobs: &sampler }) };
+    let batch = PgBatch { targets: &targets, old_lp: &old_lp, ref_lp: None, advantage: &advantage, is_weight: None, top: Some(SamplerTop { k: K, ids: &ids, logprobs: &sampler }), support: None };
     let denominator = 7.0f32;
 
     m.set_batch(Batch::Lm { tokens: &tokens, targets: &targets });
@@ -283,13 +289,110 @@ fn score_centring<M: Model>(subject: &Subject<M>, seed: u64) -> Result<Verdict, 
     Ok(Verdict::Holds)
 }
 
+/// The extra-target weights of `batch` (forwarded on `m` with `ids` as its slots), installed as one backward, against the
+/// sum of their label equivalents on a second model built the same way: an extra target `(v, c)` adds what the label `v`
+/// at weight `c` adds.
+#[allow(clippy::too_many_arguments)]
+fn one_backward_is_its_label_equivalents<M: Model>(subject: &Subject<M>, seed: u64, m: &M, tokens: &[u32], targets: &[u32], ids: &[u32], k: usize, weights: &crate::objective::pg_batch::TokenWeights, what: &str) -> Result<(), String> {
+    let name = subject.name;
+    let extra = weights.extra.clone().ok_or_else(|| format!("{name}: {what} wrote no extra-target coefficients"))?;
+    let denominator = 7.0f32;
+    m.set_batch(Batch::LmWeighted { tokens, targets, weights: &weights.label });
+    let o = m.token_objectives().expect("checked above");
+    o.set_loss_denominator(denominator);
+    o.set_sparse_target_ids(ids)?;
+    o.set_sparse_target_weights(&extra)?;
+    let got = gradients(m);
+    let (mut plain, _) = build_exact(subject, Some(RANK), BATCH, seed);
+    model::conformance_grad::randomize_adapters(&plain, seed);
+    require_token_objectives(&mut plain).map_err(|e| e.to_string())?.enable_weighted_loss();
+    let weighted = |labels: &[u32], w: &[f32]| {
+        plain.set_batch(Batch::LmWeighted { tokens, targets: labels, weights: w });
+        plain.token_objectives().expect("checked above").set_loss_denominator(denominator);
+        gradients(&plain)
+    };
+    let n = targets.len();
+    let mut want = weighted(targets, &weights.label);
+    for j in 0..k {
+        let labels: Vec<u32> = (0..n).map(|i| ids[i * k + j]).collect();
+        let coefs: Vec<f32> = (0..n).map(|i| extra[i * k + j]).collect();
+        for ((_, total), (_, g)) in want.iter_mut().zip(weighted(&labels, &coefs)) {
+            total.iter_mut().zip(&g).for_each(|(t, g)| *t += g);
+        }
+    }
+    let largest = want.iter().flat_map(|(_, w)| w.iter()).fold(0.0f32, |a, &b| a.max(b.abs())).max(1e-12);
+    for ((tensor, g), (_, w)) in got.iter().zip(&want) {
+        let off = g.iter().zip(w).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        if off > 1e-4 * largest {
+            return Err(format!("{name}: {tensor}: the {what} backward is {off:e} from the sum of its label equivalents (largest gradient {largest:e})"));
+        }
+    }
+    Ok(())
+}
+
+/// Support replay: the trainer's log-probability renormalised over a support of three ids (the label and two others)
+/// against an f64 softmax over the same ids of the model's own `logits_all`, and the clipped surrogate's weights over the
+/// support as one backward against their label equivalents. Built at the exact fp32 arithmetic ([`build_exact`]).
+fn support_replay<M: Model>(subject: &Subject<M>, seed: u64) -> Result<Verdict, String> {
+    const K: usize = 3;
+    let name = subject.name;
+    let (mut m, _) = build_exact(subject, Some(RANK), BATCH, seed);
+    model::conformance_grad::randomize_adapters(&m, seed);
+    let objectives = require_token_objectives(&mut m).map_err(|e| e.to_string())?;
+    objectives.enable_weighted_loss();
+    if let Err(e) = objectives.enable_sparse_targets(K as u32) {
+        return Ok(Verdict::Refused(format!("its LM head takes no extra targets: {e}")));
+    }
+    let vocab = ModelConfig::vocab(m.config());
+    let (tokens, targets) = model::conformance::batch(vocab);
+    let n = tokens.len();
+    let supervised = |i: usize| targets[i] != IGNORE;
+    let ids: Vec<u32> = (0..n).flat_map(|i| if supervised(i) { [targets[i], (targets[i] + 1) % vocab, (targets[i] + 5) % vocab] } else { [IGNORE; K] }).collect();
+    m.set_batch(Batch::Lm { tokens: &tokens, targets: &targets });
+    m.token_objectives().expect("checked above").set_sparse_target_ids(&ids)?;
+    m.forward();
+    let o = m.token_objectives().expect("checked above");
+    let (new_lp, new_slots) = (o.batch_token_logprobs(), o.batch_sparse_target_logprobs().ok_or_else(|| format!("{name}: no extra-target log-probabilities after a forward"))?);
+    // The renormalised figure against the model's own logits, row by row, read on the same model built for one row (the
+    // same weights and adapters: `logits_all` scores a single sequence).
+    let seq = n / BATCH as usize;
+    let (one, _) = build_exact(subject, Some(RANK), 1, seed);
+    model::conformance_grad::randomize_adapters(&one, seed);
+    for r in 0..BATCH as usize {
+        let logits = one.logits_all(&tokens[r * seq..(r + 1) * seq]).ok_or_else(|| format!("{name}: no logits_all to check the support against"))?;
+        for t in (0..seq).filter(|&t| supervised(r * seq + t)) {
+            let i = r * seq + t;
+            let row = &logits[t * vocab as usize..(t + 1) * vocab as usize];
+            let at: Vec<f64> = ids[i * K..(i + 1) * K].iter().map(|&id| f64::from(row[id as usize])).collect();
+            let max = at.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let want = at[0] - (max + at.iter().map(|z| (z - max).exp()).sum::<f64>().ln());
+            let got = model::head_ce::renormalise_over_support(new_lp[i], &new_slots[i * K..(i + 1) * K], &ids[i * K..(i + 1) * K]).ok_or_else(|| format!("{name}: position {i} has no support"))?.label;
+            if (got - want).abs() > 1e-3 * want.abs().max(1.0) {
+                return Err(format!("{name}: position {i}: the trainer's log-probability over the support is {got}, the softmax of its logits over the support {want}"));
+            }
+        }
+    }
+    // The sampler's figure within the support, a little off the trainer's so the ratios are not one.
+    let sampler: Vec<f32> = (0..n).map(|i| if supervised(i) { model::head_ce::renormalise_over_support(new_lp[i], &new_slots[i * K..(i + 1) * K], &ids[i * K..(i + 1) * K]).expect("a support").label as f32 - 0.05 * (i % 3) as f32 } else { f32::NAN }).collect();
+    let old_lp: Vec<f32> = (0..n).map(|i| if supervised(i) { new_lp[i] - 0.1 } else { 0.0 }).collect();
+    let advantage: Vec<f32> = (0..n).map(|i| if supervised(i) { if i % 2 == 0 { 1.0 } else { -0.5 } } else { f32::NAN }).collect();
+    let spec = config(Estimator::ClippedSurrogate).loss.spec();
+    let batch = PgBatch { targets: &targets, old_lp: &old_lp, ref_lp: None, advantage: &advantage, is_weight: None, top: None, support: Some(SamplerSupport { k: K, ids: &ids, logprobs: &sampler }) };
+    let (weights, terms) = weigh(&new_lp, Some(&new_slots), &batch, &spec);
+    if !terms.finite || weights.extra.as_ref().is_none_or(|e| e.iter().all(|&c| c == 0.0)) {
+        return Err(format!("{name}: the weights over the supports are not finite, or renormalise nothing"));
+    }
+    one_backward_is_its_label_equivalents(subject, seed, &m, &tokens, &targets, &ids, K, &weights, "support-normalised")?;
+    Ok(Verdict::Holds)
+}
+
 /// Run A49 for `subject` as `declares` says it should behave, publishing through `publication` when the architecture
 /// serves adapters; `dir` holds the run's state and published files. `seed` draws the weights.
 pub fn run_async<M: Model>(subject: &Subject<M>, declares: AsyncDeclares, publication: Option<&Publication<'_>>, dir: &Path, seed: u64) -> Result<AsyncReport, String> {
     let name = subject.name;
     if !declares.online_policy_gradient {
         let why = Verdict::Refused("its trainer declares no policy gradient (ChatTrainer::POLICY_GRADIENT)".to_string());
-        return Ok(AsyncReport { online_policy_gradient: why.clone(), score_centring: why.clone(), policy_publication: why });
+        return Ok(AsyncReport { online_policy_gradient: why.clone(), score_centring: why.clone(), support_replay: why.clone(), policy_publication: why });
     }
     if !subject.declares.token_objectives || !subject.declares.adapters {
         return Err(format!("{name}: declares the policy gradient but no token objectives and adapters to train it with"));
@@ -318,5 +421,9 @@ pub fn run_async<M: Model>(subject: &Subject<M>, declares: AsyncDeclares, public
     if (score_centring == Verdict::Holds) != subject.declares.sparse_targets {
         return Err(format!("{name}: declares sparse_targets={} and the score-centred check answered {score_centring:?}", subject.declares.sparse_targets));
     }
-    Ok(AsyncReport { online_policy_gradient: Verdict::Holds, score_centring, policy_publication })
+    let support_replay = support_replay(subject, seed)?;
+    if (support_replay == Verdict::Holds) != subject.declares.sparse_targets {
+        return Err(format!("{name}: declares sparse_targets={} and the support-replay check answered {support_replay:?}", subject.declares.sparse_targets));
+    }
+    Ok(AsyncReport { online_policy_gradient: Verdict::Holds, score_centring, support_replay, policy_publication })
 }

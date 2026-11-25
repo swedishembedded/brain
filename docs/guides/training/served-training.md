@@ -612,6 +612,7 @@ POST /v1/jobs
 | `max_staleness` | optional: a group whose oldest record's `policy_version` is more than this many versions behind the last published one is dropped, not trained |
 | `max_steps` | optional: the job ends after this many steps and the learning rate decays over them; unset, the job runs until `finish` and keeps its peak rate after a warmup of at most 10 steps |
 | `top_k` | with `estimator: score-centred` (required then, refused otherwise): the sampler top-K every record carries (`behavior_top_ids`, `behavior_top_logprobs`), at most 256 |
+| `support` | optional, 1 to 1024: the widest sampler support a record may carry per token (`behavior_support_*`, from a policy trace with `support`); the trainer renormalises its log-probabilities over each token's support. Records with supports are refused without it, and so is one wider than it |
 | `start_adapter` | optional: `{"digest": ...}` or `{"blob": "adapter"}`, the adapter the run continues |
 
 The estimator and its settings are the request's policy-gradient params, as for a dataset: the clipped surrogate,

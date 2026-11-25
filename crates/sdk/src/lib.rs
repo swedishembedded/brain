@@ -178,7 +178,7 @@ mod rollout_stream;
 #[cfg(feature = "study")]
 pub use rollout_stream::{RolloutStream, StreamRefusal, MAX_STREAM_RECORDS, OPEN_ENDED_STREAM_STEPS, STREAM_MAX_WARMUP};
 #[cfg(feature = "study")]
-pub use rl::objective::stream_pg::{check_streamable, Admission as StreamAdmission, StreamSettings, MAX_TOP_K as MAX_STREAM_TOP_K};
+pub use rl::objective::stream_pg::{check_streamable, Admission as StreamAdmission, StreamSettings, MAX_SUPPORT as MAX_STREAM_SUPPORT, MAX_TOP_K as MAX_STREAM_TOP_K};
 #[cfg(feature = "study")]
 mod example_length;
 #[cfg(feature = "study")]

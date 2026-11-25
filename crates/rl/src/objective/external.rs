@@ -94,7 +94,7 @@ use super::grpo_term::ClipBand;
 use super::onpolicy_distill::{sequence_advantages, token_advantage, DistillEstimator};
 use super::numerics::{NumericsAccumulator, NumericsBounds, NumericsReport};
 use super::pg_loss::{gradient_scan, Estimator, GuardVerdict, PgLoss, StepGuard};
-use super::pg_batch::{install_sampler_ids, SamplerTop, adapters_are_zero, adapters_can_be_disabled, backward_weighted_lp, weigh, with_adapters_disabled, AdapterState, BatchTerms, PgBatch, PgSpec};
+use super::pg_batch::{install_sampler_ids, slot_width, SamplerSupport, SamplerTop, adapters_are_zero, adapters_can_be_disabled, backward_weighted_lp, weigh, with_adapters_disabled, AdapterState, BatchTerms, PgBatch, PgSpec};
 use super::score_cache::{ExampleScores, ScoreCache, TokenAdvantages};
 
 /// The policy the KL term keeps the trained policy close to.
@@ -301,31 +301,60 @@ pub(crate) fn advantages(split: &data::chat_rollout::SplitRollouts, norm: Advant
 }
 
 /// The sampler's top-K of a split for the score-centred estimator, refusing a split it cannot centre: one without a
-/// top-K, a policy example a supervised token of which has none, or one whose sampler truncated its distribution (the
-/// recorded log-probabilities are then not the distribution that drew the token: support replay is not implemented).
+/// top-K, a policy example a supervised token of which has none, or one whose sampler truncated its distribution and
+/// that does not carry the support of every supervised token (`support`, the split's).
 #[allow(clippy::too_many_arguments)]
-fn score_centred_rows(dir: &Path, examples: &[Option<data::chat_rollout::ExampleRollout>], advantage: &[f32], eligible: &[usize], starts: &[usize], ends: &[usize], mask: &[bool], tokens: usize) -> Result<data::chat_rollout::BehaviorTop, String> {
+fn score_centred_rows(dir: &Path, examples: &[Option<data::chat_rollout::ExampleRollout>], advantage: &[f32], eligible: &[usize], starts: &[usize], ends: &[usize], mask: &[bool], tokens: usize, support: Option<&data::chat_rollout::BehaviorSupport>) -> Result<data::chat_rollout::BehaviorTop, String> {
     let top = data::chat_rollout::read_behavior_top(dir, "train", tokens).map_err(|e| e.to_string())?.ok_or_else(|| {
         "estimator \"score-centred\" centres over the sampler's top-K, and the records carry none (behavior_top_ids / behavior_top_logprobs on every supervised answer, from a policy trace with top_log_probs)".to_string()
     })?;
-    check_centrable(&top, examples, advantage, eligible, starts, ends, mask)?;
+    check_centrable(&top, examples, advantage, eligible, starts, ends, mask, support)?;
     Ok(top)
 }
 
+/// Whether every supervised token of example `e` (`starts[e] + 1..ends[e]` under `mask`) carries the support its sampler
+/// drew it from.
+pub(crate) fn supported_throughout(support: Option<&data::chat_rollout::BehaviorSupport>, e: usize, starts: &[usize], ends: &[usize], mask: &[bool]) -> bool {
+    support.is_some_and(|s| (starts[e] + 1..ends[e]).all(|t| !mask[t] || !s.of(t).is_empty()))
+}
+
 /// Refuse a split the score-centred estimator cannot centre over its sampler's top-K `top` (per token of the split):
-/// a policy example whose sampler truncated its distribution (the recorded log-probabilities are then not the
-/// distribution that drew the token: support replay is not implemented), or one a supervised token of which carries no
-/// top-K. The message names the example.
-pub(crate) fn check_centrable(top: &data::chat_rollout::BehaviorTop, examples: &[Option<data::chat_rollout::ExampleRollout>], advantage: &[f32], eligible: &[usize], starts: &[usize], ends: &[usize], mask: &[bool]) -> Result<(), String> {
+/// a policy example whose sampler truncated its distribution and that does not carry the support of every supervised
+/// token (`support`; without it the recorded log-probabilities are not the distribution that drew the token), or one a
+/// supervised token of which carries no top-K. The message names the example.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn check_centrable(top: &data::chat_rollout::BehaviorTop, examples: &[Option<data::chat_rollout::ExampleRollout>], advantage: &[f32], eligible: &[usize], starts: &[usize], ends: &[usize], mask: &[bool], support: Option<&data::chat_rollout::BehaviorSupport>) -> Result<(), String> {
     for &e in eligible.iter().filter(|&&e| !advantage[e].is_nan()) {
         if let Some(sampler) = examples[e].and_then(|r| r.sampler).filter(data::chat_rollout::SamplerDecl::truncates) {
-            return Err(format!("example {e}: its sampler truncated the distribution ({sampler:?}); estimator \"score-centred\" needs the whole-row distribution that drew the token (top_k unset, top_p 1, min_p 0)"));
+            if !supported_throughout(support, e, starts, ends, mask) {
+                return Err(format!("example {e}: its sampler truncated the distribution ({sampler:?}) and its record carries no support for every supervised token; estimator \"score-centred\" needs the distribution that drew the token: the whole row (top_k unset, top_p 1, min_p 0), or the sampler's support replayed (behavior_support_* from a policy trace with support)"));
+            }
         }
         if let Some(t) = (starts[e] + 1..ends[e]).find(|&t| mask[t] && top.ids[t * top.k..(t + 1) * top.k].iter().all(|&id| id == data::chat_rollout::NO_TOP_ID)) {
             return Err(format!("example {e}: supervised token {} carries no sampler top-K (behavior_top_ids); estimator \"score-centred\" needs it on every answer of a rollout", t - starts[e]));
         }
     }
     Ok(())
+}
+
+/// Refuse a split's supports the trainer cannot replay: a supervised token outside its own support (the sampler draws
+/// from it), or supports under an importance correction (whose ratio is against the trainer's start-of-run whole-row
+/// figure, not the sampler's within its support). The message names the token.
+fn check_supports(support: &data::chat_rollout::BehaviorSupport, tokens: &[u32], mask: &[bool], importance: bool) -> Result<(), String> {
+    if importance {
+        return Err("the records carry the supports of their cut samplers (behavior_support_*), and an importance correction takes the ratio against the trainer's whole-row figures; train them without a correction (importance none)".to_string());
+    }
+    if let Some(t) = (0..tokens.len()).find(|&t| mask[t] && !support.of(t).is_empty() && !support.of(t).contains(&tokens[t])) {
+        return Err(format!("token {t} of the split ({}) is not in the support its sampler drew it from ({:?})", tokens[t], support.of(t)));
+    }
+    Ok(())
+}
+
+/// Policy examples whose sampler truncated its distribution and that do not carry the support of every supervised
+/// token: the clipped surrogate trains them against the whole-row figure, whose ratio starts at the support's mass, not
+/// at 1.
+fn cut_without_support(examples: &[Option<data::chat_rollout::ExampleRollout>], advantage: &[f32], eligible: &[usize], starts: &[usize], ends: &[usize], mask: &[bool], support: Option<&data::chat_rollout::BehaviorSupport>) -> usize {
+    eligible.iter().filter(|&&e| !advantage[e].is_nan() && examples[e].and_then(|r| r.sampler).is_some_and(|s| s.truncates()) && !supported_throughout(support, e, starts, ends, mask)).count()
 }
 
 /// What a run would leave unread: a step draws `grad_accum` batches of `batch_size` records, so a run of `steps`
@@ -587,6 +616,10 @@ pub struct PolicyGradientStats {
     /// Supervised tokens whose behaviour log-probability was recorded, and those that took the start-of-run value.
     pub tokens_recorded_behavior: usize,
     pub tokens_start_of_run_behavior: usize,
+    /// Policy sequences sampled by a truncating sampler (top-k, top-p, min-p) whose record carries no support: the
+    /// clipped surrogate trains them against the whole-row behaviour figure, a biased ratio (the run warns). Debt: gone
+    /// once online runs record supports by default.
+    pub sequences_cut_without_support: usize,
     /// Sequences with a teacher context, and of those (and of those with per-token teacher scores) the ones whose
     /// summed advantage the cap scaled down.
     pub sequences_with_teacher: usize,
@@ -648,6 +681,8 @@ struct Rows {
     teacher_logprobs: Option<Vec<f32>>,
     /// The sampler's top-K per token of the stream, when the run trains the score-centred estimator.
     top: Option<data::chat_rollout::BehaviorTop>,
+    /// The support each token's cut sampler drew it from, when the records carry them.
+    support: Option<data::chat_rollout::BehaviorSupport>,
 }
 
 /// The policy the run started from, which the behaviour proxy (and, when so configured, the reference and the teacher)
@@ -752,11 +787,14 @@ struct Laid {
     /// The sampler's top-K at each position (`[bs * bl * k]` ids and log-probabilities), under the score-centred
     /// estimator.
     top: Option<(usize, Vec<u32>, Vec<f32>)>,
+    /// The support each policy position's target was drawn from (`[bs * bl * k]` ids, `[bs * bl]` the sampler's
+    /// log-probability within it, NaN where none), when the records carry supports.
+    support: Option<(usize, Vec<u32>, Vec<f32>)>,
 }
 
 impl Laid {
     fn batch(&self) -> PgBatch<'_> {
-        PgBatch { targets: &self.targets, old_lp: &self.old_lp, ref_lp: self.has_ref.then_some(&self.ref_lp[..]), advantage: &self.advantage, is_weight: self.is_weight.as_deref(), top: self.top.as_ref().map(|(k, ids, logprobs)| SamplerTop { k: *k, ids, logprobs }) }
+        PgBatch { targets: &self.targets, old_lp: &self.old_lp, ref_lp: self.has_ref.then_some(&self.ref_lp[..]), advantage: &self.advantage, is_weight: self.is_weight.as_deref(), top: self.top.as_ref().map(|(k, ids, logprobs)| SamplerTop { k: *k, ids, logprobs }), support: self.support.as_ref().map(|(k, ids, logprobs)| SamplerSupport { k: *k, ids, logprobs }) }
     }
 }
 
@@ -961,8 +999,16 @@ impl ExternalPolicyGradient {
             eprintln!("policy gradient: {note}");
         }
         let tag_examples = ["train", "val"].iter().any(|split| dir.join(format!("{split}.img.bin")).exists());
-        let top = if cfg.loss.estimator == Estimator::ScoreCentred { Some(score_centred_rows(dir, &recorded.examples, &advantage, &eligible, &starts, &ends, &mask, tokens.len()).map_err(|why| invalid(format!("{}: {why}", dir.display())))?) } else { None };
-        let rows = Rows { starts, ends, advantage, eligible, behavior, teacher, teacher_logprobs, top };
+        let support = data::chat_rollout::read_behavior_support(dir, "train", tokens.len())?;
+        if let Some(support) = &support {
+            check_supports(support, &tokens, &mask, cfg.importance.is_on()).map_err(|why| invalid(format!("{}: {why}", dir.display())))?;
+        }
+        let top = if cfg.loss.estimator == Estimator::ScoreCentred { Some(score_centred_rows(dir, &recorded.examples, &advantage, &eligible, &starts, &ends, &mask, tokens.len(), support.as_ref()).map_err(|why| invalid(format!("{}: {why}", dir.display())))?) } else { None };
+        stats.sequences_cut_without_support = cut_without_support(&recorded.examples, &advantage, &eligible, &starts, &ends, &mask, support.as_ref());
+        if stats.sequences_cut_without_support > 0 {
+            eprintln!("policy gradient: WARNING: {} policy sequences were sampled by a truncating sampler (top_k, top_p, min_p) and carry no support; the clipped surrogate trains them against the whole-row behaviour figure, so their importance ratio is biased (it starts at the support's mass, below 1, not at 1). Record the support (a policy trace with support, behavior_support_* on the records) to replay the sampler without bias", stats.sequences_cut_without_support);
+        }
+        let rows = Rows { starts, ends, advantage, eligible, behavior, teacher, teacher_logprobs, top, support };
         let cache = ScoreCache::create(dir, rows.starts.len())?;
         let max_token = tokens.iter().copied().chain(rows.teacher.iter().flat_map(|t| (0..rows.starts.len()).filter_map(|e| t.example(e)).flat_map(|(ids, _)| ids.iter().copied()))).max().unwrap_or(0);
         Ok(ExternalPolicyGradient { cfg, train, batch_cfg, rows, mask, tag_examples, order: None, cache, max_token, anchors: None, weights_moved: false, work: None, scoring_seconds: 0.0, accumulating: StepAccumulator::default(), stats, consecutive_nonfinite: 0, guard: StepGuard::default(), gate: NumericsAccumulator::default(), serve_gap: NumericsAccumulator::default(), serve_gap_seen: HashSet::new(), verdict: None })
@@ -1010,7 +1056,7 @@ impl ExternalPolicyGradient {
         let (bs, bl) = (self.batch_cfg.batch_size, self.batch_cfg.block_size);
         let has_ref = self.anchors.as_ref().is_some_and(|a| a.wants_reference);
         let corrected = self.cfg.importance.is_on();
-        let mut laid = Laid { tokens: x, targets, picks: picks.to_vec(), old_lp: vec![0.0; bs * bl], ref_lp: vec![0.0; bs * bl], advantage: vec![f32::NAN; bs * bl], is_weight: corrected.then(|| vec![1.0; bs * bl]), has_ref, teacher: Vec::new(), start_lp: vec![None; picks.len()], top: self.rows.top.as_ref().map(|t| (t.k, vec![IGNORE; bs * bl * t.k], vec![f32::NAN; bs * bl * t.k])) };
+        let mut laid = Laid { tokens: x, targets, picks: picks.to_vec(), old_lp: vec![0.0; bs * bl], ref_lp: vec![0.0; bs * bl], advantage: vec![f32::NAN; bs * bl], is_weight: corrected.then(|| vec![1.0; bs * bl]), has_ref, teacher: Vec::new(), start_lp: vec![None; picks.len()], top: self.rows.top.as_ref().map(|t| (t.k, vec![IGNORE; bs * bl * t.k], vec![f32::NAN; bs * bl * t.k])), support: self.rows.support.as_ref().map(|s| (s.max, vec![IGNORE; bs * bl * s.max], vec![f32::NAN; bs * bl])) };
         for (b, pick) in picks.iter().enumerate() {
             let Some(e) = *pick else { continue };
             let scores = self.cache.get(e).unwrap_or_else(|err| panic!("policy-gradient score cache, example {e}: {err}"));
@@ -1043,6 +1089,17 @@ impl ExternalPolicyGradient {
                             ids[at + j] = id;
                             lps[at + j] = top.logprobs[from + j];
                         }
+                    }
+                }
+            }
+            if let (Some((k, ids, lps)), Some(support)) = (laid.support.as_mut(), self.rows.support.as_ref()) {
+                for t in (0..bl.min(self.rows.ends[e] - self.rows.starts[e])).filter(|&t| laid.targets[b * bl + t] != IGNORE && !laid.advantage[b * bl + t].is_nan()) {
+                    // Row position t predicts token start + 1 + t, as the behaviour log-probabilities are laid out.
+                    let (at, token) = (b * bl + t, self.rows.starts[e] + 1 + t);
+                    let of = support.of(token);
+                    if !of.is_empty() {
+                        ids[at * *k..at * *k + of.len()].copy_from_slice(of);
+                        lps[at] = support.logprobs[token];
                     }
                 }
             }
@@ -1349,8 +1406,11 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
         let objectives = training::require_token_objectives(model)?;
         objectives.enable_weighted_loss();
         objectives.set_logit_scale(1.0 / self.cfg.temperature);
-        if let Some(top) = &self.rows.top {
-            objectives.enable_sparse_targets(top.k as u32).map_err(|_| Unsupported::of::<M>(Capability::SparseTargets))?;
+        // The extra-target slots: the sampler's top-K under the score-centred estimator, the widest support where the
+        // records carry supports (one width for both, [`slot_width`]).
+        let slots = self.rows.top.as_ref().map_or(0, |t| t.k).max(self.rows.support.as_ref().map_or(0, |s| s.max));
+        if slots > 0 {
+            objectives.enable_sparse_targets(slots as u32).map_err(|_| Unsupported::of::<M>(Capability::SparseTargets))?;
         }
         if self.cfg.kv_roundtrip.is_some() {
             objectives.set_kv_roundtrip(self.cfg.kv_roundtrip).map_err(|_| Unsupported::of::<M>(Capability::KvRoundtrip))?;
@@ -1373,6 +1433,9 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
         }
         if let Some(id) = self.rows.top.as_ref().and_then(|t| t.ids.iter().copied().filter(|&id| id != data::chat_rollout::NO_TOP_ID).max()).filter(|&id| id >= vocab) {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("behavior_top_ids: the dataset's sampler top-K names token id {id} but the model's vocabulary is {vocab}")));
+        }
+        if let Some(id) = self.rows.support.as_ref().and_then(|s| s.ids.iter().copied().max()).filter(|&id| id >= vocab) {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("behavior_support_ids: the dataset's sampler support names token id {id} but the model's vocabulary is {vocab}")));
         }
         Ok(())
     }
@@ -1512,8 +1575,8 @@ impl<M: Model> Objective<M> for ExternalPolicyGradient {
         install_sampler_ids(model, &batch, &spec).expect("check_data held every sampler id to the vocabulary and prepare enabled the extra targets");
         let _ = model.forward();
         let objectives = training::objectives(model);
-        let top = if spec.estimator.needs_sampler_top() { objectives.batch_sparse_target_logprobs() } else { None };
-        let (_, terms) = weigh(&objectives.batch_token_logprobs(), top.as_deref(), &batch, &spec);
+        let slots = if slot_width(&batch, &spec) > 0 { objectives.batch_sparse_target_logprobs() } else { None };
+        let (_, terms) = weigh(&objectives.batch_token_logprobs(), slots.as_deref(), &batch, &spec);
         terms.normalised_loss(self.cfg.loss.loss_agg.denominator(self.batch_cfg.batch_size, terms.supervised, 1))
     }
 

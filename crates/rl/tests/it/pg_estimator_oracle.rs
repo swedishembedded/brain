@@ -62,7 +62,7 @@ impl Pair {
         let ids: Vec<u32> = (0..n).flat_map(|_| listed.iter().map(|&v| v as u32)).collect();
         let sampler: Vec<f32> = (0..n).flat_map(|_| listed.iter().map(|&v| ln(self.mu[v]))).collect();
         let trainer: Vec<f32> = (0..n).flat_map(|_| listed.iter().map(|&v| ln(self.pi[v]))).collect();
-        let batch = PgBatch { targets: &targets, old_lp: &old, ref_lp: None, advantage: &advantage, is_weight: None, top: Some(SamplerTop { k, ids: &ids, logprobs: &sampler }) };
+        let batch = PgBatch { targets: &targets, old_lp: &old, ref_lp: None, advantage: &advantage, is_weight: None, top: Some(SamplerTop { k, ids: &ids, logprobs: &sampler }), support: None };
         let (w, terms) = weigh(&new, Some(&trainer), &batch, spec);
         assert!(terms.finite);
         let mut g = vec![0f64; self.k()];

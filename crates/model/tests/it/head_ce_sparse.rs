@@ -174,3 +174,79 @@ fn malformed_extra_targets_are_refused() {
     let e = check_sparse_ids(&labels, &[1, 2, 4], 2, 10).unwrap_err();
     assert!(e.contains("3 extra-target ids"), "{e}");
 }
+
+/// Spec (support replay): a loss of log-probabilities renormalised over a sampler's support,
+/// `sum_n omega_n (-log pi_S(y_n)) + sum_nj omega_nj (-log pi_S(s_nj))` with `pi_S = softmax` over the support's
+/// logits, is one forward and one backward of the extra targets: the support's ids in the slots, the read-back
+/// whole-row log-probabilities renormalised on the host ([`renormalise_over_support`]) equal an f64 softmax over the
+/// support's logits, and the label weight `omega` with the slot coefficients [`support_coefficients`] give the hidden
+/// gradient of an f64 oracle that differentiates the renormalised loss directly. Supports of varying width, padded
+/// with unused slots, over chunk boundaries and a logit scale.
+#[test]
+fn a_loss_renormalised_over_a_support_is_one_backward_of_its_extra_targets() {
+    use model::head_ce::{renormalise_over_support, support_coefficients};
+    let ops = ops();
+    let g = ops.gpu();
+    let (n, d, v, k) = (90usize, 48usize, 400usize, 6usize);
+    let mut p = problem(n, d, v, k);
+    let mut rng = Lcg::random();
+    // Each supervised row's support: its label first, then distinct ids, 2..=k of them; the rest unused. Some slots
+    // carry a weight of their own (score centring's listed ids), the others none.
+    let mut slot_w = vec![0f64; n * k];
+    for i in 0..n {
+        let width = if p.labels[i] == IGNORE { 0 } else { 2 + i % (k - 1) };
+        let mut ids = vec![IGNORE; k];
+        if width > 0 {
+            ids[0] = p.labels[i];
+            let mut j = 1;
+            while j < width {
+                let id = (rng.next_u64() % v as u64) as u32;
+                if !ids[..j].contains(&id) {
+                    ids[j] = id;
+                    slot_w[i * k + j] = if j % 2 == 0 { f64::from(rng.unit()) - 0.5 } else { 0.0 };
+                    j += 1;
+                }
+            }
+        }
+        p.ids[i * k..(i + 1) * k].copy_from_slice(&ids);
+    }
+    let (logit_scale, d_scale) = (0.8f32, 1.0 / 70.0);
+    let w = Weight::upload(&ops, &p.raw, p.v, p.d, Dtype::F32);
+    let hc = build(&ops, &p, &w, 64, false);
+    let hidden = g.storage_init("hidden", &p.hidden);
+    let (_, lps) = hc.forward_sparse(&ops, &hidden, n as u32, &p.labels, &p.ids, k as u32, logit_scale).expect("valid ids");
+    let mut coefs = vec![0f32; n * k];
+    let mut want_dh = vec![0f64; n * d];
+    let mut worst = 0f64;
+    for i in (0..n).filter(|&i| p.labels[i] != IGNORE) {
+        let (slots, ids) = (&lps[i * k..(i + 1) * k], &p.ids[i * k..(i + 1) * k]);
+        let norm = renormalise_over_support(slots[0], slots, ids).expect("a support");
+        // The f64 oracle: logits over the support, its softmax, and the renormalised loss's gradient in the logits.
+        let y: Vec<f64> = (0..v).map(|j| f64::from(logit_scale) * (0..d).map(|c| f64::from(p.hidden[i * d + c]) * f64::from(p.raw[j * d + c])).sum::<f64>()).collect();
+        let used: Vec<usize> = (0..k).filter(|&j| ids[j] != IGNORE).collect();
+        let mx = used.iter().map(|&j| y[ids[j] as usize]).fold(f64::MIN, f64::max);
+        let lse = mx + used.iter().map(|&j| (y[ids[j] as usize] - mx).exp()).sum::<f64>().ln();
+        worst = worst.max((norm.label - (y[p.labels[i] as usize] - lse)).abs());
+        for &j in &used {
+            worst = worst.max((norm.pi[j] - (y[ids[j] as usize] - lse).exp()).abs());
+        }
+        let omega_y = f64::from(p.weights[i]);
+        let slot = &slot_w[i * k..(i + 1) * k];
+        coefs[i * k..(i + 1) * k].copy_from_slice(&support_coefficients(&norm, omega_y, slot));
+        let total = omega_y + slot.iter().sum::<f64>();
+        let mut dy = vec![0f64; v];
+        dy[p.labels[i] as usize] -= omega_y;
+        for &j in &used {
+            dy[ids[j] as usize] += total * (y[ids[j] as usize] - lse).exp() - slot[j];
+        }
+        for (col, g) in dy.iter().enumerate().filter(|(_, g)| **g != 0.0) {
+            for c in 0..d {
+                want_dh[i * d + c] += g * f64::from(logit_scale) * f64::from(d_scale) * f64::from(p.raw[col * d + c]);
+            }
+        }
+    }
+    assert!(worst < 1e-5, "the renormalised log-probabilities are the f64 softmax over the support's logits: worst {worst:e}");
+    let dh = g.storage((n * d) as u64);
+    hc.backward_sparse(&ops, &hidden, &dh, n as u32, &p.labels, &p.weights, &p.ids, &coefs, k as u32, d_scale, logit_scale, None).expect("valid ids");
+    assert_close(&g.read(&dh, n * d), &want_dh, 1e-4, "the hidden gradient of the loss renormalised over the support");
+}

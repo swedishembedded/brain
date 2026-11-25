@@ -18,6 +18,14 @@
 //! PPO/GRPO, or the score-centred estimator of [`super::score_centring`], which also weighs the sampler's top-K ids of
 //! each token as extra targets of the same backward ([`model::head_ce::SparseTargets`]). The KL term, the importance
 //! correction and the imitation tokens are the same under both.
+//!
+//! A position whose record carries the support its cut sampler drew it from ([`SamplerSupport`]) is trained on its
+//! log-probability renormalised over that support, TRL's support replay: the support's ids are the position's extra
+//! targets, the forward reads the trainer's whole-row log-probabilities at them, and
+//! [`model::head_ce::renormalise_over_support`] gives `log pi_S`; the ratio is `pi_S / mu_S` against the sampler's own
+//! figure, the score-centred estimator centres over the support (its tail is the rest of the support), and the
+//! coefficients of [`model::head_ce::support_coefficients`] make the one backward the renormalised loss's gradient.
+//! The KL term stays on the whole row.
 
 use model::{adapter, training};
 use model::{Model, IGNORE};
@@ -69,8 +77,25 @@ pub struct SamplerTop<'a> {
     pub logprobs: &'a [f32],
 }
 
+/// The support a cut sampler drew each position's target from, `[b * t * k]` ids padded with [`IGNORE`] (an empty
+/// row where the position has none), and the sampler's log-probability of the target within it, `[b * t]` (NaN where
+/// the position has none).
+#[derive(Clone, Copy, Debug)]
+pub struct SamplerSupport<'a> {
+    pub k: usize,
+    pub ids: &'a [u32],
+    pub logprobs: &'a [f32],
+}
+
+impl<'a> SamplerSupport<'a> {
+    /// Position `i`'s support ids (padded), when it has one.
+    fn at(self, i: usize) -> Option<&'a [u32]> {
+        (!self.logprobs[i].is_nan()).then(|| &self.ids[i * self.k..(i + 1) * self.k])
+    }
+}
+
 /// The per-position CE-gradient weights of one batch: one per position at its target and, under the score-centred
-/// estimator, `k` extra-target coefficients per position at the sampler's ids.
+/// estimator or a batch with supports, `k` extra-target coefficients per position at its slots ([`slot_width`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct TokenWeights {
     pub label: Vec<f32>,
@@ -93,6 +118,36 @@ pub struct PgBatch<'a> {
     pub is_weight: Option<&'a [f32]>,
     /// The sampler's top-K at each position, which the score-centred estimator needs.
     pub top: Option<SamplerTop<'a>>,
+    /// The support each position's target was drawn from, when its record carries one ([`SamplerSupport`]).
+    pub support: Option<SamplerSupport<'a>>,
+}
+
+/// The extra-target slots per position a batch takes under `spec`: the sampler's top-K under the score-centred
+/// estimator, the widest support where the batch carries supports (a position's slots are its support's ids when it
+/// has one, its top-K ids otherwise); `0` when it takes none.
+pub fn slot_width(batch: &PgBatch<'_>, spec: &PgSpec) -> usize {
+    let top = if spec.estimator.needs_sampler_top() { batch.top.map_or(0, |t| t.k) } else { 0 };
+    top.max(batch.support.map_or(0, |s| s.k))
+}
+
+/// The extra-target ids of every position at [`slot_width`] slots: a position's support where it has one, else its
+/// sampler top-K under the score-centred estimator, padded with [`IGNORE`]; `None` when the batch takes none.
+pub fn slot_ids(batch: &PgBatch<'_>, spec: &PgSpec) -> Option<Vec<u32>> {
+    let width = slot_width(batch, spec);
+    if width == 0 {
+        return None;
+    }
+    let top = batch.top.filter(|_| spec.estimator.needs_sampler_top());
+    let mut ids = vec![IGNORE; batch.targets.len() * width];
+    for i in 0..batch.targets.len() {
+        let row = &mut ids[i * width..(i + 1) * width];
+        match (batch.support.and_then(|s| s.at(i)), top) {
+            (Some(support), _) => row[..support.len()].copy_from_slice(support),
+            (None, Some(top)) => row[..top.k].copy_from_slice(&top.ids[i * top.k..(i + 1) * top.k]),
+            (None, None) => {}
+        }
+    }
+    Some(ids)
 }
 
 /// What one batch measured.
@@ -184,23 +239,29 @@ impl Default for BatchTerms {
     }
 }
 
-/// The per-position CE-gradient weights for `new_lp` (the forward's log-probabilities) and `new_top` (the forward's
-/// log-probabilities at the sampler's top-K ids, which the score-centred estimator reads), and what they measured.
+/// The per-position CE-gradient weights for `new_lp` (the forward's whole-row log-probabilities) and `new_slots` (the
+/// forward's whole-row log-probabilities at every position's [`slot_ids`], `[positions * slot_width]`), and what they
+/// measured.
 ///
 /// # Panics
-/// The score-centred estimator without the batch's [`SamplerTop`] or `new_top`.
-pub fn weigh(new_lp: &[f32], new_top: Option<&[f32]>, batch: &PgBatch<'_>, spec: &PgSpec) -> (TokenWeights, BatchTerms) {
+/// A batch that takes extra targets (the score-centred estimator, supports) without `new_slots`, or the score-centred
+/// estimator without the batch's [`SamplerTop`].
+pub fn weigh(new_lp: &[f32], new_slots: Option<&[f32]>, batch: &PgBatch<'_>, spec: &PgSpec) -> (TokenWeights, BatchTerms) {
     let mut weights = vec![0f32; new_lp.len()];
+    let width = slot_width(batch, spec);
+    let slots = (width > 0).then(|| new_slots.expect("a batch with extra targets needs the trainer's log-probabilities at its slots"));
+    if let Some(slots) = slots {
+        assert_eq!(slots.len(), new_lp.len() * width, "the slots cover {} of {} positions x {width}", slots.len(), new_lp.len());
+    }
     let centring = match spec.estimator {
         PgEstimator::ScoreCentred(band) => {
             let top = batch.top.expect("the score-centred estimator needs the batch's sampler top-K");
-            let trainer = new_top.expect("the score-centred estimator needs the trainer's log-probabilities at the sampler's ids");
-            assert!(top.ids.len() == new_lp.len() * top.k && top.logprobs.len() == top.ids.len() && trainer.len() == top.ids.len(), "the sampler top-K covers {} of {} positions x {}", top.ids.len(), new_lp.len(), top.k);
-            Some((band, top, trainer))
+            assert!(top.ids.len() == new_lp.len() * top.k && top.logprobs.len() == top.ids.len(), "the sampler top-K covers {} of {} positions x {}", top.ids.len(), new_lp.len(), top.k);
+            Some((band, top))
         }
         PgEstimator::ClippedSurrogate => None,
     };
-    let mut extra = centring.map(|(_, top, _)| vec![0f32; top.ids.len()]);
+    let mut extra = slots.map(|_| vec![0f32; new_lp.len() * width]);
     let mut terms = BatchTerms::default();
     for i in (0..new_lp.len()).filter(|&i| batch.targets[i] != IGNORE) {
         terms.supervised += 1;
@@ -215,42 +276,73 @@ pub fn weigh(new_lp: &[f32], new_top: Option<&[f32]>, batch: &PgBatch<'_>, spec:
         let ref_lp = batch.ref_lp.map(|r| r[i]);
         let is_weight = batch.is_weight.map_or(1.0, |w| w[i]);
         let kl = ref_lp.filter(|_| spec.kl_beta > 0.0);
-        match (centring, extra.as_mut()) {
-            (Some((band, top, trainer)), Some(extra)) => {
-                let k = top.k;
-                let slots = i * k..(i + 1) * k;
-                let term = centred_term(batch.old_lp[i], new_lp[i], advantage * is_weight, band, &top.logprobs[slots.clone()], &trainer[slots.clone()], &mut extra[slots]);
-                terms.finite &= trainer[i * k..(i + 1) * k].iter().all(|l| l.is_finite());
-                // The KL term is the clipped path's with no advantage: the same k3 under either estimator.
-                let kl_term = token_term_weighted(batch.old_lp[i], new_lp[i], 0.0, spec.band, kl, spec.kl_beta, 1.0);
-                weights[i] = term.weight + kl_term.weight;
-                terms.loss += term.loss + kl_term.loss;
+        let row = i * width..(i + 1) * width;
+        // The policy term's log-probabilities: renormalised over the position's support when it has one.
+        let support = batch.support.and_then(|s| s.at(i).map(|ids| (ids, s.logprobs[i])));
+        let norm = support.map(|(ids, _)| {
+            let slots = &slots.expect("checked above")[row.start..row.start + ids.len()];
+            model::head_ce::renormalise_over_support(new_lp[i], slots, ids).expect("a support holds at least the sampled token")
+        });
+        let (old, new) = match (&norm, support) {
+            (Some(norm), Some((_, mu))) => (mu, norm.label as f32),
+            _ => (batch.old_lp[i], new_lp[i]),
+        };
+        // The KL term is the clipped path's with no advantage, on the whole row: the same k3 under either estimator. A
+        // clipped position without a support takes it in its own term, as it always did.
+        let separate_kl = centring.is_some() || norm.is_some();
+        let kl_term = separate_kl.then(|| token_term_weighted(batch.old_lp[i], new_lp[i], 0.0, spec.band, kl, spec.kl_beta, 1.0));
+        // The policy term's CE weights over the policy's own log-probabilities: at the label, and at the slots.
+        let mut slot_weights = vec![0f64; width];
+        let label_weight = match centring {
+            Some((band, top)) => {
+                let (sampler, trainer) = centring_rows(i, top, support, norm.as_ref(), batch.old_lp[i], slots.map(|s| &s[row.clone()]));
+                let mut coefs = vec![0f32; sampler.len()];
+                let term = centred_term(old, new, advantage * is_weight, band, &sampler, &trainer, &mut coefs);
+                terms.finite &= trainer.iter().zip(&sampler).all(|(t, s)| s.is_nan() || t.is_finite());
+                slot_weights[..coefs.len()].iter_mut().zip(&coefs).for_each(|(w, c)| *w = f64::from(*c));
+                terms.loss += term.loss;
                 terms.centred_masked += usize::from(term.masked);
                 terms.centred_tail += usize::from(term.tail);
                 terms.sampler_mass_sum += f64::from(term.sampler_mass);
+                f64::from(term.weight)
             }
-            _ => {
-                let term = token_term_weighted(batch.old_lp[i], new_lp[i], advantage, spec.band, kl, spec.kl_beta, is_weight);
-                weights[i] = term.weight;
+            None => {
+                let (kl, kl_beta) = if separate_kl { (None, 0.0) } else { (kl, spec.kl_beta) };
+                let term = token_term_weighted(old, new, advantage, spec.band, kl, kl_beta, is_weight);
                 terms.loss += term.loss;
                 terms.clipped += usize::from(term.clipped);
                 terms.clipped_high += usize::from(term.clipped && advantage > 0.0);
                 terms.dual_clipped += usize::from(term.dual_clipped);
                 terms.clipped_low += usize::from(term.clipped && advantage < 0.0);
+                f64::from(term.weight)
             }
+        };
+        terms.loss += kl_term.map_or(0.0, |t| t.loss);
+        weights[i] = match kl_term {
+            Some(t) => (label_weight + f64::from(t.weight)) as f32,
+            None => label_weight as f32,
+        };
+        if let Some(extra) = extra.as_mut() {
+            let coefs = match &norm {
+                // `-log pi_S(x) = -log p(x) + log Z`: the label's and the slots' weights become the label weight and
+                // the slot coefficients of one backward of the whole-row cross-entropy.
+                Some(norm) => model::head_ce::support_coefficients(norm, label_weight, &slot_weights[..norm.pi.len()]),
+                None => slot_weights.iter().map(|&w| w as f32).collect(),
+            };
+            extra[row.start..row.start + coefs.len()].copy_from_slice(&coefs);
         }
         terms.policy_tokens += 1;
         terms.signed_tokens += usize::from(advantage != 0.0);
         terms.weight_masked += usize::from(is_weight == 0.0);
         terms.weight_truncated += usize::from(is_weight > 0.0 && is_weight < 1.0);
         terms.weight_sum += f64::from(is_weight);
-        terms.nll_sum -= f64::from(new_lp[i]);
-        let ratio = (new_lp[i] - batch.old_lp[i]).exp();
+        terms.nll_sum -= f64::from(new);
+        let ratio = (new - old).exp();
         if let Some(r) = ref_lp {
             // The behaviour policy drew this token, so k3 is weighted by the ratio: `E_old[ratio * k3] = KL(pi || ref)`.
             // Unweighted, a token the policy has pushed down reads `ref / pi` (1e7 for a token moved 16 nats) where
             // its share of the divergence is at most one.
-            terms.kl_sum += ratio * k3_kl(r, new_lp[i]);
+            terms.kl_sum += (new_lp[i] - batch.old_lp[i]).exp() * k3_kl(r, new_lp[i]);
             terms.kl_tokens += 1;
         }
         terms.ratio_sum += f64::from(ratio);
@@ -262,18 +354,40 @@ pub fn weigh(new_lp: &[f32], new_top: Option<&[f32]>, batch: &PgBatch<'_>, spec:
     (TokenWeights { label: weights, extra }, terms)
 }
 
-/// Install the sampler's top-K ids of the batch just set as the model's extra targets, so the forward reads the
-/// trainer's log-probability at them; nothing for an estimator that does not read them. Call after `set_batch`,
-/// before the forward.
+/// The sampler's and the trainer's log-probabilities the score-centred term of position `i` centres over: its top-K
+/// against the whole row; over its support, the support's ids with the trainer's figures renormalised over it and the
+/// sampler's top-K figures renormalised by the support's mass, `log mu_S(v) = log mu(v) - (log mu(a) - log mu_S(a))`
+/// for a listed id inside the support (NaN for one the top-K does not list: part of the support's tail; TRL drops a
+/// listed id outside the support, whose `q` is 0 there).
+fn centring_rows(i: usize, top: SamplerTop<'_>, support: Option<(&[u32], f32)>, norm: Option<&model::head_ce::SupportNorm>, whole_old: f32, slots: Option<&[f32]>) -> (Vec<f32>, Vec<f32>) {
+    let listed = (&top.ids[i * top.k..(i + 1) * top.k], &top.logprobs[i * top.k..(i + 1) * top.k]);
+    let slots = slots.expect("the score-centred estimator reads the trainer at its slots");
+    match (support, norm) {
+        (Some((ids, mu)), Some(norm)) => {
+            let log_mass = f64::from(whole_old) - f64::from(mu);
+            let sampler = ids.iter().map(|&id| if id == IGNORE { f32::NAN } else { listed.0.iter().position(|&t| t == id).map_or(f32::NAN, |j| (f64::from(listed.1[j]) - log_mass) as f32) }).collect();
+            let trainer = ids.iter().enumerate().map(|(j, &id)| if id == IGNORE { 0.0 } else { (f64::from(slots[j]) - norm.log_z) as f32 }).collect();
+            (sampler, trainer)
+        }
+        _ => (listed.1.to_vec(), slots[..top.k].to_vec()),
+    }
+}
+
+/// Install the batch's [`slot_ids`] (the supports, the sampler's top-K) as the model's extra targets, so the forward
+/// reads the trainer's log-probability at them; nothing for a batch that takes none. Call after `set_batch`, before
+/// the forward.
 ///
 /// # Errors
-/// The model refuses the ids (an id past its vocabulary, extra targets not enabled).
+/// The score-centred estimator without the batch's top-K, or the model refuses the ids (an id past its vocabulary,
+/// extra targets not enabled or of another width).
 pub fn install_sampler_ids<M: Model>(model: &M, batch: &PgBatch<'_>, spec: &PgSpec) -> Result<(), String> {
-    if !spec.estimator.needs_sampler_top() {
-        return Ok(());
+    if spec.estimator.needs_sampler_top() && batch.top.is_none() {
+        return Err("the score-centred estimator needs the batch's sampler top-K".to_string());
     }
-    let top = batch.top.ok_or("the score-centred estimator needs the batch's sampler top-K")?;
-    training::objectives(model).set_sparse_target_ids(top.ids)
+    match slot_ids(batch, spec) {
+        Some(ids) => training::objectives(model).set_sparse_target_ids(&ids),
+        None => Ok(()),
+    }
 }
 
 /// Backward the objective of the batch just forwarded. `denominator` replaces the batch's own supervised-token count
@@ -304,8 +418,8 @@ pub fn install_weights<M: Model>(model: &M, batch: &PgBatch<'_>, spec: &PgSpec, 
         objectives.set_loss_denominator(d);
     }
     let new_lp = objectives.batch_token_logprobs();
-    let new_top = if spec.estimator.needs_sampler_top() { Some(objectives.batch_sparse_target_logprobs().expect("the score-centred estimator's prepare enabled the model's extra targets")) } else { None };
-    let (weights, terms) = weigh(&new_lp, new_top.as_deref(), batch, spec);
+    let new_slots = (slot_width(batch, spec) > 0).then(|| objectives.batch_sparse_target_logprobs().expect("prepare enabled the model's extra targets for the batch's slots"));
+    let (weights, terms) = weigh(&new_lp, new_slots.as_deref(), batch, spec);
     if terms.finite {
         objectives.set_loss_weights(&weights.label);
         if let Some(extra) = &weights.extra {
@@ -394,7 +508,7 @@ mod tests {
     const SPEC: PgSpec = PgSpec::clipped(ClipBand::new(0.2, 0.2), 0.0);
 
     fn batch<'a>(targets: &'a [u32], old: &'a [f32], advantage: &'a [f32]) -> PgBatch<'a> {
-        PgBatch { targets, old_lp: old, ref_lp: None, advantage, is_weight: None, top: None }
+        PgBatch { targets, old_lp: old, ref_lp: None, advantage, is_weight: None, top: None, support: None }
     }
 
     fn weigh_clipped(new_lp: &[f32], batch: &PgBatch<'_>, spec: &PgSpec) -> (Vec<f32>, BatchTerms) {
@@ -441,7 +555,7 @@ mod tests {
         let (old_lp, new_lp) = (lp(&old), lp(&new));
         let targets = vec![1u32; token.len()];
         let advantage = vec![0.0f32; token.len()];
-        let b = PgBatch { targets: &targets, old_lp: &old_lp, ref_lp: Some(&old_lp), advantage: &advantage, is_weight: None, top: None };
+        let b = PgBatch { targets: &targets, old_lp: &old_lp, ref_lp: Some(&old_lp), advantage: &advantage, is_weight: None, top: None, support: None };
         let (_, t) = weigh_clipped(&new_lp, &b, &SPEC);
         let reported = f64::from(t.kl_sum) / t.kl_tokens as f64;
         assert!((reported - kl_exact).abs() < 1e-3 * kl_exact, "reported {reported}, KL(pi || ref) {kl_exact}");
@@ -485,7 +599,7 @@ mod tests {
             let advantage: Vec<f32> = tokens.iter().map(|&(_, a, _)| a as f32).collect();
             let is_weight: Vec<f32> = tokens.iter().map(|&(_, _, w)| w as f32).collect();
             let targets = vec![1u32; tokens.len()];
-            let b = PgBatch { targets: &targets, old_lp: &old_lp, ref_lp: Some(&ref_lp), advantage: &advantage, is_weight: Some(&is_weight), top: None };
+            let b = PgBatch { targets: &targets, old_lp: &old_lp, ref_lp: Some(&ref_lp), advantage: &advantage, is_weight: Some(&is_weight), top: None, support: None };
             let (weights, terms) = weigh_clipped(&new_lp, &b, &spec);
             let mut total = 0.0f64;
             for i in 0..tokens.len() {

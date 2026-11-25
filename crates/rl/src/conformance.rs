@@ -174,7 +174,7 @@ fn policy_gradient_step<M: Model>(name: &str, regime: &str, config: &PolicyGradi
     lowers(name, regime, m, &mut || {
         m.set_batch(Batch::Lm { tokens, targets });
         m.forward();
-        let batch = PgBatch { targets, old_lp: &start, ref_lp: Some(&start), advantage: &advantage, is_weight: None, top: None };
+        let batch = PgBatch { targets, old_lp: &start, ref_lp: Some(&start), advantage: &advantage, is_weight: None, top: None, support: None };
         backward_weighted(m, &batch, &spec, denominator).normalised_loss(denominator)
     })
 }

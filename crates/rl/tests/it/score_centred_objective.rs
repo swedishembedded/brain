@@ -111,3 +111,63 @@ fn a_model_without_extra_targets_in_its_head_is_refused() {
     let refusal = Objective::<gpt2::Gpt>::prepare(&mut obj, &mut g).unwrap_err();
     assert_eq!(refusal.capability, Capability::SparseTargets, "{refusal}");
 }
+
+/// A rollout of `m` with a cut sampler and its supports replayed: each supervised token's support is the token and two
+/// others, and its behaviour figures are the policy's own, the whole row's and the support's, so the run is on-policy.
+fn supported(m: &Qwen35, ids: &[u32], advantage: f32) -> Row {
+    let mut row = on_policy(m, ids, advantage);
+    let whole = row.behavior.clone().unwrap();
+    let sets: Vec<Vec<u32>> = ids[row.answer_from..].iter().map(|&t| vec![t, (t + 3) % 29, (t + 11) % 29]).collect();
+    // The support's figure: the token's share of the support under the policy, from its whole-row log-probabilities.
+    let lps: Vec<f32> = sets.iter().zip(&whole).enumerate().map(|(i, (set, &own))| {
+        let at = super::external_policy_gradient::logprobs_at(m, &row, i, set);
+        let max = at.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        (f64::from(own) - (max + at.iter().map(|z| (z - max).exp()).sum::<f64>().ln())) as f32
+    }).collect();
+    row.support = Some((sets, lps));
+    row.sampler = Some(data::chat_rollout::SamplerDecl { top_k: Some(3), ..Default::default() });
+    row
+}
+
+/// SPEC: records from a cut sampler that carry their supports train under both estimators (the score-centred refusal of
+/// a truncating sampler is lifted where the support is replayed): on-policy, the importance ratio over the support is
+/// one; without the supports the score-centred estimator refuses them and the clipped surrogate trains them with a
+/// warning it counts. A support id past the vocabulary, a supervised token outside its support and an importance
+/// correction over supports are refused by name.
+#[test]
+fn records_from_a_cut_sampler_train_when_their_supports_are_replayed() {
+    let mut m = lora_model(9);
+    let rows = [supported(&m, &[1, 2, 3, 4, 5, 6], 1.1), supported(&m, &[7, 8, 9, 10, 11], -0.6)];
+    for cfg in [score_centred(), PolicyGradientConfig { loss: PgLoss { kl_beta: 0.0, ..PgLoss::RECORDED }, ..Default::default() }] {
+        let (mut obj, _dir) = open(&rows, cfg).expect("records with supports open");
+        assert_eq!(obj.stats().sequences_cut_without_support, 0);
+        Objective::<Qwen35>::prepare(&mut obj, &mut m).expect("qwen35 takes extra targets");
+        Objective::<Qwen35>::check_data(&mut obj, &m).expect("every id is in the vocabulary");
+        Objective::<Qwen35>::begin(&mut obj, DRAW_SEED, 0);
+        m.zero_grads();
+        let loss = Objective::<Qwen35>::micro_steps(&mut obj, &m, &mut Rng::new(1), 2);
+        m.poll_wait();
+        assert!(matches!(Objective::<Qwen35>::step_verdict(&mut obj), StepVerdict::Apply) && loss.is_finite());
+        let step = &obj.stats().steps[0];
+        assert!((step.ratio_min - 1.0).abs() < 1e-4 && (step.ratio_max - 1.0).abs() < 1e-4, "on-policy over the support: ratio [{}, {}]", step.ratio_min, step.ratio_max);
+        let grad: f32 = m.param_names().iter().map(|n| m.read_grad(n).iter().map(|g| g.abs()).sum::<f32>()).sum();
+        assert!(grad > 0.0 && grad.is_finite(), "the step has a gradient: {grad}");
+    }
+    let refused = |rows: &[Row], cfg: PolicyGradientConfig| open(rows, cfg).err().expect("refused").to_string();
+    let bare: Vec<Row> = rows.iter().map(|r| Row { support: None, ..r.clone() }).collect();
+    let why = refused(&bare, score_centred());
+    assert!(why.contains("truncated") && why.contains("support"), "{why}");
+    let (obj, _dir) = open(&bare, PolicyGradientConfig { loss: PgLoss { kl_beta: 0.0, ..PgLoss::RECORDED }, ..Default::default() }).expect("the clipped surrogate trains them, warning");
+    assert_eq!(obj.stats().sequences_cut_without_support, 4, "both rows and their partner rollouts are counted as trained against a biased ratio");
+    let why = refused(&rows, PolicyGradientConfig { importance: ImportanceCorrection::Truncate { cap: 2.0 }, ..Default::default() });
+    assert!(why.contains("behavior_support") && why.contains("importance"), "{why}");
+    let mut outside = rows.clone();
+    outside[0].support.as_mut().unwrap().0[1] = vec![28, 27];
+    let why = refused(&outside, score_centred());
+    assert!(why.contains("not in the support"), "{why}");
+    let mut past = rows.clone();
+    past[0].support.as_mut().unwrap().0[0][1] = 29;
+    let (mut obj, _dir) = open(&past, score_centred()).expect("the data crate does not know the vocabulary");
+    let why = Objective::<Qwen35>::check_data(&mut obj, &m).unwrap_err().to_string();
+    assert!(why.contains("behavior_support_ids") && why.contains("29"), "{why}");
+}
