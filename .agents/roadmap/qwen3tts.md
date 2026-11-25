@@ -31,19 +31,33 @@ Target, in order (each a self-contained change, measured with nsys/ncu before th
       `run_open`. Pinned by the batched-vs-per-stream and served-together-vs-alone GPU tests.
 - [ ] Retire `gen.rs`: rollouts and scoring still run on it (loaded on the first rollout), and
       `set_talker_weights` reaches it but not the served decoder; the shared engine needs a
-      weight-update entry point first. bf16 weights and tensor-core GEMMs on the TTS engines
-      are not on yet (`Dtype::F32`).
-- [ ] Device draws: the residual codebooks through `model::readout::RowDrawer`; cb0 with the
-      reference's suppression and repetition penalty as a device logit step.
-- [ ] The code predictor's chain in one submission per frame: per-step head and embedding table
-      on the device, the drawn code fed to the next step without a host round trip; one readback
-      of `[B, 16]` codes per frame; the decode step tape-cached as a CUDA graph per batch bucket.
-- [ ] Codec: Conv1d/ConvTranspose1d through the GEMM-lowering seam and a native candidate,
-      LayerNorm/GELU/RVQ on the device, encode off the CPU pin, batched streaming decode.
-- [ ] Training data: wav to `[T, 16]` codes, x-vector and text ids, packed shards.
-- [ ] Training objective: the inference prompt teacher-forced, cb0 next-frame CE on the Talker
-      and same-frame residual CE on the code predictor batched as `[frames, 16]`, bf16 tensor
-      cores, packed rows, through `model::fit_controlled_sync` with NCCL data parallel.
+      weight-update entry point first.
+- [x] Stored precision: both decoders hold the checkpoint's bf16 (`batched::WeightTier::Stored`,
+      read through the packed view), KL to fp32 1e-6..2e-5 on cb0 with the same best code.
+- [x] Residual draws on the device, top-k included (`draw_list`); greedy is the draw keeping one code.
+- [ ] cb0 on the device: suppression, `min_new` EOS gating and the once-per-token repetition
+      penalty as device logit processors (a per-slot count buffer and bias row, generic for text
+      serving's penalties too), then the keyed draw; the feedback row summed on the device.
+- [x] The code predictor's chain in one submission per frame (`Engine::forward_batched_embed_chain`,
+      stacked input table, one readback of the codes); embedding-input steps replay recorded tapes.
+- [ ] One sync per frame and multi-frame windows: the Talker hidden stays on the device for the
+      code predictor, the Talker step and the chain one recording.
+- [x] Codec decode as one recorded device pass with GEMM-lowered convs (8 s clip 2-3 s to 0.1-0.25 s).
+- [ ] Batched codec decode of the streams that finish together (causal throughout, so a
+      right-padded batch is exact): at 64 streams the per-clip decode on the decode thread is
+      61 % of the wall time (nsys, 111 ms a clip). A worker thread on its own handle fences
+      against the decoders and is slower.
+- [x] Training: the Talker and code predictor as one model with the reference's loss is
+      `speech_sft` (`.agents/roadmap/qwen3tts-sft.md`); the shared trainer gained what a fast run of
+      it needs: the GEMM precision reaching the model, per-position head groups (one GEMM per
+      head), rows injected from another model with their gradient, batch trimming, tensor-core
+      weight gradients and the split RMSNorm gain gradient (knowledge 578). A composite trainer on
+      them measured 0.88 s a step for 4,096 frames (about 300 s of audio a second on one shared
+      GH200; 300 h about an hour on one card, about 16 minutes projected on four, NCCL reduce about
+      5 % of a step). `speech_sft` is to adopt them and be measured the same way.
+
+Measured serving (HTTP, in-context clones of 8 s of speech, one GH200, 2026-11-25): solo 1.2 s
+(RTF 0.15); 32 concurrent 52 s of speech a second. Started at RTF 1.2 solo with requests serialised.
 
 Gates: teacher-forced cb0/residual KL against the fp32 reference, codec PCM SNR, and end to end
 speaker similarity and recogniser WER on held-out text with matched seeds.

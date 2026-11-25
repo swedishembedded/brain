@@ -70,8 +70,11 @@ pub const SAMPLE_RATE: u32 = 24_000;
 /// two serving paths agree on the one knob a listener actually hears.
 pub const DEFAULT_CHUNK_FRAMES: usize = 16;
 
-/// Requests a device engine decodes together.
-pub const DEVICE_STREAMS: usize = 16;
+/// Requests a device engine decodes together. Measured over HTTP on one GH200 (in-context clones of 8 s of speech,
+/// 2026-11-25): 16 streams 34 s of speech a second, 32 streams 52, 64 streams 43, where each finished clip's codec
+/// decode on the decode thread (about 110 ms) stalls every live stream; a codec worker on its own handle fenced
+/// against the decoders and was slower still. Revisit with a batched codec decode.
+pub const DEVICE_STREAMS: usize = 32;
 
 /// Where the Talker and the MTP run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
