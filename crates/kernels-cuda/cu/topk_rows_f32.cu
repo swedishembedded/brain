@@ -20,6 +20,12 @@
 //   vals   : [rows, cap] f32        the candidates' logits
 //   idxs   : [rows, cap] f32        their columns, as f32 (exact below 2^24)
 //
+// A row of at most BRAIN_TOPK_SORTED columns (a codec codebook: 2048) is instead sorted whole in shared memory: a bitonic
+// sort of (value, column) keys in 66 compare-exchange stages for 2048 columns, against `cap` rounds of a block-wide
+// reduction and a masked rescan through global memory (50 candidates of 32 rows of 2048 took 76 us). The answer is the
+// same: best first, the lower column on equal values, a value not above -3.4e38 (or NaN) never taken (it reports as
+// -3.4e38 at column 2^32 - 1), and the first `cap - 1` taken columns masked in the row.
+//
 // No `__restrict__` anywhere: brain's device buffers alias by design.
 
 #define BRAIN_TOPK_THREADS 1024
@@ -29,6 +35,53 @@
 // vocabulary of 1024 * 256 = 262144 columns (Qwen3.8 has 248320).
 #define BRAIN_TOPK_SUB 16
 #define BRAIN_TOPK_SUBS 16
+
+// The widest row the shared-memory sort takes: 4096 keys of 8 bytes, 32 KiB.
+#define BRAIN_TOPK_SORTED 4096
+
+// A key that orders candidates as the rounds take them, largest first: the value's bits made order-preserving in the
+// high word, the column complemented in the low word (the lower column the larger key among equal values). A value the
+// rounds never take is key 0, below every taken one: a real value above -3.4e38 has a nonzero high word.
+__device__ __forceinline__ unsigned long long brain_topk_key(float v, unsigned int i) {
+    if (!(v > BRAIN_TOPK_MASKED)) { return 0ull; }
+    // -0 and +0 are one value to the rounds' comparison: the lower column goes first between them.
+    unsigned int u = v == 0.0f ? 0u : __float_as_uint(v);
+    u = (u & 0x80000000u) ? ~u : (u | 0x80000000u);
+    return (static_cast<unsigned long long>(u) << 32) | static_cast<unsigned long long>(~i);
+}
+
+// `cap` best of a row of `vocab <= BRAIN_TOPK_SORTED` columns: the row's keys sorted in shared memory, largest first.
+__device__ void brain_topk_sorted(float* x, unsigned int vocab, unsigned int cap, float* vals, float* idxs) {
+    __shared__ unsigned long long keys[BRAIN_TOPK_SORTED];
+    unsigned int n = 2u;
+    while (n < vocab) { n <<= 1; }
+    for (unsigned int c = threadIdx.x; c < n; c += BRAIN_TOPK_THREADS) { keys[c] = c < vocab ? brain_topk_key(x[c], c) : 0ull; }
+    __syncthreads();
+    for (unsigned int size = 2u; size <= n; size <<= 1) {
+        for (unsigned int stride = size >> 1; stride > 0u; stride >>= 1) {
+            for (unsigned int p = threadIdx.x; p < n / 2u; p += BRAIN_TOPK_THREADS) {
+                const unsigned int lo = 2u * p - (p & (stride - 1u)), hi = lo + stride;
+                // Descending runs where the bit of `size` is clear, so the whole sorts largest first.
+                const bool descending = (lo & size) == 0u;
+                const unsigned long long a = keys[lo], b = keys[hi];
+                if ((a < b) == descending) { keys[lo] = b; keys[hi] = a; }
+            }
+            __syncthreads();
+        }
+    }
+    // The values as the row holds them (the key folded -0 into +0), all read before any column is masked.
+    for (unsigned int col = threadIdx.x; col < cap; col += BRAIN_TOPK_THREADS) {
+        const unsigned long long key = keys[col];
+        const unsigned int i = key == 0ull ? 0xffffffffu : ~static_cast<unsigned int>(key);
+        vals[col] = key == 0ull ? BRAIN_TOPK_MASKED : x[i];
+        idxs[col] = static_cast<float>(i);
+    }
+    __syncthreads();
+    for (unsigned int col = threadIdx.x; col + 1u < cap; col += BRAIN_TOPK_THREADS) {
+        const unsigned long long key = keys[col];
+        if (key != 0ull) { x[~static_cast<unsigned int>(key)] = BRAIN_TOPK_MASKED; }
+    }
+}
 
 struct TopkBest {
     float v;
@@ -44,6 +97,10 @@ extern "C" __global__ void __launch_bounds__(BRAIN_TOPK_THREADS) brain_topk_rows
     if (row >= rows) { return; }  // block-uniform
     const unsigned int t = threadIdx.x, lane = t & 31u, warp = t >> 5;
     float* x = logits + static_cast<unsigned long long>(row) * vocab;
+    if (vocab <= BRAIN_TOPK_SORTED) {  // block-uniform
+        brain_topk_sorted(x, vocab, cap, vals + static_cast<unsigned long long>(row) * cap, idxs + static_cast<unsigned long long>(row) * cap);
+        return;
+    }
 
     __shared__ TopkBest warp_best[BRAIN_TOPK_WARPS];
     __shared__ TopkBest winner;

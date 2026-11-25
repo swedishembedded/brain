@@ -29,7 +29,9 @@ fn the_candidates_are_the_rows_best_in_order_with_ties_to_the_lower_column() {
     let k = ReadoutKernels { part: idx("argmax_part"), fin: idx("argmax_final"), extract: idx("topk_extract_step") };
     let mut rng = Lcg::new(11); // seed: fixed fixture so a failure reproduces on the same values
     // (rows, vocab, cap): a real vocabulary at the serving widths, a tiny one, a vocabulary shorter than the block.
-    for (rows, vocab, cap) in [(16u32, 248_320u32, 32u32), (1, 248_320, 32), (3, 5_000, 7), (2, 700, 32), (5, 1_024, 1), (2, 1_001, 5), (1, 250_001, 32)] {
+    // A codec codebook as a speech decoder samples it (32 streams, 2048 codes, top 50), and widths around the
+    // shared-memory sort's limit.
+    for (rows, vocab, cap) in [(16u32, 248_320u32, 32u32), (1, 248_320, 32), (3, 5_000, 7), (2, 700, 32), (5, 1_024, 1), (2, 1_001, 5), (1, 250_001, 32), (32, 2_048, 50), (4, 4_096, 64), (3, 4_097, 9), (2, 50, 50)] {
         // Values drawn from a small set so that many columns tie, including at the top.
         let host: Vec<f32> = (0..rows * vocab).map(|_| (rng.next_u32() % 4000) as f32 / 100.0 - 20.0).collect();
         let logits = g.storage_init("logits", &host);
@@ -67,4 +69,37 @@ fn the_steps_fill_the_callers_candidate_block_whole_or_in_its_first_columns() {
             assert!(vals[r * stride as usize + count as usize..(r + 1) * stride as usize].iter().all(|&v| v == sentinel), "row {r}: columns past the {count} wanted stay as they were");
         }
     }
+}
+
+/// The extraction leaves every column it did not take as it was (a taken one may be masked to -3.4e38 in place), and a
+/// row with fewer real candidates than asked reports the rest at -3.4e38, after its real ones.
+#[test]
+fn the_taken_columns_are_masked_in_place_and_a_short_row_reports_masked_candidates() {
+    let g = gpu_core::testgpu::dev(KERNELS);
+    let idx = |n: &str| g.kernel_index(n).unwrap_or_else(|| panic!("kernel '{n}' not registered"));
+    let k = ReadoutKernels { part: idx("argmax_part"), fin: idx("argmax_final"), extract: idx("topk_extract_step") };
+    let mut rng = Lcg::new(31); // seed: fixed fixture so a failure reproduces on the same values
+    for (rows, vocab, cap) in [(8u32, 2_048u32, 50u32), (2, 30_000, 16)] {
+        let host: Vec<f32> = (0..rows * vocab).map(|_| (rng.next_u32() % 500) as f32 / 10.0 - 25.0).collect();
+        let logits = g.storage_init("logits", &host);
+        let got = model::readout::topk_rows(&g, k, &logits, rows, vocab, cap);
+        let after = g.read(&logits, (rows * vocab) as usize);
+        for (r, row) in got.iter().enumerate() {
+            let base = r * vocab as usize;
+            let taken: std::collections::HashSet<usize> = row.iter().map(|&(i, _)| i as usize).collect();
+            for c in 0..vocab as usize {
+                let ok = after[base + c] == host[base + c] || (taken.contains(&c) && after[base + c] == -3.4e38);
+                assert!(ok, "row {r} column {c} of {vocab}, cap {cap}: {} became {}", host[base + c], after[base + c]);
+            }
+        }
+    }
+    // Three real values and a row of masked ones: the candidates past the real ones are masked.
+    let mut host = vec![-3.4e38f32; 2_048];
+    host[7] = 1.0;
+    host[3] = 2.0;
+    host[900] = 1.0;
+    let logits = g.storage_init("logits", &host);
+    let got = model::readout::topk_rows(&g, k, &logits, 1, 2_048, 5);
+    assert_eq!(got[0][..3], [(3, 2.0), (7, 1.0), (900, 1.0)]);
+    assert!(got[0][3..].iter().all(|&(_, v)| v == -3.4e38), "{:?}", got[0]);
 }

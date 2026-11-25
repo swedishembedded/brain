@@ -3562,7 +3562,7 @@ pub const ALL: &[CudaKernel] = &[
         source: ImplSource::Tuned,
         min_cc: BASELINE_MIN_CC,
         entry: "brain_topk_rows",
-        what: "the best `cap` (column, value) candidates of every logits row in one launch, a block of 1024 threads a row keeping each thread's best untaken column: replaces `cap` rounds of argmax_part, argmax_final and topk_extract_step (three launches a candidate)",
+        what: "the best `cap` (column, value) candidates of every logits row in one launch, a block of 1024 threads a row keeping each thread's best untaken column (a row of at most 4096 columns, a codec codebook, sorted whole in shared memory instead): replaces `cap` rounds of argmax_part, argmax_final and topk_extract_step (three launches a candidate)",
         reported: "native:topk_rows_f32",
         block_dim: 1024,
         // A block per row.
