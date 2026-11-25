@@ -878,9 +878,42 @@ impl LibraryGemmProvider {
         }
     }
 
+    /// `y[m, n] = x[m, k] @ W[n, k]^T` as [`Self::forward_tf32`] multiplies, but in binary32 throughout
+    /// (`CUBLAS_COMPUTE_32F`): the vendor library's product for fp32 operands that must stay fp32 (weights stored
+    /// fp32 and gated against an fp32 reference), on the CUDA cores. `false` (nothing pushed) unless the library is
+    /// active and the operands are 16-byte aligned.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_f32(&self, gpu: &Gpu, steps: &mut Vec<Step>, x: &Operand, w: &Operand, y: &Operand, m: u32, n: u32, k: u32) -> bool {
+        let mut gemm = Self::tf32_product(true, m, n, k, k, k, n, 0.0);
+        gemm.tf32 = false;
+        self.is_active() && self.library_step(gpu, steps, &gemm, &[w, x, y])
+    }
+
+    /// `dx[m, k] (+)= dy[m, n] @ W[n, k]` in binary32 throughout, as [`Self::forward_f32`] multiplies.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dx_f32(&self, gpu: &Gpu, steps: &mut Vec<Step>, dy: &Operand, w: &Operand, dx: &Operand, m: u32, n: u32, k: u32, accumulate: bool) -> bool {
+        let mut gemm = Self::tf32_product(false, m, k, n, k, n, k, if accumulate { 1.0 } else { 0.0 });
+        gemm.tf32 = false;
+        self.is_active() && self.library_step(gpu, steps, &gemm, &[w, dy, dx])
+    }
+
+    /// `dw[n, k] (+)= dy[m, n]^T @ x[m, k]` in binary32 throughout, as [`Self::forward_f32`] multiplies.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dw_f32(&self, gpu: &Gpu, steps: &mut Vec<Step>, dy: &Operand, x: &Operand, dw: &Operand, m: u32, n: u32, k: u32, accumulate: bool) -> bool {
+        let mut gemm = Self::tf32_product(false, n, k, m, k, n, k, if accumulate { 1.0 } else { 0.0 });
+        gemm.trans_b = true;
+        gemm.tf32 = false;
+        self.is_active() && self.library_step(gpu, steps, &gemm, &[x, dy, dw])
+    }
+
     fn tf32_step(&self, gpu: &Gpu, steps: &mut Vec<Step>, gemm: &LibraryGemm, ops: &[&Operand; 3]) -> bool {
+        self.tf32 && self.library_step(gpu, steps, gemm, ops)
+    }
+
+    /// One fp32-operand library product, or `false` when a dimension is empty or a sub-range is not 16-byte aligned.
+    fn library_step(&self, gpu: &Gpu, steps: &mut Vec<Step>, gemm: &LibraryGemm, ops: &[&Operand; 3]) -> bool {
         // Sub-ranges must stay 16-byte aligned (4 words), as for the bf16 products.
-        if !self.tf32 || ![gemm.m, gemm.n, gemm.k].iter().all(|&d| d > 0) || !ops.iter().all(|o| o.range.0.is_multiple_of(4)) {
+        if ![gemm.m, gemm.n, gemm.k].iter().all(|&d| d > 0) || !ops.iter().all(|o| o.range.0.is_multiple_of(4)) {
             return false;
         }
         match gpu.step_library_gemm(gemm, &[ops[0].buf, ops[1].buf, ops[2].buf], &[ops[0].range, ops[1].range, ops[2].range]) {
