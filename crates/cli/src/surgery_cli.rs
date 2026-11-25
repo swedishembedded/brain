@@ -151,6 +151,9 @@ pub fn run_speech_surgery(argv: &[String]) -> ! {
     if let Some(v) = &outcome.vocabulary {
         println!("vocabulary: {} of {} ids kept, {} of {} merges; corpus texts changed {} of {}, probe texts changed {} of {}", v.kept, v.of, v.merges_kept, v.merges_of, v.corpus_changed, v.corpus_texts, v.probe_changed, v.probe_texts);
     }
+    if let Some((n, differ)) = outcome.shard_texts {
+        println!("calibration shard: {differ} of {n} utterance texts hold other ids than the tokenizer files encode them to");
+    }
     println!("parameters {} -> {}", outcome.params_before, outcome.params_after);
     if let Some(c) = &outcome.checkpoint {
         println!("checkpoint: {}", c.display());

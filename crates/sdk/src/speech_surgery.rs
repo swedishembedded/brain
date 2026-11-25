@@ -106,6 +106,10 @@ pub struct SpeechSurgeryOutcome {
     pub params_after: u64,
     /// The vocabulary trim's report, when the plan trims one.
     pub vocabulary: Option<BpeReport>,
+    /// Of the calibration shard's utterances that carry their text, how many and how many of them hold other token
+    /// ids than the tokenizer files encode that text to (a shard tokenised by another tokenizer), when the plan
+    /// trims a vocabulary.
+    pub shard_texts: Option<(usize, usize)>,
     /// The exported checkpoint (none for a profile).
     pub checkpoint: Option<PathBuf>,
     pub manifest: PathBuf,
@@ -317,7 +321,7 @@ impl SpeechSurgery {
             on_progress("exporting");
             let dir = out.join(CHECKPOINT_DIR);
             let list = edited.to_list();
-            let files: Vec<(String, Vec<u8>)> = trimmed.as_ref().map(|(files, _)| tokenizer_bytes(files)).transpose()?.unwrap_or_default();
+            let files: Vec<(String, Vec<u8>)> = trimmed.as_ref().map(|(files, _, _)| tokenizer_bytes(files)).transpose()?.unwrap_or_default();
             qwen3tts::export::export_edited(&self.base, &dir, &self.id, &qwen3tts::export::Edited { config: &edited.config, tensors: &list, files: &files }, &mut || true).map_err(backend)?;
             Some(dir)
         };
@@ -326,7 +330,8 @@ impl SpeechSurgery {
             edits: costs,
             params_before: ck.params(),
             params_after: if self.profile { ck.params() } else { edited.params() },
-            vocabulary: trimmed.map(|(_, r)| r),
+            shard_texts: trimmed.as_ref().map(|(_, _, s)| *s),
+            vocabulary: trimmed.map(|(_, r, _)| r),
             checkpoint,
             manifest: manifest_path.clone(),
         };
@@ -364,12 +369,29 @@ impl SpeechSurgery {
         let corpus: Vec<&str> = shard_texts.iter().chain(&self.corpus).map(String::as_str).collect();
         let probe: Vec<&str> = held_out_texts.iter().chain(&self.probe).map(String::as_str).collect();
         let t = bpe::trim(&files, &corpus, &extra, &probe).map_err(backend)?;
-        Ok((BTreeMap::from([("text".to_string(), t.keep.clone())]), Some((t.files, t.report))))
+        let tok = data::qwen_tokenizer::QwenBpe::from_split_files(&serde_json::from_str(&files.vocab_json).map_err(backend)?, &files.merges_txt, added_records(&files.tokenizer_config)).map_err(backend)?;
+        let (mut with_text, mut differ) = (0, 0);
+        for r in 0..shard.len() {
+            let rec = shard.record(r);
+            if rec.id.text.is_empty() || rec.text_ids.len() < 8 {
+                continue;
+            }
+            with_text += 1;
+            // A record's ids frame its text: `<|im_start|>assistant\n` before, `<|im_end|>\n<|im_start|>assistant\n` after.
+            differ += usize::from(data::tokenizer::Tokenizer::encode(&tok, &rec.id.text) != rec.text_ids[3..rec.text_ids.len() - 5]);
+        }
+        Ok((BTreeMap::from([("text".to_string(), t.keep.clone())]), Some((t.files, t.report, (with_text, differ)))))
     }
 }
 
 /// Per vocabulary the ids a trim keeps, and the rewritten tokenizer files with the trim's report.
-type Trimmed = (BTreeMap<String, Vec<usize>>, Option<(TokenizerFiles, BpeReport)>);
+type Trimmed = (BTreeMap<String, Vec<usize>>, Option<(TokenizerFiles, BpeReport, (usize, usize))>);
+
+/// The added tokens of a `tokenizer_config.json` as `[{content, id}]` records.
+fn added_records(config: &serde_json::Value) -> serde_json::Value {
+    let records: Vec<serde_json::Value> = config["added_tokens_decoder"].as_object().map(|m| m.iter().filter_map(|(id, r)| Some(serde_json::json!({"content": r["content"].as_str()?, "id": id.parse::<u64>().ok()?}))).collect()).unwrap_or_default();
+    serde_json::Value::Array(records)
+}
 
 fn needs_ablation(e: &Edit) -> bool {
     matches!(e, Edit::RemoveLayers { by: Some(plan::LayerScore::Kl | plan::LayerScore::Loss), .. })
