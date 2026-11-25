@@ -173,8 +173,10 @@ Every setting left out is the objective's own default, which `GET /v1/capabiliti
 
 The languages and voices named are exactly the shards' own. A language or voice the request calls new that the base already names, one it calls the base's that the base lacks,
 an `init_from` that is not a base language, a shard language or voice the request does not name, and a shard of
-another codebook count or x-vector width are refused by name. The run is charged four copies of the Talker's and the
-code predictor's f32 weights and a step's activations on its card. Step frames carry `step`, `steps`, `loss`
+another codebook count or x-vector width are refused by name. Each rank is charged four copies of the Talker's and the
+code predictor's f32 weights, a workspace and the activations of a micro-batch of `batch_utterances` records of
+`max_frames` frames on its card (`validate_only` answers it as `device_bytes`), so a batch the card cannot hold is
+refused at the door. Step frames carry `step`, `steps`, `loss`
 (`talker_ce + residual_weight * code_predictor_ce`), `talker_ce`, `code_predictor_ce`, `eos_accuracy` (end-of-speech
 targets the Talker's greedy pick got right), `frames` and `frames_per_s`, `grad_norm`, `lr`, `seconds`, and after an
 evaluation `eval_loss`, `held_out_talker_ce`, `held_out_code_predictor_ce` and `held_out_eos_accuracy`. The result is

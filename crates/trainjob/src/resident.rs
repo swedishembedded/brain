@@ -245,8 +245,8 @@ impl TrainResident {
         if p.validate_only {
             return Ok(Reservation::Host(64 << 20));
         }
-        let bytes = speech::device_bytes(&base_dir);
-        self.fits_a_card(speech::ACTION, bytes, "four copies of the Talker's and the code predictor's f32 weights and a step's activations", "train a smaller base")?;
+        let bytes = speech::device_bytes(&base_dir, &request);
+        self.fits_a_card(speech::ACTION, bytes, "four copies of the Talker's and the code predictor's f32 weights and a micro-batch's activations", "lower batch_utterances or max_frames")?;
         // Every claimed card holds one rank.
         Ok(Reservation::Card(bytes, request.spread.cards))
     }

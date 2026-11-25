@@ -45,8 +45,12 @@ pub const MAX_NAMES: usize = 256;
 /// The id a checkpoint carries in its manifest when it is not installed under a name.
 const DEFAULT_ID: &str = "local/qwen3tts-speech";
 /// The working set a run is charged on its card beside four copies of the trained weights (weights, gradients and the
-/// two AdamW moments): activations of a step of utterances.
-const ACTIVATION_BYTES: u64 = 2 << 30;
+/// two AdamW moments) and a micro-batch's activations: the kernels' workspaces and the step's fixed buffers.
+const WORKSPACE_BYTES: u64 = 4 << 30;
+/// Activation floats a codec frame of a micro-batch holds, per float of one layer's hidden and feed-forward widths
+/// summed over the Talker's layers and the code predictor's (which runs every frame's codebooks as positions): fitted
+/// to the device peaks of the 1.7B on a GH200 (62.9 GB at 16 utterances, 91.2 GB at 32, the longest of 375 frames).
+const ACTIVATION_FLOATS_PER_WIDTH: f64 = 2.12;
 /// The most utterances one micro-batch may hold.
 const MAX_BATCH: f64 = 1_024.0;
 /// The most frames a record may hold (about 22 minutes at 12.5 frames per second).
@@ -317,11 +321,19 @@ pub(crate) fn resolve_base(env: &JobEnv, request: &Request) -> Result<std::path:
 /// moments, 4 bytes each.
 const BYTES_PER_TRAINED_PARAM: u64 = 16;
 
-/// What a run is charged on its card: the Talker's and the code predictor's parameters at
-/// [`BYTES_PER_TRAINED_PARAM`] (the codec and the speaker encoder are not trained) and a step's activations.
-pub(crate) fn device_bytes(base_dir: &Path) -> u64 {
+/// What one rank of a run of `request` is charged on its card: the Talker's and the code predictor's parameters at
+/// [`BYTES_PER_TRAINED_PARAM`] (the codec and the speaker encoder are not trained), the workspace, and the activations
+/// of a micro-batch of `batch_utterances` records of `max_frames` frames each, the most a micro-batch can hold (the
+/// build is sized by the shard's longest record, which is not known before the shard is staged).
+pub(crate) fn device_bytes(base_dir: &Path, request: &Request) -> u64 {
     let paths = qwen3tts::TtsPaths::new(base_dir, base_dir.to_string_lossy());
-    paths.talker_and_mtp_params().saturating_mul(BYTES_PER_TRAINED_PARAM).saturating_add(ACTIVATION_BYTES)
+    let defaults = objective_defaults();
+    let frames = u64::from(request.params.batch_utterances.unwrap_or(defaults.batch)) * u64::from(request.params.max_frames.unwrap_or(defaults.max_frames));
+    let config: Value = std::fs::read(base_dir.join("config.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
+    let (talker, mtp) = (qwen3tts::TalkerConfig::from_json(&config), qwen3tts::MtpConfig::from_json(&config));
+    let width = u64::from(talker.n_layers) * u64::from(talker.d_model + talker.d_ff) + u64::from(mtp.num_code_groups) * u64::from(mtp.n_layers) * u64::from(mtp.d_model + mtp.d_ff);
+    let activations = (frames as f64 * width as f64 * ACTIVATION_FLOATS_PER_WIDTH * 4.0) as u64;
+    paths.talker_and_mtp_params().saturating_mul(BYTES_PER_TRAINED_PARAM).saturating_add(WORKSPACE_BYTES).saturating_add(activations)
 }
 
 /// The staged shards, each opened and checked against the base and the request: the codebooks and x-vector width of
@@ -461,7 +473,7 @@ pub fn run(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], progre
             "status": "valid", "objective": ACTION, "base": p.base, "steps": p.steps, "epochs": p.epochs,
             "records": train.len(), "held_out_records": held_out.as_ref().map(qwen3tts::shard::Shard::len),
             "languages": request.languages.keys().collect::<Vec<_>>(), "voices": request.voices.keys().collect::<Vec<_>>(),
-            "device_bytes": device_bytes(&base_dir),
+            "device_bytes": device_bytes(&base_dir, &request),
         });
         return Ok(outcome);
     }

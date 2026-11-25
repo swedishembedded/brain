@@ -247,6 +247,32 @@ ledger is the engine work it needs.
       resume state; the shared loop's selection), resumable; the report carries `held_out_curve`, `checkpoint`
       (`last`/`best`), `best` (step, loss) and `stopped_early`. Gated: a run that stops early publishes exactly the
       checkpoint a run stopped at the best step publishes. `length_bucket_steps` defaults to 16.
+- [x] A rank's device charge grows with the micro-batch (`trainjob::speech::device_bytes`: weights at 16 bytes a
+      parameter, a 4 GiB workspace, and `batch_utterances x max_frames` frames of activations, fitted to the 1.7B's
+      GH200 peaks), so a batch the card cannot hold is refused at the door: the 1.7B at 32 x 400 is charged 95 GB of
+      a GH200's 102.6 GB, 40 x 400 is refused (it runs out of memory).
+- [x] Operating point and scaling of the 1.7B (2026-11-25, GH200, synthetic 8000-record shard of the corpus's length
+      distribution, 79.8 frames a record, `length_bucket_steps` 16, TF32 tensor cores):
+      - one card (`speech_sft_bench run`, four runs at once on one node, 24-30 steps): batch 16 x grad_accum 1 2600
+        frames/s (3100-3260 alone on the node), 16 x 4 3900, 24 x 2 3800, 32 x 2 4080, 32 x 4 4270 (device peak 91.2
+        GB), 36 x 2 3920 (98.8 GB); 40 and 48 run out of memory. Each optimizer step costs about 0.3 s whatever its
+        frames (`nsys`, 12 steps at 16 x 1: Talker backward 40 % of the ranged time, forward 19 %, code predictor 18 %,
+        the host batch load 12 %; kernels: TF32 GEMMs 37 %, `brain_gradnorm_part` 7 % in 370 launches a step,
+        `silu_mul` 6 %, the RMSNorm kernels 12 %), so steps of more frames (grad_accum) are faster.
+      - served (`brain serve --training`, `POST /v1/jobs`, batch 32 x grad_accum 4): 2 cards of one server 8,100
+        frames/s by the wall clock with an evaluation every 20 steps (8,600 without), 4,050 a card; 8 ranks over two
+        servers (4 + 4 cards, NCCL over Slingshot, `NET/Libfabric/GDRDMA`) 29,000 (30,900 without evaluations),
+        3,620-3,870 a card, cards 84-91 % busy, 86 GB used; at grad_accum 8, 33,000 (4,130 a card). The cross-node
+        reduction of the 7.7 GB of f32 gradients costs about 0.3 s of a 2.7 s step (not overlapped with the backward).
+        At 29,000 frames/s an epoch of 20M frames takes 11.5 minutes.
+- [ ] Open (throughput): a frame budget per micro-batch (short buckets now hold as few utterances as long ones, so a
+      short step pays the fixed step cost for few frames), bf16 weights and activations, overlapping the gradient
+      sum with the backward, fused element-wise kernels (gradient-norm partials per tensor, SiLU-mul, RMSNorm), and
+      scoring the held-out shard on every rank (rank 0 scores it alone while the others wait).
+- [ ] Open (resume at scale): a resumable run writes every rank's full state (weights and both moments, about 31 GB
+      a rank for the 1.7B) every `checkpoint_every` steps; eight ranks write about 245 GB a generation. Replicated
+      ranks need one copy of the parameters and moments and each rank's stream position only.
+- [ ] Open: `parallel.devices` is empty for a speech run (the SDK records a rank's device only for its own trainers).
 - [ ] A release installed by a running server is served from the server's next start (no job registers a model
       live).
 - [ ] Collecting a published artifact over the API: a remote client without the artifact directory cannot fetch a

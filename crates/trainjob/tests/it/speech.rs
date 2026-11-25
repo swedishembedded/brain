@@ -193,6 +193,9 @@ fn validate_only_checks_the_shards_against_the_names_and_trains_nothing() {
     let rig = tts_rig("speech-validate");
     let out = run(&rig, params(json!({"validate_only": true})), &[("dataset", shard())], &Frames::default()).unwrap();
     assert_eq!((out.outputs["status"].as_str(), out.outputs["records"].as_u64()), (Some("valid"), Some(3)), "{}", out.outputs);
+    let charged = |p: Value| run(&rig, params(json!({"validate_only": true}).as_object().unwrap().clone().into_iter().chain(p.as_object().unwrap().clone()).collect()), &[("dataset", shard())], &Frames::default()).unwrap().outputs["device_bytes"].as_u64().unwrap();
+    let (small, large) = (charged(json!({"batch_utterances": 2})), charged(json!({"batch_utterances": 4})));
+    assert!(large > small && charged(json!({"batch_utterances": 2, "max_frames": 8})) == small && charged(json!({"batch_utterances": 2, "max_frames": 4})) < small, "a rank's charge grows with the frames a micro-batch can hold: {small} {large}");
     let refused = run(&rig, params(json!({"validate_only": true, "voices": "{}"})), &[("dataset", shard())], &Frames::default()).unwrap_err();
     assert!(refused.contains("astrid") && refused.contains("voices"), "a shard voice the request does not name: {refused}");
     let garbage = run(&rig, params(json!({"validate_only": true})), &[("dataset", b"not a shard".to_vec())], &Frames::default()).unwrap_err();
