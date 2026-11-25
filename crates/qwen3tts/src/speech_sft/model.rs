@@ -40,6 +40,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
+use gpu_core::provider::library::GemmPrecision;
 use gpu_core::{DeviceBuffer, Gpu};
 use model::head_ce::{HeadCe, HeadCeConfig, HeadKernels, IGNORE};
 use model::ops::{Ops, Weight};
@@ -128,6 +129,10 @@ pub struct SftShape {
     pub new_rows: Vec<u32>,
     /// Hidden width of the text path's projection.
     pub text_inter: u32,
+    /// The arithmetic of every GEMM and attention of the decoders and heads: tensor cores where the device has them
+    /// ([`GemmPrecision::Auto`], TF32 products of the fp32 weights), or the exact fp32 kernels a derivative check
+    /// states its claim against. A build input, not model data: never saved with the configuration.
+    pub gemm: GemmPrecision,
 }
 
 impl SftShape {
@@ -273,6 +278,7 @@ impl model::ModelConfig for SftShape {
             lr: serde_json::from_value(v["lr"].clone()).unwrap_or_default(),
             new_rows: serde_json::from_value(v["new_rows"].clone()).unwrap_or_default(),
             text_inter: u(tt, "text_inter"),
+            gemm: GemmPrecision::default(),
         }
     }
 
@@ -502,7 +508,7 @@ impl SpeechSftModel {
         if shape.mtp.num_code_groups != shape.talker.num_code_groups {
             return Err(format!("speech sft: the code predictor fills {} codebooks, the Talker has {}", shape.mtp.num_code_groups, shape.talker.num_code_groups));
         }
-        let mut decoder = |cfg: &QwenConfig, which: Decoder| -> Result<Qwen, String> {
+        let mut decoder = |cfg: &QwenConfig, which: Decoder, parent: Option<&Gpu>| -> Result<Qwen, String> {
             let mut weights = qwen3::init_weights(cfg, seed);
             for (hf, numel, owner) in shape.decoder_params() {
                 if owner != which {
@@ -519,7 +525,8 @@ impl SpeechSftModel {
                 Decoder::Talker => (shape.batch, shape.block),
                 Decoder::CodePredictor => (shape.frames, shape.mtp.num_code_groups),
             };
-            let mut q = Qwen::new(cfg.clone(), b, t, &weights);
+            // One device for the run: the code predictor is built on the Talker's handle.
+            let mut q = Qwen::new_training_on(parent, cfg.clone(), b, t, &weights, shape.gemm, &qwen3::model::FullFtBuild::ambient())?;
             q.enable_mm_splices(&[(0, b * t)]);
             q.enable_external_head();
             let store = model::Model::optimizer_state(&mut q).ok_or("speech sft: the decoder exposes no parameter store")?.store;
@@ -528,8 +535,8 @@ impl SpeechSftModel {
             q.set_batch(&vec![0u32; (b * t) as usize], &vec![IGNORE; (b * t) as usize]);
             Ok(q)
         };
-        let talker = decoder(&shape.talker_qwen(), Decoder::Talker)?;
-        let cp = decoder(&shape.cp_qwen(), Decoder::CodePredictor)?;
+        let talker = decoder(&shape.talker_qwen(), Decoder::Talker, None)?;
+        let cp = decoder(&shape.cp_qwen(), Decoder::CodePredictor, Some(talker.gpu()))?;
         let talker_norm = DeviceGradNorm::new(talker.gpu())?;
         let cp_norm = DeviceGradNorm::new(cp.gpu())?;
 
@@ -564,7 +571,7 @@ impl SpeechSftModel {
     fn build_aux(shape: &SftShape, talker: &Qwen, init: &mut HashMap<String, Vec<f32>>) -> Result<Aux, String> {
         let gpu = talker.gpu().new_like(&aux_kernels());
         let mut ops = Ops::new(gpu.share())?;
-        ops.set_gemm_precision(gpu_core::provider::library::GemmPrecision::Fp32Reference);
+        ops.set_gemm_precision(shape.gemm);
         let params = shape.aux_params();
         let mut weights = HashMap::new();
         for (n, s) in &params {

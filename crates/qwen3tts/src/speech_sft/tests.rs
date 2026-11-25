@@ -51,7 +51,7 @@ pub(crate) fn rows() -> RowMap {
 pub(crate) fn shape(d: u32, batch: u32, block: u32, frames: u32) -> SftShape {
     let talker = TalkerConfig { vocab: 48, d_model: d, num_code_groups: GROUPS, ..TalkerConfig::tiny() };
     let mtp = MtpConfig { vocab: CODEBOOK, embedding_dim: d, num_code_groups: GROUPS, ..MtpConfig::tiny() };
-    SftShape { talker, mtp, specials: specials(), batch, block, frames, mtp_weight: 0.3, lr: Default::default(), new_rows: Vec::new(), text_inter: 20 }
+    SftShape { talker, mtp, specials: specials(), batch, block, frames, mtp_weight: 0.3, lr: Default::default(), new_rows: Vec::new(), text_inter: 20, gemm: gpu_core::provider::library::GemmPrecision::Fp32Reference }
 }
 
 /// `(text tokens, frames, voice, language, complete)` per record.
@@ -368,7 +368,7 @@ fn training_rows_are_inference_rows_on_the_real_checkpoint() {
         return;
     };
     let base = super::Base::open(std::path::Path::new(&paths.ckpt_dir)).unwrap();
-    let shape = SftShape { talker: base.talker.clone(), mtp: base.mtp.clone(), specials: base.specials.clone(), batch: 1, block: 1, frames: 1, mtp_weight: 0.3, lr: Default::default(), new_rows: Vec::new(), text_inter: base.text_inter };
+    let shape = SftShape { talker: base.talker.clone(), mtp: base.mtp.clone(), specials: base.specials.clone(), batch: 1, block: 1, frames: 1, mtp_weight: 0.3, lr: Default::default(), new_rows: Vec::new(), text_inter: base.text_inter, gemm: gpu_core::provider::library::GemmPrecision::Fp32Reference };
     let train = super::model::host_tables(&shape, &mut base.tensors.clone()).unwrap();
     let tables = crate::npu_gen::TalkerTables::load(&paths.talker);
     let mtp = crate::gen_kv_mtp::CpuMtp::load(&paths.mtp);

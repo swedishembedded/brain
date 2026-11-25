@@ -121,12 +121,17 @@ ledger is the engine work it needs.
       | build | frames/s (steps 2-6) | step |
       |---|---|---|
       | fp32 kernels, three device handles (2026-11-25) | 106-121 | 11-12 s for 1400 frames |
+      | tensor cores (TF32 GEMMs, fp16 flash attention), the decoders on one handle | 242-283 | 4.5-6 s |
 
       `nsys` of that build (4 steps): 79 % of the kernel time in brain's fp32 CUDA-core GEMMs
       (`matmul_f32_tiled` 39 %, `matmul_f32_dw_reg` 21 %, `matmul_f32_dx_reg` 19 %), the portable fp32 flash
       attention 10 %; 1.75 s a step in host-device copies (rows up, hidden states and row gradients down);
       the build pads every micro-batch to the longest record (block 505 rows, 16 x 505 Talker rows for about
       1840 real ones, and a 6000-frame code predictor for about 1400 frames).
+      With tensor cores (`nsys`, 4 steps) the host is the step: the optimizer range 0.87 s a step (the codec
+      tables on the host Adam), the host row build 0.61 s, the code predictor's rows and its heads' gather
+      0.3-0.45 s each, and the largest kernels the projection's portable `matmul_dw`/`matmul_dx` (0.22 and
+      0.17 s each a step over every frame's 16 rows).
 - [ ] Batches shorter than the build: with every row spliced in, `qwen3::Qwen`
       runs its whole block (`needed_len` does not trim a spliced or
       external-head batch), so every micro-batch pays the longest record's

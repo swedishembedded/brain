@@ -27,6 +27,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
+/// The arithmetic tier a build takes ([`SftShape::gemm`]).
+pub use gpu_core::provider::library::GemmPrecision;
 use serde::{Deserialize, Serialize};
 
 pub mod model;
@@ -52,6 +54,27 @@ pub enum Schedule {
     Cosine,
     /// Warm up, then the rate held.
     Constant,
+}
+
+/// The arithmetic of a run's products.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Arithmetic {
+    /// Tensor cores wherever the device has them (TF32 products of the fp32 weights, binary32 accumulation), the
+    /// fp32 kernels elsewhere.
+    #[default]
+    TensorCores,
+    /// The exact fp32 kernels everywhere: the reference the tensor-core runs are compared against.
+    Fp32,
+}
+
+impl Arithmetic {
+    fn gemm(self) -> GemmPrecision {
+        match self {
+            Arithmetic::TensorCores => GemmPrecision::Auto,
+            Arithmetic::Fp32 => GemmPrecision::Fp32Reference,
+        }
+    }
 }
 
 /// One speech fine-tuning run. Unknown fields are refused.
@@ -111,6 +134,8 @@ pub struct SpeechSftConfig {
     /// Held-out batches per evaluation (`0`: every record).
     #[serde(default)]
     pub eval_batches: u32,
+    #[serde(default)]
+    pub arithmetic: Arithmetic,
 }
 
 mod defaults {
@@ -246,7 +271,7 @@ impl Base {
         let reader = checkpoint::weightio::WeightReader::open(path.to_str().ok_or_else(|| at("path", &"not UTF-8"))?).map_err(|e| at("model.safetensors", &e))?;
         let fc1_bias = model::TEXT_PROJECTION[1];
         let text_inter = reader.shape(fc1_bias).and_then(|s| s.first().copied()).ok_or_else(|| at("model.safetensors", &format!("no {fc1_bias}")))? as u32;
-        let shape = SftShape { talker: talker.clone(), mtp: mtp.clone(), specials: specials.clone(), batch: 1, block: 1, frames: 1, mtp_weight: 0.0, lr: LrMultipliers::default(), new_rows: Vec::new(), text_inter };
+        let shape = SftShape { talker: talker.clone(), mtp: mtp.clone(), specials: specials.clone(), batch: 1, block: 1, frames: 1, mtp_weight: 0.0, lr: LrMultipliers::default(), new_rows: Vec::new(), text_inter, gemm: GemmPrecision::Fp32Reference };
         let mut tensors = HashMap::new();
         let mut shapes = HashMap::new();
         for (name, numel) in ::model::ModelConfig::param_list(&shape).into_iter().chain(shape.frozen_params()) {
@@ -300,7 +325,7 @@ pub fn speech_sft(cfg: &SpeechSftConfig, train: &Shard, held_out: Option<&Shard>
     for s in &shards {
         block = block.max(objective::rows_needed(&specials, &rows.map, s)?);
     }
-    let shape = SftShape { talker, mtp, specials: specials.clone(), batch: cfg.batch, block: block as u32, frames: cfg.batch * frames as u32, mtp_weight: cfg.mtp_weight, lr: cfg.lr_multipliers, new_rows: rows.new_rows.clone(), text_inter };
+    let shape = SftShape { talker, mtp, specials: specials.clone(), batch: cfg.batch, block: block as u32, frames: cfg.batch * frames as u32, mtp_weight: cfg.mtp_weight, lr: cfg.lr_multipliers, new_rows: rows.new_rows.clone(), text_inter, gemm: cfg.arithmetic.gemm() };
     let seed = match (cfg.seed, control.state) {
         (Some(s), _) => s,
         (None, Some(state)) => ::model::train::saved_seed(state).map_err(|e| e.to_string())?.unwrap_or_else(data::rng::random_seed),
