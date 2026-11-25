@@ -187,10 +187,11 @@ pub const READOUT_KERNELS: [(&str, &str); 3] = [("argmax_part", kernels::ARGMAX_
 
 /// The keyed draw's kernels, for a model's kernel list: a decoder that registers them draws its sampled rows on the
 /// device ([`RowDrawer`]).
-pub const DRAW_KERNELS: [(&str, &str); 7] = [
+pub const DRAW_KERNELS: [(&str, &str); 8] = [
     ("draw_part", kernels::DRAW_PART),
     ("draw_final", kernels::DRAW_FINAL),
     ("draw_list", kernels::DRAW_LIST),
+    ("draw_list_rows", kernels::DRAW_LIST_ROWS),
     ("nucleus_part", kernels::NUCLEUS_PART),
     ("nucleus_step", kernels::NUCLEUS_STEP),
     ("nucleus_cut", kernels::NUCLEUS_CUT),
@@ -247,6 +248,8 @@ pub struct RowDrawer {
     nucleus_cut: usize,
     feed_kernel: usize,
     list_kernel: usize,
+    /// `draw_list` a workgroup a row, where the device runs workgroup reductions and the model registered it.
+    list_rows_kernel: Option<usize>,
     /// The argmax and extraction kernels the candidate lists are taken with, when the model registered them.
     topk: Option<ReadoutKernels>,
     max_rows: u32,
@@ -283,6 +286,7 @@ impl RowDrawer {
         let (nucleus_part, nucleus_step, nucleus_cut) = (k("nucleus_part")?, k("nucleus_step")?, k("nucleus_cut")?);
         let feed_kernel = k("draw_feed")?;
         let list_kernel = k("draw_list")?;
+        let list_rows_kernel = k("draw_list_rows").filter(|_| g.caps().workgroup_reductions);
         let topk = ReadoutKernels::resolve(g).ok();
         let rows = max_rows.max(1) as u64;
         let cands = if topk.is_some() { rows * MAX_DRAW_CANDIDATES as u64 } else { 1 };
@@ -294,6 +298,7 @@ impl RowDrawer {
             nucleus_cut,
             feed_kernel,
             list_kernel,
+            list_rows_kernel,
             topk,
             max_rows: max_rows.max(1),
             window,
@@ -432,7 +437,11 @@ impl RowDrawer {
         if let (Some(k), true) = (self.topk, shape.candidates > 0) {
             let n = shape.candidates;
             steps.extend(topk_rows_steps(g, k, logits, &self.cand_vals, &self.cand_idx, rows, vocab, n, n));
-            steps.push(g.step(self.list_kernel, &[&self.spec, &self.cand_vals, &self.cand_idx, &self.out], &[rows, n, vocab, step], rows));
+            let bufs = [&self.spec, &self.cand_vals, &self.cand_idx, &self.out];
+            steps.push(match self.list_rows_kernel {
+                Some(kernel) => g.dispatch(kernel, &bufs, &[rows, n, vocab, step], gpu_core::Dispatch::Workgroups(rows)),
+                None => g.step(self.list_kernel, &bufs, &[rows, n, vocab, step], rows),
+            });
         }
         steps
     }

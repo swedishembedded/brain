@@ -470,6 +470,8 @@ pub const DRAW_FEED: &str = include_str!("../wgsl/draw_feed.wgsl");
 pub const DRAW_FINAL: &str = include_str!("../wgsl/draw_final.wgsl");
 /// `wgsl/draw_list.wgsl`
 pub const DRAW_LIST: &str = include_str!("../wgsl/draw_list.wgsl");
+/// `wgsl/draw_list_rows.wgsl`
+pub const DRAW_LIST_ROWS: &str = include_str!("../wgsl/draw_list_rows.wgsl");
 /// `wgsl/draw_part.wgsl`
 pub const DRAW_PART: &str = include_str!("../wgsl/draw_part.wgsl");
 /// `wgsl/dw_splitk_reduce.wgsl`
@@ -2061,6 +2063,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("draw_feed", DRAW_FEED),
     ("draw_final", DRAW_FINAL),
     ("draw_list", DRAW_LIST),
+    ("draw_list_rows", DRAW_LIST_ROWS),
     ("draw_part", DRAW_PART),
     ("dw_splitk_reduce", DW_SPLITK_REDUCE),
     ("dwconv3d", DWCONV3D),
