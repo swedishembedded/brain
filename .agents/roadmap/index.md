@@ -107,6 +107,7 @@ heading and a `Scope: <one sentence>` line under it, then run `make generate/roa
 | [`serving-runtime`](serving-runtime.md) | serving-runtime - one shared inference runtime for long context and high concurrency | The shared LLM serving runtime (`model::serve`, `model::paged`, `model::kv_offload`, `llmserve`) and the engines that plug into it, for 128K-1M contexts at high concurrency. |
 | [`spectrallm`](spectrallm.md) | spectrallm | SpectralLM, the decoder with a truncated real-Fourier residual stream and per-mode spectral mixers (`crates/spectrallm`), its operators, and the comparisons its paper reports (`papers/spectral-lm`). |
 | [`splat`](splat.md) | splat | Gaussian splatting, structure from motion and multi-view stereo (`crates/splat`, `sfm`, `mvs`, `recon`). |
+| [`sten-tts-compression`](sten-tts-compression.md) | Sten-TTS compression: halving ladder from 1.9B to ~60M | Weight surgery, calibration, distillation and validation that carve progressively smaller Sten-TTS variants out of the trained checkpoint. |
 | [`supir`](supir.md) | supir | SUPIR image restoration (`crates/supir`). |
 | [`t5encoder`](t5encoder.md) | t5encoder | T5-XXL / umT5 text encoder (`crates/t5encoder`). |
 | [`throughput-27b`](throughput-27b.md) | 27B LoRA / QLoRA training throughput - plan to 1,000-2,000 trained tokens/s | Qwen3.8-27B LoRA/QLoRA training throughput. |

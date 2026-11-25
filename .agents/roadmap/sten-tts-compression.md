@@ -1,5 +1,7 @@
 # Sten-TTS compression: halving ladder from 1.9B to ~60M
 
+Scope: Weight surgery, calibration, distillation and validation that carve progressively smaller Sten-TTS variants out of the trained checkpoint.
+
 Goal (user, 2026-11-25): progressively smaller Sten-TTS variants, each about half the previous one's parameters,
 carved out of the trained Sten-TTS-1.7B by weight editing plus speech distillation from it. Each variant is
 published to `swedishembedded/sten-tts` (its own subfolder) only after full validation. The ladder stops at about
