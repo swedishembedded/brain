@@ -42,7 +42,9 @@ Target, in order (each a self-contained change, measured with nsys/ncu before th
       stacked input table, one readback of the codes); embedding-input steps replay recorded tapes.
 - [ ] One sync per frame and multi-frame windows: the Talker hidden stays on the device for the
       code predictor, the Talker step and the chain one recording.
-- [x] Codec decode as one recorded device pass with GEMM-lowered convs (8 s clip 2-3 s to 0.1-0.25 s).
+- [x] Codec decode as one recorded device pass with GEMM-lowered convs (8 s clip 2-3 s to 0.1-0.25 s), its
+      products on the vendor fp32 GEMM (warm 100 frames 75-142 ms to 58-62 ms, precision unchanged). TF32, a codec
+      worker thread, a recording per length bucket and periodic flushing were measured and dropped (knowledge 580).
 - [ ] Batched codec decode of the streams that finish together (causal throughout, so a
       right-padded batch is exact): at 64 streams the per-clip decode on the decode thread is
       61 % of the wall time (nsys, 111 ms a clip). A worker thread on its own handle fences
