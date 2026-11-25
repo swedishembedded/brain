@@ -27,6 +27,15 @@ pub fn spec() -> ActionSpec {
 
 pub struct Toy;
 
+/// The model-store id of a checkpoint at `out` (`<models-dir>/<vendor>/<name>`): `<vendor>/<name>`.
+fn store_id(out: &Path) -> Result<String, String> {
+    let name = |p: Option<&Path>| p.and_then(Path::file_name).and_then(|n| n.to_str()).map(str::to_string);
+    match (name(out.parent()), name(Some(out))) {
+        (Some(vendor), Some(model)) => Ok(format!("{vendor}/{model}")),
+        _ => Err(format!("qwen3 toy: {} is not <models-dir>/<vendor>/<name>", out.display())),
+    }
+}
+
 impl Action for Toy {
     fn spec(&self) -> ActionSpec {
         spec()
@@ -35,8 +44,12 @@ impl Action for Toy {
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let out = inv.get_str("out").filter(|o| !o.is_empty()).ok_or("qwen3 toy: missing required param 'out'")?;
         let seed = inv.get_i64("seed").map_or_else(data::rng::random_seed, |s| s as u64);
-        qwen3::toy::write_toy_chat_checkpoint(Path::new(&out), seed).map_err(|e| format!("qwen3 toy: {e}"))?;
-        if inv.get_bool("store_layout").unwrap_or(false) {
+        let store_layout = inv.get_bool("store_layout").unwrap_or(false);
+        // In the store's layout the checkpoint is `<models-dir>/<vendor>/<name>`, and its card names it so: without a
+        // card the store skips it and nothing serves it.
+        let id = store_layout.then(|| store_id(Path::new(&out))).transpose()?;
+        qwen3::toy::write_toy_chat_checkpoint_carded(Path::new(&out), seed, id.as_deref()).map_err(|e| format!("qwen3 toy: {e}"))?;
+        if store_layout {
             std::fs::rename(Path::new(&out).join("model.safetensors"), Path::new(&out).join("model.brain.safetensors")).map_err(|e| format!("qwen3 toy: {out}: {e}"))?;
         }
         Ok(Outcome::new().set("saved", json!(out)).set("seed", json!(seed)))
@@ -75,6 +88,10 @@ mod tests {
         run(at(&models.join("local").join("toy")).set("store_layout", json!(true))).unwrap();
         let found = brain_modelstore::Store::new(&models).local(&brain_modelref::ModelRef::parse("local/toy").unwrap());
         assert!(found.is_some_and(|m| m.weights.ends_with("model.brain.safetensors")), "the store finds the toy checkpoint by name");
+        // A server's scan skips weights without a card: the card names the checkpoint as the store does.
+        let weights = models.join("local").join("toy").join("model.brain.safetensors");
+        let card = checkpoint::st::read_card(weights.to_str().unwrap()).unwrap().expect("a model card");
+        assert_eq!((card.id.as_str(), card.family.as_str()), ("local/toy", "qwen"));
         assert!(run(Invocation::new()).unwrap_err().contains("out"));
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -36,6 +36,15 @@ const TEMPLATE: &str = "{% for m in messages %}{% if m.role == 'user' %}{{ m.con
 /// # Errors
 /// `dir` cannot be written.
 pub fn write_toy_chat_checkpoint(dir: &Path, seed: u64) -> Result<(), String> {
+    write_toy_chat_checkpoint_carded(dir, seed, None)
+}
+
+/// [`write_toy_chat_checkpoint`] whose weights carry a model card naming `id` (a `qwen` family checkpoint): what a
+/// model store needs to list, serve and train the checkpoint by that id. `None` writes no card.
+///
+/// # Errors
+/// `dir` cannot be written.
+pub fn write_toy_chat_checkpoint_carded(dir: &Path, seed: u64, id: Option<&str>) -> Result<(), String> {
     let io = |e: std::io::Error| format!("toy checkpoint in {}: {e}", dir.display());
     std::fs::create_dir_all(dir).map_err(io)?;
     let cfg = crate::QwenConfig { vocab: VOCAB, block_size: CONTEXT, max_position_embeddings: CONTEXT, d_model: 32, d_ff: 64, ..crate::QwenConfig::tiny() };
@@ -51,7 +60,8 @@ pub fn write_toy_chat_checkpoint(dir: &Path, seed: u64) -> Result<(), String> {
         .collect();
     let weights = dir.join("model.safetensors");
     let weights = weights.to_str().ok_or_else(|| "the toy checkpoint's path is not UTF-8".to_string())?;
-    checkpoint::st::save_safetensors(weights, &tensors, &cfg.to_json(), None).map_err(io)?;
+    let card = id.map(|id| checkpoint::st::ModelCard::new(id, "qwen"));
+    checkpoint::st::save_safetensors(weights, &tensors, &cfg.to_json(), card.as_ref()).map_err(io)?;
 
     // One token per byte, spelled as GPT-2's byte-to-unicode table spells it.
     let printable: Vec<u32> = (0x21..=0x7e).chain(0xa1..=0xac).chain(0xae..=0xff).collect();
