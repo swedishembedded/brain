@@ -86,6 +86,44 @@ is 3.8 GB. The loss is:
 - The export path handles changed shapes: the student checkpoint is its own base.
 - The original Sten is always the teacher. The previous rung only initialises the next student.
 
+### Distillation in `speech_sft` (landed 2026-11-25)
+
+The params, as the served action takes them (flat beside the existing ones): `teacher` (model-store id),
+`gt_weight` (1), `talker_kd_weight` (1), `mtp_kd_weight` (0.02: `residual_weight` 0.3 over 15 codebooks; the residual
+term is a sum over the codebooks of each one's frame mean), `hidden_kd_weight` (0) with `hidden_kd_layers`
+(`[[student, teacher], ...]`, residual stream entering the layer), `kd_temperature` (1). The objective-level config
+(`SpeechSftConfig`) takes the same names, `teacher` as a directory. Held-out selection (`patience`, `keep_best`) is the
+distillation terms alone when a teacher is named. Design and contracts: `crates/qwen3tts/src/speech_sft/distill.rs`.
+
+- The teacher is a forward-only build at bf16 linears on each rank's card (`Qwen::new_frozen_on`), trimmed to the
+  student's rows (#592); student and teacher computed layouts are checked equal each batch.
+- Student text tokens map to the teacher's by token string (both tokenizers' `vocab.json` plus added tokens), checked
+  at start with every shard token; languages and voices map by name, so a student may hold them at other rows.
+- Across widths only named-voice records distil (#591).
+
+Measured 2026-11-25 on n460 (GH200, CUDA backend, NCCL), student = Sten with its first 8 of 28 Talker layers
+(0.91 B), synthetic shard (400 records, mean 82 frames), batch 8, 16 steps, mean past step 3:
+
+| run | frames/s | device peak |
+|---|---:|---:|
+| one card, no teacher | 3,593 | 28.7 GB |
+| one card, teacher (KL terms) | 2,557 (0.71x) | 47.8 GB |
+| one card, teacher + 2 hidden pairs | 2,509 | 48.2 GB |
+| two cards, no teacher | 6,929 | - |
+| two cards, teacher | 5,020 (0.72x) | - |
+
+Open:
+- The teacher build allocates a training build's activation and backward scratch (inference builds are not sized
+  for forward-only batched use); most of the ~19 GB the teacher adds is that scratch. A forward-only batched sizing
+  would cut it.
+- The student's KD logits are a second head product beside the head's own cross-entropy pass (a few percent of a
+  step); a dense soft-target mode of `HeadCe` would fuse them.
+- The distillation's forward (`speech_sft.kd_fwd`: gathers, the student's head products, `kd_kl_rows` and the
+  read-back of the KLs) took a median 16.8 ms of a ~250 ms step in nsys on the run above (10 steps). `kd_kl_rows` is
+  one thread per row (core-compute); a workgroup-per-row variant behind `workgroup_reductions` is the next step if a
+  kernel profile puts it first.
+- Distilling x-vector (cloning) records across widths needs a rotated speaker encoder (#591).
+
 ## Validation (a variant is published only if it passes all of these)
 
 - **The full sten-tts `evaluate` stage** and all six release gates.
