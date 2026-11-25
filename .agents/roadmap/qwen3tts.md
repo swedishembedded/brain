@@ -49,6 +49,11 @@ Target, in order (each a self-contained change, measured with nsys/ncu before th
       61 % of the wall time. A worker thread on its own handle fences against the decoders, and a
       batched decode of the clips that finish together is slower (knowledge 580); the per-clip
       cost is its own kernels (im2col and the conv products), so an implicit-GEMM conv is next.
+- [x] Building a training set from recordings: the codec encoder on the device with its frames quantised across the
+      CPU pool (codes bit-identical; 8 s of audio 5.8x to 291x real time, 48 s 10.3x to 613-674x), the speaker
+      encoder's log-mel frames across the pool (bit-identical; 48 s 114x to 253x real time on the device), and the
+      stride-1 convs of the codec as tap sums on the vendor fp32 GEMM (no im2col; decode kernel time -18 %). 300 h of
+      audio is about half an hour of codec encode on one card.
 - [x] Training: the Talker and code predictor as one model with the reference's loss is
       `speech_sft` (`.agents/roadmap/qwen3tts-sft.md`); the shared trainer gained what a fast run of
       it needs: the GEMM precision reaching the model, per-position head groups (one GEMM per
