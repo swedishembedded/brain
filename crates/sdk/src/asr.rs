@@ -93,13 +93,28 @@ impl TranscribePipeline {
         }
     }
 
-    /// Transcribe already-16 kHz mono f32 PCM.
+    /// Transcribe already-16 kHz mono f32 PCM, the model identifying the language.
     pub fn transcribe(&self, samples: &[f32]) -> Result<Transcript> {
+        self.transcribe_in(samples, None)
+    }
+
+    /// Transcribe already-16 kHz mono f32 PCM spoken in `language` (Qwen3-ASR's
+    /// names: `Swedish`, `English`, ...; `None` lets the model identify it). A
+    /// language the model does not transcribe is refused, and so is any but
+    /// English on the Nemotron backend, which transcribes English only.
+    pub fn transcribe_in(&self, samples: &[f32], language: Option<&str>) -> Result<Transcript> {
         match &self.backend {
             Backend::Qwen3Asr(provider) => {
+                let language = match language {
+                    Some(l) => qwen3asr::caps::language(l).map_err(Error::Backend)?,
+                    None => None,
+                };
                 let truncated = qwen3asr::caps::window_truncation(provider.window_samples(), samples);
-                let (text, tokens) = provider.transcribe(samples, &capability::CancelToken::default(), &mut |_| {}).map_err(Error::Backend)?;
+                let (text, tokens) = provider.transcribe(samples, language, &capability::CancelToken::default(), &mut |_| {}).map_err(Error::Backend)?;
                 Ok(Transcript { text, tokens, truncated })
+            }
+            Backend::Nemotron(_) if language.is_some_and(|l| !l.eq_ignore_ascii_case("english") && !l.eq_ignore_ascii_case("auto")) => {
+                Err(Error::Backend(format!("nemotronasr: transcribes English only, not {:?}; use a Qwen3-ASR pipeline", language.unwrap_or_default())))
             }
             Backend::Nemotron(n) => {
                 let (model, detokenizer) = (&n.model, &n.detokenizer);

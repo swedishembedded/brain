@@ -343,17 +343,7 @@ struct QwenAsrInstance {
 
 impl Instance for QwenAsrInstance {
     fn run(&mut self, _action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        inv.cancel.check()?;
-        let blob = inv.get_blob("audio").ok_or("qwen-asr transcribe: missing 'audio' input")?;
-        let wav = wav_from_blob(blob)?;
-        let truncated = qwen3asr::caps::window_truncation(self.provider.window_samples(), &wav);
-        if let Some((total, window)) = truncated {
-            progress(Progress::step(0, 1, format!("warning: audio is {total:.1}s but the decode window is {window:.1}s -- transcribing only the first {window:.1}s (raise window_secs)")));
-        }
-        progress(Progress::step(0, 1, "transcribing"));
-        let (text, tokens) = self.provider.transcribe(&wav, &inv.cancel, progress)?;
-        progress(Progress::step(1, 1, text.clone()));
-        Ok(transcription_outcome(text, &tokens).set("truncated", serde_json::json!(truncated.is_some())))
+        qwen3asr::caps::run_transcribe(&self.provider, inv, progress)
     }
     // run_batch: default sequential loop (offline autoregressive decode; the audio
     // encoder still amortises within the fixed-window instance).
@@ -415,10 +405,11 @@ impl QwenAsrNpuInstance {
 impl Instance for QwenAsrNpuInstance {
     fn run(&mut self, _action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         inv.cancel.check()?;
+        let language = qwen3asr::caps::language(&inv.get_str("language").unwrap_or_default())?;
         let blob = inv.get_blob("audio").ok_or("qwen-asr transcribe: missing 'audio' input")?;
         let wav = wav_from_blob(blob)?;
         progress(Progress::step(0, 1, "transcribing (NPU audio encoder)"));
-        let (text, tokens) = self.provider.transcribe_with_head(&wav, &inv.cancel, progress, |packed, n, spans| self.npu_head(packed, n, spans))?;
+        let (text, tokens) = self.provider.transcribe_with_head(&wav, language, &inv.cancel, progress, |packed, n, spans| self.npu_head(packed, n, spans))?;
         progress(Progress::step(1, 1, text.clone()));
         Ok(transcription_outcome(text, &tokens).set("device", serde_json::json!(self.device.borrow().clone())))
     }

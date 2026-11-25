@@ -47,6 +47,37 @@ pub const PROMPT_SUFFIX: [u32; 6] = [151670, 151645, 198, 151644, 77091, 198];
 
 /// Assemble the decoder prompt ids for `n_audio` audio placeholders:
 /// `PREFIX ++ [AUDIO_TOKEN_ID; n_audio] ++ SUFFIX`.
+/// The `<asr_text>` token: the end of the model's `language <Name>` preamble.
+pub const ASR_TEXT_ID: u32 = 151704;
+
+/// The languages the model card lists, in the names its `language <Name>`
+/// preamble uses.
+pub const LANGUAGES: &[&str] = &[
+    "Chinese", "English", "Cantonese", "Arabic", "German", "French", "Spanish", "Portuguese", "Indonesian", "Italian", "Korean", "Russian", "Thai", "Vietnamese", "Japanese",
+    "Turkish", "Hindi", "Malay", "Dutch", "Swedish", "Danish", "Finnish", "Polish", "Czech", "Filipino", "Persian", "Greek", "Hungarian", "Macedonian", "Romanian",
+];
+
+/// The language a caller names (case-insensitive), as the model spells it;
+/// `""` or `auto` is `None` (the model identifies the language itself). A name
+/// the model does not list is refused with the ones it does.
+pub fn language(name: &str) -> Result<Option<&'static str>, String> {
+    let n = name.trim();
+    if n.is_empty() || n.eq_ignore_ascii_case("auto") {
+        return Ok(None);
+    }
+    LANGUAGES.iter().find(|l| l.eq_ignore_ascii_case(n)).copied().map(Some).ok_or_else(|| {
+        capability::failure::tag(capability::failure::FailureClass::InvalidRequest, format!("qwen-asr: language {name:?} is not one the model transcribes; it names {LANGUAGES:?}, or \"auto\""))
+    })
+}
+
+/// The tokens that put the model past its preamble in `language`: generation
+/// then starts at the transcript itself, in that language.
+pub fn forced_preamble(tok: &dyn Tokenizer, language: &str) -> Vec<u32> {
+    let mut ids = tok.encode(&format!("language {language}"));
+    ids.push(ASR_TEXT_ID);
+    ids
+}
+
 pub fn build_input_ids(n_audio: u32) -> Vec<u32> {
     let mut ids = Vec::with_capacity(PROMPT_PREFIX.len() + n_audio as usize + PROMPT_SUFFIX.len());
     ids.extend_from_slice(&PROMPT_PREFIX);
@@ -99,6 +130,7 @@ const MAX_NEW_TOKENS: f64 = 4_096.0;
 /// like every engine-sizing knob.
 pub fn transcribe_spec() -> ActionSpec {
     audio::asr_caps::transcribe_spec()
+        .param(ParamSpec::new("language", ParamType::Str, "the language spoken, as the model names it (Swedish, English, ...); empty or auto lets the model identify it").default(serde_json::json!("")))
         .param(
             ParamSpec::new("window_secs", ParamType::Float, "decode window, seconds; longer audio is transcribed up to it and reported truncated")
                 .default(serde_json::json!(DEFAULT_WINDOW_SECS))
@@ -158,8 +190,8 @@ impl QwenAsrProvider {
 
     /// Transcribe one waveform (padded/truncated to the window) → text + token ids.
     /// See [`QwenAsrInner::transcribe`] for `cancel` and `progress`.
-    pub fn transcribe(&self, wav: &[f32], cancel: &CancelToken, progress: &mut dyn FnMut(Progress)) -> Result<(String, Vec<u32>), String> {
-        self.inner.transcribe(wav, cancel, progress)
+    pub fn transcribe(&self, wav: &[f32], language: Option<&str>, cancel: &CancelToken, progress: &mut dyn FnMut(Progress)) -> Result<(String, Vec<u32>), String> {
+        self.inner.transcribe(wav, language, cancel, progress)
     }
 
     /// The fixed decode window in samples (16 kHz) — callers use this to
@@ -184,11 +216,11 @@ impl QwenAsrProvider {
     /// [`transcribe`](Self::transcribe) with the audio-encoder HEAD run by a closure
     /// — the seam the NPU resident uses to run the audio-tower ONNX head on the
     /// Intel NPU while the conv stem + Qwen decoder stay on the device backend.
-    pub fn transcribe_with_head<F>(&self, wav: &[f32], cancel: &CancelToken, progress: &mut dyn FnMut(Progress), head: F) -> Result<(String, Vec<u32>), String>
+    pub fn transcribe_with_head<F>(&self, wav: &[f32], language: Option<&str>, cancel: &CancelToken, progress: &mut dyn FnMut(Progress), head: F) -> Result<(String, Vec<u32>), String>
     where
         F: FnOnce(&[f32], u32, &[(u32, u32)]) -> (Vec<f32>, Vec<f32>),
     {
-        self.inner.transcribe_with_head(wav, cancel, progress, head)
+        self.inner.transcribe_with_head(wav, language, cancel, progress, head)
     }
 }
 
@@ -199,18 +231,18 @@ impl QwenAsrInner {
     /// every decoded token, each of which is reported through `progress`;
     /// once it fires the call returns `Err(`[`capability::failure::CANCELLED`]`)`
     /// and the lock is released.
-    pub fn transcribe(&self, wav: &[f32], cancel: &CancelToken, progress: &mut dyn FnMut(Progress)) -> Result<(String, Vec<u32>), String> {
+    pub fn transcribe(&self, wav: &[f32], language: Option<&str>, cancel: &CancelToken, progress: &mut dyn FnMut(Progress)) -> Result<(String, Vec<u32>), String> {
         cancel.check()?;
         let (mel, valid) = window_features(wav, self.window_samples);
         let model = self.model.lock().map_err(|_| "qwen-asr: model lock poisoned")?;
         let embeds = model.encode_audio(&mel, valid);
-        self.decode(&model, &embeds, cancel, progress)
+        self.decode(&model, &embeds, language, cancel, progress)
     }
 
     /// [`transcribe`](Self::transcribe) with the audio-encoder head supplied by a
     /// closure (the NPU path); everything else — window padding, frontend, decoder,
     /// detok — is identical.
-    pub fn transcribe_with_head<F>(&self, wav: &[f32], cancel: &CancelToken, progress: &mut dyn FnMut(Progress), head: F) -> Result<(String, Vec<u32>), String>
+    pub fn transcribe_with_head<F>(&self, wav: &[f32], language: Option<&str>, cancel: &CancelToken, progress: &mut dyn FnMut(Progress), head: F) -> Result<(String, Vec<u32>), String>
     where
         F: FnOnce(&[f32], u32, &[(u32, u32)]) -> (Vec<f32>, Vec<f32>),
     {
@@ -218,28 +250,55 @@ impl QwenAsrInner {
         let (mel, valid) = window_features(wav, self.window_samples);
         let model = self.model.lock().map_err(|_| "qwen-asr: model lock poisoned")?;
         let embeds = model.encode_audio_with_head(&mel, valid, head);
-        self.decode(&model, &embeds, cancel, progress)
+        self.decode(&model, &embeds, language, cancel, progress)
     }
 
     /// Splice the audio embeds into the Qwen decoder, greedy-decode, and detok —
     /// the tail shared by [`transcribe`](Self::transcribe) and
     /// [`transcribe_with_head`](Self::transcribe_with_head).
-    fn decode(&self, model: &crate::model::Qwen3Asr, embeds: &[f32], cancel: &CancelToken, progress: &mut dyn FnMut(Progress)) -> Result<(String, Vec<u32>), String> {
-        let max_new = self.max_new as u32;
-        let out = model.transcribe(&self.input_ids, embeds, &EOS, self.max_new, &mut |n| {
+    fn decode(&self, model: &crate::model::Qwen3Asr, embeds: &[f32], language: Option<&str>, cancel: &CancelToken, progress: &mut dyn FnMut(Progress)) -> Result<(String, Vec<u32>), String> {
+        // A named language is pre-filled as the model's own preamble; its
+        // tokens come out of the generation budget the decoder was sized for.
+        let forced = language.map(|l| forced_preamble(&self.tok, l)).unwrap_or_default();
+        let budget = self.max_new.checked_sub(forced.len()).filter(|&b| b > 0).ok_or("qwen-asr: max_new leaves no room after the language preamble")?;
+        let mut ids = self.input_ids.clone();
+        ids.extend_from_slice(&forced);
+        let max_new = budget as u32;
+        let out = model.transcribe(&ids, embeds, &EOS, budget, &mut |n| {
             progress(Progress::step(n as u32, max_new, "decoding"));
             !cancel.is_cancelled()
         });
         cancel.check()?;
         // strip trailing EOS before detok
         let trimmed: Vec<u32> = out.iter().copied().take_while(|t| !EOS.contains(t)).collect();
-        // The model emits a `language <Lang><asr_text>` preamble before the words
-        // (HF's processor strips this with return_format="transcription_only"); keep
-        // only what follows the last `<asr_text>` marker.
+        // Unforced, the model emits a `language <Lang><asr_text>` preamble before the
+        // words (HF's processor strips this with return_format="transcription_only");
+        // keep only what follows the last `<asr_text>` marker.
         let decoded = self.tok.decode(&trimmed);
         let text = decoded.rsplit(ASR_TEXT_MARKER).next().unwrap_or(&decoded).trim().to_string();
         Ok((text, trimmed))
     }
+}
+
+/// The `transcribe` action on `provider`: what the one-shot provider and the
+/// resident instance both run.
+pub fn run_transcribe(provider: &QwenAsrProvider, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+    inv.cancel.check()?;
+    let language = language(&inv.get_str("language").unwrap_or_default())?;
+    if inv.get_i64("prompt_id").is_some_and(|p| p != 0) {
+        // The shared ASR schema's prompt id is Nemotron's language one-hot; Qwen3-ASR has none, and ignoring it would transcribe in another language than asked.
+        return Err(capability::failure::tag(capability::failure::FailureClass::InvalidRequest, "qwen-asr: prompt_id selects a Nemotron language prompt; name the language with `language` instead"));
+    }
+    let blob = inv.get_blob("audio").ok_or("qwen-asr transcribe: missing 'audio' input")?;
+    let wav = wav_from_blob(blob)?;
+    let truncated = window_truncation(provider.window_samples(), &wav);
+    if let Some((total, window)) = truncated {
+        progress(Progress::step(0, 1, format!("warning: audio is {total:.1}s but the decode window is {window:.1}s -- transcribing only the first {window:.1}s (raise window_secs)")));
+    }
+    progress(Progress::step(0, 1, "transcribing"));
+    let (text, tokens) = provider.transcribe(&wav, language, &inv.cancel, progress)?;
+    progress(Progress::step(1, 1, text.clone()));
+    Ok(transcription_outcome(text, &tokens).set("truncated", serde_json::json!(truncated.is_some())).set("language", serde_json::json!(language.unwrap_or("auto"))))
 }
 
 impl Provider for QwenAsrProvider {
@@ -247,12 +306,12 @@ impl Provider for QwenAsrProvider {
         manifest()
     }
     fn action(&self, name: &str) -> Option<Arc<dyn Action>> {
-        (name == "transcribe").then(|| Arc::new(TranscribeAction { inner: self.inner.clone() }) as Arc<dyn Action>)
+        (name == "transcribe").then(|| Arc::new(TranscribeAction { provider: QwenAsrProvider { inner: self.inner.clone() } }) as Arc<dyn Action>)
     }
 }
 
 struct TranscribeAction {
-    inner: Arc<QwenAsrInner>,
+    provider: QwenAsrProvider,
 }
 
 impl Action for TranscribeAction {
@@ -260,23 +319,22 @@ impl Action for TranscribeAction {
         transcribe_spec()
     }
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        inv.cancel.check()?;
-        let blob = inv.get_blob("audio").ok_or("qwen-asr transcribe: missing 'audio' input")?;
-        let wav = wav_from_blob(blob)?;
-        let truncated = window_truncation(self.inner.window_samples, &wav);
-        if let Some((total, window)) = truncated {
-            progress(Progress::step(0, 1, format!("warning: audio is {total:.1}s but the decode window is {window:.1}s -- transcribing only the first {window:.1}s (raise window_secs)")));
-        }
-        progress(Progress::step(0, 1, "transcribing"));
-        let (text, tokens) = self.inner.transcribe(&wav, &inv.cancel, progress)?;
-        progress(Progress::step(1, 1, text.clone()));
-        Ok(transcription_outcome(text, &tokens).set("truncated", serde_json::json!(truncated.is_some())))
+        run_transcribe(&self.provider, inv, progress)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_named_language_is_resolved_and_an_unknown_one_refused() {
+        assert_eq!(language("swedish").unwrap(), Some("Swedish"));
+        assert_eq!(language(" Auto ").unwrap(), None);
+        assert_eq!(language("").unwrap(), None);
+        let e = language("klingon").unwrap_err();
+        assert!(e.contains("klingon") && e.contains("Swedish"), "{e}");
+    }
 
     #[test]
     fn template_and_window() {

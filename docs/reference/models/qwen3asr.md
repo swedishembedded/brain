@@ -54,7 +54,12 @@ protocol.
 
 ## Options
 
-- `prompt_id` - language-prompt id (default `0` = English).
+- `language` - the language spoken, by the model card's name (`Swedish`, `English`, `German`, ... 30 in all),
+  case-insensitive; empty or `auto` (the default) lets the model identify it. A named language is pre-filled as the
+  model's own `language <Name><asr_text>` preamble, so the transcript is in that language: identification fails on
+  short or accented speech (synthesized Swedish read as Danish, or translated into English). An unknown name is
+  refused with the list.
+- `prompt_id` - a Nemotron language prompt; Qwen3-ASR has none and refuses any but `0` (use `language`).
 - `sample_rate` - input PCM sample rate; must be `16000`.
 - `window_secs` - audio window in seconds (default `30`, host-side); audio
   longer than the window is truncated to its first window and reported
