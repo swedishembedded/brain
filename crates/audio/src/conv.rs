@@ -375,6 +375,10 @@ pub fn conv1d_bias_fwd(
         steps.push(bias_step(g, k, c, y, bias));
         return steps;
     }
+    if let Some(taps) = conv1d_taps(g, k, c, x, w, bias, y, scratch) {
+        steps.extend(taps);
+        return steps;
+    }
     for nn in 0..u64::from(c.n) {
         let (xo, yo) = ((nn * x_row, x_row), (nn * y_row, y_row));
         let budget = gpu_core::lower::col_budget_floats(scratch.budget_mib);
@@ -413,6 +417,55 @@ pub fn conv1d_bias_fwd(
         ));
     }
     steps
+}
+
+/// A stride-1 conv as a sum over its taps of products of shifted windows, on the vendor GEMM ([`ConvScratch::with_gemm`]):
+/// `y[Lo, Cout] = sum_j x_pad[j*dilation .. j*dilation + Lo, Cin] W[:, j, :]^T`, with `x_pad` the input channels-last
+/// behind `pad` zero rows and the weight permuted once to `[Cout, K, Cin]` (tap `j` is then a strided slice of it), then
+/// the same transpose-and-bias epilogue as the im2col form. No `im2col` copy, which is `K` times the input: measured as
+/// 28 % of a speech codec's decode on a GH200 at under half the card's memory and compute rate. `None` (nothing to
+/// push) where it does not apply: a strided or grouped conv, a provider that is not active, channel counts that are not
+/// 16-byte aligned, taps reaching past the padded input, or a device list without the permute kernels.
+#[allow(clippy::too_many_arguments)]
+fn conv1d_taps(g: &Gpu, k: &ConvGemmKernels, c: &Conv1d, x: &DeviceBuffer, w: &DeviceBuffer, bias: &DeviceBuffer, y: &DeviceBuffer, scratch: &mut ConvScratch) -> Option<Vec<Step>> {
+    use gpu_core::provider::library::Operand;
+    if !scratch.gemm.as_ref().is_some_and(gpu_core::provider::library::LibraryGemmProvider::is_active) || c.stride != 1 || c.groups != 1 || c.k < 2 || !c.cin.is_multiple_of(4) || !c.cout.is_multiple_of(4) {
+        return None;
+    }
+    let rows = c.pad + c.l;
+    if c.lo + (c.k - 1) * c.dilation > rows {
+        return None;
+    }
+    let (permute, permute_at) = (g.kernel_index("nchw_nlc")?, g.kernel_index("nchw_nlc_at")?);
+    let (x_row, y_row) = (u64::from(c.cin) * u64::from(c.l), u64::from(c.cout) * u64::from(c.lo));
+    let mut steps = Vec::new();
+    // `[Cout, Cin, K]` as `[Cout, K, Cin]`: tap `j` is the `[Cout, Cin]` rows at column `j * Cin`, `K * Cin` apart.
+    let taps = g.storage(u64::from(c.cout) * u64::from(c.k) * u64::from(c.cin));
+    let weights = c.cout * c.cin * c.k;
+    steps.push(g.step(permute, &[w, &taps], &[weights, c.cin, c.k], weights));
+    let nlc = ConvScratch::grow(&mut scratch.out, g, y_row);
+    let gemm = scratch.gemm.as_ref().expect("checked active above");
+    for nn in 0..u64::from(c.n) {
+        // Zeroed: the `pad` rows in front are the causal padding.
+        let padded = g.storage(u64::from(rows) * u64::from(c.cin));
+        steps.push(g.step_sliced(permute_at, &[x, &padded], &[(nn * x_row, x_row), (0, 0)], &[1, c.cin, c.l, rows, c.pad], c.cin * c.l));
+        for j in 0..c.k {
+            let window = Operand { buf: &padded, range: (u64::from(j * c.dilation * c.cin), u64::from(c.lo) * u64::from(c.cin)) };
+            let tap = Operand { buf: &taps, range: (u64::from(j * c.cin), 0) };
+            let out = Operand { buf: &nlc, range: (0, y_row) };
+            if !gemm.forward_f32_strided(g, &mut steps, &window, c.cin, &tap, c.k * c.cin, &out, c.cout, c.lo, c.cout, c.cin, j > 0) {
+                return None;
+            }
+        }
+        steps.push(g.dispatch_sliced(
+            k.nlc_bias,
+            &[&nlc, bias, y],
+            &[(0, 0), (0, 0), (nn * y_row, y_row)],
+            &[c.lo * c.cout, c.cout, c.lo],
+            gpu_core::Dispatch::Workgroups(c.cout.div_ceil(64) * c.lo.div_ceil(64)),
+        ));
+    }
+    Some(steps)
 }
 
 /// `y = conv_transpose1d(x, w) + bias` - the SELECTED lowering.

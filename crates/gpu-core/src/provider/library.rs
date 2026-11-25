@@ -889,6 +889,18 @@ impl LibraryGemmProvider {
         self.is_active() && self.library_step(gpu, steps, &gemm, &[w, x, y])
     }
 
+    /// `y[m, n] (+)= x[m, k] @ W[n, k]^T` in binary32 throughout over strided views: row `i` of `x` starts `ldx`
+    /// elements after row `i - 1` (likewise `ldw`, `ldy`), so a product can read every `j`-th block of a wider
+    /// tensor - a convolution's tap `j` as a slice of its weight, a shifted window of its input - without a copy.
+    /// `accumulate` adds to `y`. `false` (nothing pushed) unless the library is active and the operands are 16-byte
+    /// aligned.
+    #[allow(clippy::too_many_arguments)]
+    pub fn forward_f32_strided(&self, gpu: &Gpu, steps: &mut Vec<Step>, x: &Operand, ldx: u32, w: &Operand, ldw: u32, y: &Operand, ldy: u32, m: u32, n: u32, k: u32, accumulate: bool) -> bool {
+        let mut gemm = Self::tf32_product(true, m, n, k, ldw, ldx, ldy, if accumulate { 1.0 } else { 0.0 });
+        gemm.tf32 = false;
+        self.is_active() && self.library_step(gpu, steps, &gemm, &[w, x, y])
+    }
+
     /// `dx[m, k] (+)= dy[m, n] @ W[n, k]` in binary32 throughout, as [`Self::forward_f32`] multiplies.
     #[allow(clippy::too_many_arguments)]
     pub fn dx_f32(&self, gpu: &Gpu, steps: &mut Vec<Step>, dy: &Operand, w: &Operand, dx: &Operand, m: u32, n: u32, k: u32, accumulate: bool) -> bool {

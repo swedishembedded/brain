@@ -106,6 +106,8 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("nlc_nchw", kernels::NLC_NCHW),
     ("layernorm", kernels::LAYERNORM),
     ("gelu_erf", kernels::GELU_ERF),
+    // The tap-sum conv lowering places its input channels-last behind its padding (`audio::conv`).
+    ("nchw_nlc_at", kernels::NCHW_NLC_AT),
 ];
 
 /// SnakeBeta's `no_div_by_zero` (the reference's fixed epsilon).
