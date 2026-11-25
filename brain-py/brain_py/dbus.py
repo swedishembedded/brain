@@ -196,7 +196,7 @@ class BrainDBus(BrainBase):
                 if on_chunk is not None:
                     on_chunk(name, data, blob_meta)
             elif kind == "done":
-                outputs = frame.get("result") or {}
+                outputs = _done_result(frame, raw_fds)
             elif kind == "error":
                 raise BrainError(f"{model}.{action} failed: {frame.get('message')}")
         return Outcome(outputs=outputs, blobs=out_blobs, meta=out_meta)
@@ -238,13 +238,13 @@ class BrainDBus(BrainBase):
         finally:
             os.close(rfd)  # the server dup'd its own copy
         transcript = ""
-        for frame, _fds in frames:
+        for frame, fds in frames:
             kind = frame.get("type")
             if kind == "segment":
                 if on_segment is not None:
                     on_segment(frame.get("text", ""), bool(frame.get("final")))
             elif kind == "done":
-                transcript = (frame.get("result") or {}).get("text", transcript)
+                transcript = _done_result(frame, fds).get("text", transcript)
             elif kind == "error":
                 raise BrainError(f"transcribe failed: {frame.get('message')}")
         writer.join(timeout=5)
@@ -415,6 +415,16 @@ def _read_stream(raw_fd: int, timeout: float) -> Iterator[tuple[dict[str, Any], 
             yield frame, _scm_rights(ancillary)
             if frame.get("type") in ("done", "error"):
                 return
+
+
+def _done_result(frame: dict[str, Any], raw_fds: list[int]) -> dict[str, Any]:
+    """A `done` frame's result: inline, or, when it was too large for one frame (`result_fd`), the JSON in the
+    memfd the frame carries."""
+    if frame.get("result_fd"):
+        if not raw_fds:
+            raise BrainError("a done frame names a result fd and carries none", name="brain_py.stream_protocol")
+        return json.loads(read_fd(raw_fds[0]))
+    return frame.get("result") or {}
 
 
 def _scm_rights(ancillary: list) -> list[int]:

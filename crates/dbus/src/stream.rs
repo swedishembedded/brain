@@ -36,6 +36,12 @@ use serde_json::json;
 /// indefinitely. Droppable frames never wait at all.
 const TERMINAL_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// The datagram a client reads a frame into (brain-py reads 64 KiB): no frame may be larger.
+pub const CLIENT_FRAME_BYTES: usize = 1 << 16;
+/// The largest frame sent inline; a larger `done` result goes as a memfd ([`StreamTx::done`]). Below
+/// [`CLIENT_FRAME_BYTES`] and the socket's own datagram limit.
+const INLINE_FRAME_BYTES: usize = 48 << 10;
+
 /// The service-side (writer) end of a subscription stream.
 pub struct StreamTx {
     sock: OwnedFd,
@@ -85,7 +91,15 @@ impl StreamTx {
         loop {
             match self.try_send(header, fd) {
                 Err(nix::errno::Errno::EAGAIN) => {}
-                _ => return, // sent, or the peer died (disconnected latched)
+                Ok(()) => return, // sent, or the peer died (disconnected latched)
+                Err(e) => {
+                    // A frame the socket refuses (EMSGSIZE, ...) would leave the client waiting for an ending
+                    // that never comes: end the stream visibly instead.
+                    eprintln!("brain: a terminal stream frame could not be sent ({e}); closing the stream");
+                    self.dropped += 1;
+                    self.disconnected = true;
+                    return;
+                }
             }
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
@@ -170,13 +184,32 @@ impl StreamTx {
         self.send_terminal(&json!({"type": "blob", "name": name, "media": media, "meta": meta}), Some(fd));
     }
 
-    /// Terminal success frame carrying the scalar result JSON.
+    /// Terminal success frame carrying the result JSON: inline when the frame fits one client read
+    /// ([`CLIENT_FRAME_BYTES`]), else as `{"type": "done", "result_fd": true}` with the result's JSON in a sealed
+    /// memfd beside it, so no result is too large to arrive.
     pub fn done(&mut self, result: &serde_json::Value) {
-        self.send_terminal(&json!({"type": "done", "result": result}), None);
+        let inline = json!({"type": "done", "result": result});
+        if serde_json::to_vec(&inline).map_or(0, |b| b.len()) <= INLINE_FRAME_BYTES {
+            return self.send_terminal(&inline, None);
+        }
+        let bytes = serde_json::to_vec(result).expect("a result serializes");
+        match crate::fd::memfd_seal("result", &bytes) {
+            Ok(fd) => self.send_terminal(&json!({"type": "done", "result_fd": true}), Some(fd.as_fd())),
+            Err(e) => self.error(&format!("the job's result ({} bytes) could not be handed over: {e}", bytes.len())),
+        }
     }
 
-    /// Terminal error frame.
+    /// Terminal error frame; a message longer than a frame holds is cut, saying so.
     pub fn error(&mut self, message: &str) {
+        const KEEP: usize = INLINE_FRAME_BYTES / 2;
+        let cut;
+        let message = if message.len() > KEEP {
+            let end = (0..=KEEP).rev().find(|&i| message.is_char_boundary(i)).unwrap_or(0);
+            cut = format!("{} ... ({} bytes cut)", &message[..end], message.len() - end);
+            cut.as_str()
+        } else {
+            message
+        };
         self.send_terminal(&json!({"type": "error", "message": message}), None);
     }
 }
@@ -294,5 +327,39 @@ mod tests {
         assert!(t0.elapsed() < std::time::Duration::from_millis(100), "a droppable frame must never wait");
         assert_eq!(tx.dropped, before + 1);
         assert!(!tx.disconnected);
+    }
+
+    /// SPEC: a result larger than a client reads in one datagram (a weight-surgery outcome carries every kept
+    /// index, hundreds of KiB) reaches the client whole, as a sealed memfd beside a small `done` frame. Before,
+    /// `sendmsg` failed with EMSGSIZE, the terminal send returned as if it had succeeded, and the client saw the
+    /// stream end with no terminal frame.
+    #[test]
+    fn a_result_too_large_for_one_frame_arrives_whole_through_an_fd() {
+        let (mut tx, client) = pair().unwrap();
+        let big = json!({"kept": (0..200_000u32).collect::<Vec<_>>()});
+        tx.done(&big);
+        assert!(!tx.disconnected);
+        let mut buf = vec![0u8; CLIENT_FRAME_BYTES];
+        let mut space = nix::cmsg_space!([std::os::fd::RawFd; 1]);
+        let mut iov = [std::io::IoSliceMut::new(&mut buf)];
+        let msg = nix::sys::socket::recvmsg::<()>(client.as_raw_fd(), &mut iov, Some(&mut space), MsgFlags::empty()).expect("recv the done frame");
+        let fds: Vec<std::os::fd::RawFd> = msg.cmsgs().unwrap().filter_map(|c| if let nix::sys::socket::ControlMessageOwned::ScmRights(f) = c { Some(f) } else { None }).flatten().collect();
+        let n = msg.bytes;
+        let frame: serde_json::Value = serde_json::from_slice(&buf[..n]).expect("frame JSON");
+        assert_eq!((frame["type"].as_str(), frame["result_fd"].as_bool()), (Some("done"), Some(true)));
+        assert_eq!(fds.len(), 1, "the result travels as one fd");
+        let fd = unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(fds[0]) };
+        let bytes = crate::fd::read_fd_to_vec(fd.as_fd()).expect("read the result fd");
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&bytes).unwrap(), big);
+    }
+
+    /// A small result stays inline, as every client has always read it.
+    #[test]
+    fn a_small_result_stays_inline() {
+        let (mut tx, client) = pair().unwrap();
+        tx.done(&json!({"text": "finished"}));
+        let frame = recv_frame(&client);
+        assert_eq!(frame["result"]["text"], "finished");
+        assert!(frame.get("result_fd").is_none());
     }
 }

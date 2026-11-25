@@ -236,3 +236,14 @@ def test_jobs_lists_the_callers_subscribed_jobs():
     b._call = fake_call
     assert b.jobs() == [{"job": 7, "model": "brain/train", "action": "train", "submitted": 1}]
     assert calls == ["Jobs"]
+
+
+def test_a_done_result_too_large_for_a_frame_is_read_from_its_fd():
+    from brain_py.dbus import _done_result
+
+    big = {"kept": list(range(100_000))}
+    fd = sealed_memfd(json.dumps(big).encode(), name="result")
+    assert _done_result({"type": "done", "result_fd": True}, [os.dup(fd.fileno())]) == big
+    assert _done_result({"type": "done", "result": {"text": "x"}}, []) == {"text": "x"}
+    with pytest.raises(BrainError, match="result fd"):
+        _done_result({"type": "done", "result_fd": True}, [])
