@@ -77,12 +77,7 @@ rank; 300 h is about 22 minutes an epoch on three cards (a fourth card was anoth
 each card busy 87-91 %, the gradient all-reduce 13-18 % of each card's time (about 75 ms a step for about 2.9 GB of
 fp32 gradients, about 40 GB/s between these cards, 368 per-tensor reductions in one group, not overlapped with the
 backward), the optimizer 0.4 % of a step and the batch load about 4 %: a multi-tensor optimizer is not worth it at this
-batch, prefetching is worth at most 4 %. The reduction is mostly waiting, not moving: the cards are NVLink-connected
-(NV6, NCCL P2P direct on 16 channels), a balanced step's reduction takes about 15 ms, and its span ran 14-460 ms
-because each rank's 32 utterances of random lengths hold different frame counts, so the faster ranks wait inside the
-all-reduce for the slowest. Next: deal each step's `batch x world` records to the ranks longest first in snake order
-(written and tested: the ranks still partition the stream and no rank's frames exceed another's by more than one
-record; measuring it needs three free cards, which another tenant took mid-run). Then: hide the reduction behind the backward (per-layer reduction as each
+batch, prefetching is worth at most 4 %. The cards are NVLink-connected (NV6, NCCL P2P direct on 16 channels) and a step's reduction span ran 14-460 ms, which suggested the faster ranks wait for the one with the most frames; dealing each step's `batch x world` records to the ranks longest first in snake order (frames per rank within one record of each other) was measured and does not help: 2 ranks on cards 1 and 2, paired and alternated, 7,461 and 6,995 frames a second dealt, 7,177 and 7,420 strided, against 4,091 and 4,185 for one of those cards alone (about 89 % a rank either way), so it was dropped. The 3-rank and 1-rank figures above were taken under other tenants' load and are not a paired comparison. Then: hide the reduction behind the backward (per-layer reduction as each
 layer's gradient completes) or halve it with a bf16 gradient wire (a lower-precision opt-in); bucketed reduction
 (`JobCollective::with_bucket_bytes`) stalled at 0 % GPU and high CPU with this model's gradients spread over three
 handles' stores and was dropped; a launched multi-process run and a fourth card. The default batch is a training choice (learning rate, small corpora), so it stays with `speech_sft`'s ledger.
