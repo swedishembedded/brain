@@ -124,6 +124,63 @@ Open:
   kernel profile puts it first.
 - Distilling x-vector (cloning) records across widths needs a rotated speaker encoder (#591).
 
+## Surgery: what landed and what it measured
+
+`modelopt::surgery` edits along the graph `qwen3tts::surgery` declares; `qwen3tts::speech_sft::calibrate` measures;
+`brain::SpeechSurgery` composes them (served as `speech_surgery`, CLI `brain speech-surgery BASE --calibration SHARD
+--plan FILE --out DIR [--held-out SHARD] [--corpus FILE] [--probe FILE] [--profile] [--exact]`). The plan is a JSON
+array of `trim_vocabulary`, `fold_embedding`, `select_channels` (`talker.layers.*.mlp`, `*.kv_heads`, also for
+`code_predictor.layers.*`), `rotate_stream` (`talker`, `code_predictor`; `pca` or `identity`, `gain_tolerance`) and
+`remove_layers` (`count` + `by: kl|loss|cosine`, or `layers`). Scores: `act_rms`, `wanda`, `fisher`, `taylor`.
+
+Parity on the teacher (n460, CUDA, exact fp32, 64 validation records, unedited loss 2.6726, KL per position):
+trimmed vocabulary 0 / 0 (Talker / code predictor), full-width PCA of the Talker stream within equal final-norm gains
+1.5e-11 / 4.6e-11, full-width MLP selection, text fold and code-predictor rotation 0. A plain PCA of the Talker stream
+was exact for the Talker and 1.476 for the code predictor (#593). The trim keeps 31,789 of 151,676 ids (-246 M
+parameters) from the 194,769 training-shard texts; 121 of 2,451 held-out texts (validation shard plus the evaluation
+sentences) tokenise differently, and 2,096 of 2,151 validation records hold only kept tokens. A large Swedish text
+sample beyond the shard texts was not on disk: the recipe passes it as `corpus`.
+
+Sensitivity of single edits on the unedited teacher (64 train records calibrate, 64 validation records measure,
+tensor cores; unedited loss 2.5960; KL = Talker + 0.3 code predictor, before any recovery):
+
+| edit | params removed | loss | KL | Talker KL | CP KL |
+|---|---:|---:|---:|---:|---:|
+| text fold to 1024 (wanda) | 160.8 M | 2.809 | 0.231 | 0.192 | 0.128 |
+| text fold to 512 (wanda) | 240.5 M | 3.907 | 1.357 | 1.207 | 0.502 |
+| Talker MLP 75 % (wanda) | 264.2 M | 3.476 | 0.873 | 0.713 | 0.535 |
+| Talker MLP 50 % (wanda) | 528.5 M | 5.714 | 3.139 | 2.760 | 1.262 |
+| Talker MLP 50 % (act_rms) | 528.5 M | 3.996 | 1.424 | 1.196 | 0.760 |
+| Talker MLP 50 % (fisher) | 528.5 M | 2.903 | 0.341 | 0.241 | 0.331 |
+| Talker MLP 50 % (taylor) | 528.5 M | 2.943 | 0.380 | 0.258 | 0.409 |
+| Talker KV groups 6 of 8 (taylor) | 88.1 M | 2.736 | 0.151 | 0.090 | 0.204 |
+| Talker KV groups 4 of 8 (taylor) | 176.2 M | 3.219 | 0.656 | 0.478 | 0.596 |
+| Talker width 1792 (pca, equal gains) | 186.4 M | 2.968 | 0.409 | 0.308 | 0.337 |
+| Talker width 1536 (pca, equal gains) | 372.8 M | 4.342 | 1.777 | 1.509 | 0.892 |
+| Talker width 1536 (pca, gain tolerance 0.05) | 372.8 M | 3.597 | 1.035 | 0.843 | 0.640 |
+| Talker width 1536 (pca, gain tolerance 0.25) | 372.8 M | 3.408 | 0.842 | 0.667 | 0.584 |
+| Talker width 2048 (pca, gain tolerance 0.25) | 0 | 2.597 | 0.001 | 0.000 | 0.003 |
+| Talker width 1536 (identity) | 372.8 M | 4.758 | 2.196 | 1.895 | 1.001 |
+| Talker width 1280 (pca, equal gains) | 559.2 M | 6.448 | 3.878 | 3.408 | 1.565 |
+| remove 4 Talker layers (ablation kl) | 201.3 M | 2.831 | 0.255 | 0.171 | 0.279 |
+| remove 8 Talker layers (ablation kl) | 402.7 M | 4.725 | 2.167 | 1.906 | 0.870 |
+| remove 8 Talker layers (cosine) | 402.7 M | 4.233 | 1.676 | 1.421 | 0.851 |
+| remove 12 Talker layers (ablation kl) | 604.0 M | 6.040 | 3.487 | 3.074 | 1.380 |
+| CP MLP 75 % (wanda) | 11.8 M | 2.957 | 0.372 | 0 | 1.240 |
+| CP MLP 50 % (wanda) | 23.6 M | 3.111 | 0.530 | 0 | 1.766 |
+| CP KV groups 4 of 8 (taylor) | 15.7 M | 2.995 | 0.411 | 0 | 1.369 |
+| CP width 768 (pca) | 28.1 M | 2.816 | 0.226 | 0 | 0.753 |
+| CP width 512 (pca) | 56.1 M | 3.134 | 0.549 | 0 | 1.831 |
+| remove 1 CP layer (ablation kl) | 15.7 M | 2.958 | 0.367 | 0 | 1.224 |
+| remove 2 CP layers (ablation kl) | 31.5 M | 3.791 | 1.207 | 0 | 4.023 |
+
+Read from it: Fisher (then group Taylor) is the channel score to use, the Wanda form here (activation norm times the
+down projection's column magnitude) is the worst; per-layer ablation KL does not add up for joint removal (8 layers
+by individual KL lose to 8 by cosine); a gain tolerance near 0.25 is the better Talker rotation; the code predictor is
+small and sensitive. A chained 1.07 B checkpoint (trim, fold 1024, MLP 4608 by wanda, width 1792, minus 4 layers;
+KL 3.27 unrecovered) exported in the upstream layout loads and speaks in brain (`design`, Vulkan) and in the upstream
+`qwen-tts` package unmodified; unrecovered, both run long past the sentence.
+
 ## Validation (a variant is published only if it passes all of these)
 
 - **The full sten-tts `evaluate` stage** and all six release gates.
@@ -147,3 +204,9 @@ the ~0.48 B rung. That rung must beat or match it, or the weight-editing path ha
 
 - 2026-11-25: inventory done. All 12 GH200 (n80, n105, n460) currently host the manual-to-competence brain
   servers. The surgery engine and its parity tests run on CPU first.
+- 2026-11-25: weight surgery landed (see "Surgery: what landed and what it measured"): every edit of the plan,
+  calibration, the served action and the CLI; teacher parity exact; the single-edit sensitivity profile above.
+  Open: joint layer selection (greedy re-ablation after each removal instead of individual KL); scoring the text
+  fold and the code predictor by Fisher; a larger Swedish corpus for the trim; `qwen3::slice` duplicates the stream
+  rotation for chat models and should become a declaration over `modelopt::surgery`; an SDK-level CPU test of
+  `SpeechSurgery` on a tiny release (the pipeline is covered by the modelopt parity tests and the teacher runs).
