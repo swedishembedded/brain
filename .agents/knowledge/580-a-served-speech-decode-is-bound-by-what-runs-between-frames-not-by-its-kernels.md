@@ -34,10 +34,14 @@ Solo clone RTF 1.2 to 0.15; 32 concurrent streams 52 s of speech a second.
 - **Recording the codec decode per length bucket** (exact, the decoder is causal) gave no measured gain: a recording
   keeps about 26 MiB a frame alive, and each bucket's first clip pays the recording in front of its stream.
 - **Flushing the codec's recorded steps every 48 steps** made no measurable difference.
+- **Decoding the clips that finish together as one batch** (`decode_batch`, exact up to fp32 reassociation: 8.5e-5
+  relative rms on real weights) made the codec slower, 3.16 s to 3.71 s of codec time for 32 clips: 32 clips went out
+  in 19 batches, a batch's time grew with its clip count (500-614 ms for the largest), and each clip is padded to the
+  batch's longest. Per clip the decode is bound by its own kernels (the convs' im2col and products), not by launches.
 
 ## What to do next
-Decode the clips that finish together as one batched codec pass (the decoder is causal, so a right-padded batch is
-exact); draw codebook 0 on the device with its suppression and repetition penalty; keep the Talker hidden on the
+Make the codec's convs cheaper per clip (an implicit-GEMM conv instead of im2col plus a product); draw codebook 0 on the
+device with its suppression and repetition penalty; keep the Talker hidden on the
 device so a frame syncs once.
 
 ## Evidence
