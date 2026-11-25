@@ -13,7 +13,7 @@ use model::Model;
 use super::distill::{projection, KdShape, SpeechTeacher, TeacherMap, TextVocabMap};
 use super::model::{residual_head, residual_table, Example, SftShape, SpeechSftModel, TALKER_HEAD, TALKER_TABLE};
 use super::objective::{example, rows_needed};
-use super::tests::{rows, shape, shard, specials, LANGUAGES, RECORDS, VOICE};
+use super::tests::{rows, shape, shard, shard_of, specials, LANGUAGES, RECORDS, VOICE};
 use crate::prompt::TextLayout;
 use crate::shard::Shard;
 
@@ -292,6 +292,20 @@ fn a_narrow_student_release_distils_from_its_teacher_and_exports_its_own_shapes(
     let exported = super::Base::open(&out).unwrap();
     assert_eq!(exported.talker.d_model, 16);
     assert_eq!(exported.shapes[TALKER_HEAD], base.shapes[TALKER_HEAD]);
+
+    // Shards tokenised by the teacher's tokenizer (ids 3 higher in these fixtures) read through its tokens: a
+    // student with a trimmed, renumbered vocabulary trains exactly as on shards of its own ids.
+    let by_teacher = |digest: String| std::collections::BTreeMap::from([("tokenizer".to_string(), digest)]);
+    let teacher_ids = shard_of(24, &[RECORDS[0], RECORDS[2]], 0x65, 3, by_teacher(crate::encode::tokenizer_digest(&teacher_dir).unwrap())); // seed: fixed fixture
+    let seeded = cfg(serde_json::json!({"seed": 7})); // seed: fixed fixture
+    let own = super::speech_sft(&seeded, &s, Some(&s), model::train::FitControl::default()).unwrap();
+    let mapped = super::speech_sft(&seeded, &teacher_ids, Some(&teacher_ids), model::train::FitControl::default()).unwrap();
+    let losses = |r: &super::SpeechSftResult| r.report.steps.iter().map(|s| s.loss).collect::<Vec<_>>();
+    assert_eq!(losses(&own), losses(&mapped));
+    // Shards of a tokenizer neither the student's nor the teacher's are refused: their ids would name other tokens.
+    let other = shard_of(24, &[RECORDS[0], RECORDS[2]], 0x65, 3, by_teacher("sha256:another".into())); // seed: fixed fixture
+    let err = super::speech_sft(&seeded, &other, None, model::train::FitControl::default()).unwrap_err();
+    assert!(err.contains("another tokenizer"), "{err}");
 
     // A record in the x-vector slot cannot be taught by a teacher of another width.
     let err = super::speech_sft(&cfg(serde_json::json!({})), &shard(16, &RECORDS, 0x66), None, model::train::FitControl::default()).unwrap_err(); // seed: fixed fixture

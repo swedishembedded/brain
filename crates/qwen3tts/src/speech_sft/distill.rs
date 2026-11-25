@@ -173,6 +173,18 @@ impl TextVocabMap {
         Self::from_tokens(&tokens(student)?, &tokens(teacher)?, student_vocab, teacher_vocab)
     }
 
+    /// The student's id of each teacher id (`teacher_vocab` of them), [`crate::speech_sft::RowMap::ABSENT`] where the
+    /// student has no such token: how shards tokenised by the teacher's tokenizer read for the student.
+    pub fn to_student(&self, teacher_vocab: u32) -> Vec<u32> {
+        let mut out = vec![super::objective::RowMap::ABSENT; teacher_vocab as usize];
+        for (s, &t) in self.to_teacher.iter().enumerate() {
+            if t != Self::ABSENT {
+                out[t as usize] = s as u32;
+            }
+        }
+        out
+    }
+
     /// The teacher's id of student token `id`, or an error naming it.
     pub fn get(&self, id: u32) -> Result<u32, String> {
         match self.to_teacher.get(id as usize) {

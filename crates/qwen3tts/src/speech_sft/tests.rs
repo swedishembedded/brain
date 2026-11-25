@@ -42,7 +42,7 @@ const CODEBOOK: u32 = 16;
 const GROUPS: u32 = 4;
 
 pub(crate) fn rows() -> RowMap {
-    RowMap { languages: LANGUAGES.iter().map(|&l| Some(l)).collect(), voices: vec![VOICE] }
+    RowMap { languages: LANGUAGES.iter().map(|&l| Some(l)).collect(), voices: vec![VOICE], text: None }
 }
 
 /// A tiny Talker (2 layers, `d` wide, 48 codec rows) and code predictor (2
@@ -61,11 +61,17 @@ pub(crate) const RECORDS: [Spec; 3] = [(&[11, 12, 13], 4, true, 0, true), (&[14,
 
 /// A shard of `specs`, codes and x-vectors drawn from `seed`.
 pub(crate) fn shard(d: u32, specs: &[Spec], seed: u64) -> Shard {
-    let meta = ShardMeta { format: FORMAT.into(), codebooks: GROUPS, codebook_size: CODEBOOK, xvector_dim: d, frame_rate: 12.5, languages: vec!["alpha".into(), "beta".into()], voices: vec!["v1".into()], records: 0, producers: Default::default() };
+    shard_of(d, specs, seed, 0, Default::default())
+}
+
+/// [`shard`] with every text id `offset` higher and `producers` in its metadata: the same records as another
+/// tokenizer, whose ids are the fixture's plus `offset`, writes them.
+pub(crate) fn shard_of(d: u32, specs: &[Spec], seed: u64, offset: u32, producers: std::collections::BTreeMap<String, String>) -> Shard {
+    let meta = ShardMeta { format: FORMAT.into(), codebooks: GROUPS, codebook_size: CODEBOOK, xvector_dim: d, frame_rate: 12.5, languages: vec!["alpha".into(), "beta".into()], voices: vec!["v1".into()], records: 0, producers };
     let mut w = ShardWriter::new(meta);
     let mut rng = Lcg::new(seed);
     for (i, &(text, frames, voice, language, complete)) in specs.iter().enumerate() {
-        let ids: Vec<u32> = [3, 4, 5].iter().chain(text).chain(&[6, 7, 8, 9, 10]).copied().collect();
+        let ids: Vec<u32> = [3, 4, 5].iter().chain(text).chain(&[6, 7, 8, 9, 10]).map(|id| id + offset).collect();
         let codes: Vec<u16> = (0..frames * GROUPS as usize).map(|_| (rng.next_u64() % u64::from(CODEBOOK)) as u16).collect();
         let xvector = rng.vec_scaled(d as usize, 0.5);
         let id = RecordId { id: format!("r{i}"), speaker: "s".into(), source: "test".into(), text: String::new() };

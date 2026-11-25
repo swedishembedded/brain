@@ -101,7 +101,7 @@ pub struct Evaluator {
 pub fn row_map(sp: &TtsSpecials, shard: &Shard) -> Result<RowMap, String> {
     let languages = shard.meta.languages.iter().map(|l| if l == "auto" { Ok(None) } else { sp.lang.get(l).copied().map(Some).ok_or_else(|| format!("the checkpoint has no language {l:?} the shard names")) }).collect::<Result<_, _>>()?;
     let voices = shard.meta.voices.iter().map(|v| sp.spk_id.get(v).copied().ok_or_else(|| format!("the checkpoint has no voice {v:?} the shard names"))).collect::<Result<_, _>>()?;
-    Ok(RowMap { languages, voices })
+    Ok(RowMap { languages, voices, text: None })
 }
 
 /// `n` of `len` record indices spread evenly (`0`: all): a shard may hold its speakers one after another.

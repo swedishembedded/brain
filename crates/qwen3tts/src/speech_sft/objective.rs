@@ -37,6 +37,26 @@ pub struct RowMap {
     pub languages: Vec<Option<u32>>,
     /// Per [`crate::shard::ShardMeta::voices`] entry: its speaker row.
     pub voices: Vec<u32>,
+    /// The checkpoint's text id of each shard text id, when the shards were tokenised by another tokenizer than the
+    /// checkpoint's (a trimmed vocabulary renumbers the tokens it keeps); [`RowMap::ABSENT`] where the checkpoint has
+    /// no such token. `None`: the shards' ids are the checkpoint's.
+    pub text: Option<Vec<u32>>,
+}
+
+impl RowMap {
+    /// A shard text id with no checkpoint token in [`Self::text`].
+    pub const ABSENT: u32 = u32::MAX;
+
+    /// The checkpoint's id of shard text id `id`.
+    pub fn text_id(&self, id: u32) -> Result<u32, String> {
+        match &self.text {
+            None => Ok(id),
+            Some(map) => match map.get(id as usize) {
+                Some(&t) if t != Self::ABSENT => Ok(t),
+                _ => Err(format!("text token {id} of the shard's tokenizer is no token of the checkpoint's")),
+            },
+        }
+    }
 }
 
 /// The layout draw `position` of a stream keyed by `key` takes.
@@ -57,7 +77,11 @@ const HELD_OUT_KEY: u64 = 0x4E1D_0007_5EED_0001;
 pub fn example(sp: &TtsSpecials, rows: &RowMap, shard: &Shard, r: usize, layout: TextLayout) -> Result<Example, String> {
     let rec = shard.record(r);
     let named = |what: &str| format!("record {r} ({}): {what}", rec.id.id);
-    let (role_ids, text_ids) = crate::pipeline::split_input_ids(rec.text_ids).map_err(|e| named(&e))?;
+    let ids: std::borrow::Cow<'_, [u32]> = match &rows.text {
+        None => std::borrow::Cow::Borrowed(rec.text_ids),
+        Some(_) => std::borrow::Cow::Owned(rec.text_ids.iter().map(|&id| rows.text_id(id)).collect::<Result<_, _>>().map_err(|e| named(&e))?),
+    };
+    let (role_ids, text_ids) = crate::pipeline::split_input_ids(&ids).map_err(|e| named(&e))?;
     let speaker = match rec.voice {
         Some(v) => SpeakerSlot::Codec(*rows.voices.get(v as usize).ok_or_else(|| named(&format!("voice {v} has no row")))?),
         None => SpeakerSlot::XVector,

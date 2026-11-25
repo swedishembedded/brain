@@ -189,8 +189,13 @@ pub fn producers(paths: &TtsPaths) -> Result<std::collections::BTreeMap<String, 
     Ok(std::collections::BTreeMap::from([
         ("codec".to_string(), content_digest(&component_files(&paths.codec, &["config.json", "model.safetensors"]))?),
         ("speaker_encoder".to_string(), content_digest(&component_files(&paths.speaker, &["config.json", "model.safetensors"]))?),
-        ("tokenizer".to_string(), content_digest(&["vocab.json", "merges.txt", "tokenizer_config.json"].map(|f| ckpt.join(f)))?),
+        ("tokenizer".to_string(), tokenizer_digest(ckpt)?),
     ]))
+}
+
+/// The content digest of a checkpoint's tokenizer files, as a shard's `producers["tokenizer"]` records it.
+pub fn tokenizer_digest(ckpt: &std::path::Path) -> Result<String, String> {
+    content_digest(&["vocab.json", "merges.txt", "tokenizer_config.json"].map(|f| ckpt.join(f)))
 }
 
 impl Encoder {

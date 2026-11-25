@@ -443,6 +443,8 @@ pub fn speech_sft(cfg: &SpeechSftConfig, train: &Shard, held_out: Option<&Shard>
     let rows = rows::allocate(&cfg.rows, &specials, mtp.vocab, table, talker.d_model as usize, train)?;
 
     let shards: Vec<&Shard> = std::iter::once(train).chain(held_out).collect();
+    let mut rows = rows;
+    rows.map.text = shard_text_ids(cfg, &shards, talker.text_vocab_size, teacher.as_ref().zip(cfg.teacher.as_deref()))?;
     let frames = longest(&shards, cfg.max_frames)?;
     let mut block = 0;
     for s in &shards {
@@ -529,6 +531,31 @@ pub fn speech_sft(cfg: &SpeechSftConfig, train: &Shard, held_out: Option<&Shard>
     Ok(SpeechSftResult { tensors, languages: rows.languages, voices: rows.voices, report: SpeechSftReport { fit, steps: history, seed } })
 }
 
+/// How the shards' text ids read for the base `cfg.base`: unchanged when they were tokenised by its own tokenizer (or
+/// say nothing of theirs), and through the teacher's tokens when they were tokenised by the teacher's, as for a
+/// student whose vocabulary was trimmed from the teacher's. Shards of any other tokenizer are refused: their ids
+/// would silently name other tokens.
+fn shard_text_ids(cfg: &SpeechSftConfig, shards: &[&Shard], student_vocab: u32, teacher: Option<(&Base, &str)>) -> Result<Option<Vec<u32>>, String> {
+    let digests: std::collections::BTreeSet<&str> = shards.iter().filter_map(|s| s.meta.producers.get("tokenizer").map(String::as_str)).collect();
+    let Some(&shard_tokenizer) = digests.iter().next() else { return Ok(None) };
+    if digests.len() > 1 {
+        return Err(format!("the shards were tokenised by different tokenizers ({digests:?})"));
+    }
+    let base = crate::encode::tokenizer_digest(Path::new(&cfg.base))?;
+    if base == shard_tokenizer {
+        return Ok(None);
+    }
+    match teacher {
+        Some((t, dir)) if crate::encode::tokenizer_digest(Path::new(dir))? == shard_tokenizer => {
+            let map = TextVocabMap::from_dirs(Path::new(&cfg.base), Path::new(dir), student_vocab, t.talker.text_vocab_size).map_err(|e| format!("teacher: {e}"))?;
+            Ok(Some(map.to_student(t.talker.text_vocab_size)))
+        }
+        _ => Err(format!(
+            "the shards' text ids are of another tokenizer ({shard_tokenizer}) than the base's ({base}); tokenise them with the base's, or distil from a teacher of their tokenizer"
+        )),
+    }
+}
+
 /// The teacher of `cfg` (its release `t` at `dir`) checked against the student `shape`, the shards' languages and voices
 /// (the teacher must have each, at whatever row) and every text token of the shards: how the teacher reads the
 /// student's batches.
@@ -557,7 +584,7 @@ fn check_teacher(cfg: &SpeechSftConfig, shape: &SftShape, t: &Base, dir: &Path, 
                     rec.id.id, t.talker.d_model, shape.talker.d_model
                 ));
             }
-            if let Some(Err(e)) = rec.text_ids.iter().map(|&id| text.get(id)).find(Result::is_err) {
+            if let Some(Err(e)) = rec.text_ids.iter().map(|&id| rows.map.text_id(id).and_then(|s| text.get(s))).find(Result::is_err) {
                 return Err(format!("teacher: record {r} ({}): {e}", rec.id.id));
             }
         }
