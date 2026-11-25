@@ -207,7 +207,10 @@ pub(crate) fn train(env: &JobEnv, request: &Request, inputs: &Inputs<'_>, files:
     let bank = env.bank.get().cloned().ok_or("train: stream: this server offers no adapter bank to publish the policy to")?;
     let receiver = inv.inbox.take().ok_or("train: stream: the job's input was taken already, or this call came without one")?;
     let steps = refs.max_steps.unwrap_or(MAX_STREAM_STEPS);
-    let mut ft = job::fine_tune_settings(request, inputs.base_dir, None, files)?.adapter_id(refs.publish_adapter.as_str()).publish_every(refs.publish_every).steps(steps);
+    // A run that continues one whose versions are served already serves from the start; any other offers the policy
+    // it starts from as its first version, which its first rollouts are drawn from.
+    let served_already = bank.identity(&refs.publish_adapter).is_some();
+    let mut ft = job::fine_tune_settings(request, inputs.base_dir, None, files)?.adapter_id(refs.publish_adapter.as_str()).publish_every(refs.publish_every).publish_initial(!served_already).steps(steps);
     if let Some(path) = &inputs.staged.start_adapter {
         ft = ft.continue_from(path);
     }

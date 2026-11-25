@@ -1700,6 +1700,9 @@ impl AdapterSnapshots<'_> {
 /// then on; an error it returns ends the run.
 pub struct AdapterPublish<'a> {
     pub every: u32,
+    /// Also hand over the adapter the run starts from, before it waits for its first input: a run whose input is
+    /// drawn from the policy it serves has nothing served to draw from otherwise.
+    pub initial: bool,
     pub snapshots: AdapterSnapshots<'a>,
     pub publish: &'a mut dyn FnMut(u32, &Path) -> std::io::Result<()>,
 }
@@ -2392,6 +2395,13 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
                 obj.state_saved(completed);
             }
         };
+    }
+    // The policy the run starts from is offered before the run waits for input drawn from it.
+    if let Some(publication) = control.publish.as_mut().filter(|p| writer && p.initial) {
+        let path = publication.snapshots.path(completed);
+        let snapshots = &publication.snapshots;
+        crate::lora::device_adapter::save_lora_with_lineage(path.to_str().expect("utf-8 path"), &model, &snapshots.lora, snapshots.card_id, snapshots.base_id, snapshots.family, None, None)?;
+        (publication.publish)(completed, &path)?;
     }
     // An objective fed while the run goes on may have nothing to train yet, or nothing at all.
     let steps_end = match obj.supply() {

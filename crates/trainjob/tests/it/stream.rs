@@ -142,18 +142,20 @@ async fn a_stream_job_trains_groups_as_they_arrive_and_serves_each_version_it_pu
     let tokens = (sizes[0] + sizes[1]) as u64;
     let id = create(&app, stream_job(json!({"publish_adapter": ADAPTER, "publish_every": 1, "max_staleness": 0, "step_tokens": tokens, "queue_tokens": tokens}), json!({}))).await;
 
-    // A group is a step; its step publishes version 1, which the server then lists. (A request for it would wait for the
-    // rig's one CPU lane, which the run holds; a server gives a run a card of its own.)
-    let (status, answer) = post(&app, &id, "", group(sizes, "g1", 0)).await;
+    // Before any group, the policy the run starts from is served as version 1: the first rollouts are drawn from it.
+    // A group is a step; its step publishes version 2, which the server then lists. (A request for it would wait for
+    // the rig's one CPU lane, which the run holds; a server gives a run a card of its own.)
+    assert_eq!(served_version(&app, 1).await, 1, "the starting policy is served before any input");
+    let (status, answer) = post(&app, &id, "", group(sizes, "g1", 1)).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     assert_eq!((answer["accepted"].clone(), answer["duplicates"].clone(), answer["epoch"].clone()), (json!(["g1"]), json!([]), json!(1)));
-    assert_eq!(served_version(&app, 1).await, 1, "the first published version is served");
+    assert_eq!(served_version(&app, 2).await, 2, "the first trained version is served");
     // A group already taken is a duplicate, idempotently; a group drawn from the current version trains and publishes
-    // version 2; one drawn from version 0 is now a version behind the bound and is dropped, never trained.
-    let (status, again) = post(&app, &id, "", group(sizes, "g1", 0)).await;
+    // version 3; one drawn from version 0 is behind the bound and is dropped, never trained.
+    let (status, again) = post(&app, &id, "", group(sizes, "g1", 1)).await;
     assert_eq!((status, again["accepted"].clone(), again["duplicates"].clone()), (StatusCode::OK, json!([]), json!(["g1"])));
-    assert_eq!(post(&app, &id, "", group(sizes, "g2", 1)).await.0, StatusCode::OK);
-    assert_eq!(served_version(&app, 2).await, 2);
+    assert_eq!(post(&app, &id, "", group(sizes, "g2", 2)).await.0, StatusCode::OK);
+    assert_eq!(served_version(&app, 3).await, 3);
     let (status, stale) = post(&app, &id, "?epoch=1", group(sizes, "old", 0)).await;
     assert_eq!(status, StatusCode::OK, "{stale}");
     assert_eq!(post(&app, &id, "", b"{\"messages\": []}".to_vec()).await.0, StatusCode::BAD_REQUEST, "a record the contract refuses");
@@ -175,7 +177,7 @@ async fn a_stream_job_trains_groups_as_they_arrive_and_serves_each_version_it_pu
     let committed: Vec<String> = of_type(&frames, "committed").iter().flat_map(|f| keys(f)).collect();
     assert_eq!(committed, ["g1", "g2", "old"]);
     let published: Vec<(u64, u64)> = of_type(&frames, "published").iter().map(|f| (f["version"].as_u64().unwrap(), f["step"].as_u64().unwrap())).collect();
-    assert_eq!(published, [(1, 1), (2, 2)], "the last step was published already, so finish publishes nothing new");
+    assert_eq!(published, [(1, 0), (2, 1), (3, 2)], "the start, then each step; the last step was published already, so finish publishes nothing new");
     let steps = of_type(&frames, "step");
     assert_eq!(steps.len(), 2);
     for step in &steps {
@@ -238,9 +240,11 @@ async fn a_step_trains_the_same_whether_its_records_arrived_in_one_post_or_many(
             assert_eq!(post(&app, &id, "", both).await.0, StatusCode::OK);
         }
         let (frames, _) = frames_until(&app, &id, 0, |_| false).await;
+        // The one step's version is the last published (the first job also published its starting policy; the
+        // second, whose id the bank serves already, does not).
         let digests: Vec<Value> = of_type(&frames, "published").iter().map(|f| f["digest"].clone()).collect();
-        assert_eq!(digests.len(), 1, "{frames:?}");
-        published.push(digests[0].clone());
+        assert!(!digests.is_empty(), "{frames:?}");
+        published.push(digests.last().unwrap().clone());
     }
     assert_eq!(published[0], published[1]);
 }
@@ -353,5 +357,5 @@ async fn a_stream_trains_the_score_centred_estimator_over_the_records_top_k() {
     let steps = of_type(&frames, "step");
     assert_eq!(steps.len(), 1, "{frames:?}");
     assert!(steps[0]["pg"]["sampler_mass"].as_f64().is_some_and(|m| m > 0.0), "{}", steps[0]);
-    assert_eq!(of_type(&frames, "published").len(), 1);
+    assert_eq!(of_type(&frames, "published").len(), 2, "the starting policy, then the one step's");
 }

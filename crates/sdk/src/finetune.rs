@@ -157,6 +157,8 @@ pub struct ChatFineTune {
     pub(crate) stream: Option<crate::rollout_stream::StreamRef>,
     /// Hand the adapter to the run's publisher every this-many steps ([`ChatFineTune::publish_every`]).
     publish_every: u32,
+    /// Also hand it the adapter the run starts from, before its first step ([`ChatFineTune::publish_initial`]).
+    publish_initial: bool,
 }
 
 /// The architecture a [`ChatFineTune`] trains, with the tier its frozen base
@@ -646,6 +648,7 @@ impl ChatFineTune {
             modules_to_save: Vec::new(),
             stream: None,
             publish_every: 0,
+            publish_initial: false,
             continue_from: None,
             out_dir: None,
             adapter_id: None,
@@ -884,6 +887,15 @@ impl ChatFineTune {
     /// as the policy's next version (`0`: never). The adapter is written under [`Self::adapter_id`].
     pub fn publish_every(mut self, steps: u32) -> Self {
         self.publish_every = steps;
+        self
+    }
+
+    /// With [`Self::publish_every`]: also hand the publisher the adapter the run starts from (the adapter it continues,
+    /// or its fresh initialisation) before it waits for its first input, so a policy served while it trains is served
+    /// from the start.
+    #[must_use]
+    pub fn publish_initial(mut self, initial: bool) -> Self {
+        self.publish_initial = initial;
         self
     }
 
@@ -1468,7 +1480,7 @@ impl ChatFineTune {
             Some(publish) if self.publish_every > 0 => {
                 std::fs::create_dir_all(&published_dir).map_err(|e| Error::Backend(format!("{}: {e}", published_dir.display())))?;
                 let snapshots = model::AdapterSnapshots { dir: &published_dir, card_id: &published_card, base_id: &base_id, family: arch.family, lora: model::adapter::device::LoraCfg::new(rank, alpha, Vec::new()) };
-                Some(model::AdapterPublish { every: self.publish_every, snapshots, publish })
+                Some(model::AdapterPublish { every: self.publish_every, initial: self.publish_initial, snapshots, publish })
             }
             Some(_) => None,
             None if self.publish_every > 0 => return Err(Error::InvalidRequest("ChatFineTune: publish_every hands adapters to a publisher; run it with run_publishing".to_string())),
