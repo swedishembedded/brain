@@ -301,12 +301,34 @@ fn encode_outcome(encoder: &crate::encode::Encoder, req: &crate::encode::Request
     outcome
 }
 
-/// Encode `req` (validated from `inv`) on a loaded encoder: the one step the
-/// per-call action and a resident instance share.
+/// Encode `req` (validated from `inv`) on a loaded encoder: the per-call action's step.
 pub fn run_encode(encoder: &crate::encode::Encoder, inv: &Invocation, req: &crate::encode::Request) -> ActionResult {
     inv.cancel.check()?;
     let out = encoder.encode(req);
     Ok(encode_outcome(encoder, req, out))
+}
+
+/// Every `encode` invocation in `invs` on a loaded encoder, the valid ones
+/// encoded together as one batch (`Encoder::encode_batch`): what a resident
+/// instance runs on the requests it is handed at once. A request that is
+/// cancelled or invalid gets its own error and does not hold the others back.
+pub fn run_encode_batch(encoder: &crate::encode::Encoder, invs: &[&Invocation]) -> Vec<ActionResult> {
+    let mut results: Vec<Option<ActionResult>> = Vec::with_capacity(invs.len());
+    let mut valid: Vec<(usize, crate::encode::Request)> = Vec::new();
+    for (i, inv) in invs.iter().enumerate() {
+        match inv.cancel.check().and_then(|()| encode_request(inv)) {
+            Ok(req) => {
+                valid.push((i, req));
+                results.push(None);
+            }
+            Err(e) => results.push(Some(Err(e))),
+        }
+    }
+    let reqs: Vec<&crate::encode::Request> = valid.iter().map(|(_, r)| r).collect();
+    for ((i, req), out) in valid.iter().zip(encoder.encode_batch(&reqs)) {
+        results[*i] = Some(Ok(encode_outcome(encoder, req, out)));
+    }
+    results.into_iter().map(|r| r.expect("every invocation has a result")).collect()
 }
 
 /// An `encode` invocation's validated request, checked before any weight is

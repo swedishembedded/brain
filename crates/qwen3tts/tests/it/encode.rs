@@ -49,7 +49,16 @@ fn encode_returns_the_codec_codes_the_x_vector_and_the_generation_token_ids_of_a
     let codec = mimi::Codec::load_inference(&paths.codec);
     let want: Vec<u32> = codec.encode(&audio::resample::rational(&wav.samples, codec.cfg.input_sample_rate, wav.sample_rate));
     let codes: Vec<u32> = words::<2>(&out.blobs["codes"]).into_iter().map(|w| u32::from(u16::from_le_bytes(w))).collect();
-    assert!(codes == want, "the codes are the codec's CPU-path encode of the clip");
+    assert_eq!(codes.len(), want.len(), "the CPU-path frame count");
+    if gpu_core::backend_name() == "cpu" {
+        assert!(codes == want, "the codes are the codec's CPU-path encode of the clip");
+    } else {
+        // On a card the residual argmin's near-ties may flip (the device sums
+        // reassociate); the semantic codebook and nearly every code agree.
+        let agree = codes.iter().zip(&want).filter(|(a, b)| a == b).count() as f64 / want.len() as f64;
+        let cb0 = codes.iter().step_by(16).zip(want.iter().step_by(16)).filter(|(a, b)| a == b).count() as f64 / (want.len() / 16) as f64;
+        assert!(agree >= 0.99 && cb0 >= 0.999, "device codes agree with the CPU path's at {agree:.4} (cb0 {cb0:.4})");
+    }
     assert_eq!(out.outputs["frames"], json!(want.len() / 16));
     assert_eq!(out.outputs["codebooks"], json!(16));
     assert_eq!(out.outputs["frame_rate"], json!(12.5));
@@ -84,49 +93,30 @@ fn encode_returns_the_codec_codes_the_x_vector_and_the_generation_token_ids_of_a
     assert!((frames - (want.len() / 16) as i64).abs() <= 1, "{frames} frames at 16 kHz");
 }
 
-/// Audio seconds encoded per wall second on this machine, one request after
-/// another through one loaded encoder (the resident instance's shape).
+/// Audio seconds encoded per wall second on this machine through one loaded
+/// encoder (the resident instance's shape): one request at a time, and
+/// batches of 8 and 32 ten-second recordings encoded together.
 #[test]
 #[ignore = "timing measurement, not a gate"]
 fn encode_throughput() {
     let Some((paths, bytes)) = fixture() else { return };
     let load = Instant::now();
     let encoder = qwen3tts::encode::Encoder::load(&paths).unwrap();
-    eprintln!("encoder load: {:?}", load.elapsed());
+    eprintln!("encoder load: {:?} on {}", load.elapsed(), gpu_core::backend_name());
     // A corpus utterance is about ten seconds: the clip, repeated to that.
     let wav = audio::wav::parse(&bytes).unwrap();
     let ten: Vec<f32> = wav.samples.iter().copied().cycle().take(10 * wav.sample_rate as usize).collect();
     let req = qwen3tts::encode::Request::parse(&audio::wav::encode(&ten, wav.sample_rate), Some("en mening".to_string())).unwrap();
     encoder.encode(&req);
-    let n = 5;
-    let t = Instant::now();
-    for _ in 0..n {
-        encoder.encode(&req);
-    }
-    let wall = t.elapsed().as_secs_f64();
-    let codec = mimi::Codec::load_inference(&paths.codec);
-    let speaker = ecapatdnn::SpeakerEncoder::load_inference(&paths.speaker);
-    let at24 = audio::resample::rational(&req.wav.samples, 24_000, req.wav.sample_rate);
-    let c = Instant::now();
-    codec.encode(&at24);
-    let c = c.elapsed();
-    let x = Instant::now();
-    speaker.embed_wav(&req.wav.samples, req.wav.sample_rate);
-    for streams in [2usize, 4] {
-        let encoders: Vec<_> = (0..streams).map(|_| qwen3tts::encode::Encoder::load(&paths).unwrap()).collect();
+    for batch in [1usize, 8, 32] {
+        let reqs: Vec<&qwen3tts::encode::Request> = std::iter::repeat_n(&req, batch).collect();
+        encoder.encode_batch(&reqs);
         let t = Instant::now();
-        std::thread::scope(|s| {
-            for e in &encoders {
-                s.spawn(|| {
-                    for _ in 0..2 {
-                        e.encode(&req);
-                    }
-                });
-            }
-        });
+        let rounds = 64 / batch;
+        for _ in 0..rounds {
+            encoder.encode_batch(&reqs);
+        }
         let wall = t.elapsed().as_secs_f64();
-        eprintln!("{streams} concurrent encoders: {:.2} audio s per wall s", req.seconds() * (2 * streams) as f64 / wall);
+        eprintln!("batch {batch:2}: {:.1} audio s per wall s", req.seconds() * (rounds * batch) as f64 / wall);
     }
-    eprintln!("split of one request: codec encode {c:?}, speaker encoder {:?}", x.elapsed());
-    eprintln!("encode: {:.2} s clip x {n} in {wall:.2} s = {:.2} audio s per wall s", req.seconds(), req.seconds() * n as f64 / wall);
 }

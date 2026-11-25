@@ -11,7 +11,8 @@
 //! transcript, the token ids generation tokenises that text into. This is the
 //! `encode` action's work ([`crate::caps`]); an [`Encoder`] holds the codec,
 //! the speaker encoder and the tokenizer loaded once, so a resident instance
-//! serves a corpus without reloading them per clip.
+//! serves a corpus without reloading them per clip, and encodes a batch of
+//! recordings as one device pass of each encoder ([`Encoder::encode_batch`]).
 //!
 //! A recording arrives as WAV bytes from a caller and is parsed as hostile
 //! input: its size is capped before it is decoded ([`MAX_WAV_BYTES`]) and its
@@ -31,11 +32,12 @@ pub const MAX_SECONDS: f64 = capability::bounds::SECONDS;
 /// Longest transcript, in bytes.
 pub const MAX_TEXT_BYTES: usize = 16 << 10;
 
-/// Encoders a resident instance runs side by side, each on its own share of
-/// a batch. Measured on the CPU backend (a 10 s clip, a shared 288-core host
-/// under load): one stream 3.2 audio seconds per wall second, two 5.2, four
-/// 6.7. Each holds its own codec and speaker encoder.
-pub const STREAMS: usize = 4;
+/// Device bytes the widest batch pass holds beyond the weights: the codec's
+/// SEANet head over `mimi::ENCODE_PASS_SAMPLES` padded samples dominates (64
+/// channels of the input rate, a few such activations alive at once, and the
+/// backend's pool of freed blocks); measured on a GH200 at that bound as
+/// recorded in the roadmap ledger.
+pub const BATCH_ACTIVATION_BYTES: u64 = 12 << 30;
 
 /// A validated encode request.
 pub struct Request {
@@ -137,10 +139,10 @@ impl Encoder {
     pub fn load(paths: &TtsPaths) -> Result<Encoder, String> {
         paths.require(true)?;
         let tokenizer = crate::prompt::load_tokenizer(&paths.ckpt_dir)?;
-        // The codec encodes on the CPU path, as a clone's reference is
-        // encoded (`mimi::Codec::load_inference`), so the codes a corpus is
-        // encoded to are the codes inference conditions on.
-        let codec = mimi::Codec::load_inference(&paths.codec);
+        // Both encoders on the ambient device (the one the caller placed the
+        // encoder on): on a card the codes equal the CPU backend's but for
+        // near-ties of the residual argmin (`mimi` `tests/it/encode.rs`).
+        let codec = mimi::Codec::load_inference_on(gpu_core::Gpu::new(mimi::PIPELINES), &paths.codec);
         if codec.cfg.semantic_codebook_size.max(codec.cfg.codebook_size) > u32::from(u16::MAX) + 1 {
             return Err("the codec's codebooks are wider than a u16 code".to_string());
         }
@@ -171,12 +173,29 @@ impl Encoder {
 
     /// Encode one validated recording.
     pub fn encode(&self, req: &Request) -> Encoded {
-        let wav = &req.wav;
-        let at_codec_rate = audio::resample::rational(&wav.samples, self.codec.cfg.input_sample_rate, wav.sample_rate);
-        let codes: Vec<u16> = self.codec.encode(&at_codec_rate).into_iter().map(|c| c as u16).collect();
-        let frames = codes.len() / self.codebooks() as usize;
-        let xvector = self.speaker.embed_wav(&wav.samples, wav.sample_rate);
-        Encoded { codes, frames, xvector, text_ids: req.text.as_deref().map(|t| self.text_ids(t)) }
+        self.encode_batch(&[req]).pop().expect("one recording in, one encoding out")
+    }
+
+    /// Encode validated recordings together: each resampled to the codec's
+    /// rate on the host (in parallel), the codec and the speaker encoder each
+    /// one batched device pass (`mimi::Codec::encode_batch`,
+    /// `ecapatdnn::SpeakerEncoder::embed_wav_batch`), reading back only the
+    /// codes and the x-vectors. Each recording encodes as it does alone.
+    pub fn encode_batch(&self, reqs: &[&Request]) -> Vec<Encoded> {
+        let rate = self.codec.cfg.input_sample_rate;
+        let at_codec_rate: Vec<Vec<f32>> = backend_cpu::par::map(reqs.len(), |i| audio::resample::rational(&reqs[i].wav.samples, rate, reqs[i].wav.sample_rate));
+        let codes = self.codec.encode_batch(&at_codec_rate.iter().map(Vec::as_slice).collect::<Vec<_>>());
+        let xvectors = self.speaker.embed_wav_batch(&reqs.iter().map(|r| (r.wav.samples.as_slice(), r.wav.sample_rate)).collect::<Vec<_>>());
+        let nq = self.codebooks() as usize;
+        reqs.iter()
+            .zip(codes.into_iter().zip(xvectors))
+            .map(|(req, (codes, xvector))| Encoded {
+                frames: codes.len() / nq,
+                codes: codes.into_iter().map(|c| c as u16).collect(),
+                xvector,
+                text_ids: req.text.as_deref().map(|t| self.text_ids(t)),
+            })
+            .collect()
     }
 }
 

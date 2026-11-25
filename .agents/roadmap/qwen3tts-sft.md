@@ -73,19 +73,28 @@ ledger is the engine work it needs.
   - [x] The served `encode` action (`qwen3tts::encode`, `caps::encode_spec`):
         WAV at any rate -> `codes` (u16), `xvector` (f32), `text_ids` (u32, the
         generation tokenisation), `frames`, `sample_rate_in`, `seconds`; codes
-        gated equal to the CPU-path codec encode on a real clip
-        (`tests/it/encode.rs`). Resident: its own instance key, encoders loaded
-        once, a batch spread over `encode::STREAMS` side-by-side encoders;
-        `brain_py` `encode_audio`.
-  - Measured 2026-11-25, CPU backend, a 10 s clip, shared 288-core host at
-    load average ~170 (`tests/it/encode.rs` `encode_throughput`, ignored):
-    one encoder 3.2 audio s per wall s (codec encode about 2.1 s, speaker
-    encoder about 0.7 s of each 10 s clip), two side by side 5.2, four 6.7.
-    100 hours of audio is then about 15 h on this CPU at four streams: too
-    slow to repeat casually. What would fix it, not done: the codec encode
-    as one recorded device pass over several clips (it runs eager, one
-    submit per op, `mimi::Codec::encode`), and the encode instance placed on
-    a card (it pins the CPU path today so its codes equal the clone path's).
+        gated against the CPU-path codec encode on a real clip
+        (`tests/it/encode.rs`: equal on the CPU backend, >= 99 % and cb0
+        >= 99.9 % on a card). Resident: its own instance key, one encoder
+        loaded once on the placed device, every request the dispatcher hands
+        over at once encoded as one batch (`Encoder::encode_batch`,
+        `caps::run_encode_batch`); `brain_py` `encode_audio`.
+  - [x] Encode as batched device passes: the codec (`mimi::Codec::
+        encode_batch`, clips padded to a whole frame with per-clip length
+        masks, the residual quantizer on the device) and the speaker encoder
+        (`ecapatdnn::SpeakerEncoder::embed_batch`, utterances packed along
+        time with per-utterance reflect margins and pooling) each one recorded
+        pass reading back only codes and x-vectors; the encode instance
+        declares device memory, so it is placed on a card when one is
+        budgeted. Measured 2026-11-25 on one GH200 (gpu1, `tests/it/
+        encode.rs` `encode_throughput`, 10 s clips, the whole encode: resample,
+        codec, mel and speaker encoder): 60.6 audio s per wall s one request
+        at a time, 280 at a batch of 8, 397 at 32 (100 h in about 15 min);
+        the CPU backend 3.7 at one, 7.3 at 8. Codec alone over 256 corpus
+        clips (1318 s, `mimi` `device_encode_throughput`): 183 at batch 1,
+        375 at 8, 496 in one call. Device vs CPU codes on 24 corpus clips
+        (105 s): 99.97 % of codes, 100 % of cb0; the upstream golden (24 s)
+        100 %; x-vector vs the upstream golden rel l2 7.5e-7 on CUDA.
   - [x] `encode` returns `producers` (content digests of the codec, the
         speaker encoder and the tokenizer) for a shard's `meta.producers`.
   - [ ] Shard assembly from `encode` outputs: the caller writes

@@ -54,6 +54,10 @@ Target, in order (each a self-contained change, measured with nsys/ncu before th
       encoder's log-mel frames across the pool (bit-identical; 48 s 114x to 253x real time on the device), and the
       stride-1 convs of the codec as tap sums on the vendor fp32 GEMM (no im2col; decode kernel time -18 %). 300 h of
       audio is about half an hour of codec encode on one card.
+- [x] The encode over a batch of recordings: the codec and the speaker encoder each one recorded device pass over
+      the batch (`mimi::Codec::encode_batch`, clips padded to a whole frame with per-clip length masks;
+      `ecapatdnn::SpeakerEncoder::embed_batch`, utterances packed along time), and the served `encode` instance
+      encodes what it is handed at once as one batch. Numbers in `qwen3tts-sft.md` (the served `encode`).
 - [x] Training: the Talker and code predictor as one model with the reference's loss is
       `speech_sft` (`.agents/roadmap/qwen3tts-sft.md`); the shared trainer gained what a fast run of
       it needs: the GEMM precision reaching the model, per-position head groups (one GEMM per

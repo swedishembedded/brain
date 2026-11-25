@@ -111,8 +111,12 @@ impl ResidentModel for TtsResident {
             TRAIN_KEY => MemCost::new(self.f32_weights().max(1 << 30) * 4, self.ram()),
             // `batch` gives each request its own host decoder copy.
             HOST_KEY => MemCost::new(0, self.ram() * 2),
-            // Each encoder holds a codec and a speaker encoder, with a third on top for the working set.
-            ENCODE_KEY => MemCost::new(0, (self.paths.encoder_weight_bytes().max(1 << 30) * 4 / 3) * qwen3tts::encode::STREAMS as u64),
+            // The codec and the speaker encoder on whichever device holds them, and the widest batch
+            // pass's activations (`qwen3tts::encode::BATCH_ACTIVATION_BYTES`).
+            ENCODE_KEY => {
+                let weights = self.paths.encoder_weight_bytes().max(1 << 30);
+                MemCost::new(weights, weights / 3).with_activation(qwen3tts::encode::BATCH_ACTIVATION_BYTES)
+            }
             // The hot engine's weights and working set, on whichever device holds it, and on a
             // card the KV pool its batched decoder serves every stream from.
             _ => MemCost::new(self.ram() + qwen3tts::batched::kv_pool_bytes(&self.paths, qwen3tts::engine::DEVICE_STREAMS).unwrap_or(0), 0),
@@ -128,8 +132,8 @@ impl ResidentModel for TtsResident {
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         if key.config == ENCODE_KEY {
             self.paths.require(true).map_err(|e| format!("tts encode: {e} (encoding needs a Base checkpoint, which ships the speaker encoder)"))?;
-            let encoders = residency::on_device(device, || (0..qwen3tts::encode::STREAMS).map(|_| qwen3tts::encode::Encoder::load(&self.paths)).collect::<Result<Vec<_>, _>>())??;
-            return Ok(Box::new(EncodeInstance { encoders, device }));
+            let encoder = residency::on_device(device, || qwen3tts::encode::Encoder::load(&self.paths))??;
+            return Ok(Box::new(EncodeInstance { encoder, device }));
         }
         if key.config != ENGINE_KEY {
             let provider = qwen3tts::caps::TtsProvider::new(Some(self.paths.clone()));
@@ -163,45 +167,25 @@ impl Instance for ProviderInstance {
     }
 }
 
-/// `encode` with its encoders loaded once: a batch of recordings is shared
-/// out over them, each encoder working through its share on its own thread.
-/// The codec encode is not yet one pass over several clips; side-by-side
-/// encoders are what lifts throughput on the CPU (`qwen3tts::encode::STREAMS`).
+/// `encode` with its encoders loaded once: every recording the dispatcher
+/// hands over at once is encoded in one batch, one device pass of the codec
+/// and one of the speaker encoder (`qwen3tts::encode::Encoder::encode_batch`).
 struct EncodeInstance {
-    encoders: Vec<qwen3tts::encode::Encoder>,
+    encoder: qwen3tts::encode::Encoder,
     device: Device,
 }
 
-impl EncodeInstance {
-    fn one(encoder: &qwen3tts::encode::Encoder, inv: &Invocation) -> ActionResult {
-        inv.cancel.check()?;
-        let req = qwen3tts::caps::encode_request(inv)?;
-        qwen3tts::caps::run_encode(encoder, inv, &req)
-    }
-}
-
 impl Instance for EncodeInstance {
-    fn run(&mut self, action: &str, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        if action != "encode" {
-            return Err(format!("tts: the encode instance runs encode, not '{action}'"));
-        }
-        residency::on_device(self.device, || Self::one(&self.encoders[0], inv))?
+    fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+        self.run_batch(action, std::slice::from_ref(inv), &mut |_, p| progress(p)).pop().unwrap_or_else(|| Err("tts encode: no result".to_string()))
     }
 
     fn run_batch(&mut self, action: &str, invs: &[Invocation], _progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
         if action != "encode" {
             return invs.iter().map(|_| Err(format!("tts: the encode instance runs encode, not '{action}'"))).collect();
         }
-        let device = self.device;
-        let share = invs.len().div_ceil(self.encoders.len()).max(1);
-        std::thread::scope(|s| {
-            let workers: Vec<_> = invs
-                .chunks(share)
-                .zip(&self.encoders)
-                .map(|(chunk, encoder)| s.spawn(move || chunk.iter().map(|inv| residency::on_device(device, || Self::one(encoder, inv)).and_then(|r| r)).collect::<Vec<_>>()))
-                .collect();
-            workers.into_iter().flat_map(|w| w.join().unwrap_or_else(|_| vec![Err("tts encode: an encoder thread panicked".to_string())])).collect()
-        })
+        let invs: Vec<&Invocation> = invs.iter().collect();
+        residency::on_device(self.device, || qwen3tts::caps::run_encode_batch(&self.encoder, &invs)).unwrap_or_else(|e| invs.iter().map(|_| Err(e.clone())).collect())
     }
 }
 
@@ -362,7 +346,7 @@ mod tests {
         assert!(cost("finetune").vram >= cost("synth").vram, "training holds the weights four times over");
         assert!(cost("batch").ram > 0 && cost("batch").vram == 0, "a batch holds host decoders, one per request");
         assert!(key("encode") != key("synth") && key("encode") != key("batch"), "encode keeps its own encoders loaded");
-        assert!(cost("encode").ram > 0 && cost("encode").vram == 0, "the encoders run on the host");
+        assert!(cost("encode").vram > 0 && cost("encode").activation.is_some(), "the encoder goes on a card when one is budgeted, with its widest pass declared");
     }
 
     /// Two Qwen3-TTS checkpoints in one store (an upstream release and a
@@ -397,6 +381,37 @@ mod tests {
         let r = TtsResident::new("/nonexistent/tts", "/nonexistent/ckpt");
         let e = r.activate(&r.instance_key("encode", &Invocation::new()), Device::Cpu).err().expect("no checkpoint, no instance");
         assert!(e.contains("tts encode"), "{e}");
+    }
+
+    /// The encode instance encodes the recordings it is handed at once as one
+    /// batch: each gets the outcome it gets alone, in order, and a hostile
+    /// recording among them is refused on its own without holding back the rest.
+    #[test]
+    fn encode_runs_a_batch_together_and_refuses_a_bad_recording_alone() {
+        let Some(r) = TtsResident::all_from_store(&loader::served::ServedStore::new(brain_modelstore::default_root())).into_iter().find(|r| r.paths.require(true).is_ok()) else {
+            brain_testutil::skip("no Qwen3-TTS Base checkpoint in the model store");
+            return;
+        };
+        let Ok(clip) = std::fs::read(brain_testutil::testdata("tts/voice-clone-example-voice.wav")) else {
+            brain_testutil::skip("testdata/tts/voice-clone-example-voice.wav absent (make testdata/fetch)");
+            return;
+        };
+        let wav = audio::wav::parse(&clip).unwrap();
+        let half = audio::wav::encode(&wav.samples[..wav.samples.len() / 2], wav.sample_rate);
+        let inv = |bytes: Vec<u8>| Invocation::new().blob("audio", capability::Blob::new(Media::Bytes, bytes));
+        let key = r.instance_key("encode", &Invocation::new());
+        let mut inst = r.activate(&key, Device::Cpu).expect("activate");
+        let invs = [inv(clip.clone()), inv(b"not a wav".to_vec()), inv(half.clone())];
+        let batch = inst.run_batch("encode", &invs, &mut |_, _| {});
+        assert_eq!(batch.len(), 3);
+        assert!(batch[1].as_ref().is_err_and(|e| e.contains("invalid-request")), "the bad recording is refused alone");
+        for (i, bytes) in [(0usize, clip), (2, half)] {
+            let alone = inst.run("encode", &inv(bytes), &mut |_| {}).expect("encodes alone");
+            let got = batch[i].as_ref().expect("encodes in the batch");
+            assert_eq!(got.outputs["frames"], alone.outputs["frames"], "recording {i}: frames");
+            assert_eq!(got.blobs["codes"].bytes, alone.blobs["codes"].bytes, "recording {i}: codes");
+            assert_eq!(got.blobs["xvector"].bytes, alone.blobs["xvector"].bytes, "recording {i}: x-vector");
+        }
     }
 
     /// The resident manifest is the provider's, with the hot actions streaming.
