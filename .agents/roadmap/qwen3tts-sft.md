@@ -86,15 +86,39 @@ ledger is the engine work it needs.
         time with per-utterance reflect margins and pooling) each one recorded
         pass reading back only codes and x-vectors; the encode instance
         declares device memory, so it is placed on a card when one is
-        budgeted. Measured 2026-11-25 on one GH200 (gpu1, `tests/it/
-        encode.rs` `encode_throughput`, 10 s clips, the whole encode: resample,
-        codec, mel and speaker encoder): 60.6 audio s per wall s one request
-        at a time, 280 at a batch of 8, 397 at 32 (100 h in about 15 min);
-        the CPU backend 3.7 at one, 7.3 at 8. Codec alone over 256 corpus
-        clips (1318 s, `mimi` `device_encode_throughput`): 183 at batch 1,
-        375 at 8, 496 in one call. Device vs CPU codes on 24 corpus clips
-        (105 s): 99.97 % of codes, 100 % of cb0; the upstream golden (24 s)
-        100 %; x-vector vs the upstream golden rel l2 7.5e-7 on CUDA.
+        budgeted. Measured 2026-11-25 on one GH200 (gpu1, its other tenants
+        idle):
+        - in process, the whole encode (resample, codec, mel, speaker
+          encoder) of 10 s clips (`tests/it/encode.rs` `encode_throughput`):
+          248 audio s per wall s one at a time, 514 at a batch of 8, 683 at
+          32; the CPU backend 3.7 at one, 7.3 at 8.
+        - served over D-Bus (`brain serve --dbus --device gpu1`, `brain_py`
+          `encode_audio` with a transcript, the 0.6B Base, 256 corpus clips
+          of 1.5-30 s, 5.2 s mean, each sent twice): 99 audio s per wall s
+          one request at a time, 222 with 8 in flight, 283 with 16, 316 with
+          32. 100 h of corpus is then about 27 min at the recipe's 8 in
+          flight, 19 min at 32. The encode instance held 5.4 GB of the card.
+        - codec alone over the 256 clips (`mimi` `device_encode_throughput`):
+          231 at batch 1, 495 at 8, 606 in one call; the residual quantizer
+          went from a third of its GPU time to a small share with
+          `vq_argmin_tiled`, the fp32 conv GEMMs (`matmul_f32_reg`) lead.
+        - parity: device vs CPU-backend codes on 24 corpus clips (105 s)
+          99.97 % of codes and 100 % of cb0 (the rest residual-argmin
+          near-ties the reassociated device sums flip); the upstream golden
+          (24 s, 300 frames) 100 % on the CPU path; x-vector vs the upstream
+          golden rel l2 7.5e-7 on CUDA, 5.5e-7 on the CPU backend.
+  - [ ] Served batches at the recipe's concurrency are smaller than its
+        in-flight count, and that is the served gap (222-237 audio s per wall
+        s with 8 in flight against 514 in process at a batch of 8). Measured
+        by timing every `run_batch` the instance received over 512 requests
+        with 8 synchronous clients: 130 batches, bimodal (39 of 1, 28 of 2,
+        25 of 6, 36 of 7, 2 of 8; mean 3.9), 83 ms each on average, the
+        instance busy 97 % of the wall time. The dispatcher starts a batch as
+        soon as one request is queued, and a batch's clients resubmit
+        together, so the next batch takes the first one or two and leaves the
+        rest for the one after. Candidate fixes: a short admission window the
+        model declares to the generic scheduler (a few ms against an 83 ms
+        pass), or a multi-clip `encode` request.
   - [x] `encode` returns `producers` (content digests of the codec, the
         speaker encoder and the tokenizer) for a shard's `meta.producers`.
   - [ ] Shard assembly from `encode` outputs: the caller writes
