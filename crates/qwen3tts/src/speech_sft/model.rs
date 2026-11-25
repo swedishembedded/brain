@@ -690,6 +690,7 @@ impl SpeechSftModel {
         let tables = self.tables.borrow();
 
         // The Talker's rows: the materialised plan, then one row per frame, as generation feeds them.
+        let rows_range = gpu_core::markers::range(c"speech_sft.rows");
         let mut rows = vec![0.0f32; bt * d];
         for (slot, ex) in l.examples.iter().enumerate() {
             let prompt = ex.plan.materialise(&*tables, Some(&ex.xvector));
@@ -698,7 +699,11 @@ impl SpeechSftModel {
             rows[base..base + r.rows.len()].copy_from_slice(&r.rows);
         }
         self.talker.write_img_embeds(&rows);
+        drop(rows_range);
+        let talker_range = gpu_core::markers::range(c"speech_sft.talker_fwd");
         let talker_hidden = self.talker.forward_hidden();
+        drop(talker_range);
+        let _heads = gpu_core::markers::range(c"speech_sft.talker_head_fwd");
 
         let aux = &self.aux;
         let n = l.talker_rows.len();
@@ -709,6 +714,8 @@ impl SpeechSftModel {
         let eos_hits = eos_at.iter().filter(|&&i| picks[i] == eos).count() as u32;
 
         // The code predictor's rows: [talker hidden, cb0 (the Talker's table), cb1 .. cb14 (its own)].
+        drop(_heads);
+        let cp_rows_range = gpu_core::markers::range(c"speech_sft.cp_rows");
         let mut raw = vec![0.0f32; fg * d];
         for (f, &(_, _, trow)) in l.frames.iter().enumerate() {
             let at = f * g * d;
@@ -728,7 +735,11 @@ impl SpeechSftModel {
             None => raw.clone(),
         };
         self.cp.write_img_embeds(&cp_in);
+        drop(cp_rows_range);
+        let cp_range = gpu_core::markers::range(c"speech_sft.cp_fwd");
         let cp_hidden = self.cp.forward_hidden();
+        drop(cp_range);
+        let _cp_heads = gpu_core::markers::range(c"speech_sft.cp_heads_fwd");
 
         let nf = l.frames.len();
         let mut cp_sum = 0.0f64;
@@ -758,6 +769,7 @@ impl SpeechSftModel {
         let nf = l.frames.len();
 
         // Code predictor: every head's gradient into its position's rows, then the decoder.
+        let heads_range = gpu_core::markers::range(c"speech_sft.cp_heads_bwd");
         let mut d_cp = vec![0.0f32; fg * dc];
         if fw.cp_count > 0 {
             let scale = s.mtp_weight / fw.cp_count as f32;
@@ -773,7 +785,11 @@ impl SpeechSftModel {
             }
         }
         self.cp.backward_hidden(&d_cp);
+        drop(heads_range);
+        let cp_range = gpu_core::markers::range(c"speech_sft.cp_bwd");
         let d_cp_in = self.cp.read_d_img_embeds();
+        drop(cp_range);
+        let proj_range = gpu_core::markers::range(c"speech_sft.cp_proj_bwd");
         let d_raw = match &aux.projector {
             Some(proj) => {
                 aux.gpu.write_f32(&aux.proj_in, &fw.cp_raw);
@@ -785,6 +801,8 @@ impl SpeechSftModel {
         };
 
         // Talker: the head's gradient plus the code predictor's at position 0.
+        drop(proj_range);
+        let head_range = gpu_core::markers::range(c"speech_sft.talker_head_bwd");
         let mut d_hidden = vec![0.0f32; bt * d];
         if fw.talker_count > 0 {
             let n = l.talker_rows.len();
@@ -799,7 +817,11 @@ impl SpeechSftModel {
             add(&mut d_hidden[trow * d..(trow + 1) * d], &d_raw[f * g * d..(f * g + 1) * d]);
         }
         self.talker.backward_hidden(&d_hidden);
+        drop(head_range);
+        let talker_range = gpu_core::markers::range(c"speech_sft.talker_bwd");
         let d_rows = self.talker.read_d_img_embeds();
+        drop(talker_range);
+        let _route = gpu_core::markers::range(c"speech_sft.route");
 
         // Every codec row a Talker input row summed; the text path and the x-vector are frozen.
         let mut grads = self.grads.borrow_mut();
@@ -900,6 +922,7 @@ impl model::Model for SpeechSftModel {
     /// and the heads' measured on their devices, the tables' on the host, and
     /// the multiplier it gives (`extra_scale`, clipped) applied to all.
     fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
+        let _opt = gpu_core::markers::range(c"speech_sft.optimizer");
         let aux_items: Vec<NormItem<'_>> = self.aux.ps.opt_params().iter().map(|(n, numel)| NormItem { buf: self.aux.ps.g(n), numel: *numel, dtype: GradDtype::F32 }).collect();
         let sum_sq = Self::device_sum_sq(&self.talker_norm, &self.talker) + Self::device_sum_sq(&self.cp_norm, &self.cp) + self.aux.norm.sum_sq(&self.aux.gpu, &aux_items) + self.grads.borrow().sum_sq();
         self.last_norm.set(Some((sum_sq.sqrt() as f32) * extra_scale));

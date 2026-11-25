@@ -227,8 +227,10 @@ impl Objective<SpeechSftModel> for SpeechObjective<'_> {
 
     fn micro_step(&mut self, model: &SpeechSftModel, _rng: &mut Rng) -> f32 {
         let t0 = Instant::now();
+        let load = gpu_core::markers::range(c"speech_sft.load");
         let examples = self.next_batch();
         model.load(examples).unwrap_or_else(|e| panic!("speech sft: {e}"));
+        drop(load);
         let t1 = Instant::now();
         let loss = model::Model::forward(model);
         let t2 = Instant::now();

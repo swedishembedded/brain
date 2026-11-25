@@ -110,6 +110,23 @@ ledger is the engine work it needs.
       frames/s (`speech_sft::tests::the_real_checkpoint_overfits_one_utterance_and_reports_its_frame_rate`,
       written, ignored, refused on the CPU backend) and the cost of the host
       side (row materialisation and gradient routing per micro-batch).
+- [ ] Throughput on one card: the full 1.7B fine-tune (3 epochs of 100 h, about 13.5M acoustic frames)
+      in under 4 hours needs at least 1000 frames/s sustained (prompt rows not counted) through the served job,
+      the real objective. Bench: `crates/qwen3tts/examples/speech_sft_bench.rs` (`synth` writes a shard with a
+      corpus's length distribution, 1.5-30 s, mean 6.4 s, four text tokens a second; `run` trains through
+      `speech_sft`, the function the served job runs). Phases are NVTX ranges (`speech_sft.*`) for `nsys`.
+      Measured on one GH200 (`BRAIN_DEVICE=gpu0 BRAIN_BACKEND=cuda`), 1.7B Base, 4000-record synthetic shard
+      (80.2 frames, 25.7 text tokens a record), batch 16 utterances, fp32 kernels:
+
+      | build | frames/s (steps 2-6) | step |
+      |---|---|---|
+      | fp32 kernels, three device handles (2026-11-25) | 106-121 | 11-12 s for 1400 frames |
+
+      `nsys` of that build (4 steps): 79 % of the kernel time in brain's fp32 CUDA-core GEMMs
+      (`matmul_f32_tiled` 39 %, `matmul_f32_dw_reg` 21 %, `matmul_f32_dx_reg` 19 %), the portable fp32 flash
+      attention 10 %; 1.75 s a step in host-device copies (rows up, hidden states and row gradients down);
+      the build pads every micro-batch to the longest record (block 505 rows, 16 x 505 Talker rows for about
+      1840 real ones, and a 6000-frame code predictor for about 1400 frames).
 - [ ] Batches shorter than the build: with every row spliced in, `qwen3::Qwen`
       runs its whole block (`needed_len` does not trim a spliced or
       external-head batch), so every micro-batch pays the longest record's
