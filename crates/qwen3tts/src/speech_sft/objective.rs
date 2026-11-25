@@ -82,6 +82,12 @@ pub fn rows_needed(sp: &TtsSpecials, rows: &RowMap, shard: &Shard) -> Result<usi
 }
 
 /// The speech objective. See the module documentation.
+/// The stream positions of one rank's micro-batch of `batch` records, starting at stream position `first`, under
+/// `(rank, world)`: the positions `n` with `n % world == rank` among the next `batch x world`.
+fn batch_positions(first: u64, batch: usize, (rank, world): (usize, usize)) -> impl Iterator<Item = u64> {
+    (0..batch as u64).map(move |i| first + i * world as u64 + rank as u64)
+}
+
 pub struct SpeechObjective<'a> {
     train: &'a Shard,
     held_out: Option<&'a Shard>,
@@ -93,6 +99,8 @@ pub struct SpeechObjective<'a> {
     seed: u64,
     /// Records drawn so far in the whole run: the position of the next one in the stream.
     drawn: u64,
+    /// `(rank, world)`: this rank trains the stream's records `n` with `n % world == rank` ([`Objective::shard`]).
+    shard: (usize, usize),
     order: Option<(u64, Vec<usize>)>,
     /// What the current step's micro-steps measured.
     step: ForwardStats,
@@ -111,7 +119,7 @@ impl<'a> SpeechObjective<'a> {
         if !(0.0..=1.0).contains(&streaming_fraction) {
             return Err(format!("speech sft: streaming_fraction must be in [0, 1], got {streaming_fraction}"));
         }
-        Ok(SpeechObjective { train, held_out, rows, sp, batch, streaming_fraction, mtp_weight, seed: data::rng::random_seed(), drawn: 0, order: None, step: ForwardStats::default(), held: None, work: StepWork::default() })
+        Ok(SpeechObjective { train, held_out, rows, sp, batch, streaming_fraction, mtp_weight, seed: data::rng::random_seed(), drawn: 0, shard: (0, 1), order: None, step: ForwardStats::default(), held: None, work: StepWork::default() })
     }
 
     /// The record at position `pos` of the training stream.
@@ -124,11 +132,12 @@ impl<'a> SpeechObjective<'a> {
         self.order.as_ref().expect("just set").1[(pos % n) as usize]
     }
 
-    /// The next micro-batch of the training stream.
+    /// The next micro-batch of the training stream: this rank's `batch` records of the next `batch x world` (every rank
+    /// walks the whole stream, so their epoch orders stay one order, and each keeps its own records of it).
     fn next_batch(&mut self) -> Vec<Example> {
         let first = self.drawn;
-        self.drawn += self.batch as u64;
-        (first..first + self.batch as u64)
+        self.drawn += self.batch as u64 * self.shard.1 as u64;
+        batch_positions(first, self.batch, self.shard)
             .map(|pos| {
                 let r = self.record_at(pos);
                 let layout = draw_layout(self.seed, pos, self.streaming_fraction);
@@ -218,11 +227,22 @@ impl Objective<SpeechSftModel> for SpeechObjective<'_> {
     }
 
     /// `draws_done` counts records, as the shared loop counts them (steps x
-    /// accumulation x its `batch_size`, which a run sets to this objective's batch).
+    /// accumulation x its `batch_size`, which a run sets to this objective's batch): a rank's
+    /// own, so the stream position is `world` times it.
     fn begin(&mut self, seed: u64, draws_done: u64) {
         self.seed = seed;
-        self.drawn = draws_done;
+        self.drawn = draws_done * self.shard.1 as u64;
         self.order = None;
+    }
+
+    /// Split the training records across `world` ranks as the trait says: rank `r` trains record `n` of the stream
+    /// exactly when `n % world == r`. The held-out shard is not split.
+    fn shard(&mut self, rank: usize, world: usize) -> Result<(), std::io::Error> {
+        if world == 0 || rank >= world {
+            return Err(std::io::Error::other(format!("rank {rank} is not one of a world of {world}")));
+        }
+        self.shard = (rank, world);
+        Ok(())
     }
 
     fn micro_step(&mut self, model: &SpeechSftModel, _rng: &mut Rng) -> f32 {
@@ -291,5 +311,31 @@ impl Objective<SpeechSftModel> for SpeechObjective<'_> {
     fn step_log(&self) -> Option<String> {
         let s = &self.step;
         Some(format!("talker_ce {:.4} code_predictor_ce {:.4} eos_acc {:.3} frames {}", mean(s.talker_sum, s.talker_count), mean(s.cp_sum, s.cp_count), ratio(s.eos_hits, s.eos_count), s.frames))
+    }
+}
+
+#[cfg(test)]
+mod shard_tests {
+    use super::batch_positions;
+
+    /// Over several micro-steps, the ranks of a world draw disjoint positions that together are the whole stream:
+    /// nothing is trained twice and nothing is skipped.
+    #[test]
+    fn the_ranks_of_a_world_partition_the_stream() {
+        for world in 1..=4usize {
+            let batch = 3;
+            let mut seen = Vec::new();
+            let mut first = 0u64;
+            for _step in 0..5 {
+                for rank in 0..world {
+                    let mine: Vec<u64> = batch_positions(first, batch, (rank, world)).collect();
+                    assert!(mine.iter().all(|p| p % world as u64 == rank as u64), "world {world} rank {rank}: {mine:?}");
+                    seen.extend(mine);
+                }
+                first += (batch * world) as u64;
+            }
+            seen.sort_unstable();
+            assert_eq!(seen, (0..first).collect::<Vec<_>>(), "world {world}");
+        }
     }
 }

@@ -1277,6 +1277,18 @@ impl model::Model for SpeechSftModel {
         model::ModelConfig::param_list(&self.shape).into_iter().map(|(n, _)| n).collect()
     }
 
+    /// Every trained gradient where it lives on the device, for a data-parallel group to sum: the Talker's and the code
+    /// predictor's from their stores, then the tables' and the projection's from the auxiliary store (by name, so every
+    /// rank lists them in one order). All three are on one device.
+    fn device_grads(&self) -> Result<model::DeviceGrads, String> {
+        let mut grads = model::Model::device_grads(&self.talker)?;
+        grads.tensors.extend(model::Model::device_grads(&self.cp)?.tensors);
+        let mut aux: Vec<String> = self.aux.ps.grad.keys().cloned().collect();
+        aux.sort();
+        grads.tensors.extend(model::DeviceGrads::from_store(&self.aux.gpu, &self.aux.ps, &aux)?.tensors);
+        Ok(grads)
+    }
+
     fn read_weight(&self, name: &str) -> Vec<f32> {
         let aux = &self.aux;
         match self.shape.place(name).unwrap_or_else(|| panic!("speech sft: no parameter {name}")) {
