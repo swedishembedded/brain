@@ -240,12 +240,13 @@ impl TrainResident {
         self.check_digests(&request.digests())?;
         // The base, its languages and voices are checked here, before the run is queued.
         let base_dir = speech::resolve_base(&self.env, &request)?;
+        let teacher_dir = speech::resolve_teacher(&self.env, &request)?;
         // The objective's own checks of its configuration, before the run is queued.
-        speech::sft_config(&request, &base_dir, None)?;
+        speech::sft_config(&request, &base_dir, teacher_dir.as_deref(), None)?;
         if p.validate_only {
             return Ok(Reservation::Host(64 << 20));
         }
-        let bytes = speech::device_bytes(&base_dir, &request);
+        let bytes = speech::device_bytes(&base_dir, teacher_dir.as_deref(), &request);
         self.fits_a_card(speech::ACTION, bytes, "four copies of the Talker's and the code predictor's f32 weights and a micro-batch's activations", "lower batch_utterances or max_frames")?;
         // Every claimed card holds one rank.
         Ok(Reservation::Card(bytes, request.spread.cards))

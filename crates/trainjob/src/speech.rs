@@ -102,6 +102,13 @@ fn training_params() -> Vec<ParamSpec> {
         ParamSpec::new("patience", ParamType::Int, "stop when the held-out loss has not improved for this many evaluations, and publish the checkpoint of the best one (needs eval_every)").min(1.0).max(capability::bounds::TRAIN_COUNT).step(1.0),
         ParamSpec::new("keep_best", ParamType::Bool, "publish the checkpoint of the evaluation with the lowest held-out loss instead of the last step's, running every step (implied by patience; needs eval_every)").implied_default(json!(d.keep_best)),
         ParamSpec::new("seed", ParamType::Int, "seed of the batch order and the layout draws (random when omitted; the report carries the one used)").min(0.0).max(capability::bounds::EXACT_INTEGER),
+        float("gt_weight", "the weight of the ground-truth objective (Talker plus weighted residual-codebook cross-entropy) in the loss; 0 distils from the teacher alone", 100.0, d.gt_weight),
+        ParamSpec::new("teacher", ParamType::Str, "distil from this frozen Qwen3-TTS checkpoint, `<vendor>/<repo>` in the server's model store, of the base's upstream layout (it may be wider, deeper and have a larger text vocabulary; every student text token must be one of its tokens): it runs at bf16 beside the student on each rank's card, and the held-out distance to it is the metric patience and keep_best select on"),
+        float("talker_kd_weight", "the weight of the Talker's codebook-0 KL(teacher || student), times the squared temperature (needs teacher)", 100.0, qwen3tts::speech_sft::DEFAULT_TALKER_KD_WEIGHT),
+        float("mtp_kd_weight", "the weight of the code predictor's residual-codebook KLs to the teacher, summed over the codebooks, times the squared temperature (needs teacher)", 100.0, qwen3tts::speech_sft::DEFAULT_MTP_KD_WEIGHT),
+        float("hidden_kd_weight", "the weight of the hidden-state matching to the teacher through a learned projection per mapped layer, never exported (needs teacher and hidden_kd_layers)", 100.0, 0.0),
+        ParamSpec::new("hidden_kd_layers", ParamType::Str, "JSON list of [student layer, teacher layer] pairs whose Talker residual streams are matched (the stream entering the layer; the layer count names the stream after the last layer)"),
+        ParamSpec::new("kd_temperature", ParamType::Float, "the softmax temperature of the KLs to the teacher (needs teacher)").min(0.01).max(100.0).implied_default(json!(qwen3tts::speech_sft::DEFAULT_KD_TEMPERATURE)),
     ]
 }
 
@@ -178,6 +185,13 @@ pub struct Params {
     pub patience: Option<u32>,
     pub keep_best: Option<bool>,
     pub seed: Option<u64>,
+    pub gt_weight: Option<f32>,
+    pub teacher: Option<String>,
+    pub talker_kd_weight: Option<f32>,
+    pub mtp_kd_weight: Option<f32>,
+    pub hidden_kd_weight: Option<f32>,
+    pub hidden_kd_layers: Option<String>,
+    pub kd_temperature: Option<f32>,
     pub cards: u32,
     pub job: Option<String>,
     pub install_as: Option<String>,
@@ -277,6 +291,12 @@ impl Request {
         if let Some(name) = &params.install_as {
             check_install_name(name)?;
         }
+        if params.teacher.is_none() && (params.talker_kd_weight.is_some() || params.mtp_kd_weight.is_some() || params.hidden_kd_weight.is_some() || params.hidden_kd_layers.is_some() || params.kd_temperature.is_some()) {
+            return Err(format!("{ACTION}: the kd settings weigh a distillation; name a teacher"));
+        }
+        if let Some(layers) = &params.hidden_kd_layers {
+            hidden_kd_layers(layers)?;
+        }
         check_resume(ACTION, params.resume_key.as_deref(), params.checkpoint_every)?;
         let spread = crate::parallel::Spread::parse(ACTION, params.cards, params.job.as_deref(), params.seed, false)?;
         Ok(Request { params, dataset, held_out, languages, voices, spread })
@@ -286,6 +306,32 @@ impl Request {
     pub fn digests(&self) -> Vec<Digest> {
         std::iter::once(&self.dataset).chain(&self.held_out).filter_map(|s| if let Source::Digest(d) = s { Some(*d) } else { None }).collect()
     }
+}
+
+/// The most mapped hidden-state pairs a run may name.
+const MAX_KD_LAYERS: usize = 64;
+
+/// `hidden_kd_layers`, read: `[student layer, teacher layer]` pairs.
+fn hidden_kd_layers(doc: &str) -> Result<Vec<(u32, u32)>, String> {
+    if doc.len() > MAX_NAMES_DOC {
+        return Err(format!("{ACTION}: hidden_kd_layers is {} bytes, more than {MAX_NAMES_DOC}", doc.len()));
+    }
+    let pairs: Vec<(u32, u32)> = serde_json::from_str(doc).map_err(|e| format!("{ACTION}: hidden_kd_layers: {e} (a JSON list of [student layer, teacher layer] pairs)"))?;
+    if pairs.len() > MAX_KD_LAYERS {
+        return Err(format!("{ACTION}: hidden_kd_layers names {} pairs, more than {MAX_KD_LAYERS}", pairs.len()));
+    }
+    Ok(pairs)
+}
+
+/// The teacher of `request` in the model store, checked to be a Qwen3-TTS checkpoint; `None` without one.
+pub(crate) fn resolve_teacher(env: &JobEnv, request: &Request) -> Result<Option<std::path::PathBuf>, String> {
+    let Some(teacher) = &request.params.teacher else { return Ok(None) };
+    let dir = job::resolve_base(env.models_dir.as_deref(), teacher)?;
+    let config: Value = std::fs::read(dir.join("config.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).ok_or_else(|| format!("{ACTION}: teacher \"{teacher}\" is not a Qwen3-TTS checkpoint (it has no readable config.json)"))?;
+    if !config["architectures"].as_array().is_some_and(|a| a.iter().any(|x| x == ARCHITECTURE)) {
+        return Err(format!("{ACTION}: teacher \"{teacher}\" is not a Qwen3-TTS checkpoint"));
+    }
+    Ok(Some(dir))
 }
 
 /// The base of `request` in the model store, checked to be a Qwen3-TTS checkpoint that has every language and voice
@@ -325,16 +371,34 @@ const BYTES_PER_TRAINED_PARAM: u64 = 16;
 /// [`BYTES_PER_TRAINED_PARAM`] (the codec and the speaker encoder are not trained), the workspace, and the activations
 /// of a micro-batch of `batch_utterances` records of `max_frames` frames each, the most a micro-batch can hold (the
 /// build is sized by the shard's longest record, which is not known before the shard is staged).
-pub(crate) fn device_bytes(base_dir: &Path, request: &Request) -> u64 {
-    let paths = qwen3tts::TtsPaths::new(base_dir, base_dir.to_string_lossy());
+///
+/// A distilling run is charged its teacher beside: the teacher's parameters at [`BYTES_PER_TEACHER_PARAM`], the same
+/// micro-batch's activations at the teacher's widths (a forward holds fewer, so this bounds it), and the student's
+/// and the teacher's logits of every supervised row.
+pub(crate) fn device_bytes(base_dir: &Path, teacher_dir: Option<&Path>, request: &Request) -> u64 {
     let defaults = objective_defaults();
     let frames = u64::from(request.params.batch_utterances.unwrap_or(defaults.batch)) * u64::from(request.params.max_frames.unwrap_or(defaults.max_frames));
-    let config: Value = std::fs::read(base_dir.join("config.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
-    let (talker, mtp) = (qwen3tts::TalkerConfig::from_json(&config), qwen3tts::MtpConfig::from_json(&config));
-    let width = u64::from(talker.n_layers) * u64::from(talker.d_model + talker.d_ff) + u64::from(mtp.num_code_groups) * u64::from(mtp.n_layers) * u64::from(mtp.d_model + mtp.d_ff);
-    let activations = (frames as f64 * width as f64 * ACTIVATION_FLOATS_PER_WIDTH * 4.0) as u64;
-    paths.talker_and_mtp_params().saturating_mul(BYTES_PER_TRAINED_PARAM).saturating_add(WORKSPACE_BYTES).saturating_add(activations)
+    let config = |dir: &Path| -> (u64, qwen3tts::TalkerConfig, qwen3tts::MtpConfig) {
+        let paths = qwen3tts::TtsPaths::new(dir, dir.to_string_lossy());
+        let config: Value = std::fs::read(dir.join("config.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
+        (paths.talker_and_mtp_params(), qwen3tts::TalkerConfig::from_json(&config), qwen3tts::MtpConfig::from_json(&config))
+    };
+    let activations = |talker: &qwen3tts::TalkerConfig, mtp: &qwen3tts::MtpConfig| {
+        let width = u64::from(talker.n_layers) * u64::from(talker.d_model + talker.d_ff) + u64::from(mtp.num_code_groups) * u64::from(mtp.n_layers) * u64::from(mtp.d_model + mtp.d_ff);
+        (frames as f64 * width as f64 * ACTIVATION_FLOATS_PER_WIDTH * 4.0) as u64
+    };
+    let (params, talker, mtp) = config(base_dir);
+    let student = params.saturating_mul(BYTES_PER_TRAINED_PARAM).saturating_add(WORKSPACE_BYTES).saturating_add(activations(&talker, &mtp));
+    let Some(dir) = teacher_dir else { return student };
+    let (params, talker, mtp) = config(dir);
+    // Per supervised row: the student's and the teacher's logits of the Talker and of every residual codebook.
+    let logits = frames.saturating_mul(2 * 4 * (u64::from(talker.vocab) + u64::from(mtp.n_residual()) * u64::from(mtp.vocab)));
+    student.saturating_add(params.saturating_mul(BYTES_PER_TEACHER_PARAM)).saturating_add(activations(&talker, &mtp)).saturating_add(logits)
 }
+
+/// Bytes per teacher parameter: its linears are asked for at bf16, but a card without the tier, its heads and its
+/// tables hold fp32.
+const BYTES_PER_TEACHER_PARAM: u64 = 4;
 
 /// The staged shards, each opened and checked against the base and the request: the codebooks and x-vector width of
 /// the base, and exactly the languages and voices the request names.
@@ -383,7 +447,7 @@ fn step_frame(step: &model::train::StepReport, seconds: f64) -> Value {
 
 /// The objective's configuration for `request` over the base at `base_dir`: the settings it names, the objective's own
 /// defaults for the rest, validated as the run would ([`SpeechSftConfig::validate`]).
-pub(crate) fn sft_config(request: &Request, base_dir: &Path, seed: Option<u64>) -> Result<SpeechSftConfig, String> {
+pub(crate) fn sft_config(request: &Request, base_dir: &Path, teacher_dir: Option<&Path>, seed: Option<u64>) -> Result<SpeechSftConfig, String> {
     let p = &request.params;
     let source = |new: bool| if new { "new" } else { "base" };
     let mix = request.languages.values().find(|l| l.new && !l.init_from.is_empty()).map(|l| l.init_from.iter().map(|n| (n.clone(), 1.0 / l.init_from.len() as f32)).collect::<BTreeMap<String, f32>>());
@@ -417,6 +481,13 @@ pub(crate) fn sft_config(request: &Request, base_dir: &Path, seed: Option<u64>) 
         ("patience", p.patience.map(|v| json!(v))),
         ("keep_best", p.keep_best.map(|v| json!(v))),
         ("seed", seed.or(p.seed).map(|v| json!(v))),
+        ("gt_weight", p.gt_weight.map(|v| json!(v))),
+        ("teacher", teacher_dir.map(job::utf8).transpose()?.map(|d| json!(d))),
+        ("talker_kd_weight", p.talker_kd_weight.map(|v| json!(v))),
+        ("mtp_kd_weight", p.mtp_kd_weight.map(|v| json!(v))),
+        ("hidden_kd_weight", p.hidden_kd_weight.map(|v| json!(v))),
+        ("hidden_kd_layers", p.hidden_kd_layers.as_deref().map(hidden_kd_layers).transpose()?.map(|v| json!(v))),
+        ("kd_temperature", p.kd_temperature.map(|v| json!(v))),
     ] {
         set(&mut cfg, key, v);
     }
@@ -439,8 +510,9 @@ pub(crate) fn sft_config(request: &Request, base_dir: &Path, seed: Option<u64>) 
 fn training_report(report: &qwen3tts::speech_sft::SpeechSftReport) -> Value {
     let fit = &report.fit;
     let last = report.steps.last().map(|s| {
-        json!({"step": s.step, "loss": s.loss, "talker_ce": s.talker_ce, "code_predictor_ce": s.code_predictor_ce, "eos_accuracy": s.eos_accuracy, "grad_norm": s.grad_norm, "lr": s.lr, "frames_per_s": s.frames_per_s,
-               "held_out": s.held_out.map(|h| json!({"loss": h.loss, "talker_ce": h.talker_ce, "code_predictor_ce": h.code_predictor_ce, "eos_accuracy": h.eos_accuracy}))})
+        let distilled = |d: Option<qwen3tts::speech_sft::Distilled>| d.map(|d| json!({"talker_kl": d.talker_kl, "code_predictor_kl": d.code_predictor_kl, "hidden_mse": d.hidden_mse}));
+        json!({"step": s.step, "loss": s.loss, "talker_ce": s.talker_ce, "code_predictor_ce": s.code_predictor_ce, "eos_accuracy": s.eos_accuracy, "grad_norm": s.grad_norm, "lr": s.lr, "frames_per_s": s.frames_per_s, "distilled": distilled(s.distilled),
+               "held_out": s.held_out.map(|h| json!({"loss": h.loss, "talker_ce": h.talker_ce, "code_predictor_ce": h.code_predictor_ce, "eos_accuracy": h.eos_accuracy, "distilled": distilled(h.distilled)}))})
     });
     let curve: Vec<Value> = fit.evaluations.iter().map(|e| json!({"step": e.step, "train_loss": e.train_loss, "held_out_loss": e.eval_loss})).collect();
     let best = fit.kept_best.map(|b| json!({"step": b.step, "held_out_loss": b.eval_loss}));
@@ -457,6 +529,7 @@ pub fn run(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], progre
     let request = Request::from_invocation(inv)?;
     let p = &request.params;
     let base_dir = resolve_base(env, &request)?;
+    let teacher_dir = resolve_teacher(env, &request)?;
     let work = Workdir::create(env)?;
     let total = p.steps.unwrap_or(0);
     progress(Progress::event(0, total, json!({"type": "stage", "stage": "staging the shards"})));
@@ -473,7 +546,7 @@ pub fn run(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], progre
             "status": "valid", "objective": ACTION, "base": p.base, "steps": p.steps, "epochs": p.epochs,
             "records": train.len(), "held_out_records": held_out.as_ref().map(qwen3tts::shard::Shard::len),
             "languages": request.languages.keys().collect::<Vec<_>>(), "voices": request.voices.keys().collect::<Vec<_>>(),
-            "device_bytes": device_bytes(&base_dir, &request),
+            "device_bytes": device_bytes(&base_dir, teacher_dir.as_deref(), &request),
         });
         return Ok(outcome);
     }
@@ -490,7 +563,7 @@ pub fn run(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], progre
     // Every rank of a spread run draws the same initialisation and batch order: the resumable run's seed, the
     // request's, or one drawn here for all of them.
     let seed = run.as_ref().map(crate::runs::Run::seed).or(p.seed).or_else(|| request.spread.ranked().then(brain::random_seed));
-    let cfg = sft_config(&request, &base_dir, seed)?;
+    let cfg = sft_config(&request, &base_dir, teacher_dir.as_deref(), seed)?;
     progress(Progress::event(0, total, json!({"type": "stage", "stage": "loading the base and training"})));
     let began = Instant::now();
     let state = run.as_ref().map(crate::runs::Run::state_path);
@@ -549,6 +622,9 @@ pub fn run(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], progre
     report["objective"] = json!(ACTION);
     report["base"] = json!(p.base);
     report["seed"] = json!(trained.report.seed);
+    if let Some(teacher) = &p.teacher {
+        report["teacher"] = json!(teacher);
+    }
     report["languages"] = json!(trained.languages);
     report["voices"] = json!(trained.voices);
     report["tts_model_type"] = json!(match exported.kind {
@@ -596,6 +672,25 @@ mod tests {
         assert_eq!(frame, json!({"type": "step", "step": 3, "steps": 9, "loss": 1.5, "lr": 1e-4_f32, "grad_norm": 0.5, "frames_per_s": 0.0, "seconds": 7.0, "eval_loss": 2.0, "talker_ce": 1.25, "code_predictor_ce": 0.75, "eos_accuracy": 0.5, "held_out_talker_ce": 2.25}));
     }
 
+    /// The distillation settings reach the objective as named, the teacher as the directory it resolved to; without a
+    /// teacher they are refused, and the layer pairs are read as pairs.
+    #[test]
+    fn a_distilling_request_names_its_teacher_and_weights() {
+        let ok = validated(json!({"base": "a/b", "languages": SV, "teacher": "a/teacher", "gt_weight": 0.5, "talker_kd_weight": 2.0, "mtp_kd_weight": 0.1, "hidden_kd_weight": 0.25, "hidden_kd_layers": "[[4, 8], [9, 28]]", "kd_temperature": 2.0}), &["dataset"]).unwrap();
+        let cfg = sft_config(&ok, Path::new("base"), Some(Path::new("teacher")), None).unwrap();
+        assert_eq!(cfg.teacher.as_deref(), Some("teacher"));
+        assert_eq!((cfg.gt_weight, cfg.talker_kd_weight, cfg.mtp_kd_weight, cfg.hidden_kd_weight, cfg.kd_temperature), (0.5, Some(2.0), Some(0.1), Some(0.25), Some(2.0)));
+        assert_eq!(cfg.hidden_kd_layers, vec![(4, 8), (9, 28)]);
+        let kd = cfg.kd_shape(2048).unwrap();
+        assert_eq!((kd.talker, kd.mtp, kd.teacher_d), (2.0, 0.1, 2048));
+        let defaults = sft_config(&validated(json!({"base": "a/b", "languages": SV, "teacher": "a/teacher"}), &["dataset"]).unwrap(), Path::new("base"), Some(Path::new("teacher")), None).unwrap().kd_shape(8).unwrap();
+        assert_eq!((defaults.talker, defaults.mtp, defaults.hidden, defaults.temperature), (qwen3tts::speech_sft::DEFAULT_TALKER_KD_WEIGHT, qwen3tts::speech_sft::DEFAULT_MTP_KD_WEIGHT, 0.0, 1.0));
+        let err = validated(json!({"base": "a/b", "languages": SV, "talker_kd_weight": 2.0}), &["dataset"]).unwrap_err();
+        assert!(err.contains("name a teacher"), "{err}");
+        let err = validated(json!({"base": "a/b", "languages": SV, "teacher": "a/t", "hidden_kd_layers": "[4, 8]"}), &["dataset"]).unwrap_err();
+        assert!(err.contains("hidden_kd_layers"), "{err}");
+    }
+
     /// A cancelled job stops before it reads anything.
     #[test]
     fn a_cancelled_job_stops_before_any_work() {
@@ -609,17 +704,17 @@ mod tests {
     #[test]
     fn a_request_names_its_shards_languages_and_voices_and_refuses_what_it_cannot_take() {
         let ok = validated(json!({"base": "a/b", "languages": SV, "voices": r#"{"astrid": {"new": true}}"#, "install_as": "sv-1"}), &["dataset"]).unwrap();
-        let cfg = sft_config(&ok, Path::new("base"), None).unwrap();
+        let cfg = sft_config(&ok, Path::new("base"), None, None).unwrap();
         assert_eq!((cfg.steps, cfg.batch, cfg.mtp_weight, cfg.rows.voices["astrid"]), (Some(3), objective_defaults().batch, 0.3, qwen3tts::speech_sft::RowSource::New));
         assert_eq!(cfg.rows.language_init, Some(BTreeMap::from([("english".to_string(), 0.5), ("german".to_string(), 0.5)])));
         let named = validated(json!({"base": "a/b", "languages": SV, "batch_utterances": 2, "residual_weight": 0.5, "new_row_lr_multiplier": 10.0, "streaming_fraction": 1.0, "warmup": 4, "schedule": "constant", "lr": 1e-4, "eval_batches": 2, "seed": 9, "length_bucket_steps": 16}), &["dataset"]).unwrap();
-        let cfg = sft_config(&named, Path::new("base"), None).unwrap();
+        let cfg = sft_config(&named, Path::new("base"), None, None).unwrap();
         assert_eq!((cfg.batch, cfg.mtp_weight, cfg.lr_multipliers.new_rows, cfg.streaming_fraction, cfg.warmup, cfg.seed, cfg.length_bucket_steps), (2, 0.5, 10.0, 1.0, 4, Some(9), 16));
         assert_eq!(ok.dataset, Source::Blob("dataset".into()));
         assert_eq!(ok.languages["swedish"], LanguageInit { new: true, init_from: vec!["english".into(), "german".into()] });
         assert_eq!((ok.voices["astrid"], ok.params.steps, ok.params.residual_weight), (true, Some(3), None));
         let spread = validated(json!({"base": "a/b", "languages": SV, "cards": 4, "eval_every": 5, "patience": 3, "seed": 1}), &["dataset", "held_out"]).unwrap();
-        let cfg = sft_config(&spread, Path::new("base"), None).unwrap();
+        let cfg = sft_config(&spread, Path::new("base"), None, None).unwrap();
         assert_eq!((spread.spread.cards, spread.spread.ranked(), cfg.patience, cfg.eval_interval), (4, true, 3, 5));
         let by_digest = validated(json!({"base": "a/b", "languages": SV, "dataset_digest": digest(1), "held_out_digest": digest(2), "eval_every": 10}), &[]).unwrap();
         assert_eq!(by_digest.digests().len(), 2);

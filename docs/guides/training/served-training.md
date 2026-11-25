@@ -164,12 +164,33 @@ arrays). Params:
 | `keep_best` | publish the checkpoint of the evaluation with the lowest held-out loss rather than the last step's, still running every step (implied by `patience`; needs `eval_every`) |
 | `length_bucket_steps` | micro-batches whose utterances are regrouped by length so each pads little (default 16; 1 draws them unsorted) |
 | `seed` | the batch order and the layout draws (random when omitted; reported) |
-
-Every setting left out is the objective's own default, which `GET /v1/capabilities` lists as the param's
-`implied_default`.
+| `gt_weight` | the weight of the ground-truth objective (`talker_ce + residual_weight * code_predictor_ce`) in the loss (default 1; 0 learns from the teacher alone) |
+| `teacher` | distil from this frozen Qwen3-TTS checkpoint, `<vendor>/<repo>` in the model store (see below) |
+| `talker_kd_weight` | the weight of the Talker's codebook-0 KL to the teacher, times the squared temperature (default 1; needs `teacher`) |
+| `mtp_kd_weight` | the weight of the code predictor's residual-codebook KLs to the teacher, each a mean over the frames, summed over the codebooks, times the squared temperature (default 0.02, `residual_weight`'s 0.3 spread over 15 codebooks; needs `teacher`) |
+| `hidden_kd_weight`, `hidden_kd_layers` | the weight of matching the Talker's residual stream to the teacher's through a learned linear projection per pair, and the pairs as a JSON list `[[student layer, teacher layer], ...]` (the stream entering the layer; the layer count names the stream after the last layer). Off by default; the projections are never exported |
+| `kd_temperature` | the softmax temperature of both KLs (default 1) |
 | `cards`, `job` | one data-parallel rank per card of this server, and this server's part of a job over several servers, as for `train` ([One job over several servers](#one-job-over-several-servers)) |
 | `install_as`, `resume_key`, `checkpoint_every`, `allow_cpu` | as for `full_train` |
 | `validate_only` | stage and check the shards (format, codebooks and x-vector width against the base, every language and voice named) and the names against the base, and answer `{"status": "valid", "records", "held_out_records", "languages", "voices", "device_bytes"}` without training: host work |
+
+Every setting left out is the objective's own default, which `GET /v1/capabilities` lists as the param's
+`implied_default`.
+
+**Distillation.** With a `teacher`, every micro-batch is also run through the teacher, teacher forced on the same
+histories, and the student learns its distributions: the loss is `gt_weight * (ground truth) + talker_kd_weight * T^2 *
+KL(teacher || student)` over the Talker's supervised rows `+ mtp_kd_weight * T^2 * sum of the residual codebooks' KLs`
+`+ hidden_kd_weight * the mapped pairs' mean squared errors`. The teacher is held frozen at bf16 beside the student on
+every rank's card (no gradient, no optimizer state), so a run on several cards or servers distils exactly as it
+trains. The student is the `base`: a checkpoint of the same upstream layout, which may be narrower, shallower or have a
+trimmed text vocabulary, exported in its own shapes. Every student text token must be a token of the teacher's
+tokenizer (`vocab.json` and the added tokens of `tokenizer_config.json`), its text specials the teacher's under that
+map and its codec specials the same rows; the teacher must have every language and voice the shards train (at any
+row). A record in the x-vector slot needs a teacher of the student's width. Each is refused by name before training.
+The held-out score (`eval_loss`, what `patience` and `keep_best` select on) is then the distillation's terms alone,
+the distance to the teacher; step frames and the report's `last_step` add `talker_kl`, `code_predictor_kl` and
+`hidden_mse` (held out: `held_out_talker_kl`, ...), and the report names the `teacher`. A rank is charged the teacher's
+parameters, its activations and the logits of both models beside its own.
 
 The languages and voices named are exactly the shards' own. A language or voice the request calls new that the base already names, one it calls the base's that the base lacks,
 an `init_from` that is not a base language, a shard language or voice the request does not name, and a shard of
