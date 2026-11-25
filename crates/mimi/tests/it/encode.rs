@@ -152,3 +152,91 @@ fn encode_matches_reference_codes() {
     assert!((t_got as i64 - t_ref as i64).abs() <= 1, "frame count off by >1: got {t_got} ref {t_ref}");
     assert!(rate >= 0.95, "code-match rate {:.2}% < 95%", rate * 100.0);
 }
+
+/// Real recordings for the device gates: every `*.wav` under
+/// `testdata/tts/corpus`, at the codec's rate, in name order. `None` (and a
+/// skip naming it) when the directory holds none.
+fn corpus(rate: u32) -> Option<Vec<(String, Vec<f32>)>> {
+    let dir = testdata("tts/corpus");
+    let mut names: Vec<std::path::PathBuf> = std::fs::read_dir(&dir).map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "wav")).collect()).unwrap_or_default();
+    if names.is_empty() {
+        brain_testutil::skip(&format!("no recordings under {dir}"));
+        return None;
+    }
+    names.sort();
+    Some(
+        names
+            .into_iter()
+            .map(|p| {
+                let wav = audio::wav::parse(&std::fs::read(&p).unwrap()).unwrap();
+                (p.display().to_string(), audio::resample::rational(&wav.samples, rate, wav.sample_rate))
+            })
+            .collect(),
+    )
+}
+
+/// The codec on the ambient device, or a skip when that is the CPU backend
+/// (the reference itself) or no checkpoint is present.
+fn device_codec() -> Option<Codec> {
+    if !ckpt_available() {
+        brain_testutil::skip("checkpoint not present");
+        return None;
+    }
+    if brain_testutil::gpu_tests_skipped() || gpu_core::backend_name() == "cpu" {
+        brain_testutil::skip_unavailable("a GPU (the device encode is compared against the CPU backend)");
+        return None;
+    }
+    Some(Codec::load_inference_on(gpu_core::Gpu::new(mimi::PIPELINES), &import_to_temp()))
+}
+
+/// Code agreement of `got` with `want` over every clip: (all codes, cb0).
+fn agreement(want: &[Vec<u32>], got: &[Vec<u32>], nq: usize) -> (f64, f64) {
+    let (mut hits, mut total, mut hits0, mut frames) = (0usize, 0usize, 0usize, 0usize);
+    for (w, g) in want.iter().zip(got) {
+        assert_eq!(w.len(), g.len(), "frame count differs");
+        hits += w.iter().zip(g).filter(|(a, b)| a == b).count();
+        total += w.len();
+        hits0 += w.iter().step_by(nq).zip(g.iter().step_by(nq)).filter(|(a, b)| a == b).count();
+        frames += w.len() / nq;
+    }
+    (hits as f64 / total as f64, hits0 as f64 / frames as f64)
+}
+
+/// The batched device encode of real recordings gives the CPU backend's codes
+/// (the CPU backend runs the direct convs and serial reductions, so it is an
+/// independent witness): every frame count equal, and the codes equal but for
+/// near-ties of the residual argmin that the reassociated device sums flip.
+#[test]
+fn the_device_encode_of_real_recordings_gives_the_cpu_codes() {
+    let Some(device) = device_codec() else { return };
+    let Some(clips) = corpus(device.cfg.input_sample_rate) else { return };
+    let clips: Vec<Vec<f32>> = clips.into_iter().take(24).map(|(_, w)| w).collect();
+    let cpu = Codec::load_inference(&import_to_temp());
+    let want: Vec<Vec<u32>> = clips.iter().map(|w| cpu.encode(w)).collect();
+    let got = device.encode_batch(&clips.iter().map(Vec::as_slice).collect::<Vec<_>>());
+    let nq = device.cfg.num_quantizers as usize;
+    let (all, cb0) = agreement(&want, &got, nq);
+    let seconds: f64 = clips.iter().map(|w| w.len() as f64).sum::<f64>() / f64::from(device.cfg.input_sample_rate);
+    eprintln!("device vs CPU codes over {} clips ({seconds:.1} s): {:.4} % of codes, {:.4} % of cb0", clips.len(), all * 100.0, cb0 * 100.0);
+    assert!(cb0 >= 0.999 && all >= 0.99, "device codes agree with the CPU's at {:.4} % (cb0 {:.4} %)", all * 100.0, cb0 * 100.0);
+}
+
+/// Audio seconds the device encodes per wall second over the whole corpus
+/// directory, one `encode_batch` call (warm), at several batch sizes.
+#[test]
+#[ignore = "timing measurement, not a gate"]
+fn device_encode_throughput() {
+    let Some(device) = device_codec() else { return };
+    let Some(clips) = corpus(device.cfg.input_sample_rate) else { return };
+    let refs: Vec<&[f32]> = clips.iter().map(|(_, w)| w.as_slice()).collect();
+    let seconds: f64 = refs.iter().map(|w| w.len() as f64).sum::<f64>() / f64::from(device.cfg.input_sample_rate);
+    device.encode_batch(&refs[..refs.len().min(16)]);
+    for batch in [1usize, 8, 32, refs.len()] {
+        let t = std::time::Instant::now();
+        for chunk in refs.chunks(batch) {
+            device.encode_batch(chunk);
+        }
+        let wall = t.elapsed().as_secs_f64();
+        eprintln!("batch {batch:4}: {} clips, {seconds:.1} s of audio in {wall:.2} s = {:.1} audio s per wall s", refs.len(), seconds / wall);
+    }
+}

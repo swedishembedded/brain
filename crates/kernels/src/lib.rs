@@ -1585,6 +1585,10 @@ pub const SCALE_ROW: &str = include_str!("../wgsl/scale_row.wgsl");
 pub const SCAN_ADD: &str = include_str!("../wgsl/scan_add.wgsl");
 /// `wgsl/scan_block.wgsl`
 pub const SCAN_BLOCK: &str = include_str!("../wgsl/scan_block.wgsl");
+/// `wgsl/seg_pool_stats.wgsl`
+pub const SEG_POOL_STATS: &str = include_str!("../wgsl/seg_pool_stats.wgsl");
+/// `wgsl/seg_reflect.wgsl`
+pub const SEG_REFLECT: &str = include_str!("../wgsl/seg_reflect.wgsl");
 /// `wgsl/segment_bcast_rows.wgsl`
 pub const SEGMENT_BCAST_ROWS: &str = include_str!("../wgsl/segment_bcast_rows.wgsl");
 /// `wgsl/segment_sum_rows.wgsl`
@@ -2595,6 +2599,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("scale_row", SCALE_ROW),
     ("scan_add", SCAN_ADD),
     ("scan_block", SCAN_BLOCK),
+    ("seg_pool_stats", SEG_POOL_STATS),
+    ("seg_reflect", SEG_REFLECT),
     ("segment_bcast_rows", SEGMENT_BCAST_ROWS),
     ("segment_sum_rows", SEGMENT_SUM_ROWS),
     ("sift_match", SIFT_MATCH),

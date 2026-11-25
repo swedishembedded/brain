@@ -178,3 +178,64 @@ fn config_defaults() {
     // missing weights at forward, so just check construction wiring compiles).
     let _ = HashMap::<String, Vec<f32>>::new();
 }
+
+/// A structurally complete ECAPA at toy widths (16 channels, scale 4, a
+/// 48-channel MFA), every tensor random.
+fn tiny() -> (SpeakerConfig, HashMap<String, Vec<f32>>) {
+    let cfg = SpeakerConfig {
+        mel_dim: 8,
+        enc_dim: 6,
+        enc_channels: vec![16, 16, 16, 16, 48],
+        enc_attention_channels: 8,
+        enc_res2net_scale: 4,
+        enc_se_channels: 4,
+        ..SpeakerConfig::default()
+    };
+    let mut rng = data::rng::Lcg::new(data::rng::random_seed());
+    let mut w: HashMap<String, Vec<f32>> = HashMap::new();
+    let mut conv = |name: String, cout: u32, cin: u32, k: u32| {
+        let scale = 1.5 / ((cin * k) as f32).sqrt();
+        w.insert(format!("{name}.weight"), rng.vec_scaled((cout * cin * k) as usize, scale));
+        w.insert(format!("{name}.bias"), rng.vec_scaled(cout as usize, 0.1));
+    };
+    let c = cfg.enc_channels[0];
+    let sub = c / cfg.enc_res2net_scale;
+    conv("blocks.0.conv".into(), c, cfg.mel_dim, cfg.enc_kernel_sizes[0]);
+    for i in 1..4 {
+        conv(format!("blocks.{i}.tdnn1.conv"), c, c, 1);
+        for j in 0..cfg.enc_res2net_scale - 1 {
+            conv(format!("blocks.{i}.res2net_block.blocks.{j}.conv"), sub, sub, 3);
+        }
+        conv(format!("blocks.{i}.tdnn2.conv"), c, c, 1);
+        conv(format!("blocks.{i}.se_block.conv1"), cfg.enc_se_channels, c, 1);
+        conv(format!("blocks.{i}.se_block.conv2"), c, cfg.enc_se_channels, 1);
+    }
+    let cch = cfg.enc_channels[4];
+    conv("mfa.conv".into(), cch, cch, 1);
+    conv("asp.tdnn.conv".into(), cfg.enc_attention_channels, 3 * cch, 1);
+    conv("asp.conv".into(), cch, cfg.enc_attention_channels, 1);
+    conv("fc".into(), cfg.enc_dim, 2 * cch, 1);
+    (cfg, w)
+}
+
+/// Utterances of different lengths embedded together in one device pass each
+/// get the embedding they get alone: the reflect margins, the per-utterance
+/// pooling and the split concatenations keep every utterance to its own span.
+#[test]
+fn a_batch_embeds_each_utterance_as_it_embeds_alone() {
+    let (cfg, w) = tiny();
+    let enc = SpeakerEncoder::from_weights(cfg.clone(), w);
+    let mut rng = data::rng::Lcg::new(data::rng::random_seed());
+    let md = cfg.mel_dim as usize;
+    let frames = [cfg.max_pad_frames() + 1, 9, 40, 6, 23];
+    let mels: Vec<Vec<f32>> = frames.iter().map(|&t| rng.vec_scaled(t * md, 2.0)).collect();
+    let batch = enc.embed_batch(&mels.iter().map(Vec::as_slice).collect::<Vec<_>>());
+    for (mel, got) in mels.iter().zip(&batch) {
+        let alone = enc.embed(mel);
+        assert_eq!(got.len(), cfg.enc_dim as usize);
+        let scale = alone.iter().map(|v| v.abs()).fold(0.0f32, f32::max);
+        let err = got.iter().zip(&alone).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(err <= 1e-5 * scale.max(1.0), "{} frames: batched embedding differs from its own by {err:.3e} (scale {scale:.3e})", mel.len() / md);
+    }
+    assert!(batch.windows(2).all(|p| p[0] != p[1]), "the fixture is degenerate: two utterances embed alike");
+}
