@@ -30,6 +30,16 @@ fn is_residual_proj(name: &str) -> bool {
 }
 
 pub fn init_weights(cfg: &QwenConfig, seed: u64) -> HashMap<String, Vec<f32>> {
+    init_weights_where(cfg, seed, &|_| true)
+}
+
+/// [`init_weights`] of only the parameters `drawn` selects, in the same
+/// order: a caller that supplies the rest (a base checkpoint's tensors) does
+/// not draw values it would overwrite, which for a large model is most of a
+/// build's host time. A selected parameter's values depend on which ones are
+/// selected before it, so they equal [`init_weights`]'s only when every
+/// parameter is selected.
+pub fn init_weights_where(cfg: &QwenConfig, seed: u64, drawn: &dyn Fn(&str) -> bool) -> HashMap<String, Vec<f32>> {
     let mut rng = Rng::new(seed);
     let std = 0.02f32;
     let proj_std = 0.02f32 / ((2.0 * cfg.n_layers as f32).sqrt());
@@ -38,7 +48,7 @@ pub fn init_weights(cfg: &QwenConfig, seed: u64) -> HashMap<String, Vec<f32>> {
     };
 
     let mut w = HashMap::new();
-    for (name, numel) in cfg.param_list() {
+    for (name, numel) in cfg.param_list().into_iter().filter(|(name, _)| drawn(name)) {
         let v = if is_norm_gain(&name) {
             vec![1.0; numel]
         } else if init_of(&name) == Some(ParamInit::Zeros) {

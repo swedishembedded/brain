@@ -708,17 +708,25 @@ impl SpeechSftModel {
             Build::Frozen { .. } => 0,
         };
         let mut decoder = |cfg: &QwenConfig, which: Decoder, parent: Option<&Gpu>| -> Result<Qwen, String> {
-            let mut weights = qwen3::init_weights(cfg, seed);
-            for (hf, numel, owner) in shape.decoder_params() {
-                if owner != which {
-                    continue;
-                }
-                let brain = match which {
-                    Decoder::Talker => talker_hf_to_brain(&hf),
-                    Decoder::CodePredictor => mtp_hf_to_brain(&hf),
-                }
-                .expect("a listed parameter maps");
-                weights.insert(brain, take(&mut init, &hf, numel)?);
+            // The base supplies every decoder parameter but the token table (which no row reads), so only what it
+            // does not supply is drawn.
+            let supplied: Vec<(String, String, usize)> = shape
+                .decoder_params()
+                .into_iter()
+                .filter(|(_, _, owner)| *owner == which)
+                .map(|(hf, numel, _)| {
+                    let brain = match which {
+                        Decoder::Talker => talker_hf_to_brain(&hf),
+                        Decoder::CodePredictor => mtp_hf_to_brain(&hf),
+                    }
+                    .expect("a listed parameter maps");
+                    (hf, brain, numel)
+                })
+                .collect();
+            let given: std::collections::HashSet<&str> = supplied.iter().map(|(_, b, _)| b.as_str()).chain(std::iter::once("lm_head.weight")).collect();
+            let mut weights = qwen3::init_weights_where(cfg, seed, &|n| !given.contains(n));
+            for (hf, brain, numel) in &supplied {
+                weights.insert(brain.clone(), take(&mut init, hf, *numel)?);
             }
             weights.insert("lm_head.weight".into(), heads[which as usize].take().expect("each head is placed once"));
             let (b, t) = match which {
