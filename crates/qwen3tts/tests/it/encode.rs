@@ -93,6 +93,54 @@ fn encode_returns_the_codec_codes_the_x_vector_and_the_generation_token_ids_of_a
     assert!((frames - (want.len() / 16) as i64).abs() <= 1, "{frames} frames at 16 kHz");
 }
 
+/// A many-clip request (`clips`, `texts`) gives each clip what a request of
+/// its own gives: its rows of the concatenated codes (at `frame_offsets`), its
+/// x-vector row, its token ids (at `text_offsets`) and its frames, seconds and
+/// rate, in order, a clip without a transcript included.
+#[test]
+fn a_many_clip_request_gives_each_clip_its_own_encoding() {
+    let Some((paths, bytes)) = fixture() else { return };
+    let wav = audio::wav::parse(&bytes).unwrap();
+    let low = audio::wav::encode(&audio::resample::rational(&wav.samples, 16_000, wav.sample_rate), 16_000);
+    let half = audio::wav::encode(&wav.samples[..wav.samples.len() / 2], wav.sample_rate);
+    let clips = [bytes.clone(), low, half];
+    let texts = [Some("Det här är en mening."), None, Some("En till.")];
+    let packed = qwen3tts::encode::pack_clips(&clips.iter().map(Vec::as_slice).collect::<Vec<_>>());
+    let many = run(&paths, Invocation::new().blob("clips", Blob::new(Media::Bytes, packed)).set("texts", json!(serde_json::to_string(&texts).unwrap())));
+    assert_eq!(many.outputs["clips"], json!(3));
+    let frame_offsets: Vec<usize> = serde_json::from_value(many.outputs["frame_offsets"].clone()).unwrap();
+    let text_offsets: Vec<usize> = serde_json::from_value(many.outputs["text_offsets"].clone()).unwrap();
+    let codes = words::<2>(&many.blobs["codes"]);
+    let xvectors = words::<4>(&many.blobs["xvector"]);
+    let ids = words::<4>(&many.blobs["text_ids"]);
+    let dim = many.outputs["xvector_dim"].as_u64().unwrap() as usize;
+    for (i, (clip, text)) in clips.iter().zip(texts).enumerate() {
+        let mut inv = Invocation::new().blob("audio", Blob::new(Media::Bytes, clip.clone()));
+        if let Some(t) = text {
+            inv = inv.set("text", json!(t));
+        }
+        let alone = run(&paths, inv);
+        assert_eq!(many.outputs["frames"][i], alone.outputs["frames"], "clip {i}: frames");
+        assert_eq!(many.outputs["seconds"][i], alone.outputs["seconds"], "clip {i}: seconds");
+        assert_eq!(many.outputs["sample_rate_in"][i], alone.outputs["sample_rate_in"], "clip {i}: rate");
+        let got = &codes[frame_offsets[i] * 16..frame_offsets[i + 1] * 16];
+        let want = words::<2>(&alone.blobs["codes"]);
+        let agree = got.iter().zip(&want).filter(|(a, b)| a == b).count() as f64 / want.len() as f64;
+        if gpu_core::backend_name() == "cpu" {
+            assert_eq!(got, want.as_slice(), "clip {i}: codes");
+        } else {
+            // A batch's products may take other GEMM algorithms than one clip's: a residual near-tie can flip.
+            assert!(agree >= 0.99, "clip {i}: {agree:.4} of the codes agree with the clip's own request");
+        }
+        let xv: Vec<f32> = xvectors[i * dim..(i + 1) * dim].iter().map(|w| f32::from_le_bytes(*w)).collect();
+        let own: Vec<f32> = words::<4>(&alone.blobs["xvector"]).into_iter().map(f32::from_le_bytes).collect();
+        let err = xv.iter().zip(&own).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        assert!(err <= 1e-4, "clip {i}: x-vector differs by {err:.2e}");
+        let own_ids = alone.blobs.get("text_ids").map(words::<4>).unwrap_or_default();
+        assert_eq!(&ids[text_offsets[i]..text_offsets[i + 1]], own_ids.as_slice(), "clip {i}: token ids");
+    }
+}
+
 /// Audio seconds encoded per wall second on this machine through one loaded
 /// encoder (the resident instance's shape): one request at a time, and
 /// batches of 8 and 32 ten-second recordings encoded together.

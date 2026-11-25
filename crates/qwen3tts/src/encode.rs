@@ -32,6 +32,61 @@ pub const MAX_SECONDS: f64 = capability::bounds::SECONDS;
 /// Longest transcript, in bytes.
 pub const MAX_TEXT_BYTES: usize = 16 << 10;
 
+/// Recordings one many-clip request may carry.
+pub const MAX_CLIPS: usize = 256;
+/// Bytes a many-clip request's packed `clips` may hold (each recording also
+/// within [`MAX_WAV_BYTES`]).
+pub const MAX_CLIPS_BYTES: usize = 512 << 20;
+
+/// Pack recordings (WAV bytes) as a many-clip request's `clips` blob: each one
+/// as its byte length (u64 little-endian) followed by its bytes.
+pub fn pack_clips(wavs: &[&[u8]]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(wavs.iter().map(|w| w.len() + 8).sum());
+    for w in wavs {
+        out.extend_from_slice(&(w.len() as u64).to_le_bytes());
+        out.extend_from_slice(w);
+    }
+    out
+}
+
+/// Parse a many-clip request: the packed `clips` blob ([`pack_clips`]) and,
+/// when given, `texts`, a JSON array with one transcript (or `null`) per clip.
+/// Every recording is checked as [`Request::parse`] checks one; an error names
+/// the clip and is tagged `invalid-request`.
+pub fn parse_clips(packed: &[u8], texts: Option<&str>) -> Result<Vec<Request>, String> {
+    let invalid = |m: String| tag(FailureClass::InvalidRequest, m);
+    if packed.len() > MAX_CLIPS_BYTES {
+        return Err(invalid(format!("clips: {} bytes is more than the {MAX_CLIPS_BYTES} a request may hold", packed.len())));
+    }
+    let mut wavs: Vec<&[u8]> = Vec::new();
+    let mut rest = packed;
+    while !rest.is_empty() {
+        let i = wavs.len();
+        if i == MAX_CLIPS {
+            return Err(invalid(format!("clips: more than the {MAX_CLIPS} recordings a request may carry")));
+        }
+        let (len, body) = rest.split_at_checked(8).ok_or_else(|| invalid(format!("clips: clip {i}: its length is cut off")))?;
+        let len = u64::from_le_bytes(len.try_into().expect("eight bytes"));
+        let len = usize::try_from(len).ok().filter(|&n| n <= body.len()).ok_or_else(|| invalid(format!("clips: clip {i}: {len} bytes runs past the end of the blob")))?;
+        wavs.push(&body[..len]);
+        rest = &body[len..];
+    }
+    if wavs.is_empty() {
+        return Err(invalid("clips: no clips; pack at least one recording".to_string()));
+    }
+    let texts: Vec<Option<String>> = match texts {
+        None => vec![None; wavs.len()],
+        Some(t) => {
+            let texts: Vec<Option<String>> = serde_json::from_str(t).map_err(|e| invalid(format!("texts: not a JSON array of strings and nulls: {e}")))?;
+            if texts.len() != wavs.len() {
+                return Err(invalid(format!("texts: {} transcripts for {} clips", texts.len(), wavs.len())));
+            }
+            texts
+        }
+    };
+    wavs.into_iter().zip(texts).enumerate().map(|(i, (wav, text))| Request::check(wav, text).map_err(|e| invalid(format!("clip {i}: {e}")))).collect()
+}
+
 /// Device bytes the widest batch pass holds beyond the weights: the codec's
 /// SEANet head over `mimi::ENCODE_PASS_SAMPLES` padded samples dominates (64
 /// channels of the input rate, a few such activations alive at once, and the
@@ -51,7 +106,12 @@ impl Request {
     /// oversized, malformed or too long before any model work. Errors are
     /// tagged `invalid-request` and name what is wrong.
     pub fn parse(wav: &[u8], text: Option<String>) -> Result<Request, String> {
-        let invalid = |m: String| tag(FailureClass::InvalidRequest, m);
+        Self::check(wav, text).map_err(|m| tag(FailureClass::InvalidRequest, m))
+    }
+
+    /// [`Self::parse`]'s checks, the reason untagged.
+    fn check(wav: &[u8], text: Option<String>) -> Result<Request, String> {
+        let invalid = |m: String| m;
         if wav.len() > MAX_WAV_BYTES {
             return Err(invalid(format!("audio: {} bytes is more than the {MAX_WAV_BYTES} a WAV may hold", wav.len())));
         }

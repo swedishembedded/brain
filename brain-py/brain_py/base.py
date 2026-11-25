@@ -27,9 +27,10 @@ from __future__ import annotations
 
 import array
 import json
+import struct
 import sys
 from dataclasses import dataclass, field
-from typing import Any, Callable, NoReturn, Optional
+from typing import Any, Callable, NoReturn, Optional, Sequence
 
 # Progress callbacks receive (step, total, message).
 OnProgress = Callable[[int, int, str], None]
@@ -387,6 +388,46 @@ class BrainBase:
             seconds=float(out.outputs["seconds"]),
             producers=dict(out.outputs.get("producers") or {}),
         )
+
+    def encode_audio_batch(self, wavs: Sequence[bytes], texts: Optional[Sequence[Optional[str]]] = None, *,
+                           model: Optional[str] = None, timeout: float = 600.0) -> list[EncodedAudio]:
+        """Encode many WAV recordings in ONE ``encode`` request (its ``clips``
+        input), so the server encodes them as one batch on its device: the
+        throughput path for a corpus. ``texts``, when given, holds one transcript
+        (or ``None``) per recording. Returns one :class:`EncodedAudio` per
+        recording, in order, each as :meth:`encode_audio` returns it."""
+        wavs = list(wavs)
+        if not wavs:
+            raise ValueError("encode_audio_batch: no recordings")
+        if texts is not None and len(texts) != len(wavs):
+            raise ValueError(f"encode_audio_batch: {len(texts)} transcripts for {len(wavs)} recordings")
+        model = self._pick("encode", model)
+        packed = b"".join(struct.pack("<Q", len(w)) + w for w in wavs)
+        params = {} if texts is None else {"texts": json.dumps(list(texts))}
+        out = self.run(model, "encode", params, blobs={"clips": packed}, timeout=timeout)
+        o = out.outputs
+        codebooks, dim = int(o["codebooks"]), int(o["xvector_dim"])
+        codes, xvec = _le_array("H", out.blobs["codes"]), _le_array("f", out.blobs["xvector"])
+        ids, text_offsets = out.blobs.get("text_ids"), o.get("text_offsets")
+        ids = None if ids is None else _le_array("I", ids)
+        frame_offsets = o["frame_offsets"]
+        result = []
+        for i in range(int(o["clips"])):
+            text_ids = None
+            if ids is not None and texts is not None and texts[i] is not None:
+                text_ids = ids[text_offsets[i]:text_offsets[i + 1]]
+            result.append(EncodedAudio(
+                codes=codes[frame_offsets[i] * codebooks:frame_offsets[i + 1] * codebooks],
+                frames=int(o["frames"][i]),
+                codebooks=codebooks,
+                frame_rate=float(o["frame_rate"]),
+                xvector=xvec[i * dim:(i + 1) * dim],
+                text_ids=text_ids,
+                sample_rate_in=int(o["sample_rate_in"][i]),
+                seconds=float(o["seconds"][i]),
+                producers=dict(o.get("producers") or {}),
+            ))
+        return result
 
     # -- structured perception (Mirage) ---------------------------------------
     def describe(self, image: Any, *, model: str = MIRAGE_MODEL, timeout: float = 600.0,

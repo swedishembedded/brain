@@ -45,6 +45,7 @@ use capability::{
     Action, ActionResult, ActionSpec, Blob, BlobSpec, Invocation, Manifest, Media, Outcome, ParamSpec, ParamType,
     Progress, Provider,
 };
+use capability::failure::{tag, FailureClass};
 use capability::speech::{SpeechContract, Transcript};
 use serde_json::json;
 
@@ -270,8 +271,10 @@ pub fn sim_spec() -> ActionSpec {
 pub fn encode_spec() -> ActionSpec {
     ActionSpec::new("encode", "a recording as training data: the codec's [frames,16] codes, the speaker encoder's x-vector and, given its transcript, the token ids generation tokenises it into")
         .cancellable()
-        .input(BlobSpec::new("audio", Media::Bytes, "the recording: a WAV at any sample rate, mono or multi-channel (downmixed)").required())
+        .input(BlobSpec::new("audio", Media::Bytes, "the recording: a WAV at any sample rate, mono or multi-channel (downmixed); give it or clips"))
+        .input(BlobSpec::new("clips", Media::Bytes, "many recordings encoded together, instead of audio: each WAV as its byte length (u64 little-endian) followed by its bytes; the outputs concatenate the clips' arrays in order, with per-clip counts and offsets"))
         .param(ParamSpec::new("text", ParamType::Str, "the recording's transcript; when given, its token ids are returned as text_ids"))
+        .param(ParamSpec::new("texts", ParamType::Str, "with clips: a JSON array of one transcript (or null) per clip; the clips' token ids are returned concatenated as text_ids"))
         .output(BlobSpec::new("codes", Media::Bytes, "the codec codes, u16 little-endian, [frames, codebooks] row-major"))
         .output(BlobSpec::new("xvector", Media::Bytes, "the speaker encoder's x-vector of the recording, f32 little-endian"))
         .output(BlobSpec::new("text_ids", Media::Bytes, "with text: the ids of <|im_start|>assistant\\n{text}<|im_end|>\\n<|im_start|>assistant\\n, u32 little-endian"))
@@ -301,41 +304,111 @@ fn encode_outcome(encoder: &crate::encode::Encoder, req: &crate::encode::Request
     outcome
 }
 
-/// Encode `req` (validated from `inv`) on a loaded encoder: the per-call action's step.
-pub fn run_encode(encoder: &crate::encode::Encoder, inv: &Invocation, req: &crate::encode::Request) -> ActionResult {
-    inv.cancel.check()?;
-    let out = encoder.encode(req);
-    Ok(encode_outcome(encoder, req, out))
+/// The outcome of a many-clip `encode`: the clips' arrays concatenated in
+/// order (`codes` `[sum frames, codebooks]`, `xvector` `[clips, xvector_dim]`,
+/// `text_ids` when transcripts were given), with `clips`, per-clip `frames`,
+/// `seconds` and `sample_rate_in`, `frame_offsets` (clip `i`'s frames are rows
+/// `frame_offsets[i]..frame_offsets[i+1]`), `text_offsets` likewise, and the
+/// single-clip outcome's `codebooks`, `frame_rate`, `xvector_dim` and
+/// `producers`.
+fn encode_many_outcome(encoder: &crate::encode::Encoder, reqs: &[crate::encode::Request], outs: Vec<crate::encode::Encoded>) -> Outcome {
+    let offsets = |counts: &mut dyn Iterator<Item = usize>| -> Vec<usize> { std::iter::once(0).chain(counts.scan(0, |acc, n| { *acc += n; Some(*acc) })).collect() };
+    let frames: Vec<usize> = outs.iter().map(|o| o.frames).collect();
+    let frame_offsets = offsets(&mut frames.iter().copied());
+    let dim = outs.first().map_or(0, |o| o.xvector.len());
+    let codes: Vec<u8> = outs.iter().flat_map(|o| o.codes.iter().flat_map(|c| c.to_le_bytes())).collect();
+    let xvector: Vec<u8> = outs.iter().flat_map(|o| o.xvector.iter().flat_map(|v| v.to_le_bytes())).collect();
+    let mut outcome = Outcome::new()
+        .set("clips", json!(outs.len()))
+        .set("frames", json!(frames))
+        .set("frame_offsets", json!(frame_offsets))
+        .set("codebooks", json!(encoder.codebooks()))
+        .set("frame_rate", json!(encoder.frame_rate()))
+        .set("xvector_dim", json!(dim))
+        .set("sample_rate_in", json!(reqs.iter().map(|r| r.wav.sample_rate).collect::<Vec<_>>()))
+        .set("seconds", json!(reqs.iter().map(crate::encode::Request::seconds).collect::<Vec<_>>()))
+        .set("producers", json!(encoder.producers()))
+        .blob("codes", Blob::new(Media::Bytes, codes).with_meta(json!({"dtype": "u16", "shape": [frame_offsets[outs.len()], encoder.codebooks()]})))
+        .blob("xvector", Blob::new(Media::Bytes, xvector).with_meta(json!({"dtype": "f32", "shape": [outs.len(), dim]})));
+    if reqs.iter().any(|r| r.text.is_some()) {
+        let lens: Vec<usize> = outs.iter().map(|o| o.text_ids.as_ref().map_or(0, Vec::len)).collect();
+        let text_offsets = offsets(&mut lens.iter().copied());
+        let ids: Vec<u8> = outs.iter().flat_map(|o| o.text_ids.iter().flatten().flat_map(|i| i.to_le_bytes())).collect();
+        outcome = outcome
+            .set("text_offsets", json!(text_offsets))
+            .blob("text_ids", Blob::new(Media::Bytes, ids).with_meta(json!({"dtype": "u32", "shape": [text_offsets[outs.len()]]})));
+    }
+    outcome
 }
 
-/// Every `encode` invocation in `invs` on a loaded encoder, the valid ones
-/// encoded together as one batch (`Encoder::encode_batch`): what a resident
-/// instance runs on the requests it is handed at once. A request that is
-/// cancelled or invalid gets its own error and does not hold the others back.
+/// What one `encode` invocation asks for: one recording (`audio`) or many
+/// encoded together (`clips`).
+pub enum EncodeJob {
+    One(crate::encode::Request),
+    Many(Vec<crate::encode::Request>),
+}
+
+impl EncodeJob {
+    fn requests(&self) -> &[crate::encode::Request] {
+        match self {
+            EncodeJob::One(r) => std::slice::from_ref(r),
+            EncodeJob::Many(rs) => rs,
+        }
+    }
+}
+
+/// Every `encode` invocation in `invs` on a loaded encoder, every recording of
+/// the valid ones (a many-clip request's clips included) encoded together as
+/// one batch (`Encoder::encode_batch`): what a resident instance runs on the
+/// requests it is handed at once, and the per-call action on its one. A
+/// request that is cancelled or invalid gets its own error and does not hold
+/// the others back.
 pub fn run_encode_batch(encoder: &crate::encode::Encoder, invs: &[&Invocation]) -> Vec<ActionResult> {
     let mut results: Vec<Option<ActionResult>> = Vec::with_capacity(invs.len());
-    let mut valid: Vec<(usize, crate::encode::Request)> = Vec::new();
+    let mut valid: Vec<(usize, EncodeJob)> = Vec::new();
     for (i, inv) in invs.iter().enumerate() {
         match inv.cancel.check().and_then(|()| encode_request(inv)) {
-            Ok(req) => {
-                valid.push((i, req));
+            Ok(job) => {
+                valid.push((i, job));
                 results.push(None);
             }
             Err(e) => results.push(Some(Err(e))),
         }
     }
-    let reqs: Vec<&crate::encode::Request> = valid.iter().map(|(_, r)| r).collect();
-    for ((i, req), out) in valid.iter().zip(encoder.encode_batch(&reqs)) {
-        results[*i] = Some(Ok(encode_outcome(encoder, req, out)));
+    let reqs: Vec<&crate::encode::Request> = valid.iter().flat_map(|(_, job)| job.requests()).collect();
+    let mut outs = encoder.encode_batch(&reqs).into_iter();
+    for (i, job) in valid {
+        let n = job.requests().len();
+        let mine: Vec<crate::encode::Encoded> = outs.by_ref().take(n).collect();
+        results[i] = Some(Ok(match job {
+            EncodeJob::One(req) => encode_outcome(encoder, &req, mine.into_iter().next().expect("one encoding per recording")),
+            EncodeJob::Many(reqs) => encode_many_outcome(encoder, &reqs, mine),
+        }));
     }
     results.into_iter().map(|r| r.expect("every invocation has a result")).collect()
 }
 
-/// An `encode` invocation's validated request, checked before any weight is
-/// read.
-pub fn encode_request(inv: &Invocation) -> Result<crate::encode::Request, String> {
-    let audio = inv.get_blob("audio").ok_or("tts encode: missing required input 'audio' (a WAV recording)")?;
-    crate::encode::Request::parse(&audio.bytes, inv.get_str("text")).map_err(|e| format!("tts encode: {e}"))
+/// An `encode` invocation's validated job, checked before any weight is read:
+/// exactly one of `audio` (with an optional `text`) and `clips` (with optional
+/// `texts`).
+pub fn encode_request(inv: &Invocation) -> Result<EncodeJob, String> {
+    let invalid = |m: &str| format!("tts encode: {}", tag(FailureClass::InvalidRequest, m));
+    match (inv.get_blob("audio"), inv.get_blob("clips")) {
+        (Some(_), Some(_)) => Err(invalid("give audio (one recording) or clips (many), not both")),
+        (None, None) => Err(invalid("missing input 'audio' (a WAV recording) or 'clips' (many, packed)")),
+        (Some(audio), None) => {
+            if inv.get_str("texts").is_some() {
+                return Err(invalid("texts goes with clips; give one recording's transcript as text"));
+            }
+            crate::encode::Request::parse(&audio.bytes, inv.get_str("text")).map(EncodeJob::One).map_err(|e| format!("tts encode: {e}"))
+        }
+        (None, Some(clips)) => {
+            if inv.get_str("text").is_some() {
+                return Err(invalid("text goes with audio; give the clips' transcripts as texts"));
+            }
+            crate::encode::parse_clips(&clips.bytes, inv.get_str("texts").as_deref()).map(EncodeJob::Many).map_err(|e| format!("tts encode: {e}"))
+        }
+    }
 }
 
 /// The full, static capability manifest - safe to build with no weights loaded.
@@ -675,10 +748,10 @@ impl Action for EncodeAction {
 
     fn run(&self, inv: &Invocation, _progress: &mut dyn FnMut(Progress)) -> ActionResult {
         inv.cancel.check()?;
-        let req = encode_request(inv)?;
+        encode_request(inv)?;
         let paths = checkpoint(&self.paths, "encode", true)?;
         let encoder = crate::encode::Encoder::load(&paths).map_err(|e| format!("tts encode: {e}"))?;
-        run_encode(&encoder, inv, &req)
+        run_encode_batch(&encoder, &[inv]).pop().expect("one invocation in, one result out")
     }
 }
 
@@ -816,7 +889,7 @@ mod caps_tests {
     fn encode_declares_its_arrays_and_refuses_hostile_input_before_any_weight() {
         let spec = encode_spec();
         assert!(spec.cancellable && !spec.training);
-        assert!(spec.inputs.iter().any(|i| i.name == "audio" && i.required));
+        assert!(spec.inputs.iter().any(|i| i.name == "audio"));
         assert!(spec.params.iter().any(|p| p.name == "text" && !p.required));
         let outputs: Vec<&str> = spec.outputs.iter().map(|o| o.name.as_str()).collect();
         assert_eq!(outputs, ["codes", "xvector", "text_ids"]);
@@ -832,6 +905,46 @@ mod caps_tests {
         cancelled.cancel = capability::CancelToken::armed();
         cancelled.cancel.cancel();
         assert_eq!(run(cancelled), capability::failure::CANCELLED);
+    }
+
+    /// `encode` also takes many recordings in one request: a packed `clips`
+    /// blob (`crate::encode::pack_clips`) and optional `texts`. A hostile
+    /// packing, a count or size past the caps, both or neither of `audio` and
+    /// `clips`, and `texts` that do not match the clips are refused naming what
+    /// is wrong, before any weight is read.
+    #[test]
+    fn a_many_clip_encode_refuses_hostile_packing_before_any_weight() {
+        let spec = encode_spec();
+        assert!(spec.inputs.iter().any(|i| i.name == "clips" && !i.required));
+        assert!(spec.params.iter().any(|p| p.name == "texts" && !p.required));
+        let act = EncodeAction { paths: Some(missing_paths()) };
+        let run = |inv: Invocation| act.run(&inv, &mut |_| {}).unwrap_err();
+        let clip = audio::wav::encode(&[0.1; 2_400], SAMPLE_RATE);
+        let packed = crate::encode::pack_clips(&[clip.as_slice(), clip.as_slice()]);
+        let clips = |bytes: Vec<u8>| Invocation::new().blob("clips", Blob::new(Media::Bytes, bytes));
+        let mut truncated = packed.clone();
+        truncated.truncate(packed.len() - 1);
+        let mut overlong = packed.clone();
+        overlong[..8].copy_from_slice(&(u64::MAX).to_le_bytes());
+        let too_many = crate::encode::pack_clips(&vec![clip.as_slice(); crate::encode::MAX_CLIPS + 1]);
+        let cases: Vec<(Invocation, &str)> = vec![
+            (Invocation::new(), "audio"),
+            (clips(packed.clone()).blob("audio", Blob::new(Media::Bytes, clip.clone())), "not both"),
+            (clips(Vec::new()), "no clips"),
+            (clips(truncated), "clip 1"),
+            (clips(overlong), "clip 0"),
+            (clips(too_many), "more than"),
+            (clips(crate::encode::pack_clips(&[clip.as_slice(), b"junk"])), "clip 1: audio: not a readable WAV"),
+            (clips(packed.clone()).set("texts", json!("[\"one\"]")), "texts"),
+            (clips(packed.clone()).set("texts", json!("not json")), "texts"),
+            (Invocation::new().blob("audio", Blob::new(Media::Bytes, clip.clone())).set("texts", json!("[\"a\"]")), "texts"),
+        ];
+        for (inv, why) in cases {
+            let e = run(inv);
+            assert!(e.contains(why), "{why}: {e}");
+        }
+        let ok = clips(packed).set("texts", json!("[\"en\", null]"));
+        assert!(run(ok).contains("tts encode"), "valid clips reach the checkpoint, which is missing");
     }
 
     /// The sampling knobs declare no default - the checkpoint owns them - yet

@@ -118,9 +118,23 @@ rate), `seconds` (its duration) and `producers`: the content digests of the
 codec, the speaker encoder and the tokenizer (`sha256:` of one
 `<file>\t<sha256>` line per file read), what a shard's `meta.producers`
 records so codes from another codec are never mixed in. It needs a Base checkpoint (the speaker
-encoder). Served, it keeps its encoders loaded and spreads concurrent requests
-over several of them. From Python, `encode_audio(wav_bytes, text)` on any
-`brain_py` client returns the decoded arrays.
+encoder).
+
+Many recordings go in one request as blob `clips` instead of `audio`: each WAV
+as its byte length (u64 little-endian) followed by its bytes, at most 256
+recordings and 512 MiB, with optional param `texts` (a JSON array of one
+transcript or `null` per clip). The outputs then concatenate the clips' arrays
+in order (`codes` `[total frames, 16]`, `xvector` `[clips, xvector_dim]`,
+`text_ids`), with `clips`, per-clip lists `frames`, `seconds` and
+`sample_rate_in`, and `frame_offsets` / `text_offsets` (clip `i`'s rows are
+`offsets[i]..offsets[i+1]`). A bad clip refuses the request, naming the clip.
+
+Served, the encoders stay loaded on the device the scheduler places them on,
+and every recording of the requests it hands over at once (a many-clip
+request's included) is encoded as one batch on the device. From Python,
+`encode_audio(wav_bytes, text)` on any `brain_py` client returns the decoded
+arrays, and `encode_audio_batch(wavs, texts)` sends many recordings as one
+request and returns one result per recording: the throughput path for a corpus.
 
 Resident serving for repeated calls without reloading weights each time:
 

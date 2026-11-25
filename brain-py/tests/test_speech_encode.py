@@ -61,3 +61,41 @@ def test_encode_audio_without_text_sends_no_text_and_returns_no_ids():
     enc = b.encode_audio(b"RIFF....WAVE", model="local/sv")
     assert b.calls[0][0] == "local/sv" and b.calls[0][2] == {}
     assert enc.text_ids is None
+
+
+class FakeTtsMany(FakeTts):
+    """Answers a many-clip ``encode``: two clips, of 2 and 1 frames, the second without a transcript."""
+
+    def run(self, model, action, params=None, *, blobs=None, meta=None, timeout=1800.0):
+        self.calls.append((model, action, params, blobs, meta))
+        codes = CODES + CODES[:16]
+        return Outcome(
+            outputs={"clips": 2, "frames": [2, 1], "frame_offsets": [0, 2, 3], "codebooks": 16, "frame_rate": 12.5, "xvector_dim": 3,
+                     "sample_rate_in": [16000, 24000], "seconds": [0.16, 0.08], "text_offsets": [0, 9, 9], "producers": {"codec": "sha256:" + "a" * 64}},
+            blobs={"codes": struct.pack(f"<{len(codes)}H", *codes), "xvector": struct.pack("<6f", *(XVEC + [2.0, 3.0, 4.0])),
+                   "text_ids": struct.pack(f"<{len(IDS)}I", *IDS)},
+        )
+
+
+def test_encode_audio_batch_packs_the_clips_and_splits_each_clips_arrays():
+    b = FakeTtsMany(with_text=True)
+    out = b.encode_audio_batch([b"RIFF1", b"RIFF22"], ["hej", None])
+    _model, action, params, blobs, _meta = b.calls[0]
+    assert action == "encode" and set(blobs) == {"clips"}
+    assert blobs["clips"] == struct.pack("<Q", 5) + b"RIFF1" + struct.pack("<Q", 6) + b"RIFF22"
+    assert params == {"texts": '["hej", null]'}
+    assert [type(e) for e in out] == [EncodedAudio, EncodedAudio]
+    assert list(out[0].codes) == CODES and out[0].frames == 2 and list(out[1].codes) == CODES[:16]
+    assert list(out[0].xvector) == XVEC and list(out[1].xvector) == [2.0, 3.0, 4.0]
+    assert list(out[0].text_ids) == IDS and out[1].text_ids is None
+    assert (out[1].sample_rate_in, out[1].seconds) == (24000, 0.08)
+
+
+def test_encode_audio_batch_refuses_mismatched_texts_and_sends_none_without_them():
+    b = FakeTtsMany(with_text=False)
+    with pytest.raises(ValueError):
+        b.encode_audio_batch([b"RIFF1"], ["a", "b"])
+    with pytest.raises(ValueError):
+        b.encode_audio_batch([])
+    b.encode_audio_batch([b"RIFF1", b"RIFF22"])
+    assert b.calls[-1][2] == {}
