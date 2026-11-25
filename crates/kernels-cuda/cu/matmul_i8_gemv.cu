@@ -155,10 +155,35 @@ __device__ __forceinline__ uint4 brain_load_x(const unsigned int* p) {
     return make_uint4(p[0], p[1], p[2], p[3]);
 }
 
+// Four-way signed 8-bit dot product with a 32-bit accumulator. Native
+// `__dp4a` where the instruction exists (compute capability 6.1+); below that
+// floor the identical integer sum is written out lane by lane, which is
+// EXACT (each term is a product of two int8 values, summed in int32, so the
+// group total is the same integer whatever the order). That makes this kernel
+// bit-identical to the reference there too, and it is what lets the dp4a
+// block declare the toolchain baseline instead of vanishing on a card older
+// than the instruction: the streaming loop and its 16-byte loads are the win,
+// not the dot itself.
+//
+// The `.cu` sources share no header (each is one translation unit built from
+// a `#define` prefix), so this helper is inlined per file that needs it.
+__device__ __forceinline__ int brain_dp4a(unsigned int a, unsigned int b, int c) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 610
+    return __dp4a(static_cast<int>(a), static_cast<int>(b), c);
+#else
+    int acc = c;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        acc += static_cast<int>(static_cast<signed char>(a >> (8 * i))) * static_cast<int>(static_cast<signed char>(b >> (8 * i)));
+    }
+    return acc;
+#endif
+}
+
 // One `f32(dot4(x, w)) * s` term added to a virtual lane's accumulator, with
 // every operation individually rounded as the reference does.
 __device__ __forceinline__ float brain_term(float acc, unsigned int x, unsigned int w, float s) {
-    const float d = __int2float_rn(__dp4a(static_cast<int>(x), static_cast<int>(w), 0));
+    const float d = __int2float_rn(brain_dp4a(x, w, 0));
     return __fadd_rn(acc, __fmul_rn(d, s));
 }
 

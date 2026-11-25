@@ -152,9 +152,27 @@ __device__ __forceinline__ uint4 brain_i8d_load_w(const unsigned int* base, bool
     return make_uint4(__byte_perm(e0, o0, 0x5140u), __byte_perm(e0, o0, 0x7362u), __byte_perm(e1, o1, 0x5140u), __byte_perm(e1, o1, 0x7362u));
 }
 
+// Four-way signed 8-bit dot product with a 32-bit accumulator: native
+// `__dp4a` at compute capability 6.1+, else the identical (exact) integer sum
+// written out - see `matmul_i8_gemv.cu`'s copy for why the sources each
+// inline this. A scale group's total is one integer in any order, so the GEMM
+// stays bit-identical to the WGSL reference below the floor.
+__device__ __forceinline__ int brain_i8d_dp4a(unsigned int a, unsigned int b, int c) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 610
+    return __dp4a(static_cast<int>(a), static_cast<int>(b), c);
+#else
+    int acc = c;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        acc += static_cast<int>(static_cast<signed char>(a >> (8 * i))) * static_cast<int>(static_cast<signed char>(b >> (8 * i)));
+    }
+    return acc;
+#endif
+}
+
 // The sum of the sixteen int8 values in `v`, exact.
 __device__ __forceinline__ int brain_i8d_sum4(const uint4& v) {
-    return __dp4a(static_cast<int>(v.w), 0x01010101, __dp4a(static_cast<int>(v.z), 0x01010101, __dp4a(static_cast<int>(v.y), 0x01010101, __dp4a(static_cast<int>(v.x), 0x01010101, 0))));
+    return brain_i8d_dp4a(v.w, 0x01010101, brain_i8d_dp4a(v.z, 0x01010101, brain_i8d_dp4a(v.y, 0x01010101, brain_i8d_dp4a(v.x, 0x01010101, 0))));
 }
 
 // One 128 x 128 tile of the GEMM for weight format FMT. `kg` is K/4.
@@ -302,7 +320,7 @@ __device__ __forceinline__ void brain_i8d_block(Shared& sh, unsigned int m, unsi
                     for (int j = 0; j < 8; ++j) {
                         // A group's first step seeds its accumulator with the
                         // bias itself, so no separate reset is issued.
-                        c[i][j] = __dp4a(static_cast<int>(av[i]), static_cast<int>(bv[j]), kk == 0 ? BRAIN_I8D_BIAS_BITS : c[i][j]);
+                        c[i][j] = brain_i8d_dp4a(av[i], bv[j], kk == 0 ? BRAIN_I8D_BIAS_BITS : c[i][j]);
                     }
                 }
             }

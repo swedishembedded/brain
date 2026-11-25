@@ -143,11 +143,28 @@ __device__ __forceinline__ float2 brain_kqg_scales(unsigned int g, unsigned int 
     return make_float2(__fmul_rn(d, static_cast<float>((sm >> shift) & 0xffu)), __fmul_rn(dmin, static_cast<float>((sm >> (shift + 8u)) & 0xffu)));
 }
 
+// Four-way signed 8-bit dot product with a 32-bit accumulator: native
+// `__dp4a` at compute capability 6.1+, else the identical (exact) integer sum
+// written out - see `matmul_i8_gemv.cu`'s copy for why the sources each
+// inline this and why the result is bit-identical below the floor.
+__device__ __forceinline__ int brain_kqg_dp4a(unsigned int a, unsigned int b, int c) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 610
+    return __dp4a(static_cast<int>(a), static_cast<int>(b), c);
+#else
+    int acc = c;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        acc += static_cast<int>(static_cast<signed char>(a >> (8 * i))) * static_cast<int>(static_cast<signed char>(b >> (8 * i)));
+    }
+    return acc;
+#endif
+}
+
 // The int8 dot of 32 activations (two 16-byte vectors) with a group's codes.
 __device__ __forceinline__ int brain_kqg_dot(const unsigned int (&x)[8], const unsigned int (&op)[8]) {
     int a = 0;
 #pragma unroll
-    for (int j = 0; j < 8; ++j) { a = __dp4a(static_cast<int>(x[j]), static_cast<int>(op[j]), a); }
+    for (int j = 0; j < 8; ++j) { a = brain_kqg_dp4a(x[j], op[j], a); }
     return a;
 }
 
@@ -242,7 +259,7 @@ __device__ __forceinline__ void brain_kqg_tile(BrainKqXShared<ROWS, UNROLL>& xs,
                     const unsigned int x[8] = {xa.x, xa.y, xa.z, xa.w, xb.x, xb.y, xb.z, xb.w};
                     int sum = 0;
 #pragma unroll
-                    for (int j = 0; j < 8; ++j) { sum = __dp4a(static_cast<int>(x[j]), 0x01010101, sum); }
+                    for (int j = 0; j < 8; ++j) { sum = brain_kqg_dp4a(x[j], 0x01010101, sum); }
                     const float sf = static_cast<float>(sum);
                     // Rows past `mrows` fold zeros and are never stored.
                     const float ax = static_cast<unsigned int>(r) < mrows ? __ldg(sx + (unsigned long long)(m0 + r) * groups + g) : 0.0f;
