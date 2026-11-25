@@ -63,12 +63,48 @@ pub fn wanda(ck: &Checkpoint, sum_sq: &[f64], reader: &str, axis: Axis, block: u
     Ok(mag.iter().zip(sum_sq).map(|(m, s)| m * s.sqrt()).collect())
 }
 
-/// The elements of channel `c` (lines `c*block..(c+1)*block`) in a `[rows, cols]` tensor.
-fn channel_elements(rows: usize, cols: usize, axis: Axis, block: usize, c: usize) -> Box<dyn Iterator<Item = usize>> {
-    match axis {
-        Axis::Rows => Box::new(c * block * cols..(c + 1) * block * cols),
-        Axis::Cols => Box::new((0..rows).flat_map(move |r| (c * block..(c + 1) * block).map(move |k| r * cols + k))),
+/// The most host threads one tensor's accumulation is split over.
+const MAX_THREADS: usize = 64;
+/// Tensors smaller than this many elements are accumulated on the calling thread.
+const PARALLEL_ELEMENTS: usize = 1 << 20;
+
+/// Adds the gradient `g` of a `[rows, cols]` tensor at its weights `w` into the
+/// per-channel Fisher (`½ Σ g² w²`) and first-order (`Σ g w`) sums of the
+/// dimension it belongs to (channel `c` owns lines `c*block..(c+1)*block`
+/// along `axis`). Channels are split over host threads; each channel's sums
+/// are one thread's, in element order, so the result does not depend on the
+/// thread count.
+fn accumulate(g: &[f32], w: &[f32], (rows, cols): (usize, usize), axis: Axis, block: usize, fisher: &mut [f64], first: &mut [f64]) {
+    let width = fisher.len();
+    let threads = if g.len() < PARALLEL_ELEMENTS { 1 } else { std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, MAX_THREADS).min(width) };
+    let per = width.div_ceil(threads.max(1)).max(1);
+    let add = |c0: usize, fisher: &mut [f64], first: &mut [f64]| {
+        let n = fisher.len();
+        let mut line = |c: usize, span: std::ops::Range<usize>| {
+            for j in span {
+                let (gj, wj) = (f64::from(g[j]), f64::from(w[j]));
+                fisher[c] += 0.5 * gj * gj * wj * wj;
+                first[c] += gj * wj;
+            }
+        };
+        match axis {
+            Axis::Rows => (0..n).for_each(|i| line(i, (c0 + i) * block * cols..(c0 + i + 1) * block * cols)),
+            Axis::Cols => {
+                for r in 0..rows {
+                    (0..n).for_each(|i| line(i, r * cols + (c0 + i) * block..r * cols + (c0 + i + 1) * block));
+                }
+            }
+        }
+    };
+    if threads <= 1 {
+        add(0, fisher, first);
+        return;
     }
+    std::thread::scope(|s| {
+        for (k, (f, t)) in fisher.chunks_mut(per).zip(first.chunks_mut(per)).enumerate() {
+            s.spawn(move || add(k * per, f, t));
+        }
+    });
 }
 
 /// Fisher and group-Taylor scores of every channel of `dims` on `m`, one
@@ -93,13 +129,7 @@ pub fn curvature<M: Model>(m: &M, shapes: &Checkpoint, dims: &[&ChannelDim], bat
         if g.len() != w.len() {
             return Err(format!("{}: gradient of {} values, the tensor {}", l.tensor, g.len(), w.len()));
         }
-        for c in 0..dims[*di].width {
-            for j in channel_elements(*rows, *cols, l.axis, l.block, c) {
-                let (gj, wj) = (f64::from(g[j]), f64::from(w[j]));
-                fisher[*di][c] += 0.5 * gj * gj * wj * wj;
-                first[*di][c] += gj * wj;
-            }
-        }
+        accumulate(g, w, (*rows, *cols), l.axis, l.block, &mut fisher[*di], &mut first[*di]);
         // The batch's last line closes it: square its first-order sums into the Taylor scores.
         if t + 1 == lines.len() {
             for (tay, f) in taylor.iter_mut().zip(first.iter_mut()) {

@@ -110,26 +110,46 @@ pub fn spread(len: usize, n: usize) -> Vec<usize> {
     (0..n).map(|i| i * len / n).collect()
 }
 
-/// Mean KL divergence `KL(p || q)` over the rows of two `[rows, vocab]` logit sets.
-fn mean_kl(p: &[f32], q: &[f32], vocab: usize) -> f64 {
-    if p.is_empty() {
-        return 0.0;
-    }
+/// Rows of a logit set one host thread scores at a time in [`mean_kl`]; fixed, so the sum does not depend on the
+/// thread count.
+const KL_CHUNK_ROWS: usize = 256;
+/// The most host threads [`mean_kl`] uses.
+const KL_THREADS: usize = 64;
+
+/// `Σ KL(p || q)` over the rows of two `[rows, vocab]` logit sets.
+fn sum_kl(p: &[f32], q: &[f32], vocab: usize) -> f64 {
     let log_softmax = |row: &[f32]| -> Vec<f64> {
         let m = row.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)) as f64;
         let z = row.iter().map(|&v| (v as f64 - m).exp()).sum::<f64>().ln() + m;
         row.iter().map(|&v| v as f64 - z).collect()
     };
-    let rows = p.len() / vocab;
-    let total: f64 = p
-        .chunks(vocab)
+    p.chunks(vocab)
         .zip(q.chunks(vocab))
         .map(|(a, b)| {
             let (la, lb) = (log_softmax(a), log_softmax(b));
             la.iter().zip(&lb).map(|(x, y)| x.exp() * (x - y)).sum::<f64>()
         })
-        .sum();
-    total / rows as f64
+        .sum()
+}
+
+/// Mean KL divergence `KL(p || q)` over the rows of two `[rows, vocab]` logit sets, chunks of rows scored on
+/// host threads and summed in row order.
+fn mean_kl(p: &[f32], q: &[f32], vocab: usize) -> f64 {
+    if p.is_empty() {
+        return 0.0;
+    }
+    let rows = p.len() / vocab;
+    let chunk = KL_CHUNK_ROWS * vocab;
+    let chunks: Vec<(&[f32], &[f32])> = p.chunks(chunk).zip(q.chunks(chunk)).collect();
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, KL_THREADS).min(chunks.len());
+    let mut sums = vec![0f64; chunks.len()];
+    std::thread::scope(|s| {
+        let per = chunks.len().div_ceil(threads);
+        for (part, out) in chunks.chunks(per).zip(sums.chunks_mut(per)) {
+            s.spawn(move || part.iter().zip(out.iter_mut()).for_each(|((a, b), o)| *o = sum_kl(a, b, vocab)));
+        }
+    });
+    sums.iter().sum::<f64>() / rows as f64
 }
 
 fn measurement(stats: &ForwardStats, kl: (f64, f64), mtp_weight: f32) -> Measurement {
