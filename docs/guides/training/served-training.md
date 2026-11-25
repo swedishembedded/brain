@@ -160,11 +160,14 @@ arrays). Params:
 | `talker_lr_multiplier`, `code_predictor_lr_multiplier`, `codec_table_lr_multiplier`, `new_row_lr_multiplier` | the learning-rate multiplier of the Talker decoder and head, the code predictor, the codec rows the base trained, and the new languages' and voices' rows |
 | `voice_outlier_fraction`, `free_row_fraction` | the share of a new voice's x-vectors left out of the centroid its row starts at, and the norm (as a share of the median named row's) below which a codec row is free for a new name |
 | `eval_every`, `eval_batches` | score the held-out shard every this many steps, over this many micro-batches (0: every record) |
+| `patience` | stop once the held-out loss has not improved for this many evaluations, and publish the checkpoint of the best evaluation (needs `eval_every`) |
+| `keep_best` | publish the checkpoint of the evaluation with the lowest held-out loss rather than the last step's, still running every step (implied by `patience`; needs `eval_every`) |
+| `length_bucket_steps` | micro-batches whose utterances are regrouped by length so each pads little (default 16; 1 draws them unsorted) |
 | `seed` | the batch order and the layout draws (random when omitted; reported) |
 
 Every setting left out is the objective's own default, which `GET /v1/capabilities` lists as the param's
 `implied_default`.
-| `cards` | 1: a speech fine-tune trains on one card |
+| `cards`, `job` | one data-parallel rank per card of this server, and this server's part of a job over several servers, as for `train` ([One job over several servers](#one-job-over-several-servers)) |
 | `install_as`, `resume_key`, `checkpoint_every`, `allow_cpu` | as for `full_train` |
 | `validate_only` | stage and check the shards (format, codebooks and x-vector width against the base, every language and voice named) and the names against the base, and answer `{"status": "valid", "records", "held_out_records", "languages", "voices", "device_bytes"}` without training: host work |
 
@@ -176,8 +179,10 @@ code predictor's f32 weights and a step's activations on its card. Step frames c
 targets the Talker's greedy pick got right), `frames` and `frames_per_s`, `grad_norm`, `lr`, `seconds`, and after an
 evaluation `eval_loss`, `held_out_talker_ce`, `held_out_code_predictor_ce` and `held_out_eos_accuracy`. The result is
 the report (`objective: "speech_sft"`, `base`, `seed`, `initial_loss`, `final_loss`, `steps_completed`,
-`evaluations`, `last_step` with the measurements above, `languages` and `voices` with the codec row of each,
-`tts_model_type`, `trained_tensors`), `checkpoint_digest` and `files`, and with `install_as` the installed id. Installed as
+`evaluations`, `last_step` with the measurements above, `held_out_curve` (each evaluation's `step`, `train_loss` and
+`held_out_loss`), `checkpoint` (`"last"`, or `"best"` when the run selected on held-out loss, with `best`: its `step`
+and `held_out_loss`), `stopped_early`, `languages` and `voices` with the codec row of each,
+`tts_model_type`, `trained_tensors`, and on several cards `parallel`: the group as `train` reports it), `checkpoint_digest` and `files`, and with `install_as` the installed id. Installed as
 `local/<name>`, the checkpoint is served (from the server's next start) as a model of its own under that id:
 `POST /v1/audio/speech` with `"model": "local/<name>"`, `"voice": "<voice>"` and `"language": "<language>"`.
 
@@ -523,6 +528,11 @@ gradient of the whole batch.
   pairs or records (`grad_accum`) trains. Every rank scores the frozen
   reference of every pair, or has the teacher score every record, before the
   first step: that pass takes as long on `N` cards as on one.
+- `speech_sft` is such a sum (each utterance's teacher-forced losses) and trains as ranks: rank `r` of `N` trains
+  the `n`-th record drawn when `n % N == r` (within each length bucket), and rank 0 scores the held-out shard for
+  every rank. On several cards a run with a patience or `keep_best` holds the best evaluation's parameters on every
+  rank, in host memory (about 6.5 GB for the 1.7B). The server of rank 0 publishes the checkpoint; every other server
+  answers `{"status": "completed", "objective": "speech_sft", "job", "ranks": [first, last], "steps_completed"}`.
 - `feedback` (KTO) is not: its reference point is a KL estimate over the step's
   batch, from mismatched pairs of that batch, so a rank holding a shard would
   estimate a different reference point and optimise a different objective unless

@@ -105,10 +105,11 @@ pub struct SpeechSftConfig {
     #[serde(default = "defaults::batch")]
     pub batch: u32,
     /// Micro-batches whose records are regrouped by length, so each micro-batch holds records of about one length
-    /// and computes few padding rows (and the ranks of a data-parallel run get steps of about one cost). 1 (the
-    /// default) draws records in the shuffled epoch order alone. Every record still trains once an epoch; the steps
-    /// then differ in their records' lengths rather than each mixing them.
-    #[serde(default = "defaults::one")]
+    /// and computes few padding rows (and the ranks of a data-parallel run get steps of about one cost). 1 draws
+    /// records in the shuffled epoch order alone; the default, 16, is the window measured fastest on a card (a third
+    /// more frames a second than unsorted batches of 1.5-30 s utterances). Every record still trains once an epoch;
+    /// the steps then differ in their records' lengths rather than each mixing them.
+    #[serde(default = "defaults::length_bucket_steps")]
     pub length_bucket_steps: u32,
     /// The most frames a record may hold (a longer one is refused, naming
     /// it): with the longest prompt it sizes the build.
@@ -141,6 +142,14 @@ pub struct SpeechSftConfig {
     /// Held-out batches per evaluation (`0`: every record).
     #[serde(default)]
     pub eval_batches: u32,
+    /// Stop when the held-out loss has not improved for this many evaluations, and hand back the parameters of the
+    /// best one (`0`: never stop early). Needs a held-out shard and an `eval_interval`.
+    #[serde(default)]
+    pub patience: u32,
+    /// Hand back the parameters of the evaluation with the lowest held-out loss instead of the last step's, while
+    /// still running every step (implied by a `patience`). Needs a held-out shard and an `eval_interval`.
+    #[serde(default)]
+    pub keep_best: bool,
     #[serde(default)]
     pub arithmetic: Arithmetic,
 }
@@ -164,6 +173,9 @@ mod defaults {
     }
     pub fn one() -> u32 {
         1
+    }
+    pub fn length_bucket_steps() -> u32 {
+        16
     }
     pub fn grad_clip() -> f32 {
         1.0
@@ -197,7 +209,19 @@ impl SpeechSftConfig {
                 return Err(format!("{name} must be at least 1"));
             }
         }
+        if (self.patience > 0 || self.keep_best) && self.eval_interval == 0 {
+            return Err("patience and keep_best select on the held-out loss: they need an eval_interval (and a held-out shard)".into());
+        }
         self.lr_multipliers.validate()
+    }
+
+    /// The shared loop's patience for this run: the run's own, or one it never reaches when it keeps its best
+    /// evaluation without stopping early ([`::model::train::FitOpts::patience`]).
+    fn fit_patience(&self) -> u32 {
+        match (self.patience, self.keep_best) {
+            (0, true) => u32::MAX,
+            (patience, _) => patience,
+        }
     }
 }
 
@@ -244,7 +268,8 @@ pub struct SpeechSftReport {
 pub struct SpeechSftResult {
     /// Every trained tensor under its upstream name (`talker.model.layers.0...`,
     /// `talker.codec_head.weight`, `talker.code_predictor.*`,
-    /// `talker.model.codec_embedding.weight`), f32, in its upstream shape.
+    /// `talker.model.codec_embedding.weight`), f32, in its upstream shape. Empty on a rank other than 0 of a
+    /// data-parallel group: every rank trains the same parameters, and rank 0 hands them back.
     pub tensors: Vec<(String, Vec<u64>, Vec<f32>)>,
     /// Every language the run trained, by name, and its codec row.
     pub languages: BTreeMap<String, u32>,
@@ -366,6 +391,10 @@ pub fn speech_sft(cfg: &SpeechSftConfig, train: &Shard, held_out: Option<&Shard>
         seed,
         checkpoint_secs: 0,
         initial_probe_batches: 0,
+        patience: cfg.fit_patience(),
+        // The best evaluation's parameters are held in host memory (and in the resume state, under their `best:`
+        // names): the run has no checkpoint path of its own to write them to at every improvement.
+        best_hold_floats: usize::MAX,
         ..::model::train::FitOpts::default()
     };
 
@@ -382,11 +411,14 @@ pub fn speech_sft(cfg: &SpeechSftConfig, train: &Shard, held_out: Option<&Shard>
     let mut fingerprint = cfg.clone();
     fingerprint.seed = None;
     let identity = serde_json::json!({ "caller": identity, "speech_sft": serde_json::to_string(&fingerprint).map_err(|e| e.to_string())? });
+    // Every rank of a data-parallel group ends with the same parameters; rank 0's are the run's.
+    let writer = grad_sync.as_ref().is_none_or(|sync| sync.rank == 0);
     let control = ::model::train::FitControl { on_step: Some(&mut on_step), state, state_every, identity, snapshots, publish: None, grad_sync };
     let (fit, model) = ::model::train::fit_controlled(model, objective, &opts, None, control).map_err(|e| e.to_string())?;
 
     let tensors = ::model::Model::param_names(&model)
         .into_iter()
+        .filter(|_| writer)
         .map(|name| {
             let values = ::model::Model::read_weight(&model, &name);
             (name.clone(), shapes[&name].clone(), values)

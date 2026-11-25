@@ -230,6 +230,7 @@ impl TrainResident {
         let request = speech::Request::from_invocation(inv)?;
         let p = &request.params;
         self.resumable(speech::ACTION, p.resume_key.as_deref())?;
+        request.spread.admit(speech::ACTION, self.devices, self.env.job_access.as_ref())?;
         if self.env.store.is_none() && p.install_as.is_none() && !p.validate_only {
             return Err(format!("{}: this server has no artifact store (--artifact-store) to publish the checkpoint to: set install_as to keep it in the model store", speech::ACTION));
         }
@@ -246,7 +247,8 @@ impl TrainResident {
         }
         let bytes = speech::device_bytes(&base_dir);
         self.fits_a_card(speech::ACTION, bytes, "four copies of the Talker's and the code predictor's f32 weights and a step's activations", "train a smaller base")?;
-        Ok(Reservation::Card(bytes, 1))
+        // Every claimed card holds one rank.
+        Ok(Reservation::Card(bytes, request.spread.cards))
     }
 
     fn admit_check(&self, inv: &Invocation) -> Result<Reservation, String> {
@@ -393,7 +395,7 @@ impl Instance for TrainInstance {
             pretrain::ACTION => &mut || pretrain::run(env, inv, progress),
             dryrun::ACTION => &mut || dryrun::run(env, inv, progress),
             timeline::ACTION => &mut || timeline::run(env, inv, progress),
-            speech::ACTION => &mut || speech::run(env, inv, progress),
+            speech::ACTION => &mut || speech::run(env, inv, &self.devices, progress),
             other => return Err(format!("{} has no action '{other}'", request::MODEL)),
         };
         // A `full_train` that only checks its settings trains nothing: host work, never refused for a CPU placement.

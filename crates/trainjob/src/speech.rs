@@ -95,6 +95,8 @@ fn training_params() -> Vec<ParamSpec> {
         float("free_row_fraction", "a codec row is free for a new name when its norm is below this share of the median norm of the rows the base names", 0.99, d.rows.free_row_fraction),
         ParamSpec::new("eval_every", ParamType::Int, "score the held-out shard every this many steps (needs one)").min(1.0).max(capability::bounds::TRAIN_COUNT).step(1.0),
         ParamSpec::new("eval_batches", ParamType::Int, "held-out micro-batches per evaluation (0: every record)").min(0.0).max(capability::bounds::TRAIN_COUNT).step(1.0).implied_default(json!(d.eval_batches)),
+        ParamSpec::new("patience", ParamType::Int, "stop when the held-out loss has not improved for this many evaluations, and publish the checkpoint of the best one (needs eval_every)").min(1.0).max(capability::bounds::TRAIN_COUNT).step(1.0),
+        ParamSpec::new("keep_best", ParamType::Bool, "publish the checkpoint of the evaluation with the lowest held-out loss instead of the last step's, running every step (implied by patience; needs eval_every)").implied_default(json!(d.keep_best)),
         ParamSpec::new("seed", ParamType::Int, "seed of the batch order and the layout draws (random when omitted; the report carries the one used)").min(0.0).max(capability::bounds::EXACT_INTEGER),
     ]
 }
@@ -112,7 +114,8 @@ pub fn spec() -> ActionSpec {
         .param(ParamSpec::new("languages", ParamType::Str, "JSON object naming every language the shards hold: name -> {\"new\": true, \"init_from\"?: [existing names]} for one the base lacks (its codec row starts at the mean of those, by default of every base language; every new language of a run names the same init_from), or {\"new\": false} for one of the base's; names are lowercase [a-z0-9_-]").required())
         .param(ParamSpec::new("voices", ParamType::Str, "JSON object naming every voice the shards train: name -> {\"new\": true} for a new voice (its row initialised from its speaker's x-vectors), or {\"new\": false} for one of the base's; a checkpoint with named voices is exported as `custom_voice`").default(json!("{}")))
         .params(training_params())
-        .param(ParamSpec::new("cards", ParamType::Int, "cards the run trains on; a speech fine-tune trains on one").default(json!(1)).min(1.0).max(1.0).step(1.0))
+        .param(crate::parallel::cards_param("the whole Talker and code predictor with their optimizer state", "every speech fine-tune"))
+        .param(crate::parallel::job_param("sharding replicated", ""))
         .param(ParamSpec::new("install_as", ParamType::Str, "also install the checkpoint in the server's model store as `local/<this name>` (letters, digits, `.`, `_`, `-`; it must not exist yet), where it is served as a model of its own with its voices and languages"))
         .param(resume_key_param())
         .param(checkpoint_every_param())
@@ -168,8 +171,11 @@ pub struct Params {
     pub free_row_fraction: Option<f32>,
     pub eval_every: Option<u32>,
     pub eval_batches: Option<u32>,
+    pub patience: Option<u32>,
+    pub keep_best: Option<bool>,
     pub seed: Option<u64>,
     pub cards: u32,
+    pub job: Option<String>,
     pub install_as: Option<String>,
     pub resume_key: Option<String>,
     pub checkpoint_every: Option<u32>,
@@ -185,6 +191,8 @@ pub struct Request {
     pub held_out: Option<Source>,
     pub languages: BTreeMap<String, LanguageInit>,
     pub voices: BTreeMap<String, bool>,
+    /// How the run is spread over this server's cards and, with a `job`, over several servers.
+    pub spread: crate::parallel::Spread,
 }
 
 /// A language or voice name as upstream looks one up (lowercased).
@@ -227,6 +235,9 @@ impl Request {
         if params.eval_every.is_some() && held_out.is_none() {
             return Err(format!("{ACTION}: eval_every scores a held-out shard; attach `held_out` or name `held_out_digest`"));
         }
+        if (params.patience.is_some() || params.keep_best == Some(true)) && params.eval_every.is_none() {
+            return Err(format!("{ACTION}: patience and keep_best select on the held-out loss; name eval_every (and a held-out shard)"));
+        }
         let mut languages = BTreeMap::new();
         for (name, doc) in names_doc::<LanguageDoc>("languages", &params.languages)? {
             check_name("language", &name)?;
@@ -263,7 +274,8 @@ impl Request {
             check_install_name(name)?;
         }
         check_resume(ACTION, params.resume_key.as_deref(), params.checkpoint_every)?;
-        Ok(Request { params, dataset, held_out, languages, voices })
+        let spread = crate::parallel::Spread::parse(ACTION, params.cards, params.job.as_deref(), params.seed, false)?;
+        Ok(Request { params, dataset, held_out, languages, voices, spread })
     }
 
     /// Every digest the call names.
@@ -390,6 +402,8 @@ pub(crate) fn sft_config(request: &Request, base_dir: &Path, seed: Option<u64>) 
         ("streaming_fraction", p.streaming_fraction.map(|v| json!(v))),
         ("eval_interval", p.eval_every.map(|v| json!(v))),
         ("eval_batches", p.eval_batches.map(|v| json!(v))),
+        ("patience", p.patience.map(|v| json!(v))),
+        ("keep_best", p.keep_best.map(|v| json!(v))),
         ("seed", seed.or(p.seed).map(|v| json!(v))),
     ] {
         set(&mut cfg, key, v);
@@ -407,18 +421,26 @@ pub(crate) fn sft_config(request: &Request, base_dir: &Path, seed: Option<u64>) 
     Ok(cfg)
 }
 
-/// What the run reports about its training: the shared loop's totals and the last step's measurements.
+/// What the run reports about its training: the shared loop's totals, the last step's measurements, the held-out
+/// curve, and which checkpoint the run published: the last step's (`"checkpoint": "last"`) or, selecting on held-out
+/// loss, the best evaluation's (`"best"`, with its step and loss in `best`, and whether the run stopped early).
 fn training_report(report: &qwen3tts::speech_sft::SpeechSftReport) -> Value {
     let fit = &report.fit;
     let last = report.steps.last().map(|s| {
         json!({"step": s.step, "loss": s.loss, "talker_ce": s.talker_ce, "code_predictor_ce": s.code_predictor_ce, "eos_accuracy": s.eos_accuracy, "grad_norm": s.grad_norm, "lr": s.lr, "frames_per_s": s.frames_per_s,
                "held_out": s.held_out.map(|h| json!({"loss": h.loss, "talker_ce": h.talker_ce, "code_predictor_ce": h.code_predictor_ce, "eos_accuracy": h.eos_accuracy}))})
     });
-    json!({"initial_loss": fit.initial_loss, "final_loss": fit.final_loss, "steps_completed": fit.steps_completed, "evaluations": fit.evaluations.len(), "last_step": last})
+    let curve: Vec<Value> = fit.evaluations.iter().map(|e| json!({"step": e.step, "train_loss": e.train_loss, "held_out_loss": e.eval_loss})).collect();
+    let best = fit.kept_best.map(|b| json!({"step": b.step, "held_out_loss": b.eval_loss}));
+    json!({"initial_loss": fit.initial_loss, "final_loss": fit.final_loss, "steps_completed": fit.steps_completed, "evaluations": fit.evaluations.len(), "last_step": last,
+           "held_out_curve": curve, "checkpoint": if best.is_some() { "best" } else { "last" }, "best": best, "stopped_early": fit.stopped_early})
 }
 
-/// Runs the `speech_sft` job `inv` on the device this thread is scoped to.
-pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
+/// Runs the `speech_sft` job `inv` on `devices`, the cards claimed for it: on the one this thread is scoped to, or as
+/// one data-parallel rank per card of the request's spread ([`crate::parallel::train_as_ranks`]), every rank training
+/// its share of the records with the same seed and every step's gradients summed over the group. Rank 0 streams the
+/// steps, and its server exports and publishes the checkpoint.
+pub fn run(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], progress: &mut dyn FnMut(Progress)) -> ActionResult {
     inv.cancel.check()?;
     let request = Request::from_invocation(inv)?;
     let p = &request.params;
@@ -443,7 +465,7 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
         });
         return Ok(outcome);
     }
-    let run = match open_run(env, ACTION, p.resume_key.as_deref(), inv, p.seed, &crate::runs::Layout::single())? {
+    let run = match open_run(env, ACTION, p.resume_key.as_deref(), inv, p.seed, &request.spread.layout(Some(brain::Sharding::Replicated)))? {
         Some(crate::runs::Opened::Completed(mut result)) => {
             result["resume"] = crate::runs::completed_report(p.resume_key.as_deref().unwrap_or_default());
             let mut outcome = Outcome::new();
@@ -453,19 +475,56 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
         Some(crate::runs::Opened::Run(run)) => Some(*run),
         None => None,
     };
-    let cfg = sft_config(&request, &base_dir, run.as_ref().map(crate::runs::Run::seed))?;
+    // Every rank of a spread run draws the same initialisation and batch order: the resumable run's seed, the
+    // request's, or one drawn here for all of them.
+    let seed = run.as_ref().map(crate::runs::Run::seed).or(p.seed).or_else(|| request.spread.ranked().then(brain::random_seed));
+    let cfg = sft_config(&request, &base_dir, seed)?;
     progress(Progress::event(0, total, json!({"type": "stage", "stage": "loading the base and training"})));
     let began = Instant::now();
-    let mut on_step = |step: &model::train::StepReport| {
-        progress(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64())));
-        !inv.cancel.is_cancelled()
-    };
     let state = run.as_ref().map(crate::runs::Run::state_path);
     let identity = json!({"base": p.base, "dataset": request.digests().iter().map(Digest::hex).collect::<Vec<_>>()});
-    let control = model::train::FitControl { on_step: Some(&mut on_step), state: state.as_deref(), state_every: p.checkpoint_every.unwrap_or(crate::runs::DEFAULT_CHECKPOINT_EVERY), identity, snapshots: None, publish: None, grad_sync: None };
-    let trained = qwen3tts::speech_sft::speech_sft(&cfg, &train, held_out.as_ref(), control).map_err(|e| format!("{ACTION}: {e}"))?;
+    let state_every = p.checkpoint_every.unwrap_or(crate::runs::DEFAULT_CHECKPOINT_EVERY);
+    // One rank's training: `rank` is its place in a spread run's group, `frames` where its steps are reported.
+    let train_one = |rank: Option<&brain::DataParallel>, report: &mut dyn FnMut(Progress)| -> Result<qwen3tts::speech_sft::SpeechSftResult, String> {
+        let mut on_step = |step: &model::train::StepReport| {
+            report(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64())));
+            match rank {
+                // The ranks of a group stop after the same step.
+                Some(rank) => rank.keep_going(step.step, inv.cancel.is_cancelled()),
+                None => !inv.cancel.is_cancelled(),
+            }
+        };
+        let control = model::train::FitControl { on_step: Some(&mut on_step), state: state.as_deref(), state_every, identity: identity.clone(), snapshots: None, publish: None, grad_sync: rank.map(brain::DataParallel::grad_sync) };
+        qwen3tts::speech_sft::speech_sft(&cfg, &train, held_out.as_ref(), control).map_err(|e| format!("{ACTION}: {e}"))
+    };
+    let (trained, parallel) = if request.spread.ranked() {
+        let rank = |_: usize, rank: brain::DataParallel, frames: Option<std::sync::mpsc::Sender<Progress>>| {
+            let trained = train_one(Some(&rank), &mut |frame| {
+                if let Some(frames) = &frames {
+                    let _ = frames.send(frame);
+                }
+            })?;
+            Ok((trained, rank.report()))
+        };
+        let mut ranks = crate::parallel::train_as_ranks(&request.spread, ACTION, env, devices, brain::Sharding::Replicated, rank, progress)?;
+        let (trained, parallel) = ranks.swap_remove(0);
+        (trained, Some(parallel))
+    } else {
+        (train_one(None, progress)?, None)
+    };
     if trained.report.fit.interrupted {
         return Err(capability::failure::CANCELLED.to_string());
+    }
+    // A server that runs none of a job's rank 0 answers for its ranks only: the server of rank 0 publishes the run.
+    if let Some(mut answer) = request.spread.answer_for_ranks(ACTION) {
+        answer["steps_completed"] = json!(trained.report.fit.steps_completed);
+        // Its part of the job is done: a resubmission answers this without joining the job again.
+        if let Some(run) = run {
+            run.finish(&mut answer, trained.report.fit.resumed_at)?;
+        }
+        let mut outcome = Outcome::new();
+        outcome.outputs = answer;
+        return Ok(outcome);
     }
 
     let id = p.install_as.as_ref().map_or_else(|| DEFAULT_ID.to_string(), |name| format!("local/{name}"));
@@ -486,6 +545,9 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
         qwen3tts::prompt::CheckpointKind::VoiceDesign => "voice_design",
     });
     report["trained_tensors"] = json!(trained.tensors.len());
+    if let Some(parallel) = parallel {
+        report["parallel"] = serde_json::to_value(parallel).map_err(|e| format!("{ACTION}: {e}"))?;
+    }
     work.ensure_within_quota()?;
     checkpoint_outcome_of(env, &out, p.install_as.as_deref(), report, run.map(|r| (r, resumed_at)))
 }
@@ -529,7 +591,7 @@ mod tests {
         let mut inv = Invocation::new();
         inv.cancel = capability::CancelToken::armed();
         inv.cancel.cancel();
-        assert_eq!(run(&env, &inv, &mut |_| {}).unwrap_err(), capability::failure::CANCELLED);
+        assert_eq!(run(&env, &inv, &[], &mut |_| {}).unwrap_err(), capability::failure::CANCELLED);
     }
 
     #[test]
@@ -544,6 +606,9 @@ mod tests {
         assert_eq!(ok.dataset, Source::Blob("dataset".into()));
         assert_eq!(ok.languages["swedish"], LanguageInit { new: true, init_from: vec!["english".into(), "german".into()] });
         assert_eq!((ok.voices["astrid"], ok.params.steps, ok.params.residual_weight), (true, Some(3), None));
+        let spread = validated(json!({"base": "a/b", "languages": SV, "cards": 4, "eval_every": 5, "patience": 3, "seed": 1}), &["dataset", "held_out"]).unwrap();
+        let cfg = sft_config(&spread, Path::new("base"), None).unwrap();
+        assert_eq!((spread.spread.cards, spread.spread.ranked(), cfg.patience, cfg.eval_interval), (4, true, 3, 5));
         let by_digest = validated(json!({"base": "a/b", "languages": SV, "dataset_digest": digest(1), "held_out_digest": digest(2), "eval_every": 10}), &[]).unwrap();
         assert_eq!(by_digest.digests().len(), 2);
         let cases: Vec<(Value, Vec<&str>, &str)> = vec![
@@ -561,7 +626,10 @@ mod tests {
             (json!({"base": "a/b", "languages": " ".repeat(MAX_NAMES_DOC + 1)}), vec!["dataset"], "more than"),
             (json!({"base": "a/b", "languages": SV, "install_as": "../x"}), vec!["dataset"], "install_as"),
             (json!({"base": "a/b", "languages": SV, "checkpoint_every": 5}), vec!["dataset"], "resume_key"),
-            (json!({"base": "a/b", "languages": SV, "cards": 2}), vec!["dataset"], "cards"),
+            (json!({"base": "a/b", "languages": SV, "cards": 0}), vec!["dataset"], "cards"),
+            (json!({"base": "a/b", "languages": SV, "patience": 3}), vec!["dataset", "held_out"], "eval_every"),
+            (json!({"base": "a/b", "languages": SV, "keep_best": true}), vec!["dataset", "held_out"], "eval_every"),
+            (json!({"base": "a/b", "languages": SV, "job": "{}"}), vec!["dataset"], "job"),
             (json!({"base": "a/b", "languages": SV, "out": "x"}), vec!["dataset"], "unknown param"),
             (json!({"base": "a/b", "languages": SV, "steps": 0}), vec!["dataset"], "steps"),
             (json!({"base": "a/b", "languages": SV, "steps": 3, "epochs": 1}), vec!["dataset"], "exactly one of steps and epochs"),

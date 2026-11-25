@@ -1333,6 +1333,50 @@ impl model::Model for SpeechSftModel {
         }
     }
 
+    /// A gradient as a reduction through the host hands it back ([`Self::read_grad`]'s inverse): a group that cannot
+    /// sum the gradients on the cards (the CPU backend, a card without a device collective) reads, sums and writes
+    /// them per parameter.
+    fn write_grad(&self, name: &str, data: &[f32]) -> Result<(), String> {
+        let aux = &self.aux;
+        let expect = |n: usize| if data.len() == n { Ok(()) } else { Err(format!("speech sft: {name}'s gradient holds {n} values, given {}", data.len())) };
+        match self.shape.place(name).ok_or_else(|| format!("speech sft: no parameter {name}"))? {
+            Place::Talker(b) => model::Model::write_grad(&self.talker, &b, data)?,
+            Place::CodePredictor(b) => model::Model::write_grad(&self.cp, &b, data)?,
+            Place::CpHead(i) => {
+                let mut all = self.cp.read_grad("lm_head.weight");
+                let span = self.head_span(i);
+                expect(span.len())?;
+                all[span].copy_from_slice(data);
+                model::Model::write_grad(&self.cp, "lm_head.weight", &all)?;
+            }
+            Place::Projection => {
+                expect(aux.ps.read_grad(&aux.gpu, name).len())?;
+                aux.gpu.write_f32(aux.ps.g(name), data);
+            }
+            Place::Table(i) => {
+                let (at, n) = self.table_span(i);
+                expect(n)?;
+                match (i, aux.talker_new.is_some()) {
+                    // The new rows' gradients live in their own store; the table keeps its own values at their rows.
+                    (0, true) => {
+                        let mut table = vec![0.0; n];
+                        aux.gpu.read_into(aux.ps.g(TABLES), at as u64, &mut table);
+                        let d = self.shape.d();
+                        let mut merged = data.to_vec();
+                        for &row in self.aux.new_slot.keys() {
+                            let span = row as usize * d..(row as usize + 1) * d;
+                            merged[span.clone()].copy_from_slice(&table[span]);
+                        }
+                        aux.gpu.write_f32_at(aux.ps.g(TABLES), at as u64, &merged);
+                        aux.gpu.write_f32(aux.ps.g(NEW_ROWS), &self.new_rows_of(data));
+                    }
+                    _ => aux.gpu.write_f32_at(aux.ps.g(TABLES), at as u64, data),
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn logits_all(&self, _tokens: &[u32]) -> Option<Vec<f32>> {
         None
     }

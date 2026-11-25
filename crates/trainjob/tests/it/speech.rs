@@ -95,10 +95,15 @@ fn qwen3tts_specials() -> qwen3tts::TtsSpecials {
 
 /// A shard of three Swedish utterances, two by the voice `astrid`, at the tiny base's codebooks and x-vector width.
 pub fn shard() -> Vec<u8> {
+    shard_drawn(0x56) // seed: a fixed fixture
+}
+
+/// [`shard`] with its codes and x-vectors drawn from `seed`: another seed is a held-out shard of the same names.
+fn shard_drawn(seed: u64) -> Vec<u8> {
     use qwen3tts::shard::{Record, RecordId, ShardMeta, ShardWriter, FORMAT, NO_VOICE};
     let meta = ShardMeta { format: FORMAT.into(), codebooks: GROUPS, codebook_size: CODEBOOK, xvector_dim: D, frame_rate: 12.5, languages: vec!["swedish".into()], voices: vec!["astrid".into()], records: 0, producers: Default::default() };
     let mut w = ShardWriter::new(meta);
-    let mut rng = data::rng::Lcg::new(0x56); // seed: a fixed fixture
+    let mut rng = data::rng::Lcg::new(seed);
     for (i, (text, frames, voice)) in [(&[11u32, 12, 13][..], 4usize, true), (&[14, 15][..], 3, false), (&[16, 17, 18, 19][..], 5, true)].into_iter().enumerate() {
         let ids: Vec<u32> = [3, 4, 5].iter().chain(text).chain(&[6, 7, 8, 9, 10]).copied().collect();
         let codes: Vec<u16> = (0..frames * GROUPS as usize).map(|_| (rng.next_u64() % u64::from(CODEBOOK)) as u16).collect();
@@ -227,4 +232,68 @@ fn a_shard_larger_than_the_job_may_stage_is_refused_and_leaves_nothing() {
     let e = run(&rig, params(json!({})), &[("dataset", vec![0u8; 4 << 20])], &Frames::default()).unwrap_err();
     assert!(e.contains("bytes"), "{e}");
     assert!(crate::support::work_is_clean(&rig.work_root));
+}
+
+/// A server holding the tiny Qwen3-TTS base, given the cards `gpus` (computing on the CPU backend, as the suite does)
+/// and, with `job_access`, taking part in jobs spread over several servers.
+fn tts_server(tag: &str, gpus: &[u32], job_access: Option<trainjob::job::JobAccess>) -> Rig {
+    let rig = crate::support::rig_qwen3_serving_jobs(tag, 16 << 30, gpus, false, job_access);
+    write_tts_base(&rig.dir.join("models"));
+    rig
+}
+
+/// A loopback address no one listens on now.
+fn free_address() -> String {
+    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().to_string()
+}
+
+/// A speech fine-tune trains data-parallel: on two cards of one server, and as one job over two servers of one card
+/// each, the two spreads train the same checkpoint (every rank its share of the records, the same rank-ordered
+/// gradient sums); rank 0's server publishes it and the other server answers for its ranks only.
+#[test]
+fn a_speech_fine_tune_on_two_cards_trains_what_one_job_over_two_servers_trains_and_rank_zeros_server_publishes_it() {
+    let two = tts_server("speech-two-cards", &[0, 1], None);
+    let frames = Frames::default();
+    let alone = run(&two, params(json!({"cards": 2, "steps": 3})), &[("dataset", shard())], &frames).expect("two cards of one server").outputs;
+    assert_eq!((alone["status"].as_str(), alone["steps_completed"].as_u64(), alone["parallel"]["world_size"].as_u64()), (Some("completed"), Some(3), Some(2)), "{alone}");
+    assert_eq!(frames.steps().len(), 3, "rank 0 streams one frame a step");
+    crate::support::assert_reservation_returned(&two);
+
+    let secret = brain::JobSecret::random();
+    let coordinator = free_address();
+    let access = |coordinator: Option<&str>| Some(trainjob::job::JobAccess { secret: secret.clone(), coordinator: coordinator.map(str::to_string) });
+    let (first, second) = (tts_server("speech-job-a", &[0], access(Some(&coordinator))), tts_server("speech-job-b", &[0], access(None)));
+    let plan = json!({"job": "speech-test", "world_size": 2, "tp": 1, "pp": 1, "dp": 2, "coordinator": coordinator, "handshake_timeout_ms": 60000, "op_timeout_ms": 60000});
+    let part = |first_rank: usize| params(json!({"steps": 3, "job": json!({"plan": plan, "first_rank": first_rank, "secret_sha256": secret.digest_hex()}).to_string()}));
+    let (published, worker) = std::thread::scope(|scope| {
+        let worker = scope.spawn(|| run(&second, part(1), &[("dataset", shard())], &Frames::default()));
+        (run(&first, part(0), &[("dataset", shard())], &Frames::default()), worker.join().unwrap())
+    });
+    let (published, worker) = (published.expect("rank 0's server").outputs, worker.expect("the other server").outputs);
+    assert_eq!(published["checkpoint_digest"], alone["checkpoint_digest"], "one job over two servers trains what two cards of one server train");
+    assert_eq!(worker, json!({"status": "completed", "objective": "speech_sft", "job": "speech-test", "ranks": [1, 1], "steps_completed": 3}), "the other server answers for its ranks only");
+    crate::support::assert_reservation_returned(&first);
+    crate::support::assert_reservation_returned(&second);
+}
+
+/// Selecting on held-out loss: with a patience the run stops once the held-out loss has not improved for that many
+/// evaluations, and publishes the best evaluation's checkpoint, the one a run stopped at that step publishes; the
+/// report carries the held-out curve and the chosen step and loss. On two cards, every rank stops at the same step.
+#[test]
+fn a_speech_fine_tune_with_patience_stops_early_and_publishes_its_best_evaluations_checkpoint() {
+    let rig = tts_server("speech-best", &[0, 1], None);
+    let blobs = [("dataset", shard()), ("held_out", shard_drawn(0x99))];
+    // A constant rate, so a run of fewer steps trains exactly the first steps of a longer one.
+    let selecting = params(json!({"cards": 2, "steps": 40, "lr": 0.2, "schedule": "constant", "eval_every": 1, "patience": 2}));
+    let out = run(&rig, selecting, &blobs, &Frames::default()).expect("a selecting run").outputs;
+    let curve = out["held_out_curve"].as_array().unwrap();
+    let (best_at, best) = curve.iter().map(|e| (e["step"].as_u64().unwrap(), e["held_out_loss"].as_f64().unwrap())).fold((0, f64::INFINITY), |a, b| if b.1 < a.1 { b } else { a });
+    assert_eq!((out["checkpoint"].as_str(), out["best"]["step"].as_u64(), out["best"]["held_out_loss"].as_f64()), (Some("best"), Some(best_at), Some(best)), "{out}");
+    assert_eq!(out["stopped_early"], true, "the held-out loss of a tiny model overfitting three utterances rises: {out}");
+    let stopped = out["steps_completed"].as_u64().unwrap();
+    assert!(stopped < 40 && curve.len() as u64 == stopped && stopped == best_at + 2, "stopped two evaluations past the best: {out}");
+
+    let at_best = run(&rig, params(json!({"cards": 2, "steps": best_at, "lr": 0.2, "schedule": "constant"})), &blobs[..1], &Frames::default()).expect("a run to the best step").outputs;
+    assert_eq!((out["checkpoint_digest"].as_str(), at_best["checkpoint"].as_str()), (at_best["checkpoint_digest"].as_str(), Some("last")), "the published checkpoint is the best step's");
+    crate::support::assert_reservation_returned(&rig);
 }

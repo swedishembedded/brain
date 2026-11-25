@@ -381,8 +381,9 @@ impl DataParallel {
     /// stopped. In-process ranks share a cancellation that each sees at its own moment, so the first rank to see it
     /// names a step every rank still reaches: the steps run in lockstep (a step completes only once every rank has
     /// entered its reduction), so no rank has completed more than `completed + 1`, and every rank stops after that
-    /// one. A rank of a launched job stops when it is cancelled, as before.
-    pub(crate) fn keep_going(&self, completed: u32, cancelled: bool) -> bool {
+    /// one. A rank of a launched job stops when it is cancelled, as before. A trainer outside this crate that drives the
+    /// shared fit loop itself answers its step callback with this.
+    pub fn keep_going(&self, completed: u32, cancelled: bool) -> bool {
         let Some(local) = &self.local else { return !cancelled };
         let mut stop_after = local.stop_after.lock().unwrap_or_else(|e| e.into_inner());
         if stop_after.is_none() && cancelled {
@@ -448,8 +449,9 @@ impl DataParallel {
         model::broadcast_words(&*self.group, self.rank, words, 0).map_err(|e| Error::Backend(format!("sharing rank 0's result: {e}")))
     }
 
-    /// The gradient group a trainer's fit loop reduces over.
-    pub(crate) fn grad_sync(&self) -> model::GradSync<'_> {
+    /// The gradient group a trainer's fit loop reduces over: what a trainer outside this crate (an architecture's own
+    /// objective driven through [`model::train::FitControl`]) hands the shared loop to train as this rank.
+    pub fn grad_sync(&self) -> model::GradSync<'_> {
         let checkpoint = self.job.as_ref().map(|(job, plan)| model::CheckpointIdentity { job, plan });
         model::GradSync { collective: &*self.group, rank: self.rank, checkpoint, observer: None }
     }

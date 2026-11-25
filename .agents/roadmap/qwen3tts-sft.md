@@ -234,6 +234,19 @@ ledger is the engine work it needs.
       backend (`dbus::the_real_base_trains_over_the_bus_and_its_release_speaks_in_its_new_voice`, ignored: slow):
       3 steps of one 29-frame recording, loss 3.06 -> 0.91, 397 tensors trained, the release served and spoken in
       its new voice and language; about 15 s and 1.2-2.0 frames/s per step on a shared 288-core host.
+- [x] The served job on several cards and servers: `cards` (one data-parallel rank per card of the server) and `job`
+      (this server's part of one job over several servers, the `train`/`full_train` mechanism of
+      `trainjob::parallel`): every rank its share of the records with the same seed, the ranks stop after the same
+      step, rank 0 streams the steps and its server exports and publishes; the other servers answer for their ranks.
+      Resumable (each server keeps its ranks' generations). A rank other than 0 reads no tensors back. The model
+      answers `write_grad`, so a group without device collectives (the CPU backend) reduces through the host. Gated on
+      the CPU backend (`tests/it/speech.rs`): two cards of one server train the checkpoint one job over two servers of
+      one card trains, byte for byte.
+- [x] Selecting on held-out loss: `patience` (stop once the held-out loss has not improved for that many evaluations)
+      and `keep_best` (no early stop), both publishing the best evaluation's parameters (held in host memory and in the
+      resume state; the shared loop's selection), resumable; the report carries `held_out_curve`, `checkpoint`
+      (`last`/`best`), `best` (step, loss) and `stopped_early`. Gated: a run that stops early publishes exactly the
+      checkpoint a run stopped at the best step publishes. `length_bucket_steps` defaults to 16.
 - [ ] A release installed by a running server is served from the server's next start (no job registers a model
       live).
 - [ ] Collecting a published artifact over the API: a remote client without the artifact directory cannot fetch a
