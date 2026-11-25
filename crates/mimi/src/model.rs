@@ -38,7 +38,6 @@ use audio::conv::{ConvGemmKernels, ConvKernels, ConvScratch};
 use bytemuck::cast_slice;
 use gpu_core::select::{DefaultSelector, Dtype, KernelSelector, KernelVariant, Op, OpShape, VQ_TILE_ROWS};
 use gpu_core::{f, BufUsage, DeviceBuffer, Gpu, Step};
-use backend_cpu::par;
 use model::block::{self, Gqa, KernelIds};
 use paramstore::{ParamStore, Role};
 
@@ -131,9 +130,14 @@ pub const PIPELINES: &[(&str, &str)] = &[
 const SNAKE_EPS: f32 = 1e-9;
 /// ConvNeXt LayerNorm epsilon.
 const LN_EPS: f32 = 1e-6;
-/// Element-count threshold below which the host clamp of the waveform stays
-/// single-threaded (rayon fan-out costs more than it saves on tiny buffers).
-const PAR_MIN: usize = 1 << 14;
+/// Clamp decoded samples to the waveform's [-1, 1] on the calling thread. A clip is a few hundred thousand samples,
+/// well under a millisecond of memory-bound work; handed to the shared worker pool instead, a served decode waited
+/// about 14 ms a clip behind the other requests' host work for the pool to take it.
+fn clamp_samples(wav: &mut [f32]) {
+    for s in wav {
+        *s = s.clamp(-1.0, 1.0);
+    }
+}
 
 /// The codec model: frozen weights on the device.
 pub struct Codec {
@@ -284,13 +288,7 @@ impl Codec {
 
         // --- 6. clamp ---
         let mut wav = p.read(&h, l as usize);
-        if wav.len() >= PAR_MIN {
-            par::each_mut(&mut wav, |_, s| *s = s.clamp(-1.0, 1.0));
-        } else {
-            for s in &mut wav {
-                *s = s.clamp(-1.0, 1.0);
-            }
-        }
+        clamp_samples(&mut wav);
         wav
     }
 
@@ -375,13 +373,7 @@ impl Codec {
 
         // --- 5. clamp ---
         let mut wav = p.read(&h, l as usize);
-        if wav.len() >= PAR_MIN {
-            par::each_mut(&mut wav, |_, s| *s = s.clamp(-1.0, 1.0));
-        } else {
-            for s in &mut wav {
-                *s = s.clamp(-1.0, 1.0);
-            }
-        }
+        clamp_samples(&mut wav);
         wav
     }
 
