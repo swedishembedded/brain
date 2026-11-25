@@ -36,9 +36,11 @@
 //! activation statistics the model's own probe collects.
 
 pub mod bpe;
+pub mod calibration;
 mod channels;
 mod fold;
 mod layers;
+pub mod plan;
 pub mod scores;
 mod stream;
 mod vocab;

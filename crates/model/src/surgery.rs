@@ -180,6 +180,67 @@ impl SurgeryGraph {
     }
 }
 
+/// What calibration measured on a checkpoint, in the names its graph
+/// declares: what an edit ranks by. Produced by the model's own probe,
+/// consumed by `modelopt::surgery`.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Calibration {
+    /// The content digest of the checkpoint it was measured on.
+    pub source: String,
+    /// The calibration records, and the rows (positions) they held.
+    pub records: usize,
+    pub rows: u64,
+    /// The unedited checkpoint's loss on them.
+    pub loss: f64,
+    /// Per layer stack, per layer: what removing that one layer costs.
+    pub layers: std::collections::BTreeMap<String, Vec<LayerAblation>>,
+    /// Per channel dimension: the summed squared activation of each channel and the rows summed over.
+    pub channels: std::collections::BTreeMap<String, ChannelStats>,
+    /// Per channel dimension: the Fisher and group-Taylor estimates of each channel.
+    pub curvature: std::collections::BTreeMap<String, ChannelCurvature>,
+    /// Per residual stream: the second moment of its unit-mean-square states.
+    pub streams: std::collections::BTreeMap<String, StreamStats>,
+}
+
+/// One layer removed alone, measured on the calibration records.
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LayerAblation {
+    /// The loss without the layer (`None`: not ablated).
+    pub loss: Option<f64>,
+    /// The mean KL divergence from the unedited predictions to those without the layer.
+    pub kl: Option<f64>,
+    /// The mean cosine between the stream entering and leaving the layer (near 1: the layer changes little).
+    pub cosine: f64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelStats {
+    pub sum_sq: Vec<f64>,
+    pub rows: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChannelCurvature {
+    pub fisher: Vec<f64>,
+    pub taylor: Vec<f64>,
+}
+
+/// A stream's `[width, width]` second moments, row-major: of every state it
+/// held (each scaled to unit mean square, as a norm sees it), and per shared
+/// norm of the states entering that norm.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamStats {
+    pub width: usize,
+    pub covariance: Vec<f64>,
+    pub rows: u64,
+    pub shared: std::collections::BTreeMap<String, Vec<f64>>,
+}
+
 /// `pattern` against `name`, segment by segment, `*` matching any one segment.
 pub fn matches(pattern: &str, name: &str) -> bool {
     let (mut p, mut n) = (pattern.split('.'), name.split('.'));

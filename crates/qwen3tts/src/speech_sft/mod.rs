@@ -31,6 +31,7 @@ use std::path::Path;
 pub use gpu_core::provider::library::GemmPrecision;
 use serde::{Deserialize, Serialize};
 
+pub mod calibrate;
 pub mod distill;
 pub mod model;
 pub mod objective;

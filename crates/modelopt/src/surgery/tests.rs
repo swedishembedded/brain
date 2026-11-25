@@ -313,7 +313,7 @@ fn bpe_files() -> bpe::TokenizerFiles {
 
 #[test]
 fn a_trimmed_bpe_keeps_bytes_specials_the_corpus_and_its_merge_closure() {
-    let trim = bpe::trim(&bpe_files(), &["<|im_start|>hello<|im_end|>", "hello hello"], &["wow"]).unwrap();
+    let trim = bpe::trim(&bpe_files(), &["<|im_start|>hello<|im_end|>", "hello hello"], &[], &["wow"]).unwrap();
     let r = &trim.report;
     assert_eq!((r.kept, r.of, r.bytes, r.added), (262, 264, 256, 2));
     assert_eq!((r.corpus, r.closure, r.merges_kept, r.merges_of), (1, 3, 4, 6), "{r:?}");

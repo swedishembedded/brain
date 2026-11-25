@@ -376,3 +376,63 @@ fn an_edited_export_reads_back_exactly_and_brain_loads_it() {
     assert!(err.contains("does not read the edited checkpoint back"), "{err}");
     assert!(!bad.exists());
 }
+
+/// The speech objective's base over the tensors of `ck`.
+fn base_of(ck: &Checkpoint) -> Base {
+    Base::from_parts(&ck.config, &|n| ck.get(n).ok().map(|t| t.shape.iter().map(|&d| d as u64).collect()), &|n| ck.get(n).ok().map(|t| t.data.clone())).unwrap()
+}
+
+#[test]
+fn a_calibrated_plan_edits_the_checkpoint_and_its_measurement_sees_the_cost() {
+    use qwen3tts::speech_sft::calibrate::{calibrate, CalibrationOpts, Inputs};
+    let ck = tiny(config(24, 16, 3, 2), 0xca1); // seed: fixed fixture
+    let texts: Vec<&[u32]> = (0..6).map(|i| TEXTS[i % 3]).collect();
+    let s = shard(24, &texts, 0x5b); // seed: fixed fixture
+    let opts = CalibrationOpts { records: 0, batch: 2, mtp_weight: 0.3, layers: true, sample_rows: 64, gemm: gpu_core::provider::library::GemmPrecision::Fp32Reference };
+    let (ev, cal) = calibrate(base_of(&ck), &s, "sha256:test", &opts, &mut |_| {}).unwrap();
+    assert_eq!((cal.records, cal.layers["talker.layers"].len(), cal.layers["code_predictor.layers"].len()), (6, 3, 2));
+    for a in cal.layers.values().flatten() {
+        assert!(a.kl.unwrap() >= 0.0 && a.loss.unwrap().is_finite() && (-1.0..=1.0).contains(&a.cosine), "{a:?}");
+    }
+    assert_eq!((cal.streams["talker"].width, cal.streams["code_predictor"].width), (24, 16));
+    assert!(cal.streams["talker"].shared.contains_key("talker.model.norm.weight"));
+    assert_eq!((cal.channels["talker.layers.2.mlp"].sum_sq.len(), cal.channels["talker.text"].sum_sq.len()), (32, 20));
+
+    // The calibration file reads back as written, to f32.
+    let scratch = brain_testutil::Scratch::dir("modelopt-calibration");
+    let path = scratch.path().join("calibration.safetensors");
+    surgery::calibration::save(&path, &cal).unwrap();
+    let back = surgery::calibration::load(&path).unwrap();
+    assert_eq!((back.records, back.source.as_str()), (cal.records, "sha256:test"));
+    for (stack, layers) in &cal.layers {
+        for (a, b) in layers.iter().zip(&back.layers[stack]) {
+            assert!((a.kl.unwrap() - b.kl.unwrap()).abs() <= 1e-12 && (a.cosine - b.cosine).abs() <= 1e-12, "{stack}: {a:?} vs {b:?}");
+        }
+    }
+    let (a, b) = (&cal.streams["talker"].covariance, &back.streams["talker"].covariance);
+    assert!(a.iter().zip(b).all(|(x, y)| (x - y).abs() <= 1e-6 * x.abs().max(1.0)));
+
+    // A plan that keeps everything measures what the unedited checkpoint predicts.
+    let m = surgery::plan::Model { graph: &|c: &Checkpoint| qwen3tts::surgery::graph(&c.config, &|n| c.tensors.contains_key(n)), check: &|c: &Checkpoint| qwen3tts::surgery::check_upstream(&c.config, &|n| c.tensors.contains_key(n)) };
+    let all: Vec<surgery::plan::Edit> = serde_json::from_str(r#"[{"select_channels": {"dims": "talker.layers.*.mlp", "keep": 32, "score": "wanda"}}]"#).unwrap();
+    let mut same = ck.clone();
+    surgery::plan::apply(&mut same, &all, &back, &BTreeMap::new(), &m).unwrap();
+    let unchanged = ev.measure(base_of(&same), &Inputs::default()).unwrap();
+    assert!(unchanged.talker_kl < 1e-9 && unchanged.code_predictor_kl < 1e-9, "{unchanged:?}");
+
+    let plan: Vec<surgery::plan::Edit> = serde_json::from_str(
+        r#"[{"remove_layers": {"stack": "talker.layers", "count": 1, "by": "kl"}},
+            {"select_channels": {"dims": "talker.layers.*.mlp", "keep": 16, "score": "wanda"}},
+            {"rotate_stream": {"stream": "code_predictor", "width": 12, "basis": "pca"}}]"#,
+    )
+    .unwrap();
+    let mut edited = ck.clone();
+    let applied = surgery::plan::apply(&mut edited, &plan, &back, &BTreeMap::new(), &m).unwrap();
+    let order: Vec<&str> = applied.changes.iter().map(|(c, _)| c.edit.as_str()).collect();
+    assert_eq!(order, ["select_channels", "rotate_stream", "remove_layers"], "a plan applies its edits in a fixed order");
+    let cheapest = cal.layers["talker.layers"].iter().enumerate().min_by(|a, b| a.1.kl.unwrap().total_cmp(&b.1.kl.unwrap())).unwrap().0;
+    assert!(!applied.changes[2].0.kept["talker.layers"].contains(&cheapest), "the layer whose removal costs least goes");
+    let cost = ev.measure(base_of(&edited), &Inputs::default()).unwrap();
+    assert!(cost.talker_kl > 1e-6 && cost.loss.is_finite(), "{cost:?}");
+    assert!(edited.params() < ck.params());
+}

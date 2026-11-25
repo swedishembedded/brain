@@ -35,7 +35,7 @@ pub struct BpeReport {
     /// Ids kept, of the ids the vocabulary had.
     pub kept: usize,
     pub of: usize,
-    /// Kept for being a byte token, an added token, a corpus token, and only for the merge closure.
+    /// Kept for being a byte token, an added token, a corpus token (or a given id), and only for the merge closure.
     pub bytes: usize,
     pub added: usize,
     pub corpus: usize,
@@ -79,10 +79,12 @@ fn tokenizer(vocab: &Value, merges: &str, added: &BTreeMap<usize, Value>) -> Res
     QwenBpe::from_split_files(vocab, merges, records(added)?)
 }
 
-/// Trim `files` to what `corpus` needs; `probe` are texts outside the corpus
-/// whose encodings the report compares before and after. Refused: files that
-/// do not parse, a vocabulary whose ids are not dense, a missing byte token.
-pub fn trim(files: &TokenizerFiles, corpus: &[&str], probe: &[&str]) -> Result<BpeTrim, String> {
+/// Trim `files` to what `corpus` needs, keeping the ids `extra` too (token
+/// ids a tokenised dataset already holds); `probe` are texts outside the
+/// corpus whose encodings the report compares before and after. Refused:
+/// files that do not parse, a vocabulary whose ids are not dense, a missing
+/// byte token, an extra id past the vocabulary.
+pub fn trim(files: &TokenizerFiles, corpus: &[&str], extra: &[usize], probe: &[&str]) -> Result<BpeTrim, String> {
     let vocab: BTreeMap<String, usize> = serde_json::from_str(&files.vocab_json).map_err(|e| format!("vocab.json: {e}"))?;
     let added = added_tokens(&files.tokenizer_config)?;
     let mut by_id: BTreeMap<usize, &str> = BTreeMap::new();
@@ -123,6 +125,12 @@ pub fn trim(files: &TokenizerFiles, corpus: &[&str], probe: &[&str]) -> Result<B
             return Err(format!("the tokenizer encoded id {id}, past the vocabulary of {total}"));
         }
         from_corpus += usize::from(keep.insert(id as usize));
+    }
+    for &id in extra {
+        if id >= total {
+            return Err(format!("token id {id} is past the vocabulary of {total}"));
+        }
+        from_corpus += usize::from(keep.insert(id));
     }
     // The merge closure of every kept regular token.
     let mut stack: Vec<usize> = keep.iter().copied().filter(|&id| id < regular).collect();
