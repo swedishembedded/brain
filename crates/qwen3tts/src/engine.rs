@@ -711,6 +711,7 @@ impl ResidentEngine {
                         break;
                     }
                     for (i, req) in reqs {
+                        let _range = gpu_core::markers::range(c"tts.prompt");
                         match voices.prompt(&req, talker.as_ref(), mtp.as_ref()) {
                             Ok(prompt) => {
                                 chunks.borrow_mut().insert(i, req.chunk_frames);
@@ -724,6 +725,7 @@ impl ResidentEngine {
             },
             &mut |_, _| {},
             &mut |i, result| {
+                let _range = gpu_core::markers::range(c"tts.codec");
                 let chunk = chunks.borrow_mut().remove(&i).unwrap_or(DEFAULT_CHUNK_FRAMES);
                 let audio = result.and_then(|codes| if codes.is_empty() { Err("no codec frames were generated".to_string()) } else { codec.decode(&codes, chunk, &mut |pcm, seq| on_audio(i, pcm, seq)) });
                 (finish.borrow_mut())(i, audio);

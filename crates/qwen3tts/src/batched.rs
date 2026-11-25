@@ -137,11 +137,11 @@ fn take(c: &checkpoint::Container, name: &str) -> Result<Vec<f32>, String> {
     c.find(name, "").cloned().ok_or_else(|| format!("tts: the checkpoint has no {name}"))
 }
 
-/// The Talker KV blocks a decoder for `max_streams` streams holds: every stream at an average
-/// utterance, not each at the worst case (a stream that would not fit waits for one to finish).
+/// The Talker KV blocks a decoder for `max_streams` streams holds: each stream at the longest
+/// utterance it may ask for. A stream reserves its whole utterance when it is admitted, so a smaller
+/// pool admits fewer streams than the decoder batches (measured: 12 of 16 at the served frame cap).
 fn pool_blocks(max_streams: usize) -> u32 {
-    let per_seq = MAX_CONTEXT / BLOCK;
-    (max_streams as u32 * per_seq / 2).max(per_seq)
+    max_streams as u32 * (MAX_CONTEXT / BLOCK)
 }
 
 /// The device bytes the Talker's KV pool takes for `max_streams` streams, beside the weights;
@@ -180,7 +180,10 @@ impl BatchedDecoder {
             WeightTier::Stored => model::ops::stored_tier_policy(&*talker_src, tcfg.param_list().iter().map(|(name, _)| name.as_str())),
             WeightTier::F32 => model::ops::TierPolicy::uniform(Dtype::F32),
         };
-        let talker = Engine::from_source_tiers_on(gpu, tcfg, &*talker_src, BLOCK, pool, max_streams as u32, per_seq, PREFILL_CHUNK, false, &talker_tiers);
+        let mut talker = Engine::from_source_tiers_on(gpu, tcfg, &*talker_src, BLOCK, pool, max_streams as u32, per_seq, PREFILL_CHUNK, false, &talker_tiers);
+        // Every row count the streams pass through replays a recorded step; recording one while streams decode would
+        // stall them, and recording a wider one after a narrower drops the narrower ones.
+        talker.record_embed_decode_tapes(max_streams as u32);
         drop(talker_src);
 
         let tables_host = TalkerTables::load(&paths.talker);
@@ -247,6 +250,7 @@ impl BatchedDecoder {
         let names: Vec<&str> = heads.iter().map(String::as_str).collect();
         mtp.add_heads(&mtp_map, &names, mc.vocab as usize)?;
         mtp.set_window_capacity(nres);
+        mtp.record_embed_decode_tapes(max_streams as u32);
         drop(mtp_map);
 
         Ok(BatchedDecoder {
@@ -313,6 +317,7 @@ impl BatchedDecoder {
 
     /// Start `job` as stream `index`: prefill its prompt and draw its first codebook-0 token.
     fn admit(&mut self, index: usize, job: Job, sp: &TtsSpecials) -> Result<Admission, String> {
+        let _range = gpu_core::markers::range(c"tts.admit");
         let d = self.tables.d();
         let prefix = job.prompt.embeds.len() / d;
         if !self.fits(prefix, job.opts.max_frames) {
@@ -367,6 +372,7 @@ impl BatchedDecoder {
     /// feedback rows, one Talker step and the next codebook-0 draw. Returns the streams that
     /// finished this frame.
     fn step(&mut self, live: &mut Vec<Stream>, sp: &TtsSpecials) -> Vec<(Stream, Result<(), String>)> {
+        let _frame = gpu_core::markers::range(c"tts.frame");
         let d = self.tables.d();
         // Frames end here before any work: a cancelled stream, or one whose codebook 0 says it is done.
         let mut done = Vec::new();
@@ -393,12 +399,13 @@ impl BatchedDecoder {
         // The code predictor: position 0 is the Talker's hidden state, position k (1..=15) the
         // embedding of codebook k-1, read by head k-1 to predict codebook k; the whole chain is one
         // submission, each drawn code feeding the next position on the device.
+        let chain_range = gpu_core::markers::range(c"tts.mtp_chain");
         let mut mtp_tables: Vec<BlockTable> = (0..b).map(|_| BlockTable::new()).collect();
         let hidden: Vec<f32> = live.iter().flat_map(|s| s.hidden.iter().copied()).collect();
         let first: Vec<u32> = live.iter().map(|s| s.cb0).collect();
         let draws: Vec<Vec<RowDraw>> = live.iter().map(|s| (1..CODEBOOKS).map(|k| Self::residual_draw(&s.plan.subtalker, s.seed, s.frames.len() / CODEBOOKS, k)).collect()).collect();
         let chain: Vec<ChainStep<'_>> = self.heads.iter().zip(&self.feed_offsets).map(|(head, &feed_offset)| ChainStep { head, feed_offset }).collect();
-        let drawn = {
+        let codes_drawn = {
             let input = self.to_mtp(hidden);
             let mut refs: Vec<&mut BlockTable> = mtp_tables.iter_mut().collect();
             self.mtp.forward_batched_embed_chain(&mut refs, &input, &first, &chain, &draws)
@@ -406,10 +413,12 @@ impl BatchedDecoder {
         for t in mtp_tables.iter_mut() {
             self.mtp.release_table(t);
         }
+        drop(chain_range);
+        let feed_range = gpu_core::markers::range(c"tts.feedback");
         let mut feed: Vec<f32> = live.iter().flat_map(|s| self.tables.codec_embed(s.cb0).iter().copied()).collect();
         let mut codes = vec![vec![0u32; CODEBOOKS - 1]; b];
-        for (r, row) in drawn.iter().enumerate() {
-            for (k, &(code, _)) in row.iter().enumerate() {
+        for (r, row) in codes_drawn.iter().enumerate() {
+            for (k, &code) in row.iter().enumerate() {
                 codes[r][k] = code;
                 for (f, x) in feed[r * d..(r + 1) * d].iter_mut().zip(self.residual.codec_embed(k, code)) {
                     *f += x;
@@ -429,10 +438,14 @@ impl BatchedDecoder {
                 *f += x;
             }
         }
+        drop(feed_range);
+        let talker_range = gpu_core::markers::range(c"tts.talker");
         let (hidden, logits) = {
             let mut refs: Vec<&mut BlockTable> = live.iter_mut().map(|s| &mut s.table).collect();
             self.talker.forward_batched_embed_hidden_logits(&mut refs, &feed, None)
         };
+        drop(talker_range);
+        let _sample = gpu_core::markers::range(c"tts.sample");
         let v = logits.len() / b;
         for (r, s) in live.iter_mut().enumerate() {
             s.hidden = hidden[r * d..(r + 1) * d].to_vec();

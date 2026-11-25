@@ -379,6 +379,12 @@ impl RowDrawer {
         g.step(self.feed_kernel, &[&self.out, tok, &self.hist, &self.lphist], &[rows, s, offset], rows)
     }
 
+    /// The token of every row at each of a window's `k` steps ([`Self::feed`]), row by row: one readback.
+    pub fn read_window_tokens(&self, g: &Gpu, rows: usize, k: usize) -> Vec<Vec<u32>> {
+        let toks = g.read(&self.hist, k * rows);
+        (0..rows).map(|i| (0..k).map(|s| toks[s * rows + i] as u32).collect()).collect()
+    }
+
     /// The `(token, log-probability)` of every row at each of a window's `k` steps ([`Self::feed`]), row by row.
     pub fn read_window(&self, g: &Gpu, rows: usize, k: usize) -> Vec<Vec<(u32, f32)>> {
         let (toks, lps) = (g.read(&self.hist, k * rows), g.read(&self.lphist, k * rows));
