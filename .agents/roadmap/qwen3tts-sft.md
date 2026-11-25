@@ -39,7 +39,10 @@ ledger is the engine work it needs.
 - The 1.7B Base pull is mis-attributed: its `brain.manifest.json` says
   `family: "qwen3asr"`, because `modelstore::recipe`'s `qwen3tts` row is
   pinned to the 0.6B repo only and the broader `qwen3asr` signature claims
-  every other TTS repo, a trained release included.
+  every other TTS repo, a trained release included. Selection is fixed
+  (`cfd296bfe`); `brain pull` now also re-derives a complete repo's manifest
+  from its local files and rewrites a stale one (`modelstore::reattribute`),
+  and `brain models list` flags a stale row on stderr.
 - `sft::run_finetune` trains a causal LM over a flat token stream, not the
   Talker's prompt; the code predictor's trainable form (`MtpModel::
   new_trainable`) takes one frame per forward with host heads, and drops the

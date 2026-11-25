@@ -264,7 +264,12 @@ one artifact in one place, not two copies.
 
 Re-running a pull is cheap for what already landed: a file already complete in
 the store is not fetched again, and a pull of a model that is already complete
-does no network I/O at all and says so.
+does no network I/O at all and says so. It still re-checks the repo's
+manifest against the repo's own files: a repo pulled before a recipe-selection
+fix may name the wrong family (`qwen3asr` for a Qwen3-TTS repo), and pull then
+rewrites the manifest atomically and prints `re-attributed from <old> to
+<new>`. A repo whose recipe cannot be decided from its local files is left as it
+is, with a message. `brain models list` flags such a stale row on stderr.
 
 **Resume is per file, not per byte.** A transfer interrupted part-way through a
 file restarts *that file* from the beginning - the partial download is

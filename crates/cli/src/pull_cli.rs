@@ -81,6 +81,10 @@ the store is not fetched again. Resume is per FILE, not per byte - a transfer
 interrupted part-way through a file restarts that file from the beginning. For
 a single-file GGUF that is the whole transfer.
 
+A repo already complete in the store is not fetched, but its manifest is
+re-checked against the repo's own files: when an older release attributed it
+to the wrong family, pull rewrites the manifest and says so.
+
 --brain-data-dir DIR   brain's data root; models land in <DIR>/models.
                        Default ~/.local/share/brain. This is a GLOBAL option
                        (valid on any subcommand) and outranks BRAIN_MODELS_DIR.
@@ -143,7 +147,18 @@ pub fn run_pull(args: &[String]) -> i32 {
     let dir = store.repo_dir(&reference.base());
     if plan.steps == [Step::Serve] {
         println!("brain pull {reference}: already complete in {}", dir.display());
-        return 0;
+        return match repair_attribution(&store, &reference) {
+            Ok(note) => {
+                if let Some(note) = note {
+                    println!("brain pull {reference}: {note}");
+                }
+                0
+            }
+            Err(e) => {
+                eprintln!("brain pull: {e}");
+                1
+            }
+        };
     }
     // A choice made for the user is a choice said out loud. The planner puts
     // what it resolved on the plan's reference, so this fires exactly when
@@ -199,6 +214,20 @@ pub fn run_pull(args: &[String]) -> i32 {
     }
 }
 
+/// A complete repo's manifest may carry the family an older recipe selection
+/// gave it. Re-derive it from the repo's own files and rewrite it when it
+/// differs; the returned line says what happened (`None` when nothing needed
+/// saying). A repo whose recipe cannot be decided offline is left as it is
+/// and the line says so.
+fn repair_attribution(store: &Store, reference: &brain_modelref::ModelRef) -> Result<Option<String>, String> {
+    use brain_modelstore::reattribute::{reattribute, Attribution};
+    Ok(match reattribute(store, reference)? {
+        Attribution::Stale { from, to, .. } => Some(Attribution::stale_note(&from, &to)),
+        Attribution::Undecided(why) => Some(why),
+        Attribution::Current | Attribution::NotApplicable => None,
+    })
+}
+
 /// The path of the single file a plan produced, when it produced exactly one
 /// AND that file is still there -- the artifact a file URL named, or the one
 /// quantization a GGUF repo resolved to. `None` for a multi-file pull, and
@@ -214,4 +243,37 @@ fn landed_file(plan: &brain_modelstore::Plan, dir: &std::path::Path) -> Option<S
         _ => return None,
     };
     dest.is_file().then(|| dest.display().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use brain_modelref::ModelRef;
+
+    fn tts_repo(root: &std::path::Path, manifest: &str) -> ModelRef {
+        let r = ModelRef::new("Qwen", "Qwen3-TTS-12Hz-1.7B-Base", None);
+        let dir = root.join("Qwen").join("Qwen3-TTS-12Hz-1.7B-Base");
+        for f in ["config.json", "merges.txt", "model.safetensors", "preprocessor_config.json", "speech_tokenizer/config.json", "tokenizer_config.json", "vocab.json"] {
+            let p = dir.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, b"{}").unwrap();
+        }
+        std::fs::write(dir.join("brain.manifest.json"), manifest).unwrap();
+        r
+    }
+
+    /// An already-pulled repo with the manifest an older selection wrote is
+    /// repaired by pull and the user is told; a second pull has nothing to say.
+    #[test]
+    fn pulling_a_stale_repo_reattributes_it_out_loud() {
+        let root = std::env::temp_dir().join(format!("pull-reattr-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let r = tts_repo(&root, r#"{"id":"Qwen/Qwen3-TTS-12Hz-1.7B-Base","family":"qwen3asr","roles":{"weights":"."}}"#);
+        let store = Store::new(&root);
+        assert_eq!(repair_attribution(&store, &r).unwrap().as_deref(), Some("re-attributed from qwen3asr to qwen3tts"));
+        let on_disk = std::fs::read_to_string(root.join("Qwen/Qwen3-TTS-12Hz-1.7B-Base/brain.manifest.json")).unwrap();
+        assert!(on_disk.contains("\"qwen3tts\"") && on_disk.contains("weights_dir"), "{on_disk}");
+        assert_eq!(repair_attribution(&store, &r).unwrap(), None);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }

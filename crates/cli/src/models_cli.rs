@@ -308,6 +308,7 @@ fn run_list(args: &[String]) -> i32 {
     a.finish();
 
     let locals = store.scan();
+    warn_stale_attributions(&store, &locals);
     if reprofile {
         run_reprofile(&locals);
     }
@@ -327,6 +328,24 @@ fn run_list(args: &[String]) -> i32 {
         }
     };
     render(roots, plain, force_tui, json, Some(&on_enter))
+}
+
+/// A compound repo pulled before a recipe-selection fix still carries the
+/// family the old selection wrote, so the list would file it under the wrong
+/// architecture without a word. Say so on stderr (stdout stays the tree or the
+/// JSON) and name the repair; `brain pull <ref>` rewrites the manifest.
+fn warn_stale_attributions(store: &Store, locals: &[LocalModel]) {
+    use brain_modelstore::reattribute::{assess, Attribution};
+    let mut seen = std::collections::BTreeSet::new();
+    for l in locals.iter().filter(|l| l.roles.is_some()) {
+        let base = l.reference.base();
+        if !seen.insert(base.to_string()) {
+            continue;
+        }
+        if let Attribution::Stale { from, to, .. } = assess(store, &base) {
+            eprintln!("brain models list: {base} is listed as {from} but its files select {to}; run `brain pull {base}` to repair its manifest");
+        }
+    }
 }
 
 fn run_reprofile(locals: &[LocalModel]) {
