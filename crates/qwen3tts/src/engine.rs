@@ -70,11 +70,21 @@ pub const SAMPLE_RATE: u32 = 24_000;
 /// two serving paths agree on the one knob a listener actually hears.
 pub const DEFAULT_CHUNK_FRAMES: usize = 16;
 
-/// Requests a device engine decodes together. Measured over HTTP on one GH200 (in-context clones of 8 s of speech,
-/// 2026-11-25): 16 streams 34 s of speech a second, 32 streams 52, 64 streams 43, where each finished clip's codec
-/// decode on the decode thread (about 110 ms) stalls every live stream; a codec worker on its own handle fenced
-/// against the decoders and was slower still. Revisit with a batched codec decode.
-pub const DEVICE_STREAMS: usize = 32;
+/// Requests a device engine decodes together by default, where the card holds that wide a decoder
+/// ([`device_streams_within`] narrows it where it does not). Measured over HTTP on one GH200 (in-context clones of 8 s of
+/// speech, as many requests at once as streams, 2026-11-25), once each finished clip's codec decode on the decode thread
+/// was about 32 ms: 64 streams 91-100 s of speech a second (the 32-stream engine under the same 64 requests 79-81), 96
+/// streams 98-101, 128 streams 110-111. Past 64 each request takes longer than the speech it makes (an 8 s clip about
+/// 9.5 s at 128), so 64 keeps every request faster than real time; a frame of 32 streams is about 1,700 kernels near
+/// their launch floor, so wider frames are nearly free on the device. Every stream holds its whole utterance in the KV
+/// pool (about 470 MB of fp32 KV a stream at the 2048-position context), so 64 streams take about 30 GB.
+pub const DEVICE_STREAMS: usize = 64;
+
+/// The widest decoder, from [`DEVICE_STREAMS`] down by halves, whose device bytes (`cost(streams)`: its weights, working
+/// set and KV pool) fit `bytes`; `None` when not even one stream fits.
+pub fn device_streams_within(bytes: u64, cost: impl Fn(usize) -> u64) -> Option<usize> {
+    std::iter::successors(Some(DEVICE_STREAMS), |&n| (n > 1).then_some(n / 2)).find(|&n| cost(n) <= bytes)
+}
 
 /// Where the Talker and the MTP run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -122,11 +132,11 @@ enum Core {
 }
 
 impl Core {
-    fn load(paths: &TtsPaths, placement: Placement) -> Result<Core, String> {
+    fn load(paths: &TtsPaths, placement: Placement, streams: usize) -> Result<Core, String> {
         Ok(match placement {
             Placement::Host => Core::Host { talker: CpuTalker::load(&paths.talker), mtp: CpuMtp::load(&paths.mtp) },
             Placement::Device => {
-                let dec = BatchedDecoder::load_on(&gpu_core::Gpu::new(&[]), paths, DEVICE_STREAMS, crate::batched::WeightTier::Stored)?;
+                let dec = BatchedDecoder::load_on(&gpu_core::Gpu::new(&[]), paths, streams, crate::batched::WeightTier::Stored)?;
                 let (talker, mtp) = dec.hosts();
                 Core::Device { dec, talker, mtp, paths: paths.clone(), policy: None }
             }
@@ -401,12 +411,17 @@ impl ResidentEngine {
 
     /// [`Self::load`] with the Talker and the MTP on `placement`.
     pub fn load_with(paths: &TtsPaths, placement: Placement) -> Result<ResidentEngine, String> {
+        Self::load_streams(paths, placement, DEVICE_STREAMS)
+    }
+
+    /// [`Self::load_with`] with a device decoder `streams` wide (a host engine ignores it).
+    pub fn load_streams(paths: &TtsPaths, placement: Placement, streams: usize) -> Result<ResidentEngine, String> {
         paths.require(false).map_err(|e| format!("tts: {e}"))?;
         let sp = TtsSpecials::from_config_dir(&paths.ckpt_dir)?;
         let tok = prompt::load_tokenizer(&paths.ckpt_dir)?;
         Ok(ResidentEngine {
             last: SpeakTimings::default(),
-            core: Core::load(paths, placement)?,
+            core: Core::load(paths, placement, streams.max(1))?,
             codec: CodecPath::load(paths, placement),
             voices: Voices {
                 tok,
@@ -754,6 +769,24 @@ impl ResidentEngine {
     /// Decode `codes` through the codec, `chunk_frames` at a time.
     pub fn decode(&mut self, codes: &[u32], on_audio: &mut dyn FnMut(&[f32], u32)) -> Result<Vec<f32>, String> {
         self.codec.decode(codes, self.chunk_frames, on_audio)
+    }
+}
+
+#[cfg(test)]
+mod stream_width_tests {
+    use super::{device_streams_within, DEVICE_STREAMS};
+
+    /// The widest decoder whose memory fits the bytes a card offers: the default where it fits, the next narrower
+    /// width (halving) where it does not, and none where not even one stream fits.
+    #[test]
+    fn the_widest_decoder_that_fits_is_taken() {
+        let cost = |streams: usize| 2_000 + 470 * streams as u64;
+        assert_eq!(device_streams_within(u64::MAX, cost), Some(DEVICE_STREAMS));
+        assert_eq!(device_streams_within(cost(DEVICE_STREAMS), cost), Some(DEVICE_STREAMS), "exactly the default's bytes fit it");
+        assert_eq!(device_streams_within(cost(DEVICE_STREAMS) - 1, cost), Some(DEVICE_STREAMS / 2));
+        assert_eq!(device_streams_within(cost(5), cost), Some(4));
+        assert_eq!(device_streams_within(cost(1), cost), Some(1));
+        assert_eq!(device_streams_within(cost(1) - 1, cost), None);
     }
 }
 

@@ -52,6 +52,9 @@ pub struct TtsResident {
     /// store resolved it, [`qwen3tts::caps::MODEL`] when it was named outright.
     id: String,
     paths: TtsPaths,
+    /// How many requests the device engine decodes together: [`qwen3tts::engine::DEVICE_STREAMS`] until a card
+    /// cannot hold that wide a decoder ([`ResidentModel::replan`] narrows it).
+    streams: std::sync::atomic::AtomicUsize,
 }
 
 impl TtsResident {
@@ -63,14 +66,31 @@ impl TtsResident {
     pub fn all_from_store(store: &loader::served::ServedStore) -> Vec<TtsResident> {
         loader::served::served_assemblies(store, "qwen3tts", &qwen3tts::spec::Qwen3TtsSpec, qwen3tts::caps::MODEL)
             .into_iter()
-            .filter_map(|assembly| Some(TtsResident { paths: TtsPaths::from_assembly(&assembly).ok()?, id: assembly.id }))
+            .filter_map(|assembly| {
+                let paths = TtsPaths::from_assembly(&assembly).ok()?;
+                Some(TtsResident::with_paths(assembly.id, paths))
+            })
             .collect()
     }
 
     /// Direct constructor for callers that already hold the two paths (e.g.
     /// `brain perf`'s `tts:<weights-dir>:<hf-ckpt-dir>` target).
     pub fn new(weights_dir: impl Into<String>, ckpt_dir: impl Into<String>) -> TtsResident {
-        TtsResident { id: qwen3tts::caps::MODEL.to_string(), paths: TtsPaths::new(weights_dir.into(), ckpt_dir) }
+        TtsResident::with_paths(qwen3tts::caps::MODEL.to_string(), TtsPaths::new(weights_dir.into(), ckpt_dir))
+    }
+
+    fn with_paths(id: String, paths: TtsPaths) -> TtsResident {
+        TtsResident { id, paths, streams: std::sync::atomic::AtomicUsize::new(qwen3tts::engine::DEVICE_STREAMS) }
+    }
+
+    fn streams(&self) -> usize {
+        self.streams.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// The device bytes the hot engine takes with a decoder `streams` wide: its weights and working set, and the KV
+    /// pool its batched decoder serves every stream from.
+    fn engine_bytes(&self, streams: usize) -> u64 {
+        self.ram() + qwen3tts::batched::kv_pool_bytes(&self.paths, streams).unwrap_or(0)
     }
 
     /// The bytes every component's weights occupy as f32, the size both the
@@ -119,14 +139,29 @@ impl ResidentModel for TtsResident {
             }
             // The hot engine's weights and working set, on whichever device holds it, and on a
             // card the KV pool its batched decoder serves every stream from.
-            _ => MemCost::new(self.ram() + qwen3tts::batched::kv_pool_bytes(&self.paths, qwen3tts::engine::DEVICE_STREAMS).unwrap_or(0), 0),
+            _ => MemCost::new(self.engine_bytes(self.streams()), 0),
         }
     }
 
     /// A card decodes this many speech requests at once, so the dispatcher hands the engine
     /// everything queued up to that.
     fn batch_limit(&self) -> Option<usize> {
-        Some(qwen3tts::engine::DEVICE_STREAMS)
+        Some(self.streams())
+    }
+
+    /// Narrow the device engine to the widest decoder the largest card offered can hold
+    /// ([`qwen3tts::engine::device_streams_within`]); the other instances are sized by their weights alone.
+    fn replan(&self, key: &InstanceKey, usable: &[(Device, u64)]) -> Option<String> {
+        if key.config != ENGINE_KEY {
+            return None;
+        }
+        let largest = usable.iter().filter(|(d, _)| *d != Device::Cpu).map(|&(_, bytes)| bytes).max()?;
+        let (before, after) = (self.streams(), qwen3tts::engine::device_streams_within(largest, |n| self.engine_bytes(n))?);
+        if after >= before {
+            return None;
+        }
+        self.streams.store(after, std::sync::atomic::Ordering::Release);
+        Some(format!("decoder streams {before} -> {after} (largest card offers {} MiB)", largest >> 20))
     }
 
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
@@ -149,7 +184,7 @@ impl ResidentModel for TtsResident {
             Device::Gpu(_) => qwen3tts::engine::Placement::Device,
             Device::Cpu | Device::Npu(_) => qwen3tts::engine::Placement::Host,
         };
-        let engine = residency::on_device(device, || qwen3tts::ResidentEngine::load_with(&self.paths, placement))??;
+        let engine = residency::on_device(device, || qwen3tts::ResidentEngine::load_streams(&self.paths, placement, self.streams()))??;
         Ok(Box::new(TtsInstance { engine, device }))
     }
 }
@@ -328,6 +363,30 @@ mod tests {
             panic!("activating without weights must fail");
         };
         assert!(err.contains("not found"), "got: {err}");
+    }
+
+    /// The device engine starts as wide as `DEVICE_STREAMS` and, offered a card too small for that, re-plans to the
+    /// widest decoder that fits: its estimate fits the card, the dispatcher batches as many requests, and a card that
+    /// holds the plan already changes nothing. Needs a Qwen3-TTS checkpoint in the model store (its config sizes the
+    /// KV pool).
+    #[test]
+    fn a_card_too_small_for_the_default_decoder_narrows_it_to_one_that_fits() {
+        let Some(paths) = brain_modelstore::default_root().and_then(|root| qwen3tts::spec::store_checkpoints(&root).into_iter().find(|p| p.require(true).is_ok())) else {
+            brain_testutil::skip("no Qwen3-TTS checkpoint in the model store");
+            return;
+        };
+        let r = TtsResident::with_paths(qwen3tts::caps::MODEL.to_string(), paths);
+        let key = InstanceKey::new(qwen3tts::caps::MODEL, ENGINE_KEY);
+        let wide = r.estimate(&key).vram;
+        assert_eq!(r.batch_limit(), Some(qwen3tts::engine::DEVICE_STREAMS));
+        assert_eq!(r.replan(&key, &[(Device::Gpu(0), wide)]), None, "a card that holds the default decoder changes nothing");
+        let card = wide - 1;
+        let change = r.replan(&key, &[(Device::Gpu(0), card), (Device::Cpu, u64::MAX)]).expect("a card one byte short narrows the decoder");
+        assert!(change.contains("decoder streams"), "{change}");
+        assert_eq!(r.batch_limit(), Some(qwen3tts::engine::DEVICE_STREAMS / 2));
+        assert!(r.estimate(&key).vram <= card, "the narrowed engine fits the card it was narrowed for");
+        assert_eq!(r.replan(&key, &[(Device::Gpu(0), 1)]), None, "no width fits a card of one byte, and the plan stays");
+        assert_eq!(r.replan(&InstanceKey::new(qwen3tts::caps::MODEL, TRAIN_KEY), &[(Device::Gpu(0), 1)]), None, "only the engine re-plans");
     }
 
     /// The speech actions share one hot engine; the provider's own actions
