@@ -305,9 +305,9 @@ pub struct ChatOutcome {
     /// The sampler settings the model drew the reply with, under the request fields that set them
     /// ([`crate::sampling::echo`]), when it reports them.
     pub sampler: Option<serde_json::Value>,
-    /// The `(id, digest, version)` of the adapter that answered, when one did. The version is the policy version
-    /// of that release under its id.
-    pub adapter: Option<(String, String, u64)>,
+    /// The adapter that answered, when one did: its id, digest, the policy version of that release under its id and,
+    /// for a release a training run published, the run-level identity of its weights.
+    pub adapter: Option<residency::AdapterIdentity>,
     /// `sha256:<hex>` of the base checkpoint that answered, when the model knows it.
     pub base_digest: Option<String>,
     /// The backend the decode ran on (`cuda`, `cpu`, ...).
@@ -339,7 +339,7 @@ impl ChatOutcome {
         let mut trace = self.trace.clone()?;
         let policy = serde_json::json!({
             "base_digest": self.base_digest,
-            "adapter": self.adapter.as_ref().map(|(id, digest, version)| serde_json::json!({ "id": id, "digest": digest, "version": version })),
+            "adapter": self.adapter.as_ref().map(residency::AdapterIdentity::to_json),
             "policy_version": self.policy_version(),
             "tokenizer_digest": trace.get("tokenizer_digest"),
             "chat_template_digest": trace.get("chat_template_digest"),
@@ -354,7 +354,7 @@ impl ChatOutcome {
     /// The policy version this reply was generated under: the version of the adapter release that answered under its id
     /// (1 for the first, +1 for each release with different weights), 0 for the base model.
     pub fn policy_version(&self) -> u64 {
-        self.adapter.as_ref().map_or(0, |(_, _, version)| *version)
+        self.adapter.as_ref().map_or(0, |adapter| adapter.version)
     }
 
     /// The reply's `brain` extension object: the seed that reproduces the
@@ -375,8 +375,8 @@ impl ChatOutcome {
         if let Some(sampler) = &self.sampler {
             served.insert("sampler".into(), sampler.clone());
         }
-        if let Some((id, digest, version)) = &self.adapter {
-            served.insert("adapter".into(), serde_json::json!({ "id": id, "digest": digest, "version": version }));
+        if let Some(adapter) = &self.adapter {
+            served.insert("adapter".into(), adapter.to_json());
         }
         for (key, value) in [("base_digest", &self.base_digest), ("backend", &self.backend), ("engine", &self.engine)] {
             if let Some(value) = value {
@@ -410,7 +410,8 @@ pub fn read_chat_outcome(o: &Outcome) -> ChatOutcome {
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default();
     let seed = o.outputs.get("seed").and_then(|v| v.as_u64());
-    let adapter = o.outputs.get("adapter").and_then(|a| Some((a.get("id")?.as_str()?.to_string(), a.get("digest")?.as_str()?.to_string(), a.get("version")?.as_u64()?)));
+    // The model's own report of who answered: a malformed one is the engine's defect, never a reply's guess.
+    let adapter = o.outputs.get("adapter").and_then(|a| residency::AdapterIdentity::from_json(a).inspect_err(|e| eprintln!("apiserve: a reply's {e}: {a}")).ok());
     let numbers = |key: &str| o.outputs.get(key).and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|n| n.as_i64()).collect::<Vec<_>>());
     let logprobs = o.outputs.get("completion_logprobs").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|n| n.as_f64()).collect::<Vec<_>>());
     let text_of = |key: &str| o.outputs.get(key).and_then(|v| v.as_str()).map(str::to_string);

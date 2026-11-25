@@ -2887,6 +2887,7 @@ dependencies = [
  "brain-gpu-core",
  "brain-gpu-supervisor",
  "brain-memauth",
+ "serde",
  "serde_json",
 ]
 

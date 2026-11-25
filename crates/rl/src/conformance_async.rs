@@ -143,7 +143,7 @@ fn streamed<M: Model>(subject: &Subject<M>, seed: u64, state: &Path, stop_after:
         Ok(())
     };
     let snapshots = publication.map(|p| AdapterSnapshots { dir, card_id: p.card_id, base_id: p.base_id, family: p.family, lora: model::adapter::device::LoraCfg::new(RANK, RANK as f32, Vec::new()) });
-    let control = FitControl { on_step: Some(&mut on_step), state: Some(state), state_every: 0, identity: serde_json::json!({"conformance": subject.name}), publish: snapshots.map(|snapshots| AdapterPublish { every: 1, initial: false, snapshots, publish: &mut publish }), ..FitControl::default() };
+    let control = FitControl { on_step: Some(&mut on_step), state: Some(state), state_every: 0, identity: serde_json::json!({"conformance": subject.name}), publish: snapshots.map(|snapshots| AdapterPublish { every: 1, initial: false, snapshots, provenance: None, publish: &mut publish }), ..FitControl::default() };
     let fitted = model::fit_controlled(m, &mut objective, &opts(seed), None, control).map_err(|e| format!("{}: the streamed run: {e}", subject.name));
     // A stopped run leaves the offer waiting for a finish nobody sends: the feed is told so it ends.
     feed.finish();

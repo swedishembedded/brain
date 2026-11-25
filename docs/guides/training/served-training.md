@@ -616,9 +616,10 @@ every job: the run writes its state and stops.
 `queue_tokens`, `time_in_queue_seconds` (the step's groups' mean) and `dropped_stale`, the job reports:
 
 ```
-{"type": "stream", "epoch": 2, "publish_adapter": "...", "version": 5, "step_tokens": 16384, "queue_tokens": 65536, "max_staleness": 2}
+{"type": "stream", "run": "my-run", "epoch": 2, "publish_adapter": "...", "version": 5, "step_tokens": 16384, "queue_tokens": 65536, "max_staleness": 2}
 {"type": "applied", "step": 7, "groups": ["g1", "g2"]}                 (+ "skipped": why, when a guard skipped the update)
-{"type": "published", "version": 6, "digest": "sha256:...", "step": 7}
+{"type": "published", "version": 6, "digest": "sha256:...", "step": 7,
+ "lineage": {"run": "my-run", "epoch": 2, "update": 7, "base_digest": "sha256:...", "adapter_digest": "sha256:..."}}
 {"type": "dropped", "reason": "stale", "groups": ["g0"]}
 {"type": "committed", "step": 8, "groups": ["g1", "g2", "g0"]}
 ```
@@ -626,7 +627,11 @@ every job: the run writes its state and stops.
 `applied` follows the step whose optimiser update holds the groups' gradient; `committed` follows the write of a
 training state that holds it (every `checkpoint_every` steps of a `resume_key` run, a cancel, and the job's
 completion); a version is `published` once a request for `publish_adapter` is routed to it, and staleness is measured
-against it.
+against it. `version` counts the releases this server offered under the id; `lineage` names the weights for good: the
+run (`resume_key`, or `job:<hex>` drawn for a run without one, as the `stream` frame says), the job of it (`epoch`), the
+optimiser update (`update`, the step), the base and the file. The adapter's card records it, so every reply the
+version decodes names it under `brain.adapter.lineage` (and `policy_trace.policy.adapter.lineage`), on this server or
+any other that serves the file.
 
 **Resuming.** Started again with the same `resume_key`, the run continues from its last saved state at the next
 epoch (the `stream` frame and every answer carry it). The queue is not kept: the client re-sends every group it has

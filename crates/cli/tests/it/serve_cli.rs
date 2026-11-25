@@ -208,6 +208,7 @@ fn write_named_adapter(dir: &std::path::Path, fill: f32, trained_on: Option<&std
         trained_from: None,
         base_digest: Some(brain_modelstore::fetch::file_digest(trained_on.unwrap_or(&base)).unwrap()),
         cycle: 0,
+        run: None,
     });
     let tensors = vec![("blocks.0.attn.wq.weight.lora_a".to_string(), vec![2, 4], vec![0.5; 8]), ("blocks.0.attn.wq.weight.lora_b".to_string(), vec![4, 2], vec![0.5; 8])];
     checkpoint::st::save_safetensors(adapter.to_str().unwrap(), &tensors, &serde_json::json!({"rank": 2}), Some(&card)).unwrap();

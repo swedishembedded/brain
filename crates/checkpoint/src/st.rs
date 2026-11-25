@@ -203,6 +203,25 @@ pub struct TrainingProvenance {
     pub base_digest: Option<String>,
     /// The continuous-loop cycle number that produced this checkpoint.
     pub cycle: u64,
+    /// Which optimiser update of which training run these weights are, for an adapter a run published while it
+    /// trained ([`RunLineage`]). Additive: absent on any card written before this field existed, and on a card of
+    /// weights no run published.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<RunLineage>,
+}
+
+/// The run-level identity of a published policy: the training run, the job of it (its epoch) and the optimiser
+/// update. The three name one set of weights for good: a run continued from a saved state counts its updates on from
+/// that state under the next epoch, so an update number taken again after a resume is told apart by its epoch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunLineage {
+    /// The run: its resume key, or `job:<hex>` drawn once for a run that has none.
+    pub run: String,
+    /// The job of the run that took the update: 1 for the first, one more for each that continued it.
+    pub epoch: u64,
+    /// Optimiser updates the weights hold, counted over the whole run (0 for the policy it starts from).
+    pub update: u32,
 }
 
 impl TrainingProvenance {
@@ -222,6 +241,7 @@ impl TrainingProvenance {
             trained_from: None,
             base_digest: Some(base_digest),
             cycle: 0,
+            run: None,
         }
     }
 }
@@ -756,6 +776,7 @@ mod tests {
             trained_from: Some("qwen3-0.6b-cycle-3".into()),
             base_digest: Some("sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into()),
             cycle: 4,
+            run: None,
         });
 
         let meta = card.to_metadata();

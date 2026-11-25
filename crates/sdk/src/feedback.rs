@@ -363,6 +363,7 @@ impl FeedbackFineTune {
             trained_from: parent.clone(),
             base_digest: Some(base_digest.clone()),
             cycle: self.cycle,
+            run: None,
         };
         let job = FeedbackJob {
             base: &weights,

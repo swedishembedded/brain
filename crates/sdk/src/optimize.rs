@@ -475,6 +475,7 @@ pub(crate) fn distill_recovery(work: &Workload, req: &RecoveryRequest<'_>, on_pr
         trained_from: None,
         base_digest: Some(crate::finetune::base_digest(req.student)?),
         cycle: 0,
+        run: None,
     };
     let mut on_step = |s: &model::StepReport| {
         on_progress(&OptimizerProgress::Recovering { step: s.step, steps: s.steps, loss: s.loss });

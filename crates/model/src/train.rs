@@ -1704,6 +1704,9 @@ pub struct AdapterPublish<'a> {
     /// drawn from the policy it serves has nothing served to draw from otherwise.
     pub initial: bool,
     pub snapshots: AdapterSnapshots<'a>,
+    /// The training provenance the card of the adapter after the given step count records, for a caller that names
+    /// the run every version belongs to (`TrainingProvenance::run`); `None` writes the card without provenance.
+    pub provenance: Option<&'a dyn Fn(u32) -> checkpoint::st::TrainingProvenance>,
     pub publish: &'a mut dyn FnMut(u32, &Path) -> std::io::Result<()>,
 }
 
@@ -2400,7 +2403,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
     if let Some(publication) = control.publish.as_mut().filter(|p| writer && p.initial) {
         let path = publication.snapshots.path(completed);
         let snapshots = &publication.snapshots;
-        crate::lora::device_adapter::save_lora_with_lineage(path.to_str().expect("utf-8 path"), &model, &snapshots.lora, snapshots.card_id, snapshots.base_id, snapshots.family, None, None)?;
+        crate::lora::device_adapter::save_lora_with_lineage(path.to_str().expect("utf-8 path"), &model, &snapshots.lora, snapshots.card_id, snapshots.base_id, snapshots.family, None, publication.provenance.map(|of| of(completed)))?;
         (publication.publish)(completed, &path)?;
     }
     // An objective fed while the run goes on may have nothing to train yet, or nothing at all.
@@ -2676,7 +2679,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         if let Some(publication) = control.publish.as_mut().filter(|p| writer && p.every > 0 && completed.is_multiple_of(p.every)) {
             let path = publication.snapshots.path(completed);
             let snapshots = &publication.snapshots;
-            crate::lora::device_adapter::save_lora_with_lineage(path.to_str().expect("utf-8 path"), &model, &snapshots.lora, snapshots.card_id, snapshots.base_id, snapshots.family, None, None)?;
+            crate::lora::device_adapter::save_lora_with_lineage(path.to_str().expect("utf-8 path"), &model, &snapshots.lora, snapshots.card_id, snapshots.base_id, snapshots.family, None, publication.provenance.map(|of| of(completed)))?;
             (publication.publish)(completed, &path)?;
         }
 

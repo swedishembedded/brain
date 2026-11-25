@@ -21,6 +21,7 @@ brain-gpu-supervisor.workspace = true
 brain-backend-api.workspace = true
 # `on_device`: the scoped device selection an activation builds on its assigned card through.
 brain-gpu-core.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 
 # A model hosted in a real worker process: the test binary is its own worker,

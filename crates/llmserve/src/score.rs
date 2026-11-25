@@ -224,7 +224,7 @@ fn score_one<D: PagedDecoder, F: Frontend + ?Sized>(sched: &mut Scheduler<D>, fr
         outcome = outcome.set("base_digest", json!(digest));
     }
     if let Some(identity) = identity {
-        outcome = outcome.set("adapter", json!({"id": identity.id, "digest": identity.digest, "version": identity.version}));
+        outcome = outcome.set("adapter", identity.to_json());
     }
     Ok(outcome)
 }

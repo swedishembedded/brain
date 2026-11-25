@@ -155,7 +155,7 @@ fn add_discovery(card: &mut Value, provider: Provider, info: &ModelInfo, adapter
         });
     }
     if let Some(adapter) = adapter {
-        card["adapter"] = json!({ "id": adapter.id, "digest": adapter.digest, "version": adapter.version });
+        card["adapter"] = adapter.to_json();
     }
     // Whether the model's architecture is certified for production serving,
     // so a caller can tell before relying on it. Said on every card: a model

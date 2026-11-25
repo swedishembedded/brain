@@ -496,6 +496,7 @@ pub fn cycle<M: Model, O: Objective<M>>(
                 trained_from: Some(adapter.base_id.to_string()),
                 base_digest: Some(brain_modelstore::fetch::base_digest(base_checkpoint)?),
                 cycle: provenance.cycle,
+                run: None,
             };
             model::lora::device_adapter::save_adapter_with_lineage(
                 path.to_str().expect("utf-8 path"),

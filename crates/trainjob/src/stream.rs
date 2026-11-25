@@ -20,7 +20,10 @@
 //! **Receipts.** The job's events carry, beside each `step`: `applied {step, groups}` once a step's update is taken
 //! (`skipped` names why when a guard skipped it), `committed {step, groups}` once a training state holding that update
 //! is written (`checkpoint_every`, a stop, and the job's completion), `dropped {reason, groups}` for groups too stale to
-//! train, and `published {version, digest, step}` once a version is routable. The consumed keys ride in the training
+//! train, and `published {version, digest, step, lineage}` once a version is routable. `lineage` is the version's
+//! run-level identity, `{run, epoch, update, base_digest, adapter_digest}`, which its card records and every reply it
+//! decodes names (`brain.adapter.lineage`): the run is the resume key (or `job:<hex>` drawn for a run without one,
+//! named in the `stream` frame), the update the step. The consumed keys ride in the training
 //! state, so a job that resumes the run (`resume_key`) answers every committed key as a duplicate; a client re-sends
 //! every group it has no `committed` receipt for.
 //!
@@ -210,7 +213,8 @@ pub(crate) fn train(env: &JobEnv, request: &Request, inputs: &Inputs<'_>, files:
     // A run that continues one whose versions are served already serves from the start; any other offers the policy
     // it starts from as its first version, which its first rollouts are drawn from.
     let served_already = bank.identity(&refs.publish_adapter).is_some();
-    let mut ft = job::fine_tune_settings(request, inputs.base_dir, None, files)?.adapter_id(refs.publish_adapter.as_str()).publish_every(refs.publish_every).publish_initial(!served_already).steps(steps);
+    let run = run_id(request);
+    let mut ft = job::fine_tune_settings(request, inputs.base_dir, None, files)?.adapter_id(refs.publish_adapter.as_str()).publish_every(refs.publish_every).publish_initial(!served_already).steps(steps).run_lineage(run.as_str(), epoch);
     if let Some(path) = &inputs.staged.start_adapter {
         ft = ft.continue_from(path);
     }
@@ -219,7 +223,7 @@ pub(crate) fn train(env: &JobEnv, request: &Request, inputs: &Inputs<'_>, files:
     let ft = ft.rollout_stream(&stream);
     let published_at_start = bank.identity(&refs.publish_adapter).map_or(0, |identity| identity.version);
     stream.set_version(published_at_start);
-    progress(Progress::event(0, steps, json!({"type": "stream", "epoch": epoch, "publish_adapter": refs.publish_adapter, "version": published_at_start, "step_tokens": refs.step_tokens, "queue_tokens": refs.queue_tokens, "max_staleness": refs.max_staleness})));
+    progress(Progress::event(0, steps, json!({"type": "stream", "run": run, "epoch": epoch, "publish_adapter": refs.publish_adapter, "version": published_at_start, "step_tokens": refs.step_tokens, "queue_tokens": refs.queue_tokens, "max_staleness": refs.max_staleness})));
 
     let done = Arc::new(AtomicBool::new(false));
     let listener = {
@@ -247,8 +251,10 @@ pub(crate) fn train(env: &JobEnv, request: &Request, inputs: &Inputs<'_>, files:
     let mut publish = |step: u32, path: &std::path::Path| -> std::io::Result<()> {
         let identity = bank.publish(&publish_id, path).map_err(std::io::Error::other)?;
         std::fs::remove_file(path).ok();
+        // The bank read the identity from the card this run wrote: it must be this run's, at this step.
+        let lineage = identity.lineage.as_ref().filter(|l| l.run == run && l.epoch == epoch && l.update == step).ok_or_else(|| std::io::Error::other(format!("publishing adapter {publish_id}: the served release names {:?}, not run {run:?} epoch {epoch} update {step}", identity.lineage)))?;
         stream.set_version(identity.version);
-        published.borrow_mut().push(json!({"type": "published", "version": identity.version, "digest": identity.digest, "step": step}));
+        published.borrow_mut().push(json!({"type": "published", "version": identity.version, "digest": identity.digest, "step": step, "lineage": lineage}));
         *last_published.borrow_mut() = Some(step);
         Ok(())
     };
@@ -277,6 +283,15 @@ pub(crate) fn train(env: &JobEnv, request: &Request, inputs: &Inputs<'_>, files:
     emit(std::mem::take(&mut *published.borrow_mut()), &mut open, progress);
     let trained = Trained { adapter, record: outcome.record.clone(), adapter_sha256: outcome.adapter_digest.clone().unwrap_or_default(), evaluations: Vec::new(), resumed_at: outcome.resumed_at, summary: outcome.report() };
     Ok(Streamed { trained, uncommitted: open })
+}
+
+/// The run every version a stream publishes names (`TrainingProvenance::run`): its resume key, which every job that
+/// continues the run shares, or for a run without one an id drawn once (`job:<32 hex>`; a key holds no `:`).
+fn run_id(request: &Request) -> String {
+    match &request.params.resume_key {
+        Some(key) => key.clone(),
+        None => format!("job:{:016x}{:016x}", brain::random_seed(), brain::random_seed()),
+    }
 }
 
 /// Answers the job's input until the job is done or its surface has gone.

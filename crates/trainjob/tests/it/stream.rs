@@ -189,6 +189,27 @@ async fn a_stream_job_trains_groups_as_they_arrive_and_serves_each_version_it_pu
     }
     assert_eq!(steps[1]["pg"]["staleness_max"], json!(0.0), "g2 was drawn by the version being trained");
     assert!(result["outputs"]["adapter_digest"].is_string(), "the final adapter is in the artifact store too: {result}");
+
+    // Each version carries the run-level identity of its weights: this run (an id drawn for a run without a resume
+    // key, named in its stream frame), its epoch, the update it holds, the base it trained on and its own file.
+    let run = started[0]["run"].as_str().expect("the stream frame names the run");
+    assert!(run.starts_with("job:"), "{run}");
+    for frame in of_type(&frames, "published") {
+        let lineage = &frame["lineage"];
+        assert_eq!((lineage["run"].as_str(), lineage["epoch"].clone(), lineage["update"].clone(), lineage["adapter_digest"].clone()), (Some(run), json!(1), frame["step"].clone(), frame["digest"].clone()), "{frame}");
+        assert!(lineage["base_digest"].as_str().is_some_and(|d| d.starts_with("sha256:")), "{frame}");
+    }
+    // The served version names it on the model card, in a reply's `brain` object and in its policy trace: exactly the
+    // lineage of the last version published.
+    let last = of_type(&frames, "published").last().unwrap()["lineage"].clone();
+    let (_, listing) = call(&app, Method::GET, "/v1/models", None).await;
+    let card = listing["data"].as_array().unwrap().iter().find(|m| m["id"] == ADAPTER).unwrap().clone();
+    assert_eq!(card["adapter"]["lineage"], last, "{card}");
+    let ask = json!({"model": ADAPTER, "messages": [{"role": "user", "content": "cab"}], "max_tokens": 2, "temperature": 1.0, "policy_trace": true});
+    let (status, reply) = call(&app, Method::POST, "/v1/chat/completions", Some(("application/json", ask.to_string().into_bytes()))).await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    assert_eq!((reply["brain"]["adapter"]["lineage"].clone(), reply["brain"]["policy_version"].clone()), (last.clone(), json!(3)), "{reply}");
+    assert_eq!(reply["policy_trace"]["policy"]["adapter"]["lineage"], last, "{reply}");
 }
 
 /// The queue's two promises at the job's own door: an offer is never refused while the queue holds less than one
@@ -219,7 +240,7 @@ fn a_full_queue_names_its_allowance_and_never_refuses_below_a_step() {
 }
 
 /// The gradient of a step is a function of its records and their order alone: the same two groups posted together or
-/// one at a time train the same first version, byte for byte.
+/// one at a time train the same first version, tensor for tensor (the files differ by the run their cards name).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_step_trains_the_same_whether_its_records_arrived_in_one_post_or_many() {
     let rig = rig_stream("stream-same");
@@ -241,12 +262,20 @@ async fn a_step_trains_the_same_whether_its_records_arrived_in_one_post_or_many(
         }
         let (frames, _) = frames_until(&app, &id, 0, |_| false).await;
         // The one step's version is the last published (the first job also published its starting policy; the
-        // second, whose id the bank serves already, does not).
-        let digests: Vec<Value> = of_type(&frames, "published").iter().map(|f| f["digest"].clone()).collect();
-        assert!(!digests.is_empty(), "{frames:?}");
-        published.push(digests.last().unwrap().clone());
+        // second, whose id the bank serves already, does not), and the run's adapter in the store is that step's.
+        assert!(!of_type(&frames, "published").is_empty(), "{frames:?}");
+        let (status, result) = call(&app, Method::GET, &format!("/v1/jobs/{id}/result"), None).await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        let digest = trainjob::store::Digest::parse(result["outputs"]["adapter_digest"].as_str().unwrap()).unwrap();
+        let path = rig.store.root().join(format!("stream-same-{split}.safetensors"));
+        rig.store.fetch(&digest, &path, 1 << 30).unwrap();
+        let mut tensors: Vec<(String, Vec<u32>)> = checkpoint::st::load_safetensors(path.to_str().unwrap()).unwrap().tensors.into_iter().map(|(name, data)| (name, data.iter().map(|v| v.to_bits()).collect())).collect();
+        tensors.sort();
+        std::fs::remove_file(&path).ok();
+        published.push(tensors);
     }
-    assert_eq!(published[0], published[1]);
+    assert!(!published[0].is_empty());
+    assert!(published[0] == published[1], "the two runs trained different weights");
 }
 
 /// A run resumed from its saved state (the job that ran it is gone, as after a crash) takes again exactly the groups
@@ -293,6 +322,10 @@ async fn a_resumed_stream_takes_again_what_was_applied_and_not_committed() {
     let (frames, _) = frames_until(&app, &resumed, 0, |_| false).await;
     assert_eq!(of_type(&frames, "stream")[0]["epoch"], 2);
     assert_eq!(of_type(&frames, "applied").iter().flat_map(|f| keys(f)).collect::<Vec<_>>(), ["g3"]);
+    // The resumed job's versions are the run's (its key), under the new epoch: update 3 of epoch 2 is not update 3 of
+    // epoch 1, which the first job published before the state was put back.
+    let lineages: Vec<(Value, Value, Value)> = of_type(&frames, "published").iter().map(|f| (f["lineage"]["run"].clone(), f["lineage"]["epoch"].clone(), f["lineage"]["update"].clone())).collect();
+    assert_eq!(lineages, [(json!("stream-k1"), json!(2), json!(3))], "{frames:?}");
     let (status, result) = call(&app, Method::GET, &format!("/v1/jobs/{resumed}/result"), None).await;
     assert_eq!(status, StatusCode::OK, "{result}");
     assert_eq!((result["outputs"]["resume"]["state"].clone(), result["outputs"]["resume"]["resumed_at"].clone(), result["outputs"]["steps_completed"].clone()), (json!("continued"), json!(2), json!(3)), "{result}");

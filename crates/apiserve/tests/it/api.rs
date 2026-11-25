@@ -584,7 +584,7 @@ async fn model_card_names_the_attached_adapter_and_tracks_a_swap() {
         assert_valid(model_schema.0, model_schema.1, &card);
         assert!(card.get("adapter").is_none(), "{provider}: no adapter attached, so none is advertised: {card}");
 
-        let first = residency::AdapterIdentity { id: "acme/tuned".into(), digest: format!("sha256:{}", "a".repeat(64)), version: 1 };
+        let first = residency::AdapterIdentity::new("acme/tuned", format!("sha256:{}", "a".repeat(64)), 1);
         exec.set_served_adapter("brain-agent", Some(first.clone()));
         let card = get_json(&app, provider, one_uri, &key).await;
         assert_valid(model_schema.0, model_schema.1, &card);
@@ -595,7 +595,7 @@ async fn model_card_names_the_attached_adapter_and_tracks_a_swap() {
         let embed = listed["data"].as_array().unwrap().iter().find(|m| m["id"] == "brain-embed").unwrap();
         assert!(embed.get("adapter").is_none(), "{provider}: an adapter is advertised on its own model only");
 
-        let second = residency::AdapterIdentity { id: "acme/tuned".into(), digest: format!("sha256:{}", "b".repeat(64)), version: 2 };
+        let second = residency::AdapterIdentity::new("acme/tuned", format!("sha256:{}", "b".repeat(64)), 2);
         exec.set_served_adapter("brain-agent", Some(second.clone()));
         let card = get_json(&app, provider, one_uri, &key).await;
         assert_eq!(card["adapter"]["digest"], json!(second.digest), "{provider}: a hot swap is visible on the next read");
@@ -4253,7 +4253,7 @@ impl Instance for SiblingChatInst {
         let who = adapter.clone().unwrap_or_else(|| "the base".to_string());
         let mut out = Outcome::new().set("prompt_tokens", json!(5)).set("completion_tokens", json!(2)).set("finish_reason", json!("stop")).set("seed", json!(seed));
         if let Some(id) = adapter {
-            out = out.set("adapter", json!({"id": id, "digest": adapter_identity().digest, "version": adapter_identity().version}));
+            out = out.set("adapter", json!({"id": id, "digest": adapter_identity().digest, "version": adapter_identity().version, "lineage": adapter_identity().lineage}));
         }
         if inv.get_bool("logprobs") == Some(true) || inv.get_bool("return_token_ids") == Some(true) {
             out = out.set("completion_token_ids", json!([11, 12])).set("completion_logprobs", json!([-0.5, -0.25]));
@@ -4281,8 +4281,11 @@ impl Instance for SiblingChatInst {
     }
 }
 
+/// The adapter the sibling serves: version 1, update 4 of run `stream-k1`'s second job.
 fn adapter_identity() -> residency::AdapterIdentity {
-    residency::AdapterIdentity { id: ADAPTER_ID.into(), digest: format!("sha256:{}", "c".repeat(64)), version: 1 }
+    let digest = format!("sha256:{}", "c".repeat(64));
+    let lineage = residency::PolicyLineage { run: "stream-k1".into(), epoch: 2, update: 4, base_digest: format!("sha256:{}", "b".repeat(64)), adapter_digest: digest.clone() };
+    residency::AdapterIdentity { lineage: Some(lineage), ..residency::AdapterIdentity::new(ADAPTER_ID, digest, 1) }
 }
 
 /// The base and one adapter riding on it, behind `provider`.
@@ -4314,7 +4317,7 @@ async fn an_adapter_is_a_listed_model_named_by_identity_and_never_by_a_path() {
         let base = cards.iter().find(|m| m["id"] == ADAPTER_BASE).unwrap_or_else(|| panic!("{provider}: base missing: {listed}"));
         let adapter = cards.iter().find(|m| m["id"] == ADAPTER_ID).unwrap_or_else(|| panic!("{provider}: adapter missing: {listed}"));
         assert!(base.get("adapter").is_none(), "{provider}: the base entry names no adapter: {base}");
-        assert_eq!(adapter["adapter"], json!({"id": ADAPTER_ID, "digest": adapter_identity().digest, "version": adapter_identity().version}), "{provider}: {adapter}");
+        assert_eq!(adapter["adapter"], adapter_identity().to_json(), "{provider}: {adapter}");
 
         let card = get_json(&app, provider, &one_uri, &key).await;
         assert_eq!(card["adapter"]["digest"], json!(adapter_identity().digest), "{provider}: {card}");
@@ -4506,7 +4509,7 @@ async fn a_reply_names_the_adapter_that_answered_by_digest() {
     let (_, base) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &chat_body(ADAPTER_BASE)).await;
     assert!(base["brain"].get("adapter").is_none(), "the base names no adapter: {base}");
     let (_, tuned) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &chat_body(ADAPTER_ID)).await;
-    assert_eq!(tuned["brain"]["adapter"], json!({"id": ADAPTER_ID, "digest": adapter_identity().digest, "version": adapter_identity().version}), "{tuned}");
+    assert_eq!(tuned["brain"]["adapter"], adapter_identity().to_json(), "{tuned}");
     assert_eq!(tuned["model"], json!(ADAPTER_ID));
 
     let mut streamed = chat_body(ADAPTER_ID);
@@ -4516,7 +4519,7 @@ async fn a_reply_names_the_adapter_that_answered_by_digest() {
     let frames: Vec<Value> = sse_data(&sse).iter().filter(|d| *d != "[DONE]").map(|d| serde_json::from_str(d).unwrap()).collect();
     let with_brain: Vec<&Value> = frames.iter().filter(|f| f.get("brain").is_some()).collect();
     assert_eq!(with_brain.len(), 1, "exactly the terminal chunk carries the extension: {sse}");
-    assert_eq!(with_brain[0]["brain"], json!({"seed": 5, "policy_version": adapter_identity().version, "adapter": {"id": ADAPTER_ID, "digest": adapter_identity().digest, "version": adapter_identity().version}}));
+    assert_eq!(with_brain[0]["brain"], json!({"seed": 5, "policy_version": adapter_identity().version, "adapter": adapter_identity().to_json()}));
     assert_eq!(with_brain[0]["choices"][0]["finish_reason"], json!("stop"));
 }
 
@@ -4623,6 +4626,15 @@ async fn every_dialect_echoes_the_sampler_settings_the_reply_was_drawn_with() {
 #[tokio::test]
 async fn a_chat_reply_returns_a_policy_trace_only_when_asked() {
     let (app, _exec, key) = adapter_app(Provider::OpenAI);
+    // An adapter a training run published names its run-level identity in the trace's policy and the reply's `brain`.
+    let mut tuned = chat_body(ADAPTER_ID);
+    tuned["policy_trace"] = json!(true);
+    let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &tuned).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let lineage = json!({"run": "stream-k1", "epoch": 2, "update": 4, "base_digest": format!("sha256:{}", "b".repeat(64)), "adapter_digest": adapter_identity().digest});
+    assert_eq!((v["policy_trace"]["policy"]["adapter"]["lineage"].clone(), v["brain"]["adapter"]["lineage"].clone()), (lineage.clone(), lineage), "{v}");
+    assert_eq!(v["policy_trace"]["policy"]["policy_version"], json!(1));
+
     let mut asked = chat_body(ADAPTER_BASE);
     asked["policy_trace"] = json!(true);
     let (st, v) = post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &asked).await;

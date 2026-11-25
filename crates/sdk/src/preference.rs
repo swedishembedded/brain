@@ -517,6 +517,7 @@ impl PreferenceFineTune {
             trained_from: parent.clone(),
             base_digest: Some(base_digest.clone()),
             cycle: self.cycle,
+            run: None,
         };
         // A family that cannot score its exported adapter is scored on the
         // resident model: the training pairs and the held-out pairs that fit the row.

@@ -52,7 +52,7 @@ pub mod supervised;
 pub use activate::on_device;
 /// Where a device build inside [`on_device`] lands (a caller that must not run on the CPU by accident checks it).
 pub use gpu_core::{build_target, BuildTarget};
-pub use adapter::AdapterIdentity;
+pub use adapter::{AdapterIdentity, PolicyLineage};
 pub use devpool::DevicePool;
 pub use executor::{Executor, InFlightJob, Job};
 pub use manager::{DeviceBudget, InstancePlacement, ResidencyManager, ResidencyReport};

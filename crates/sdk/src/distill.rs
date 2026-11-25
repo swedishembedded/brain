@@ -372,6 +372,7 @@ impl DistillFineTune {
             trained_from: parent.clone(),
             base_digest: Some(base_digest.clone()),
             cycle: 0,
+            run: None,
         };
         let example_count = examples.len();
         let job = DistillJob {

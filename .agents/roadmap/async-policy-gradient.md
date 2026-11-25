@@ -108,8 +108,7 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       open-ended stream (no `max_steps`) keeps its peak rate.
       Open: a group whose
       oldest record has no `policy_version` is never stale (unmeasurable); the consumed-key list grows with the run
-      (in the state's cursor); the published adapter is a snapshot card without base digest (it binds by base id);
-      a `--serve-adapters` file of the same id would fight the stream for it (refuse an id the directory owns);
+      (in the state's cursor); a `--serve-adapters` file of the same id would fight the stream for it (refuse an id the directory owns);
       `steps` is not read by a stream job (`max_steps` is).
 - [x] Per-step telemetry for async runs (lane agrpo-stream): every streamed step frame's `pg` carries
       `staleness_mean`, `staleness_max` (versions behind the last published one), `policy_tokens`,
@@ -217,8 +216,27 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       `ricursive::resident::family`, `inkling2::serve::served_family`, the last two moved out of the catalog so the
       resident and the suite share one). Matrix: qwen3, qwen35, ricursive, inkling2 hold all three; qwen35moe refuses
       all three (its `ChatTrainer` declares no policy gradient, asserted against the constant).
-- [ ] **Run-level policy identity** (A16): training run, committed update, base and adapter digests beside the serving
-      version, in every reply and every `published` event.
+- [x] **Run-level policy identity** (A16, lane agrpo-prov): a published version's card records
+      `TrainingProvenance::run` `{run, epoch, update}` beside its `base_digest` (`ChatFineTune::run_lineage`; the fit
+      loop's `AdapterPublish::provenance` writes it on every published snapshot, the exported adapter carries it too);
+      a server reads it from the card (`llmserve::adapter_release`, the one read) into `AdapterIdentity::lineage`
+      (`residency::PolicyLineage {run, epoch, update, base_digest, adapter_digest}`), so the serving-local `version` and
+      the immutable identity travel together through admission: `published {version, digest, step, lineage}`, a reply's
+      `brain.adapter.lineage`, `policy_trace.policy.adapter.lineage` and the model card. The run is the `resume_key`,
+      else `job:<32 hex>` drawn once (named in the `stream` frame); the update is the step, told apart across resumes
+      by the epoch. One JSON form (`AdapterIdentity::to_json`/`from_json`, `deny_unknown_fields`) for every surface. A
+      card naming a run without a base digest, a run id outside `[A-Za-z0-9._:-]{1,160}` or a malformed base digest is
+      refused by name (the card is hostile input that every reply repeats). Tests: `trainjob` `it::stream` (every
+      published frame's lineage is this run, epoch, step and file; `/v1/models`, a reply's `brain` and its policy trace
+      name the last version's lineage; a resumed run publishes under its key at epoch 2; the one-POST/many-POST
+      versions are compared tensor by tensor, since the cards now differ by run), `llmserve`
+      `a_published_adapter_names_its_run_from_its_own_card` (bound, unbound and among bases; refusals),
+      `a_request_keeps_the_lineage_of_the_version_it_was_admitted_under`, `residency`
+      `an_identity_reads_back_from_its_json_and_a_foreign_field_is_refused`, `apiserve`
+      `a_chat_reply_returns_a_policy_trace_only_when_asked` and the adapter card/reply tests. API audit
+      (api-security.md): no new route or param; the new fields are read-only facts of a release (no path, bounded,
+      validated at the card), behind the key like the rest of the reply; the run id exposes a `resume_key` to callers
+      that may use the adapter, which opens nothing (a key resumes only the identical request, `runs::open`).
 - [ ] End-to-end on Qwen3-4B (one card): serving and the streaming job in one process, rollouts from an orchestrator;
       profile (nsys) before optimising anything.
 - [ ] **Support replay for truncated samplers**: the sampler's support per position in the trace, the trainer's

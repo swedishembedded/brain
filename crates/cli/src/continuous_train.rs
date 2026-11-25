@@ -799,7 +799,7 @@ mod tests {
         assert!(follow.is_none(), "a pinned adapter must leave nothing to follow");
         assert_eq!(line.as_deref(), Some(format!("brain serve: {ONE} adapter={ONE} digest={}", digest(&adapter)).as_str()));
         assert!(listed(&executor, ONE) && listed(&executor, "brain/qwen3"), "the adapter is a model beside the base");
-        assert_eq!(executor.served_adapter(ONE), Some(residency::AdapterIdentity { id: ONE.to_string(), digest: digest(&adapter), version: 1 }), "the serving surfaces are told the verified release, by id and digest");
+        assert_eq!(executor.served_adapter(ONE), Some(residency::AdapterIdentity::new(ONE.to_string(), digest(&adapter), 1)), "the serving surfaces are told the verified release, by id and digest");
         assert_eq!(executor.served_adapter("brain/qwen3"), None, "the base names none");
 
         let wrong = Arc::new(QwenResident::from_card_configured(other.to_str().unwrap(), &card, None, banked()));
@@ -891,7 +891,7 @@ mod tests {
         wait("the verified release to be offered", &|| watcher.swaps() == 1);
         wait("the previous release to be withdrawn", &|| !listed(&executor, ONE));
         assert!(listed(&executor, TWO) && listed(&executor, "brain/qwen3"));
-        assert_eq!(executor.served_adapter(TWO), Some(residency::AdapterIdentity { id: TWO.to_string(), digest: digest(&two), version: 1 }), "a hot swap moves the reported identity with the served file");
+        assert_eq!(executor.served_adapter(TWO), Some(residency::AdapterIdentity::new(TWO.to_string(), digest(&two), 1)), "a hot swap moves the reported identity with the served file");
         assert_eq!(executor.served_adapter(ONE), None);
     }
 }

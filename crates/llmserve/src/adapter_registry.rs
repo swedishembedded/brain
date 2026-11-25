@@ -888,6 +888,27 @@ mod tests {
         assert_eq!(reg.identity("Qwen/Qwen3-0.6B:lab:other:v1").unwrap().version, 1, "each id counts for itself");
     }
 
+    /// The identity a request is admitted under carries the version's lineage, and a newer version replacing the
+    /// release offers its own: each version names its own update of the run.
+    #[test]
+    fn a_request_keeps_the_lineage_of_the_version_it_was_admitted_under() {
+        let dir = scratch_dir("registry-lineage");
+        let reg = registry(Some(AdapterBankSettings::default()));
+        let published = |update: u32, fill: f32| {
+            let path = dir.join(format!("update-{update}.safetensors"));
+            let run = checkpoint::st::RunLineage { run: "k".into(), epoch: 1, update };
+            brain_testutil::adapters::write_published_adapter(&path, ID, "Qwen/Qwen3-0.6B", Some(format!("sha256:{}", "b".repeat(64))), fill, run);
+            load_adapter(&path).unwrap()
+        };
+        let _lease = reg.attach(published(1, 0.5)).unwrap();
+        // What a route captures at admission ([`AdapterSync::route`] reads the same identity from its snapshot).
+        let admitted = reg.identity(ID).unwrap();
+        let replaced = reg.replace(published(2, 0.25)).unwrap();
+        assert_eq!((admitted.version, admitted.lineage.as_ref().map(|l| l.update)), (1, Some(1)), "the admitted request keeps version 1's identity");
+        assert_eq!((replaced.version, replaced.lineage.as_ref().map(|l| l.update)), (2, Some(2)));
+        assert_eq!(admitted.lineage.unwrap().adapter_digest, admitted.digest, "the lineage names the file the version is");
+    }
+
     /// A learning loop trains rank 32; a server that sizes its bank by default
     /// must not refuse it, and the cap above it stays a flag.
     #[test]

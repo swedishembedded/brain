@@ -21,9 +21,12 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
 
+use serde::{Deserialize, Serialize};
+
 /// How an attached adapter is named to the outside: its card's id, the
-/// digest of its weight file (`sha256:<hex>`) and its policy version. Never a
-/// filesystem location.
+/// digest of its weight file (`sha256:<hex>`), its policy version and, for a
+/// release a training run published, the run-level identity of its weights
+/// ([`PolicyLineage`]). Never a filesystem location.
 ///
 /// The version counts the releases of one id the server has offered: it is 1
 /// for the first, and each release of the same id with different weights
@@ -31,12 +34,52 @@ use std::sync::RwLock;
 /// and offered again continues its count, and the same weights offered again
 /// keep their number). A caller that records the version a completion was
 /// sampled under can tell how many refits behind the id's current weights it
-/// is.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// is. The version is local to the serving process; the lineage is not: it is
+/// read from the adapter's own card, so every server that serves the file,
+/// a restarted one included, names the same run, epoch and update.
+///
+/// Its JSON form (`{"id", "digest", "version"[, "lineage"]}`) is what every
+/// serving surface reports: a model card, a reply's `brain.adapter`, a policy
+/// trace's `policy.adapter`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AdapterIdentity {
     pub id: String,
     pub digest: String,
     pub version: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<PolicyLineage>,
+}
+
+/// Which weights a published policy is, independently of the server that serves it: the training run (its resume
+/// key, or the id drawn for a run without one), the job of that run (`epoch`, one more for each job that continued
+/// it), the optimiser update the weights hold (`update`, counted over the whole run), the base checkpoint it trained
+/// on (`base_digest`) and the adapter file (`adapter_digest`, the same as [`AdapterIdentity::digest`]).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyLineage {
+    pub run: String,
+    pub epoch: u64,
+    pub update: u32,
+    pub base_digest: String,
+    pub adapter_digest: String,
+}
+
+impl AdapterIdentity {
+    /// An identity with no run-level lineage: a release no training run published.
+    pub fn new(id: impl Into<String>, digest: impl Into<String>, version: u64) -> AdapterIdentity {
+        AdapterIdentity { id: id.into(), digest: digest.into(), version, lineage: None }
+    }
+
+    /// The JSON form every surface reports.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("an adapter identity is plain data")
+    }
+
+    /// Read the JSON form back, refusing anything else by name.
+    pub fn from_json(value: &serde_json::Value) -> Result<AdapterIdentity, String> {
+        AdapterIdentity::deserialize(value).map_err(|e| format!("adapter identity: {e}"))
+    }
 }
 
 /// The model id -> attached adapter table behind [`Executor`](crate::Executor).
@@ -71,7 +114,18 @@ mod tests {
     use super::*;
 
     fn identity(id: &str, hex: char) -> AdapterIdentity {
-        AdapterIdentity { id: id.into(), digest: format!("sha256:{}", hex.to_string().repeat(64)), version: 1 }
+        AdapterIdentity::new(id, format!("sha256:{}", hex.to_string().repeat(64)), 1)
+    }
+
+    #[test]
+    fn an_identity_reads_back_from_its_json_and_a_foreign_field_is_refused() {
+        let mut published = identity("a", '1');
+        assert_eq!(published.to_json(), serde_json::json!({"id": "a", "digest": published.digest, "version": 1}), "no lineage, no key");
+        published.lineage = Some(PolicyLineage { run: "k".into(), epoch: 2, update: 7, base_digest: "sha256:b".into(), adapter_digest: published.digest.clone() });
+        assert_eq!(AdapterIdentity::from_json(&published.to_json()), Ok(published.clone()));
+        let mut foreign = published.to_json();
+        foreign["lineage"]["step"] = serde_json::json!(7);
+        assert!(AdapterIdentity::from_json(&foreign).unwrap_err().contains("step"));
     }
 
     #[test]

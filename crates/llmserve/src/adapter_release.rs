@@ -52,13 +52,16 @@ pub use brain_modelstore::adapter_manifest::AdapterManifest;
 use checkpoint::st::ModelCard;
 use model::adapter::bank::{AdapterServing, VerifiedAdapter};
 use model::lora::device_adapter::DeviceAdapter;
-use residency::AdapterIdentity;
+use residency::{AdapterIdentity, PolicyLineage};
 use std::sync::Arc;
 
 /// The largest adapter file read into memory. An adapter is megabytes (a
 /// rank-16 attention adapter on an 8B base is tens of MiB); a file past this
 /// is not one, and reading it whole would only exhaust the host.
 const MAX_ADAPTER_BYTES: u64 = 2 << 30;
+
+/// The longest run id an adapter's card may name (`TrainingProvenance::run`): a resume key, or `job:` and 32 hex.
+pub const MAX_RUN_ID_LEN: usize = 160;
 
 /// The base checkpoint a server puts adapters on: its file (or a
 /// `transformers` directory), the id it was resolved under, and its digest,
@@ -210,13 +213,16 @@ pub struct LoadedAdapter {
     /// The policy version of this release under its id, which the registry
     /// that offers it assigns ([`AdapterIdentity`]); `0` until then.
     pub version: u64,
+    /// The run-level identity of the weights, read from the card a training run wrote when it published them
+    /// (`TrainingProvenance::run`); `None` for an adapter no run published.
+    pub lineage: Option<PolicyLineage>,
 }
 
 impl LoadedAdapter {
     /// What the serving surface calls this release: id, digest and version,
     /// no path.
     pub fn identity(&self) -> AdapterIdentity {
-        AdapterIdentity { id: self.release.id.clone(), digest: self.release.digest.clone(), version: self.version }
+        AdapterIdentity { id: self.release.id.clone(), digest: self.release.digest.clone(), version: self.version, lineage: self.lineage.clone() }
     }
 
     /// The form the serving engine registers an adapter in
@@ -248,8 +254,27 @@ fn read_once(path: &Path, expect: Option<&ServedFamily>) -> Result<(LoadedAdapte
         return Err(format!("adapter {shown}: its card ({}) describes a model, not an adapter", card.id));
     }
     check_family(path, &card, expect)?;
+    let lineage = lineage_of(path, &card, &digest)?;
     let release = AdapterRelease { id: card.id.clone(), path: path.to_path_buf(), digest };
-    Ok((LoadedAdapter { family: card.family.clone(), release, adapter, version: 0 }, card))
+    Ok((LoadedAdapter { family: card.family.clone(), release, adapter, version: 0, lineage }, card))
+}
+
+/// The run-level identity a card records for the file whose digest is `digest`: the run, epoch and update of its
+/// provenance, the base digest it records beside them. A card that names a run and no base digest is refused: the
+/// identity would not say which base the weights are an update of.
+fn lineage_of(path: &Path, card: &ModelCard, digest: &str) -> Result<Option<PolicyLineage>, String> {
+    let Some(training) = card.training.as_ref() else { return Ok(None) };
+    let Some(run) = training.run.as_ref() else { return Ok(None) };
+    let base_digest = training.base_digest.clone().ok_or_else(|| format!("adapter {}: its card names training run {:?} and no base_digest, so the run-level identity of its weights is incomplete", path.display(), run.run))?;
+    // Every reply the release decodes repeats these: a card is a file, read as hostile input.
+    let plain = |text: &str, max: usize| !text.is_empty() && text.len() <= max && text.chars().all(|c| c.is_ascii_alphanumeric() || "._-:".contains(c));
+    if !plain(&run.run, MAX_RUN_ID_LEN) {
+        return Err(format!("adapter {}: its card's training.run.run is not a run id (1 to {MAX_RUN_ID_LEN} letters, digits, `.`, `_`, `-` and `:`)", path.display()));
+    }
+    if !base_digest.strip_prefix("sha256:").is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit())) {
+        return Err(format!("adapter {}: its card's training.base_digest is not sha256:<64 hex>", path.display()));
+    }
+    Ok(Some(PolicyLineage { run: run.run.clone(), epoch: run.epoch, update: run.update, base_digest, adapter_digest: digest.to_string() }))
 }
 
 /// Refuse an adapter the engines' banks cannot hold: not a LoRA, or (when `expect` is given) of another family than
@@ -478,7 +503,7 @@ impl ManifestFollower {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use brain_testutil::adapters::{file_digest as digest, scratch_dir as tmp, write_adapter, write_base};
+    use brain_testutil::adapters::{file_digest as digest, scratch_dir as tmp, write_adapter, write_base, write_published_adapter};
 
     /// The release a poll produced; any other outcome fails the test.
     fn released(poll: ManifestPoll) -> AdapterRelease {
@@ -519,6 +544,35 @@ mod tests {
         // Same id, different bytes: the digest decides, not the name.
         let err = verify_adapter(&adapter, &ServedBase::new(&other, Some("local/base".to_string()))).err().expect("another base refuses it");
         assert!(err.contains(&digest(&base)) && err.contains(&digest(&other)), "a mismatch names both digests: {err}");
+    }
+
+    /// A version a training run published names its run, epoch, update, base and file from its own card, whether a
+    /// server binds it to its base or serves it unbound (a worker, a restarted server): the identity travels with the
+    /// file, not with the process that first offered it. A card that names a run and no base digest is refused.
+    #[test]
+    fn a_published_adapter_names_its_run_from_its_own_card() {
+        let dir = tmp("lineage");
+        let base = dir.join("base.safetensors");
+        write_base(&base, 1.0);
+        let adapter = dir.join("adapter.safetensors");
+        let run = checkpoint::st::RunLineage { run: "stream-k1".into(), epoch: 2, update: 7 };
+        write_published_adapter(&adapter, "local/base:lab:policy:v1", "local/base", Some(digest(&base)), 0.5, run.clone());
+        let expected = PolicyLineage { run: run.run.clone(), epoch: 2, update: 7, base_digest: digest(&base), adapter_digest: digest(&adapter) };
+        let bound = verify_adapter(&adapter, &ServedBase::new(&base, None)).unwrap();
+        assert_eq!(bound.identity().lineage.as_ref(), Some(&expected));
+        assert_eq!(load_adapter(&adapter).unwrap().identity().lineage, Some(expected), "an unbound read names the same weights");
+        assert_eq!(verify_adapter_among(&adapter, &[ServedBase::new(&base, Some("local/base".into()))]).unwrap().1.identity().lineage.map(|l| l.update), Some(7));
+
+        write_adapter(&adapter, "local/base:lab:plain:v1", "local/base", Some(digest(&base)), 0.5);
+        assert_eq!(load_adapter(&adapter).unwrap().identity().lineage, None, "an adapter no run published names none");
+        write_published_adapter(&adapter, "local/base:lab:policy:v1", "local/base", None, 0.5, run);
+        let refused = load_adapter(&adapter).err().expect("a run without a base digest");
+        assert!(refused.contains("stream-k1") && refused.contains("base_digest"), "{refused}");
+        let hostile = checkpoint::st::RunLineage { run: "k\n<script>".into(), epoch: 1, update: 1 };
+        write_published_adapter(&adapter, "local/base:lab:policy:v1", "local/base", Some(digest(&base)), 0.5, hostile);
+        assert!(load_adapter(&adapter).err().expect("not a run id").contains("training.run.run"));
+        write_published_adapter(&adapter, "local/base:lab:policy:v1", "local/base", Some("sha256:short".into()), 0.5, checkpoint::st::RunLineage { run: "k".into(), epoch: 1, update: 1 });
+        assert!(load_adapter(&adapter).err().expect("not a digest").contains("training.base_digest"));
     }
 
     /// The digest and the factors come from the same bytes: the release a read

@@ -540,7 +540,7 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
             outcome = outcome.set("base_digest", serde_json::json!(digest));
         }
         match &job.identity {
-            Some(identity) => outcome.set("adapter", serde_json::json!({ "id": identity.id, "digest": identity.digest, "version": identity.version })),
+            Some(identity) => outcome.set("adapter", identity.to_json()),
             None => outcome,
         }
     }

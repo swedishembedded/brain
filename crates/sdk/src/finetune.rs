@@ -128,6 +128,8 @@ pub struct ChatFineTune {
     keep_best: bool,
     evaluations_dir: Option<PathBuf>,
     cycle: u64,
+    /// The training run and its epoch every adapter this run writes names ([`ChatFineTune::run_lineage`]).
+    run_lineage: Option<(String, u64)>,
     device: Device,
     /// The caller has scoped this thread to its device ([`ChatFineTune::placed`]).
     placed: bool,
@@ -668,6 +670,7 @@ impl ChatFineTune {
             keep_best: false,
             evaluations_dir: None,
             cycle: 0,
+            run_lineage: None,
             device: Device::default(),
             placed: false,
             bf16_base: false,
@@ -1074,6 +1077,16 @@ impl ChatFineTune {
         self
     }
 
+    /// Name the training run (`run`, a resume key or an id the caller drew for it) and the job of it (`epoch`) every
+    /// adapter this run writes belongs to: each published version's card and the exported adapter's record
+    /// `TrainingProvenance::run` with the optimiser update the weights hold, so whoever serves the file names exactly
+    /// these weights. The run's training state does not depend on it: a run continued under the next epoch resumes the
+    /// same state.
+    pub fn run_lineage(mut self, run: impl Into<String>, epoch: u64) -> Self {
+        self.run_lineage = Some((run.into(), epoch));
+        self
+    }
+
     pub fn device(mut self, device: Device) -> Self {
         self.device = device;
         self
@@ -1476,11 +1489,21 @@ impl ChatFineTune {
         };
         let published_card = self.adapter_id.clone().unwrap_or_else(|| format!("{base_id}:local:chat:latest"));
         let published_dir = out_dir.join(PUBLISHED_DIR);
+        // A published version's card binds it to the base by digest and, for a run that names itself, says which
+        // update of which run it is.
+        let regime = if policy_gradient.is_some() { "policy_gradient_lora" } else { "sft_lora" };
+        let published_provenance = |update: u32| checkpoint::st::TrainingProvenance {
+            hyperparams: serde_json::json!({"rank": rank, "alpha": alpha, "lr": self.lr, "weight_decay": self.weight_decay, "steps_completed": update}),
+            trained_from: parent.clone(),
+            cycle: self.cycle,
+            run: self.run_lineage.as_ref().map(|(run, epoch)| checkpoint::st::RunLineage { run: run.clone(), epoch: *epoch, update }),
+            ..checkpoint::st::TrainingProvenance::on_base(regime, seed, gpu_core::backend_name(), base_digest.clone())
+        };
         let publication = match publish {
             Some(publish) if self.publish_every > 0 => {
                 std::fs::create_dir_all(&published_dir).map_err(|e| Error::Backend(format!("{}: {e}", published_dir.display())))?;
                 let snapshots = model::AdapterSnapshots { dir: &published_dir, card_id: &published_card, base_id: &base_id, family: arch.family, lora: model::adapter::device::LoraCfg::new(rank, alpha, Vec::new()) };
-                Some(model::AdapterPublish { every: self.publish_every, initial: self.publish_initial, snapshots, publish })
+                Some(model::AdapterPublish { every: self.publish_every, initial: self.publish_initial, snapshots, provenance: Some(&published_provenance), publish })
             }
             Some(_) => None,
             None if self.publish_every > 0 => return Err(Error::InvalidRequest("ChatFineTune: publish_every hands adapters to a publisher; run it with run_publishing".to_string())),
@@ -1584,6 +1607,7 @@ impl ChatFineTune {
             trained_from: parent,
             base_digest: Some(base_digest),
             cycle: self.cycle,
+            run: self.run_lineage.as_ref().map(|(run, epoch)| checkpoint::st::RunLineage { run: run.clone(), epoch: *epoch, update: outcome.steps_completed }),
         };
         let dataset_id = match dataset {
             Some(path) => digest(path)?,
