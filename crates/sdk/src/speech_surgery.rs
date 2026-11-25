@@ -32,7 +32,8 @@
 //! scores by them. A plan that trims the text vocabulary keeps every token
 //! the calibration shard holds and its utterance texts and the corpus encode
 //! to ([`modelopt::surgery::bpe`]); the held-out shard's texts and the probe
-//! measure how many texts outside it would tokenise differently, and only
+//! measure how many texts outside it would tokenise differently. The ids the
+//! held-out shard stores are kept too, so a recovery can read it; only
 //! held-out records of kept tokens are measured on. The plan is applied
 //! ([`modelopt::surgery::plan::apply`]; a `greedy` layer removal is first
 //! chosen on the calibration records of the checkpoint as edited so far,
@@ -366,9 +367,12 @@ impl SpeechSurgery {
         }
         let read = |f: &str| std::fs::read_to_string(self.base.join(f)).map_err(|e| backend(format!("{f}: {e}")));
         let files = TokenizerFiles { vocab_json: read("vocab.json")?, merges_txt: read("merges.txt")?, tokenizer_config: serde_json::from_str(&read("tokenizer_config.json")?).map_err(backend)? };
-        // The corpus: every utterance text of the calibration shard (its token ids kept exactly as tokenised) and
-        // the texts given; the probe: the held-out shard's texts and the probe texts given.
-        let mut extra: Vec<usize> = (0..shard.len()).flat_map(|r| shard.record(r).text_ids.iter().map(|&t| t as usize)).collect();
+        // The corpus: every utterance text of the calibration shard and the texts given; kept exactly: the token ids
+        // both shards store (a recovery reads the held-out shard too, and the ids may come from another loader than
+        // the files' encoding); the probe: the held-out shard's texts and the probe texts given.
+        let stored = |s: &qwen3tts::shard::Shard| (0..s.len()).flat_map(|r| s.record(r).text_ids.iter().map(|&t| t as usize)).collect::<Vec<_>>();
+        let mut extra: Vec<usize> = stored(shard);
+        extra.extend(held_out.map(stored).unwrap_or_default());
         // The config's own special tokens stay whatever the corpus holds.
         for key in qwen3tts::surgery::TOKEN_ID_KEYS {
             if let Some(id) = ck.config.get(key).and_then(serde_json::Value::as_u64) {
