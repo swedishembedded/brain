@@ -28,8 +28,13 @@ Hopper systems.
 
 brain finds NVRTC in this order: the library named by `--nvrtc` (the only
 one tried when given), then the toolkit under `CUDA_PATH` (`lib64`, then `lib`),
-then the system loader, trying `libnvrtc.so.13`, `.12`, `.11` and the
-unversioned name.
+then the system loader (`LD_LIBRARY_PATH`, the loader's cache), trying
+`libnvrtc.so.13`, `.12`, `.11` and the unversioned name, then the places a
+toolkit is usually put, newest first within each: a `cuda*` directory (with
+`lib64` or `lib`) under brain's data directory (`~/.local/share/brain`). A machine therefore needs
+no environment setting: one toolkit placed or linked in brain's data directory
+is found by every machine that shares it, such as the nodes of a cluster with
+a shared home. cuBLAS and NCCL are searched the same way.
 
 ### Compile targets
 

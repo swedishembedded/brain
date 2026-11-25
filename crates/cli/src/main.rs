@@ -1742,6 +1742,8 @@ fn main() {
     // same published answer.
     let (data_dir, argv) = parse_data_dir(argv);
     apply_data_dir(data_dir);
+    // A CUDA toolkit linked into brain's data directory is found by every machine that shares it, with no setting.
+    gpu_core::cuda_nvrtc::set_search_roots(brain_modelstore::default_data_root().into_iter().collect());
     // `--autofetch` may be written anywhere; it is handed to the command
     // that fetches (`serve`, or a model's action through `invoke`) as its own
     // flag rather than published process-wide.

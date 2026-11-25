@@ -53,41 +53,86 @@ static LIBRARY: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None)
 pub fn set_library(lib: Option<String>) {
     *LIBRARY.write().unwrap_or_else(std::sync::PoisonError::into_inner) = lib;
 }
+static SEARCH_ROOTS: std::sync::RwLock<Vec<PathBuf>> = std::sync::RwLock::new(Vec::new());
+
+/// Directories whose `cuda*` subdirectories hold a CUDA toolkit to look in when none is named and the loader finds none
+/// (the CLI gives brain's data directory, so one toolkit linked there serves every machine that shares it). Set before a
+/// CUDA device is opened; never read from the environment.
+pub fn set_search_roots(roots: Vec<PathBuf>) {
+    *SEARCH_ROOTS.write().unwrap_or_else(std::sync::PoisonError::into_inner) = roots;
+}
+
 /// The toolkit root whose `lib64`/`lib` hold NVRTC, the same variable the CUDA
 /// toolchain itself uses.
 const ENV_CUDA_PATH: &str = "CUDA_PATH";
 
 /// Every library name to try loading, in order: the explicit override alone if
 /// there is one; otherwise the toolkit root's `lib64` then `lib`, then the bare
-/// SONAMEs for the system loader. A toolkit the user installed without root is
-/// found by its root, not by whatever the loader's cache happens to hold.
-fn candidate_libraries(explicit: Option<&str>, cuda_path: Option<&str>) -> Vec<String> {
+/// SONAMEs for the system loader (`LD_LIBRARY_PATH`, the loader's cache), then the
+/// places a toolkit is found when nobody named one ([`discovered_dirs`]). A toolkit
+/// the user installed without root is found by its root, not by whatever the
+/// loader's cache happens to hold.
+fn candidate_libraries(explicit: Option<&str>, cuda_path: Option<&str>, discovered: &[PathBuf]) -> Vec<String> {
     if let Some(lib) = explicit.filter(|l| !l.is_empty()) {
         return vec![lib.to_string()];
     }
-    let mut out = Vec::new();
-    if let Some(root) = cuda_path.filter(|r| !r.is_empty()) {
-        for dir in ["lib64", "lib"] {
-            out.extend(SONAMES.iter().map(|s| format!("{root}/{dir}/{s}")));
-        }
-    }
-    out.extend(SONAMES.iter().map(|s| s.to_string()));
-    out
+    search(SONAMES, cuda_path, discovered)
 }
 
 /// Every path or SONAME to try for a toolkit library whose SONAMEs are
 /// `sonames`, in the order NVRTC's own search uses (an explicit [`set_library`]
-/// pin is NVRTC-specific and not applied): the toolkit root's `lib64` then
-/// `lib`, then the bare SONAMEs for the system loader.
+/// pin is NVRTC-specific and not applied).
 pub(crate) fn toolkit_library_candidates(sonames: &[&str]) -> Vec<String> {
     let cuda_path = std::env::var(ENV_CUDA_PATH).ok();
+    search(sonames, cuda_path.as_deref(), &discovered_dirs())
+}
+
+fn search(sonames: &[&str], cuda_path: Option<&str>, discovered: &[PathBuf]) -> Vec<String> {
     let mut out = Vec::new();
-    if let Some(root) = cuda_path.as_deref().filter(|r| !r.is_empty()) {
+    if let Some(root) = cuda_path.filter(|r| !r.is_empty()) {
         for dir in ["lib64", "lib"] {
             out.extend(sonames.iter().map(|s| format!("{root}/{dir}/{s}")));
         }
     }
     out.extend(sonames.iter().map(|s| s.to_string()));
+    for dir in discovered {
+        out.extend(sonames.iter().map(|s| dir.join(s).to_string_lossy().into_owned()));
+    }
+    out
+}
+
+/// Where a toolkit's libraries are looked for on a machine where none was named and the loader finds none:
+/// the `cuda*` toolkits under the roots the application gave ([`set_search_roots`]: brain's data directory, so one
+/// toolkit placed or linked there is found on every machine that shares the directory, as the nodes of a cluster with a
+/// shared home do, with no per-node setting). A system install is the loader's to find. Newest toolkit first.
+fn discovered_dirs() -> Vec<PathBuf> {
+    let given = SEARCH_ROOTS.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    discovered_under(&given)
+}
+
+/// [`discovered_dirs`] over given directories, each holding `cuda*` toolkits. Only directories that exist are returned.
+fn discovered_under(given: &[PathBuf]) -> Vec<PathBuf> {
+    fn children(dir: &std::path::Path, keep: impl Fn(&str) -> bool) -> Vec<PathBuf> {
+        let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| keep(&e.file_name().to_string_lossy()))
+            .map(|e| e.path())
+            .collect();
+        found.sort_by(|a, b| b.cmp(a)); // cuda-13.0 before cuda-12.4 before cuda
+        found
+    }
+    let toolkit = |name: &str| name == "cuda" || name.starts_with("cuda-");
+    let mut out = Vec::new();
+    for root in given {
+        for toolkit_dir in children(root, toolkit) {
+            for sub in ["lib64", "lib"] {
+                out.push(toolkit_dir.join(sub));
+            }
+        }
+    }
+    out.retain(|d| d.is_dir());
     out
 }
 
@@ -130,7 +175,7 @@ fn load() -> Result<Nvrtc, String> {
     let mut tried = Vec::new();
     let explicit = LIBRARY.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
     let cuda_path = std::env::var(ENV_CUDA_PATH).ok();
-    for soname in &candidate_libraries(explicit.as_deref(), cuda_path.as_deref()) {
+    for soname in &candidate_libraries(explicit.as_deref(), cuda_path.as_deref(), &discovered_dirs()) {
         // SAFETY: loading a shared object runs its initialisers; NVRTC's are
         // the ordinary CUDA toolkit ones.
         let lib = match unsafe { libloading::Library::new(soname) } {
@@ -174,7 +219,11 @@ fn load() -> Result<Nvrtc, String> {
             Err(e) => tried.push(format!("{soname}: {e}")),
         }
     }
-    Err(format!("no usable NVRTC ({})", tried.join("; ")))
+    Err(format!(
+        "no usable NVRTC ({}); put a CUDA toolkit where brain looks (a directory `cuda*` with `lib64` under brain's data directory), \
+         point CUDA_PATH at one, or name the library with --nvrtc",
+        tried.join("; ")
+    ))
 }
 
 /// # Safety
@@ -560,7 +609,7 @@ mod tests {
     /// candidate in its own right.
     #[test]
     fn every_supported_toolkit_major_is_a_candidate_soname() {
-        let c = candidate_libraries(None, None);
+        let c = candidate_libraries(None, None, &[]);
         for major in ["13", "12", "11"] {
             assert!(c.iter().any(|l| l == &format!("libnvrtc.so.{major}")), "{major}: {c:?}");
         }
@@ -570,18 +619,47 @@ mod tests {
     /// silently getting another would make a toolkit pin meaningless.
     #[test]
     fn an_explicit_override_is_the_only_candidate() {
-        assert_eq!(candidate_libraries(Some("pinned/libnvrtc.so.12"), Some("toolkit")), ["pinned/libnvrtc.so.12"]);
+        assert_eq!(candidate_libraries(Some("pinned/libnvrtc.so.12"), Some("toolkit"), &[PathBuf::from("found")]), ["pinned/libnvrtc.so.12"]);
     }
 
     /// A toolkit root is searched before the system loader, `lib64` before
     /// `lib`, so a user-owned toolkit wins over whatever the loader finds first.
     #[test]
     fn a_toolkit_root_is_searched_before_the_system_loader() {
-        let c = candidate_libraries(None, Some("toolkit"));
+        let c = candidate_libraries(None, Some("toolkit"), &[]);
         let at = |needle: &str| c.iter().position(|l| l == needle).unwrap_or_else(|| panic!("{needle} missing from {c:?}"));
         assert!(at("toolkit/lib64/libnvrtc.so.13") < at("toolkit/lib/libnvrtc.so.13"));
         assert!(at("toolkit/lib/libnvrtc.so") < at("libnvrtc.so.13"));
         assert_eq!(c.last().map(String::as_str), Some("libnvrtc.so"));
+    }
+
+    /// A toolkit nobody named is found where one is usually put, after the loader has had its turn, so a machine's own
+    /// installation wins over a guess and a machine with none still finds the one in brain's data directory.
+    #[test]
+    fn a_toolkit_nobody_named_is_found_in_the_directories_the_application_gave() {
+        let dir = std::env::temp_dir().join(format!("brain-cuda-discovery-{}", std::process::id()));
+        let data = dir.join("data/brain");
+        for d in [
+            data.join("cuda-13.0.2/lib64"),
+            data.join("cuda-12.4/lib64"),
+            data.join("cuda-12.9/lib64"),
+            data.join("cuda-12.9/lib"),
+            data.join("not-cuda/lib64"),
+        ] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let found = discovered_under(&[data.clone()]);
+        let at = |needle: &PathBuf| found.iter().position(|d| d == needle).unwrap_or_else(|| panic!("{needle:?} missing from {found:?}"));
+        assert!(at(&data.join("cuda-13.0.2/lib64")) < at(&data.join("cuda-12.9/lib64")), "the newer toolkit comes first: {found:?}");
+        assert!(at(&data.join("cuda-12.9/lib64")) < at(&data.join("cuda-12.4/lib64")), "{found:?}");
+        assert!(at(&data.join("cuda-12.9/lib64")) < at(&data.join("cuda-12.9/lib")), "lib64 before lib: {found:?}");
+        assert!(!found.iter().any(|d| d.starts_with(data.join("not-cuda"))), "{found:?}");
+        assert!(!found.contains(&data.join("cuda-12.4/lib")), "a directory that does not exist is not searched: {found:?}");
+        let c = candidate_libraries(None, None, &found);
+        let loader = c.iter().position(|l| l == "libnvrtc.so.13").unwrap();
+        let first_found = c.iter().position(|l| l.starts_with(&*data.to_string_lossy())).unwrap();
+        assert!(loader < first_found, "the loader is asked before a guess: {c:?}");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// The flags are part of the contract, not an implementation detail: the
