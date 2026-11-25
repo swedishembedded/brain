@@ -648,7 +648,7 @@ mod tests {
         ] {
             std::fs::create_dir_all(d).unwrap();
         }
-        let found = discovered_under(&[data.clone()]);
+        let found = discovered_under(std::slice::from_ref(&data));
         let at = |needle: &PathBuf| found.iter().position(|d| d == needle).unwrap_or_else(|| panic!("{needle:?} missing from {found:?}"));
         assert!(at(&data.join("cuda-13.0.2/lib64")) < at(&data.join("cuda-12.9/lib64")), "the newer toolkit comes first: {found:?}");
         assert!(at(&data.join("cuda-12.9/lib64")) < at(&data.join("cuda-12.4/lib64")), "{found:?}");
