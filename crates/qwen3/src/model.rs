@@ -391,8 +391,6 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         // The two-stage RMSNorm gain gradient `model::block::rmsnorm_dw_steps` takes over a long batch: one serial
         // pass over every row per channel is most of a large training step otherwise.
         model::ops::extend_kernel_list(&mut v, &[("rmsnorm_dw_part", kernels::RMSNORM_DW_PART), ("rmsnorm_dw_sum", kernels::RMSNORM_DW_SUM)]);
-        // The declared head transform of the chunked loss (`Qwen::set_head_transform`).
-        model::ops::extend_kernel_list(&mut v, &model::head_transform::KERNELS);
         // Rows of another model's hidden state copied into the residual stream (`Qwen::enable_row_injection`).
         model::ops::extend_kernel_list(&mut v, &[("anchor_rows_copy", kernels::ANCHOR_ROWS_COPY)]);
         v
@@ -3443,23 +3441,6 @@ impl Qwen {
 
     fn sparse(&self) -> Result<&SparseTargets, String> {
         self.sparse_targets.as_ref().ok_or_else(|| "qwen3: extra targets need enable_sparse_targets first".to_string())
-    }
-
-    /// Declare the transform between the head's raw logits and the logits the loss reads
-    /// ([`model::head_transform::HeadTransform`]: a soft cap, a valid-vocabulary bound, a per-position head window),
-    /// in the forward, the backward and every readout of the chunked head. Rebuilds the recorded passes; call before
-    /// the first forward. An invalid declaration is an `Err` naming it.
-    pub fn set_head_transform(&mut self, transform: model::head_transform::HeadTransform) -> Result<(), String> {
-        let head = self.head_ce.as_mut().ok_or("qwen3: this build has no chunked LM head to transform (not the head stage, or decode-only)")?;
-        head.set_head_transform(&self.gpu, transform)?;
-        if !self.decode_only {
-            self.fwd_steps = self.forward_steps(self.b, self.t);
-            self.run_tapes.get_mut().clear();
-            if !self.bwd_steps.steps.is_empty() {
-                self.bwd_steps = self.build_backward_steps();
-            }
-        }
-        Ok(())
     }
 
     /// Withdraw every trainable parameter `pred` names from the optimizer (`paramstore::ParamStore::freeze_where`):

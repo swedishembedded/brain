@@ -479,29 +479,6 @@ pub fn check_qwen(seed: u64) -> Report {
     directional_check(&model, 5e-3, 4, seed ^ 0x1234)
 }
 
-/// The per-position head window of the chunked LM head (`model::head_transform::HeadWindow`, set through
-/// `Qwen::set_head_transform`): the tiny Qwen3's head read as 3 stacked heads of 7 columns, each row of a 6-row
-/// sequence restricted to the head its position owns (position 0 carries no target, position `p` reads head `p - 1`),
-/// the shape a multi-codebook predictor trains its per-position heads as one GEMM in. Every parameter's gradient,
-/// the head's included (its masked columns must take none), is checked by directional differences.
-pub fn check_qwen_head_window(seed: u64) -> Report {
-    use model::head_transform::{HeadTransform, HeadWindow};
-    use qwen3::{Qwen, QwenConfig, IGNORE};
-    let (width, heads, period) = (7u32, 3u32, 6u32);
-    let cfg = QwenConfig { vocab: width * heads + 2, tie_embeddings: false, ..QwenConfig::tiny() };
-    let init = qwen3::init_weights(&cfg, seed);
-    let mut model = Qwen::new(cfg, 2, period, &init);
-    let window = HeadWindow { period, offset: 1, width, heads };
-    model.set_head_transform(HeadTransform { window: Some(window), ..HeadTransform::NONE }).expect("the window fits the head");
-    let x: Vec<u32> = (0..12).map(|i| (i * 5 + 1) % 23).collect();
-    let y: Vec<u32> = (0..12u32).map(|i| if i % period == 0 { IGNORE } else { window.columns(i).start + (i * 3 + 1) % width }).collect();
-    model.set_batch(&x, &y);
-    // A step of 1e-3, not the 5e-3 of `check_qwen`: with the loss concentrated on 7-column softmaxes, the central
-    // difference of layer 1's `wk` at 5e-3 is off by a tenth on every backend, and agrees at 1e-3 (truncation error
-    // of the difference, not of the analytic gradient).
-    directional_check(&model, 1e-3, 4, seed ^ 0x51DE)
-}
-
 /// The reward/advantage-weighted CE gradient (`model::Batch::LmWeighted`,
 /// `Qwen::enable_weighted_loss`/`write_weights`) - the seam brain's
 /// continuous-training work (STaR-style rejection sampling, GRPO-lite
@@ -2424,16 +2401,6 @@ mod tests {
             return;
         }
         let report = check_qwen(7);
-        report.print();
-        assert_grad_gate(&report, "model");
-    }
-
-    #[test]
-    fn qwen_head_window_grads_match_finite_differences() {
-        if brain_testutil::gpu_tests_skipped() {
-            return;
-        }
-        let report = check_qwen_head_window(7);
         report.print();
         assert_grad_gate(&report, "model");
     }
