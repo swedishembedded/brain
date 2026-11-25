@@ -270,7 +270,45 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       and ignore a run's `gemm_precision` (`Auto` there trains on the fp32 kernels); implementing `new_with_gemm`
       changes the arithmetic of their default runs on CUDA, so it lands with a step-parity check per model.
 - [ ] End-to-end on Qwen3-4B (one card): serving and the streaming job in one process, rollouts from an orchestrator;
-      profile (nsys) before optimising anything.
+      profile (nsys) before optimising anything. **Partial (lane agrpo-real, 2026-11-25, brain 760c04d3b):** Qwen3-0.6B
+      and Qwen3-4B trained online on a GH200 through an orchestrator's online stage, with versions published, receipts
+      applied and committed, and no group trained twice. A container restart then lost the run directories and the
+      nsys report, and the cards were withdrawn; the figures below were read from them before that. Engine findings:
+      int8 KV cache vs the clipped surrogate (knowledge 588: 8% of tokens clipped at version 1, none with
+      `--kv-cache f32`); the served 4B fell back to the CPU beside a full-size training reservation (589); and the
+      `dropped` and first `published` frames come late (590). One nsys capture of a short 4B run (8 groups of 8,
+      `--kv-cache f32 --weight-format bf16 --ctx 2048`, `max_block 1024`, LoRA rank 16; the card shared with another
+      tenant's busy 63 GB server, so absolute decode speed is not attributable) gave this breakdown of a 175.7 s run:
+      - startup: 27 s to the first scored group (two base loads plus the policy's first publication);
+      - serving: `serve.decode` NVTX ranges 131.0 s wall over 1701 ranges, CUDA-graph time 84.6 s (32319 launches of
+        2.6 ms), `serve.admit_prefill` 5.7 s;
+      - training: one step, a 5.3 s GPU window with 1.5 s of kernels (forward and other 1.23 s, backward 0.23 s,
+        optimiser 0.05 s, split by kernel names);
+      - learner wait: 147.2 s (84% of the wall);
+      - rollouts: 63 finished, 466 tokens generated and 243 trained. One rollout ran away to the 2048-token context
+        three times (about 44 s per attempt, `context_length_exceeded`, retried as an infrastructure failure), and
+        its group was scored at +164 s;
+      - device: this process kept the card busy 89.2 s of the 170.9 s capture (52%, union of kernels, graphs and
+        copies); `nvidia-smi` read about 99% only because the other tenant's server shares the card;
+        `cuStreamSynchronize` accounted for 104 s of host time;
+      - memory: the run added at most 28.8 GB to the card;
+      - device-lease handoffs: not measured, because no NVTX range marks lend and reclaim.
+      Proposals, ranked by measured share of the wall (knowledge-entry form; the orchestrator's ledger holds the run-level
+      ones):
+      1. Runaway rollouts (74% of this run): bound a rollout's reply and treat context exhaustion as truncation.
+         the orchestrator's output bound landed on its lane branch, but its after-measurement was not taken.
+      2. Learner starvation (84%): the run is generation-bound, so training-side work cannot shorten it.
+      3. Startup, 27 s with two copies of the base: share the frozen base (A37-A39).
+      4. NVTX for the lease and for the fit loop's step phases: lend, reclaim, forward, backward and optimiser. The
+         breakdown above had to infer them from kernel names.
+      5. A short step is launch- or sync-bound (28% busy in its window): low priority while the learner waits.
+      Re-profile on an exclusive card before acting on decode or step speed.
+- [ ] **Frames when the facts happen** (knowledge 590): emit `dropped` when `RolloutFeed` drops a stale group while it
+      waits, and emit the initial `published` frame as soon as the run's first version is routable. Both are now
+      emitted from the step callback. Clients work around both today (they count no stale held group, and they poll
+      `/v1/models`).
+- [ ] **Lossy serving under a stream job** (knowledge 588, 589): refuse, or warn loudly about, a stream job whose
+      policy is served over a lossy KV cache or has fallen back to the host; measure fp8 KV against f32 at version 1.
 - [ ] **Support replay for truncated samplers**: the sampler's support per position in the trace, the trainer's
       log-probabilities renormalised over it, so cut samplers can train without bias.
 - [ ] Later, each driven by a profile and recorded as a knowledge entry (bottleneck, baseline, evidence, change,
