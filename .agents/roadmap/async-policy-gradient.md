@@ -249,6 +249,17 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       `the_reported_contract_digest_is_the_digest_of_the_example_set`, `brain` `build::tests`. Open: D-Bus has no
       method for it yet (`Version` stays the version string), and `tests/e2e/api_conformance.bats` does not assert
       it (not run in this lane: e2e suites take a card).
+- [x] **Serving beside a streamed run on one device** (lane agrpo-e2e2, knowledge 584): a workload held its device
+      lane for its whole run, so a stream job whose server serves its policy on the same device waited for ever for
+      records whose requests queued behind it. `capability::lease::DeviceLease` on every workload job (armed by the
+      executor), a serving and a workload lane per device, `Msg::Lend`/`Msg::Reclaim` in the dispatcher (a lent
+      device takes serving; a reclaimed one starts nothing new and its open groups take no late jobs until it is
+      back); `RolloutFeed` lends at every step boundary. Tests: `residency` `it::admission::a_workload_that_lends_*`,
+      `capability` `lease` unit test, `trainjob` `it::stream` (replies from version 1 and 2 while the run goes on).
+      Open: a GPU run (two threads now reach one device, one at a time); other training runs still hold their device
+      between steps (they need not wait on their own server; lending in the fit loop would be the same call).
+- [ ] **Run-level policy identity** (A16): training run, committed update, base and adapter digests beside the serving
+      version, in every reply and every `published` event.
 - [ ] End-to-end on Qwen3-4B (one card): serving and the streaming job in one process, rollouts from an orchestrator;
       profile (nsys) before optimising anything.
 - [ ] **Support replay for truncated samplers**: the sampler's support per position in the trace, the trainer's

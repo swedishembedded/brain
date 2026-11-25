@@ -219,7 +219,7 @@ pub(crate) fn train(env: &JobEnv, request: &Request, inputs: &Inputs<'_>, files:
         ft = ft.continue_from(path);
     }
     let cancel = inv.cancel.clone();
-    let stream = Arc::new(ft.open_rollout_stream(refs.step_tokens, refs.queue_tokens, refs.max_staleness, refs.top_k, move || !cancel.is_cancelled()).map_err(job::trainer_failure)?);
+    let stream = Arc::new(ft.open_rollout_stream(refs.step_tokens, refs.queue_tokens, refs.max_staleness, refs.top_k, move || !cancel.is_cancelled(), inv.lease.clone()).map_err(job::trainer_failure)?);
     let ft = ft.rollout_stream(&stream);
     let published_at_start = bank.identity(&refs.publish_adapter).map_or(0, |identity| identity.version);
     stream.set_version(published_at_start);

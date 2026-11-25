@@ -49,6 +49,15 @@
 //! deadline, so serving is throttled for at most the time it takes one held
 //! device to drain, and never after the workload has left the queue.
 //!
+//! A running workload that waits for something other than device work (a
+//! streaming training run between two steps) lends its device back
+//! ([`capability::lease`]): serving is admitted there meanwhile, on the
+//! device's serving lane, while the workload keeps its own. When it asks for
+//! the device back, nothing new starts there and running serving groups there
+//! take no late jobs, so it has the device again once the serving already
+//! running has finished. Training and serving thus share one device step by
+//! step and never compute on it at once.
+//!
 //! The guarantee: a workload that fits a device is claimed within
 //! `workload_max_wait` plus the longest serving request already running on a
 //! held device. `crates/residency/tests/it/fairness_model.rs` checks it, the

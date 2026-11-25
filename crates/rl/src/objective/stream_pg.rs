@@ -281,6 +281,8 @@ pub struct RolloutFeed {
     state: Mutex<FeedState>,
     wake: Condvar,
     keep_going: Box<dyn Fn() -> bool + Send + Sync>,
+    /// The learner's device, lent to the server between steps (see [`RolloutFeed::new`]).
+    lease: capability::lease::DeviceLease,
 }
 
 /// What a step took from the queue.
@@ -294,10 +296,15 @@ struct Taken {
 
 impl RolloutFeed {
     /// A feed bounded by `settings`; the learner waiting on it stops once `keep_going` says no (a cancelled job).
-    pub fn new(settings: StreamSettings, keep_going: impl Fn() -> bool + Send + Sync + 'static) -> Result<Arc<RolloutFeed>, String> {
+    ///
+    /// Between two steps the learner lends its device through `lease` while it takes the next step's groups: the
+    /// records it waits for are drawn from the policy the same server serves, often on the same device, so a learner
+    /// that kept the device while it waited would wait for ever; and one that has records still gives a request
+    /// waiting for the device its turn (the server lets running serving finish before the device comes back).
+    pub fn new(settings: StreamSettings, keep_going: impl Fn() -> bool + Send + Sync + 'static, lease: capability::lease::DeviceLease) -> Result<Arc<RolloutFeed>, String> {
         settings.validate()?;
         let state = FeedState { queue: VecDeque::new(), queued_tokens: 0, known: HashSet::new(), finished: false, version: 0, events: Vec::new(), dropped: Vec::new(), open: false };
-        Ok(Arc::new(RolloutFeed { settings, state: Mutex::new(state), wake: Condvar::new(), keep_going: Box::new(keep_going) }))
+        Ok(Arc::new(RolloutFeed { settings, state: Mutex::new(state), wake: Condvar::new(), keep_going: Box::new(keep_going), lease }))
     }
 
     pub fn settings(&self) -> &StreamSettings {
@@ -659,7 +666,7 @@ impl<M: Model> Objective<M> for StreamedPolicyGradient {
     }
 
     fn supply(&mut self) -> Supply {
-        let taken = self.feed.take_step();
+        let taken = self.feed.lease.lent(|| self.feed.take_step());
         self.uncommitted.extend(self.feed.take_dropped());
         match taken {
             Ok(taken) => {
@@ -866,7 +873,7 @@ mod tests {
     }
 
     fn feed(step: usize, queue: usize, staleness: Option<u64>) -> Arc<RolloutFeed> {
-        let feed = RolloutFeed::new(StreamSettings { step_tokens: step, queue_tokens: queue, max_staleness: staleness, block: 64, top_k: None }, || true).unwrap();
+        let feed = RolloutFeed::new(StreamSettings { step_tokens: step, queue_tokens: queue, max_staleness: staleness, block: 64, top_k: None }, || true, Default::default()).unwrap();
         assert_eq!(feed.offer(vec![group("early", 1, None)]), Err(FeedRefusal::Starting), "nothing is taken before the learner is ready");
         feed.open();
         feed

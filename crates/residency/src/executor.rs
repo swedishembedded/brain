@@ -13,7 +13,11 @@
 //! / evict via the manager, pinned so it can't be swapped mid-run), and hands the
 //! hot instance to that device's lane. Lanes run concurrently, so models on
 //! different GPUs (or the CPU) execute in parallel; jobs contending for one device
-//! serialize on its lane (the GPU is the bottleneck anyway). Replies and progress go
+//! serialize on it (the GPU is the bottleneck anyway). Each device has two lanes, one
+//! for serving and one for workloads ([`crate::ResidentModel::transient`]), and still
+//! one group computing at a time: a workload that lends its device while it waits
+//! ([`capability::lease`]) lets serving run there on the serving lane, and gets the
+//! device back once that serving has finished. Replies and progress go
 //! back through each job's callbacks - no async runtime dependency here.
 
 use std::collections::{HashMap, HashSet};
@@ -231,6 +235,10 @@ enum Msg {
     /// A lane finished the health probe the dispatcher sent it; the device is
     /// free again (whatever the probe found is already in the registry).
     Probed { device: Device },
+    /// A running workload lends its `devices` while it waits ([`capability::lease`]).
+    Lend { devices: Vec<Device> },
+    /// The workload wants its lent `devices` back; `grant` is answered once nothing else runs on them.
+    Reclaim { devices: Vec<Device>, grant: Sender<()> },
     /// An abandoned instance (see [`drop_elsewhere`]) finished dropping; its
     /// memory is given back.
     Dropped { key: InstanceKey, charges: Vec<(Device, u64)> },
@@ -444,23 +452,29 @@ impl Executor {
         let stats = Arc::new(Mutex::new(Stats::default()));
         let (tx, rx) = channel::<Msg>();
 
-        // One lane per device; each returns completions to the dispatcher via `tx`.
+        // Two lanes per device, one for serving and one for workloads; each returns completions to the dispatcher via
+        // `tx`. A workload runs on a thread of its own so that the device it lends while it waits
+        // ([`capability::lease`]) can serve on the serving lane meanwhile; `busy` still lets one group compute on a
+        // device at a time.
         let mut lanes: HashMap<Device, Sender<LaneMsg>> = HashMap::new();
+        let mut workload_lanes: HashMap<Device, Sender<LaneMsg>> = HashMap::new();
         let mut join_handles = Vec::new();
         for d in devices {
-            let (ltx, lrx) = channel::<LaneMsg>();
-            let done = tx.clone();
-            let lane_supervision = supervision.clone();
-            let h = std::thread::Builder::new()
-                .name(format!("brain-lane-{d:?}"))
-                .spawn(move || lane_loop(lrx, done, lane_supervision))
-                .expect("spawn lane");
-            join_handles.push(h);
-            lanes.insert(d, ltx);
+            for (name, map) in [("lane", &mut lanes), ("workload-lane", &mut workload_lanes)] {
+                let (ltx, lrx) = channel::<LaneMsg>();
+                let done = tx.clone();
+                let lane_supervision = supervision.clone();
+                let h = std::thread::Builder::new()
+                    .name(format!("brain-{name}-{d:?}"))
+                    .spawn(move || lane_loop(lrx, done, lane_supervision))
+                    .expect("spawn lane");
+                join_handles.push(h);
+                map.insert(d, ltx);
+            }
         }
 
         let manifests = Arc::new(RwLock::new(Arc::new(manifests)));
-        let dispatcher = Dispatcher::new(mgr, policy, lanes, tx.clone(), stats.clone(), supervision.map(|s| s.health), manifests.clone());
+        let dispatcher = Dispatcher::new(mgr, policy, Lanes { serving: lanes, workloads: workload_lanes }, tx.clone(), stats.clone(), supervision.map(|s| s.health), manifests.clone());
         let h = std::thread::Builder::new()
             .name("brain-dispatcher".into())
             .spawn(move || dispatch_loop(rx, dispatcher, capacity))
@@ -802,13 +816,56 @@ pub type CapacityProbe = Arc<dyn Fn() -> Vec<(Device, u64)> + Send + Sync>;
 /// true for causes originating outside this process.
 const IDLE_TICK: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Each device's two lane threads ([`Executor::start_supervised`]).
+struct Lanes {
+    serving: HashMap<Device, Sender<LaneMsg>>,
+    workloads: HashMap<Device, Sender<LaneMsg>>,
+}
+
+/// A workload's request for its lent devices back: `grant` is answered once none of them runs anything.
+struct Reclaim {
+    devices: Vec<Device>,
+    grant: Sender<()>,
+}
+
+/// The [`capability::lease::Lender`] of a workload's job: lending and reclaiming are messages to the dispatcher,
+/// which owns which device runs what.
+struct LaneLender {
+    dispatcher: Mutex<Sender<Msg>>,
+    devices: Vec<Device>,
+}
+
+impl capability::lease::Lender for LaneLender {
+    fn lend(&self) {
+        let _ = self.dispatcher.lock().unwrap_or_else(|e| e.into_inner()).send(Msg::Lend { devices: self.devices.clone() });
+    }
+
+    fn reclaim(&self) {
+        let (grant, granted) = channel();
+        let sent = self.dispatcher.lock().unwrap_or_else(|e| e.into_inner()).send(Msg::Reclaim { devices: self.devices.clone(), grant });
+        // A dispatcher that has gone (the executor shut down) grants nothing; the job ends with the server.
+        if sent.is_ok() {
+            let _ = granted.recv();
+        }
+    }
+}
+
 /// What the dispatcher thread owns: the residency manager, the lanes, and the
 /// scheduling state every message and every round acts on. Nothing else
 /// touches it, so none of it is locked (except `stats`, which front ends read).
 struct Dispatcher {
     mgr: ResidencyManager,
     policy: Policy,
+    /// The serving lane of each device (probes run there too).
     lanes: HashMap<Device, Sender<LaneMsg>>,
+    /// The workload lane of each device: a workload's group runs there, so its device can serve while it is lent.
+    workload_lanes: HashMap<Device, Sender<LaneMsg>>,
+    /// Devices a running workload lent while it waits ([`capability::lease`]): not `busy`, so serving may run there;
+    /// no other workload may, its lane is the lender's.
+    lent: HashSet<Device>,
+    /// Workloads asking for their lent devices back, granted once nothing runs on them; until then nothing new
+    /// starts there and running serving groups there take no late jobs.
+    reclaims: Vec<Reclaim>,
     /// The dispatcher's own inbox, for the threads that drop abandoned instances.
     done: Sender<Msg>,
     stats: Arc<Mutex<Stats>>,
@@ -836,12 +893,15 @@ struct Dispatcher {
 }
 
 impl Dispatcher {
-    fn new(mgr: ResidencyManager, policy: Policy, lanes: HashMap<Device, Sender<LaneMsg>>, done: Sender<Msg>, stats: Arc<Mutex<Stats>>, health: Option<Arc<Health<Device>>>, manifests: Arc<RwLock<Arc<Vec<Manifest>>>>) -> Dispatcher {
+    fn new(mgr: ResidencyManager, policy: Policy, lanes: Lanes, done: Sender<Msg>, stats: Arc<Mutex<Stats>>, health: Option<Arc<Health<Device>>>, manifests: Arc<RwLock<Arc<Vec<Manifest>>>>) -> Dispatcher {
         Dispatcher {
             manifests,
             mgr,
             policy,
-            lanes,
+            lanes: lanes.serving,
+            workload_lanes: lanes.workloads,
+            lent: HashSet::new(),
+            reclaims: Vec::new(),
             done,
             stats,
             health,
@@ -1017,7 +1077,11 @@ fn dispatch_loop(rx: Receiver<Msg>, mut d: Dispatcher, capacity: Option<Capacity
         if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| d.enforce_contract(Instant::now()))) {
             eprintln!("[residency] dispatcher: panic enforcing the admission contract: {} -- continuing", panic_message(p.as_ref()));
         }
-        refill_open_groups(&mut d.queue, &d.open_groups, &d.running, &mut d.running_jobs, &d.stats, &d.policy.admission, &d.holds);
+        if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| d.grant_reclaims())) {
+            eprintln!("[residency] dispatcher: panic granting a lent device back: {} -- continuing", panic_message(p.as_ref()));
+        }
+        let reclaiming = d.reclaiming();
+        refill_open_groups(&mut d.queue, &d.open_groups, &d.running, &mut d.running_jobs, &d.stats, &d.policy.admission, &d.holds, &reclaiming);
         if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| d.assign())) {
             eprintln!("[residency] dispatcher: panic during assign: {} -- continuing", panic_message(p.as_ref()));
         }
@@ -1062,7 +1126,7 @@ fn dispatch_loop(rx: Receiver<Msg>, mut d: Dispatcher, capacity: Option<Capacity
 impl Dispatcher {
     /// Apply one message to the dispatcher's state.
     fn on_msg(&mut self, msg: Msg) {
-        let Dispatcher { queue, mgr, policy, running, busy, stats, running_jobs, open_groups, replica_routes, next_id, done, .. } = self;
+        let Dispatcher { queue, mgr, policy, running, busy, stats, running_jobs, open_groups, replica_routes, next_id, done, lent, reclaims, .. } = self;
         match msg {
             Msg::Submit(mut job) => match mgr.instance_key_for(&job.model, &job.action, &job.inv) {
                 Some(key) => {
@@ -1226,6 +1290,14 @@ impl Dispatcher {
             Msg::Probed { device } => {
                 busy.remove(&device);
             }
+            Msg::Lend { devices } => {
+                for device in devices {
+                    if busy.remove(&device) {
+                        lent.insert(device);
+                    }
+                }
+            }
+            Msg::Reclaim { devices, grant } => reclaims.push(Reclaim { devices, grant }),
             Msg::Dropped { key, charges } => {
                 mgr.release_abandoned(&key, &charges);
             }
@@ -1343,9 +1415,32 @@ fn note_unservable(stats: &Arc<Mutex<Stats>>, key: &InstanceKey, reason: Option<
 }
 
 impl Dispatcher {
+    /// Give each workload asking for its lent devices back the ones nothing runs on any more: they are busy again,
+    /// its own. Runs before [`Self::assign`], so a device a reclaim waits for goes to the workload, not to new work.
+    fn grant_reclaims(&mut self) {
+        let Dispatcher { busy, lent, reclaims, .. } = self;
+        reclaims.retain(|reclaim| {
+            if reclaim.devices.iter().any(|d| busy.contains(d)) {
+                return true;
+            }
+            for &d in &reclaim.devices {
+                lent.remove(&d);
+                busy.insert(d);
+            }
+            let _ = reclaim.grant.send(());
+            false
+        });
+    }
+
+    /// The devices a workload asks back and has not got yet.
+    fn reclaiming(&self) -> HashSet<Device> {
+        self.reclaims.iter().flat_map(|r| r.devices.iter().copied()).collect()
+    }
+
     /// Assign as many runnable groups as there are free device lanes.
     fn assign(&mut self) {
-        let Dispatcher { queue, mgr, policy, lanes, done, running, busy, stats, running_jobs, open_groups, health: supervised, holds, manifests, .. } = self;
+        let reclaiming = self.reclaiming();
+        let Dispatcher { queue, mgr, policy, lanes, workload_lanes, lent, done, running, busy, stats, running_jobs, open_groups, health: supervised, holds, manifests, .. } = self;
         let health = supervised.as_deref();
         let contract = policy.admission;
         // Quarantined devices are excluded exactly like busy ones, so a group is
@@ -1372,18 +1467,26 @@ impl Dispatcher {
             // Groups whose key is not already running AND that can be placed on some
             // non-busy device (the scheduler policy then picks among them).
             let now = Instant::now();
-            let exclude: HashSet<Device> = busy.union(&quarantined).copied().collect();
+            // A device a workload asks back takes nothing new.
+            let exclude: HashSet<Device> = busy.iter().chain(&quarantined).chain(&reclaiming).copied().collect();
             let rows = group_rows(queue, now, running);
             // The contract's word on each group: where it may be claimed (a
             // serving group avoids the devices held for a workload), or not at
             // all this round (a deadline that passed since the round began is
             // answered at the next one, which is due at once).
+            // A lent device runs serving only: its workload lane is the lender's.
             let excludes: Vec<Option<HashSet<Device>>> = rows
                 .iter()
-                .map(|r| match contract.decide(&r.oldest, now, holds) {
-                    Decision::Admit => Some(exclude.clone()),
-                    Decision::Elsewhere { avoid } => Some(exclude.iter().copied().chain(avoid).collect()),
-                    Decision::Shrink | Decision::Refuse(_) => None,
+                .map(|r| {
+                    let exclude: HashSet<Device> = match mgr.is_transient(&r.model) {
+                        true => exclude.iter().chain(lent.iter()).copied().collect(),
+                        false => exclude.clone(),
+                    };
+                    match contract.decide(&r.oldest, now, holds) {
+                        Decision::Admit => Some(exclude),
+                        Decision::Elsewhere { avoid } => Some(exclude.into_iter().chain(avoid).collect()),
+                        Decision::Shrink | Decision::Refuse(_) => None,
+                    }
                 })
                 .collect();
             // Multi-device groups need `placeable_multi` (checks EVERY named device),
@@ -1505,7 +1608,9 @@ impl Dispatcher {
             // name budgeted devices, and `Executor::start` spawns one lane per
             // budgeted device) - but a missing lane must fail this group's jobs
             // cleanly, never panic the one thread every model depends on.
-            if !lanes.contains_key(&home) {
+            let workload = mgr.is_transient(&model);
+            let lane = if workload { &*workload_lanes } else { &*lanes };
+            if !lane.contains_key(&home) {
                 match outcome {
                     // Promote reuses the existing (Warm) instance, same as Hot --
                     // just unpin it, don't unwind it out of existence.
@@ -1557,7 +1662,12 @@ impl Dispatcher {
             // The group is now CLAIMED onto a lane - work is about to start. Fire each
             // job's admission signal exactly once (an HTTP layer gates streaming on it).
             // A workload that held devices holds its slot now: the hold ends.
+            // A workload's jobs may lend the group's devices while they wait.
+            let lender: Option<Arc<dyn capability::lease::Lender>> = workload.then(|| Arc::new(LaneLender { dispatcher: Mutex::new(done.clone()), devices: group_devices.clone() }) as Arc<dyn capability::lease::Lender>);
             for j in jobs.iter_mut() {
+                if let Some(lender) = &lender {
+                    j.inv.lease = capability::lease::DeviceLease::armed(Arc::clone(lender));
+                }
                 if holds.release(j.id) {
                     note_hold(&HoldChange::Released { job: j.id }, &[]);
                 }
@@ -1604,7 +1714,7 @@ impl Dispatcher {
                 open_groups.insert(ckey.clone(), OpenGroup { action: action.clone(), inbox: inbox.clone(), devices: group_devices });
             }
             // Hand to the home lane (which builds the instance first when cold).
-            let _ = lanes[&home].send(LaneMsg::Run(RunReq { target, action, jobs, key: ckey, inbox }));
+            let _ = lane[&home].send(LaneMsg::Run(RunReq { target, action, jobs, key: ckey, inbox }));
         }
     }
 }
@@ -1742,13 +1852,18 @@ fn shed_cancelled(queue: &mut Vec<Pending>, stats: &Arc<Mutex<Stats>>) {
     }
 }
 
-fn refill_open_groups(queue: &mut Vec<Pending>, open_groups: &HashMap<InstanceKey, OpenGroup>, running: &HashSet<InstanceKey>, running_jobs: &mut Vec<RunningJob>, stats: &Arc<Mutex<Stats>>, contract: &crate::contract::Contract, holds: &Holds) {
+#[allow(clippy::too_many_arguments)]
+fn refill_open_groups(queue: &mut Vec<Pending>, open_groups: &HashMap<InstanceKey, OpenGroup>, running: &HashSet<InstanceKey>, running_jobs: &mut Vec<RunningJob>, stats: &Arc<Mutex<Stats>>, contract: &crate::contract::Contract, holds: &Holds, reclaiming: &HashSet<Device>) {
     for (key, group) in open_groups {
         if !queue.iter().any(|p| &p.key == key && p.action == group.action) {
             continue;
         }
         if contract.late_joins(&group.devices, holds) == Decision::Shrink {
             crate::log::debug(&format!("group {key} takes no late job: its device is held for a workload"));
+            continue;
+        }
+        if group.devices.iter().any(|d| reclaiming.contains(d)) {
+            crate::log::debug(&format!("group {key} takes no late job: the workload that lent its device wants it back"));
             continue;
         }
         if let Some(other) = queue.iter().find(|p| &p.key != key && !running.contains(&p.key)) {

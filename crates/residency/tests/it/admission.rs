@@ -315,3 +315,107 @@ fn a_workload_gets_the_card_under_continuous_serving_traffic() {
     }
     exec.shutdown();
 }
+
+/// A workload that lends its device while it waits ([`capability::lease`]), as a streaming training run does between
+/// steps.
+struct Lending {
+    gate: Arc<Mutex<Receiver<()>>>,
+    log: Arc<Mutex<Vec<&'static str>>>,
+}
+
+struct LendingInst {
+    gate: Arc<Mutex<Receiver<()>>>,
+    log: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl ResidentModel for Lending {
+    fn manifest(&self) -> Manifest {
+        Manifest::new("learner", "lends its device while it waits", vec![ActionSpec::new("run", "run")])
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new("learner", "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::new(0, MB)
+    }
+    fn transient(&self) -> bool {
+        true
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(LendingInst { gate: self.gate.clone(), log: self.log.clone() }))
+    }
+}
+
+impl Instance for LendingInst {
+    fn run(&mut self, _a: &str, inv: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+        assert!(inv.lease.is_armed(), "a workload's job carries its device lease");
+        self.log.lock().unwrap().push("learner lends");
+        inv.lease.lent(|| {
+            let _ = self.gate.lock().unwrap().recv_timeout(Duration::from_secs(30));
+            self.log.lock().unwrap().push("learner asks back");
+        });
+        self.log.lock().unwrap().push("learner has it back");
+        Ok(Outcome::new())
+    }
+}
+
+/// A serving model whose run waits for the test, then logs that it ended.
+struct Serving {
+    gate: Arc<Mutex<Receiver<()>>>,
+    log: Arc<Mutex<Vec<&'static str>>>,
+}
+
+impl ResidentModel for Serving {
+    fn manifest(&self) -> Manifest {
+        Manifest::new("server", "serves", vec![ActionSpec::new("run", "run")])
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new("server", "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::new(0, MB)
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(Serving { gate: self.gate.clone(), log: self.log.clone() }))
+    }
+}
+
+impl Instance for Serving {
+    fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+        let _ = self.gate.lock().unwrap().recv_timeout(Duration::from_secs(30));
+        self.log.lock().unwrap().push("served");
+        Ok(Outcome::new())
+    }
+}
+
+/// On a server with one device, a workload that lends its device while it waits lets serving run on it meanwhile,
+/// and takes it back only once that serving has finished: training and serving share the device step by step, and
+/// never compute on it at once.
+#[test]
+fn a_workload_that_lends_its_device_while_it_waits_lets_serving_run_and_takes_it_back_after() {
+    let log: Arc<Mutex<Vec<&'static str>>> = Arc::default();
+    let (release_learner, learner_gate) = channel();
+    let (release_server, server_gate) = channel();
+    let models: Vec<Arc<dyn ResidentModel>> = vec![
+        Arc::new(Lending { gate: Arc::new(Mutex::new(learner_gate)), log: log.clone() }),
+        Arc::new(Serving { gate: Arc::new(Mutex::new(server_gate)), log: log.clone() }),
+    ];
+    let exec = Executor::start(models, on_cpu(), Policy::default());
+    let learner = submit(&exec, Job::new("learner", "run", Invocation::new()));
+    wait_running(&exec, "learner");
+
+    // While the learner waits, a request is served on its device.
+    release_server.send(()).unwrap();
+    let served = submit(&exec, Job::new("server", "run", Invocation::new()));
+    served.recv_timeout(Duration::from_secs(10)).expect("a request is served while the workload waits").unwrap();
+
+    // A request still running when the learner asks for its device back keeps it until it ends.
+    let serving = submit(&exec, Job::new("server", "run", Invocation::new()));
+    wait_running(&exec, "server");
+    release_learner.send(()).unwrap();
+    assert!(learner.recv_timeout(Duration::from_millis(500)).is_err(), "the learner computes only once serving has left its device");
+    release_server.send(()).unwrap();
+    serving.recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
+    learner.recv_timeout(Duration::from_secs(10)).expect("the learner gets its device back").unwrap();
+    assert_eq!(*log.lock().unwrap(), ["learner lends", "served", "learner asks back", "served", "learner has it back"]);
+}

@@ -22,6 +22,8 @@ qwen3 = ["dep:brain-qwen3"]
 
 [dependencies]
 brain-model.workspace = true
+# `capability::lease`: a streamed run lends its device to serving while it waits between steps.
+brain-capability.workspace = true
 # `rl::env` and `rl::gate` ARE `promote::env`/`promote::gate` - re-exported
 # from lib.rs, never copied. They moved there so a model crate (layer 4) can
 # gate a candidate adapter without the cycle `brain-qwen3 -> brain-rl ->

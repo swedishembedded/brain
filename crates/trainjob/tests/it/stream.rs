@@ -126,6 +126,14 @@ async fn served_version(app: &Router, at_least: u64) -> u64 {
     }
 }
 
+/// The policy version that answers a chat request for the published adapter.
+async fn reply_version(app: &Router) -> u64 {
+    let body = json!({"model": ADAPTER, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 2});
+    let (status, reply) = call(app, Method::POST, "/v1/chat/completions", Some(("application/json", body.to_string().into_bytes()))).await;
+    assert_eq!(status, StatusCode::OK, "{reply}");
+    reply["brain"]["policy_version"].as_u64().unwrap_or_else(|| panic!("the reply names its policy version: {reply}"))
+}
+
 fn of_type<'a>(frames: &'a [Value], kind: &str) -> Vec<&'a Value> {
     frames.iter().filter(|f| f["type"] == kind).collect()
 }
@@ -142,14 +150,16 @@ async fn a_stream_job_trains_groups_as_they_arrive_and_serves_each_version_it_pu
     let tokens = (sizes[0] + sizes[1]) as u64;
     let id = create(&app, stream_job(json!({"publish_adapter": ADAPTER, "publish_every": 1, "max_staleness": 0, "step_tokens": tokens, "queue_tokens": tokens}), json!({}))).await;
 
-    // Before any group, the policy the run starts from is served as version 1: the first rollouts are drawn from it.
-    // A group is a step; its step publishes version 2, which the server then lists. (A request for it would wait for
-    // the rig's one CPU lane, which the run holds; a server gives a run a card of its own.)
+    // Before any group, the policy the run starts from is served as version 1: the first rollouts are drawn from it,
+    // on the rig's one CPU device, which the run lends while it waits for records. A group is a step; its step
+    // publishes version 2, which the server then lists and answers from.
     assert_eq!(served_version(&app, 1).await, 1, "the starting policy is served before any input");
+    assert_eq!(reply_version(&app).await, 1, "a request is answered while the run waits on the same device");
     let (status, answer) = post(&app, &id, "", group(sizes, "g1", 1)).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     assert_eq!((answer["accepted"].clone(), answer["duplicates"].clone(), answer["epoch"].clone()), (json!(["g1"]), json!([]), json!(1)));
     assert_eq!(served_version(&app, 2).await, 2, "the first trained version is served");
+    assert_eq!(reply_version(&app).await, 2, "a request after the step is answered by the version it published");
     // A group already taken is a duplicate, idempotently; a group drawn from the current version trains and publishes
     // version 3; one drawn from version 0 is behind the bound and is dropped, never trained.
     let (status, again) = post(&app, &id, "", group(sizes, "g1", 1)).await;
@@ -223,7 +233,7 @@ fn a_full_queue_names_its_allowance_and_never_refuses_below_a_step() {
     let base = rig.dir.join("models").join("local").join("toy");
     let config = brain::PolicyGradientConfig { loss: brain::PgLoss { loss_agg: brain::LossAgg::TokenSum, ..brain::PolicyGradientConfig::default().loss }, ..Default::default() };
     // No learner takes from this stream: what is queued stays queued.
-    let stream = brain::ChatFineTune::from_pretrained(base.to_str().unwrap()).policy_gradient(config).max_block(128).open_rollout_stream(2 * tokens, 2 * tokens, None, None, || true).expect("a stream");
+    let stream = brain::ChatFineTune::from_pretrained(base.to_str().unwrap()).policy_gradient(config).max_block(128).open_rollout_stream(2 * tokens, 2 * tokens, None, None, || true, Default::default()).expect("a stream");
     let answer = |key: &str| trainjob::stream::answer(&stream, 3, "records", &json!({}), &group(sizes, key, 0));
     assert_eq!(answer("a").unwrap()["queued_tokens"], json!(tokens));
     // Below one step the offer is taken even though it passes the queue's bound.

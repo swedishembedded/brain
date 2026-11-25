@@ -41,6 +41,7 @@ pub mod failure;
 pub mod scratch;
 pub mod hot;
 pub mod inbox;
+pub mod lease;
 pub mod pixels;
 pub mod presentation;
 pub mod speech;
@@ -536,7 +537,7 @@ impl ActionSpec {
                 return Err(violation(Violation::UnknownInput, k, format!("unknown input '{k}' for action '{action}'")));
             }
         }
-        Ok(Invocation { params: Value::Object(params), blobs: inv.blobs, cancel: inv.cancel, scope: inv.scope, inbox: inv.inbox })
+        Ok(Invocation { params: Value::Object(params), blobs: inv.blobs, cancel: inv.cancel, scope: inv.scope, inbox: inv.inbox, lease: inv.lease })
     }
 }
 
@@ -819,16 +820,19 @@ pub struct Invocation {
     pub scope: String,
     /// Input the client sends the job while it runs ([`inbox`]); unarmed (the default) when the surface delivers none.
     pub inbox: inbox::Inbox,
+    /// The job's device, lent back to the server while the job waits ([`lease`]); unarmed (the default) when the
+    /// surface that runs it shares no device.
+    pub lease: lease::DeviceLease,
 }
 
 impl Invocation {
     pub fn new() -> Invocation {
-        Invocation { params: json!({}), blobs: BTreeMap::new(), cancel: CancelToken::default(), scope: String::new(), inbox: inbox::Inbox::default() }
+        Invocation { params: json!({}), blobs: BTreeMap::new(), cancel: CancelToken::default(), scope: String::new(), inbox: inbox::Inbox::default(), lease: lease::DeviceLease::default() }
     }
     /// This invocation's parameters and cancellation, without its blobs: what a caller that only needs to
     /// remember the request (not read its payload again) keeps. A page of pixels is tens of megabytes.
     pub fn without_blobs(&self) -> Invocation {
-        Invocation { params: self.params.clone(), blobs: BTreeMap::new(), cancel: self.cancel.clone(), scope: self.scope.clone(), inbox: self.inbox.clone() }
+        Invocation { params: self.params.clone(), blobs: BTreeMap::new(), cancel: self.cancel.clone(), scope: self.scope.clone(), inbox: self.inbox.clone(), lease: self.lease.clone() }
     }
     pub fn set(mut self, key: &str, v: Value) -> Invocation {
         self.params.as_object_mut().expect("params must be an object").insert(key.into(), v);

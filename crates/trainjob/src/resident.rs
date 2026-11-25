@@ -28,8 +28,11 @@
 //!   past the surface's admission deadline it is refused (HTTP 429, a D-Bus
 //!   `error` frame) instead of queueing without bound or taking the memory
 //!   serving is using - the caller retries;
-//! * one run holds one device at a time (the executor's device lane), and a
-//!   run needing more than the largest card holds is refused at the door;
+//! * one run holds one device at a time (on the device's workload lane), and a
+//!   run needing more than the largest card holds is refused at the door; a
+//!   streamed run lends its device to serving between steps
+//!   ([`capability::lease`]), so the policy it publishes is served on the same
+//!   device while it waits for the records drawn from it;
 //! * a `train` or `full_train` run asking for `cards` N > 1 holds N cards at once, each
 //!   charged one rank's footprint, sharded as the run is ([`residency::ResidentModel::cards`]): the
 //!   cards with room, else ones that evicting idle residents frees, all of

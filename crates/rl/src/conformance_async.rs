@@ -118,7 +118,7 @@ fn streamed<M: Model>(subject: &Subject<M>, seed: u64, state: &Path, stop_after:
     let (m, _) = build(subject, Some(RANK), BATCH, seed);
     let vocab = ModelConfig::vocab(m.config());
     let settings = StreamSettings { step_tokens: GROUP_TOKENS, queue_tokens: GROUPS * GROUP_TOKENS, max_staleness: None, block: SEQ as usize, top_k: None };
-    let feed = RolloutFeed::new(settings, || true)?;
+    let feed = RolloutFeed::new(settings, || true, Default::default())?;
     if !state.exists() {
         feed.open();
     }
