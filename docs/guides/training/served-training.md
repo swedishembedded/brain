@@ -616,7 +616,7 @@ every job: the run writes its state and stops.
 `queue_tokens`, `time_in_queue_seconds` (the step's groups' mean) and `dropped_stale`, the job reports:
 
 ```
-{"type": "stream", "run": "my-run", "epoch": 2, "publish_adapter": "...", "version": 5, "step_tokens": 16384, "queue_tokens": 65536, "max_staleness": 2}
+{"type": "stream", "run": "my-run", "epoch": 2, "tokenizer_digest": "sha256:...", "publish_adapter": "...", "version": 5, "step_tokens": 16384, "queue_tokens": 65536, "max_staleness": 2}
 {"type": "applied", "step": 7, "groups": ["g1", "g2"]}                 (+ "skipped": why, when a guard skipped the update)
 {"type": "published", "version": 6, "digest": "sha256:...", "step": 7,
  "lineage": {"run": "my-run", "epoch": 2, "update": 7, "base_digest": "sha256:...", "adapter_digest": "sha256:..."}}

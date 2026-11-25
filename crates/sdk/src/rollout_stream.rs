@@ -139,6 +139,12 @@ impl RolloutStream {
     pub fn settings(&self) -> StreamSettings {
         *self.feed.settings()
     }
+
+    /// `sha256:<hex>` of the base's tokenizer file, which every record's `tokenizer_digest` must name; `None` when
+    /// the base's tokenizer has no file to digest.
+    pub fn tokenizer_digest(&self) -> Option<&str> {
+        self.tok.digest()
+    }
 }
 
 impl ChatFineTune {

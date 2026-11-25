@@ -233,7 +233,9 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       `a_published_adapter_names_its_run_from_its_own_card` (bound, unbound and among bases; refusals),
       `a_request_keeps_the_lineage_of_the_version_it_was_admitted_under`, `residency`
       `an_identity_reads_back_from_its_json_and_a_foreign_field_is_refused`, `apiserve`
-      `a_chat_reply_returns_a_policy_trace_only_when_asked` and the adapter card/reply tests. API audit
+      `a_chat_reply_returns_a_policy_trace_only_when_asked` and the adapter card/reply tests. The `stream` frame also names the base's
+      `tokenizer_digest` (`RolloutStream::tokenizer_digest`), so an orchestrator records the model and tokenizer a run
+      trained without a probe. API audit
       (api-security.md): no new route or param; the new fields are read-only facts of a release (no path, bounded,
       validated at the card), behind the key like the rest of the reply; the run id exposes a `resume_key` to callers
       that may use the adapter, which opens nothing (a key resumes only the identical request, `runs::open`).

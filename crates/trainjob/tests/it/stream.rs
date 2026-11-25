@@ -193,6 +193,7 @@ async fn a_stream_job_trains_groups_as_they_arrive_and_serves_each_version_it_pu
     // Each version carries the run-level identity of its weights: this run (an id drawn for a run without a resume
     // key, named in its stream frame), its epoch, the update it holds, the base it trained on and its own file.
     let run = started[0]["run"].as_str().expect("the stream frame names the run");
+    assert!(started[0]["tokenizer_digest"].as_str().is_some_and(|d| d.starts_with("sha256:")), "the frame names the base's tokenizer: {}", started[0]);
     assert!(run.starts_with("job:"), "{run}");
     for frame in of_type(&frames, "published") {
         let lineage = &frame["lineage"];

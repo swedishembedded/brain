@@ -23,7 +23,7 @@
 //! train, and `published {version, digest, step, lineage}` once a version is routable. `lineage` is the version's
 //! run-level identity, `{run, epoch, update, base_digest, adapter_digest}`, which its card records and every reply it
 //! decodes names (`brain.adapter.lineage`): the run is the resume key (or `job:<hex>` drawn for a run without one,
-//! named in the `stream` frame), the update the step. The consumed keys ride in the training
+//! named in the `stream` frame, beside the base's `tokenizer_digest`), the update the step. The consumed keys ride in the training
 //! state, so a job that resumes the run (`resume_key`) answers every committed key as a duplicate; a client re-sends
 //! every group it has no `committed` receipt for.
 //!
@@ -223,7 +223,7 @@ pub(crate) fn train(env: &JobEnv, request: &Request, inputs: &Inputs<'_>, files:
     let ft = ft.rollout_stream(&stream);
     let published_at_start = bank.identity(&refs.publish_adapter).map_or(0, |identity| identity.version);
     stream.set_version(published_at_start);
-    progress(Progress::event(0, steps, json!({"type": "stream", "run": run, "epoch": epoch, "publish_adapter": refs.publish_adapter, "version": published_at_start, "step_tokens": refs.step_tokens, "queue_tokens": refs.queue_tokens, "max_staleness": refs.max_staleness})));
+    progress(Progress::event(0, steps, json!({"type": "stream", "run": run, "epoch": epoch, "tokenizer_digest": stream.tokenizer_digest(), "publish_adapter": refs.publish_adapter, "version": published_at_start, "step_tokens": refs.step_tokens, "queue_tokens": refs.queue_tokens, "max_staleness": refs.max_staleness})));
 
     let done = Arc::new(AtomicBool::new(false));
     let listener = {
