@@ -92,7 +92,7 @@ impl Engine {
         }
         let rows = self.max_batch.max(self.max_prefill);
         self.bank = Some(AdapterBank::new(&self.gpu, &self.cfg.lora_sites(), cfg, rows)?);
-        self.tape_cache.retain(|&(_, lora), _| !lora);
+        self.tape_cache.retain(|&(_, lora, _), _| !lora);
         self.warn_if_calib_with_adapters();
         Ok(())
     }

@@ -1196,8 +1196,7 @@ pub struct Engine {
     /// schedule and history and the drawer are sized for it.
     window: usize,
     /// The recorded decode step (`gpu_core::tape::Tape` of what `batched_tape`
-    /// builds), keyed by `(bsz, lora)` - a pure function of that key once
-    /// `causal_chunk` is `false` and the input is `Tokens`/`Resident` (every
+    /// builds) - a pure function of its key once `causal_chunk` is `false` (every
     /// kernel choice, buffer identity and uniform PARAMETER in that tape
     /// comes from this engine's own fixed config; the only thing that varies
     /// step to step is buffer CONTENTS, written separately by
@@ -1205,11 +1204,11 @@ pub struct Engine {
     /// replayed) - so it is recorded once per bucket and replayed as the
     /// backend's frozen program: no dispatch is rebuilt, resolved or matched
     /// against a captured graph per step. Never populated above
-    /// `Engine::tape_rows` (prefill's row count is not bucketed) or for
-    /// `Input::Embeds` (its tape has no embed step at all, a structurally
-    /// different shape at the same `bsz`) - both keep rebuilding via
-    /// `Self::run_batched_steps`.
-    tape_cache: HashMap<(u32, bool), gpu_core::tape::Tape>,
+    /// `Engine::tape_rows` or for a prefill chunk (its row count is not
+    /// bucketed), which keeps rebuilding via `Self::run_batched_steps`. Keyed by `(bsz, lora, embeds)`: a step over
+    /// `Input::Embeds` has no embed step at all (its rows are written straight into the residual stream), a
+    /// structurally different tape at the same `bsz`, recorded and replayed under its own key.
+    tape_cache: HashMap<(u32, bool, bool), gpu_core::tape::Tape>,
     /// The temporaries every cached tape binds, shared: tapes never run at once (`gpu_core::tape`). Paired with the
     /// [`gpu_core::tape::TapeScratch::replacements`] count the cache was filled at: a grown slot drops the older tapes.
     tape_scratch: gpu_core::tape::TapeScratch,
@@ -2411,9 +2410,9 @@ impl Engine {
     /// position 0 reads `embeds` (`[bsz, d_model]`; no head is read there), position 1 the token ids `first`, and each
     /// later position the token the step before drew plus that step's [`ChainStep::feed_offset`]. Step `s` reads head
     /// `steps[s].head` and row `i` is drawn by `draws[i][s]`; a chain's steps differ only in their heads, offsets and
-    /// keys (a greedy row is a draw that keeps its best token). Answers row `i`'s `(token, log-probability)` at every
-    /// step. Needs the device draw kernels and a window capacity of `steps.len()` ([`Self::set_window_capacity`]).
-    pub fn forward_batched_embed_chain(&mut self, tables: &mut [&mut BlockTable], embeds: &[f32], first: &[u32], steps: &[ChainStep<'_>], draws: &[Vec<RowDraw>]) -> Vec<Vec<(u32, f32)>> {
+    /// keys (a greedy row is a draw that keeps its best token). Answers row `i`'s token at every step, in one readback.
+    /// Needs the device draw kernels and a window capacity of `steps.len()` ([`Self::set_window_capacity`]).
+    pub fn forward_batched_embed_chain(&mut self, tables: &mut [&mut BlockTable], embeds: &[f32], first: &[u32], steps: &[ChainStep<'_>], draws: &[Vec<RowDraw>]) -> Vec<Vec<u32>> {
         let k = steps.len();
         assert!(k >= 1, "a chain of no steps");
         assert!(draws.len() == tables.len() && draws.iter().all(|d| d.len() == k), "one draw per row and step");
@@ -2435,7 +2434,7 @@ impl Engine {
             out.push(drawer.feed(&e.gpu, &e.sc.tok_buf, bsz, s, step.feed_offset));
             e.gpu.submit(&[], &out);
         });
-        let answer = drawer.read_window(&self.gpu, rows, k);
+        let answer = drawer.read_window_tokens(&self.gpu, rows, k);
         self.drawer = Some(drawer);
         answer
     }
@@ -3640,27 +3639,30 @@ impl Engine {
     }
 
     /// [`Self::run_batched_steps`] plus the submit - decode's hot path
-    /// (`causal_chunk = false`, `bsz <= Engine::tape_rows`,
-    /// `Input::Tokens`/`Input::Resident`) goes through the tape cache
-    /// instead: `Self::batched_tape` is a pure function of `(bsz, causal_chunk,
-    /// matches!(input, Embeds), lora)` (see its own doc), so the FIRST call at
-    /// a given `(bsz, lora)` records the tape into `self.tape_cache` and every
-    /// later call at that key replays it unchanged - `write_batch_meta`/
+    /// (`causal_chunk = false`, `bsz <= Engine::tape_rows`, any input) goes
+    /// through the tape cache instead: `Self::batched_tape` is a pure function
+    /// of `(bsz, causal_chunk, matches!(input, Embeds), lora)` (see its own
+    /// doc), so the FIRST call at a given `(bsz, lora, embeds)` records the tape
+    /// into `self.tape_cache` and every later call at that key replays it
+    /// unchanged - `write_batch_meta`/
     /// `write_batch_input` still run every call (real per-step values, not
     /// cacheable); building the steps, and on a backend that freezes a tape
     /// resolving and matching them, is skipped on a hit. A batch with no adapter row keys
     /// `lora = false`, the tape an engine without a bank records. Prefill's
-    /// chunked rows (`causal_chunk = true`, an unbucketed row count) and
-    /// `Input::Embeds` (a structurally different tape at the same `bsz` - no
-    /// embed step at all) keep rebuilding every call, exactly as before this
-    /// cache existed.
+    /// chunked rows (`causal_chunk = true`, an unbucketed row count) keep
+    /// rebuilding every call. An `Input::Embeds` step (rows written straight
+    /// into the residual stream, no embed step) is its own tape at the same
+    /// `bsz`: the embedding-input decoders (a speech model's Talker and code
+    /// predictor) replay it every frame.
     fn run_batched_submit(&mut self, meta: &BatchMeta, input: Input, causal_chunk: bool) -> u32 {
         let bsz = meta.bsz;
         let lora = meta.has_adapter_rows();
         self.write_batch_meta(input, meta);
         self.write_batch_input(input);
-        if !causal_chunk && bsz <= self.tape_rows() && !matches!(input, Input::Embeds(_)) {
-            if !self.tape_cache.contains_key(&(bsz, lora)) {
+        let embeds = matches!(input, Input::Embeds(_));
+        if !causal_chunk && bsz <= self.tape_rows() {
+            let key = (bsz, lora, embeds);
+            if !self.tape_cache.contains_key(&key) {
                 // Built inside the recording, so the temporaries the steps allocate are the shared set's.
                 let before = self.tape_scratch.replacements();
                 let recording = self.gpu.record_tape_on(&self.tape_scratch);
@@ -3671,9 +3673,9 @@ impl Engine {
                     // A slot grew: the older tapes bind the buffer it replaced.
                     self.tape_cache.clear();
                 }
-                self.tape_cache.insert((bsz, lora), tape);
+                self.tape_cache.insert(key, tape);
             }
-            let cached = self.tape_cache.get(&(bsz, lora)).expect("just inserted or already present");
+            let cached = self.tape_cache.get(&key).expect("just inserted or already present");
             self.gpu.replay_tape(cached);
             return bsz;
         }
@@ -3688,19 +3690,33 @@ impl Engine {
     /// instead of in front of the first step at each batch size.
     /// The adapter variant is recorded on first use, as before.
     pub fn record_decode_tapes(&mut self, max_rows: u32) {
+        self.record_tapes(max_rows, &[false]);
+    }
+
+    /// [`Self::record_decode_tapes`] for the steps of an embedding-input decoder too (`Input::Embeds`): a decoder fed
+    /// embedding rows (a speech model's Talker and code predictor) replays both kinds every frame, at every row count
+    /// its streams pass through.
+    pub fn record_embed_decode_tapes(&mut self, max_rows: u32) {
+        self.record_tapes(max_rows, &[true, false]);
+    }
+
+    fn record_tapes(&mut self, max_rows: u32, kinds: &[bool]) {
         let top = max_rows.min(self.max_batch);
         let (started, before) = (std::time::Instant::now(), self.tape_cache.len());
         // Widest first: every narrower tape then fits the shared scratch's slots, and none is dropped for a grown one.
         for bsz in (1..=top).rev() {
-            if self.tape_cache.contains_key(&(bsz, false)) {
-                continue;
+            for &embeds in kinds {
+                if self.tape_cache.contains_key(&(bsz, false, embeds)) {
+                    continue;
+                }
+                let input = if embeds { Input::Embeds(&[]) } else { Input::Tokens(&[]) };
+                let recording = self.gpu.record_tape_on(&self.tape_scratch);
+                let s = self.batched_tape(bsz, input, false, false);
+                self.gpu.submit(&[], &s);
+                let tape = recording.finish();
+                self.gpu.prepare_tape(&tape);
+                self.tape_cache.insert((bsz, false, embeds), tape);
             }
-            let recording = self.gpu.record_tape_on(&self.tape_scratch);
-            let s = self.batched_tape(bsz, Input::Tokens(&[]), false, false);
-            self.gpu.submit(&[], &s);
-            let tape = recording.finish();
-            self.gpu.prepare_tape(&tape);
-            self.tape_cache.insert((bsz, false), tape);
         }
         let recorded = self.tape_cache.len() - before;
         if recorded > 0 {
@@ -3723,7 +3739,7 @@ impl Engine {
 
     /// `(recorded, frozen)` decode tapes of base rows: what a decode step at a new row count would have to record.
     pub fn decode_tapes(&self) -> (usize, usize) {
-        let base = self.tape_cache.iter().filter(|((_, lora), _)| !lora);
+        let base = self.tape_cache.iter().filter(|((_, lora, embeds), _)| !lora && !embeds);
         (base.clone().count(), base.filter(|(_, t)| t.is_frozen()).count())
     }
 
