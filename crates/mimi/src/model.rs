@@ -140,8 +140,8 @@ pub struct Codec {
     pub gpu: Gpu,
     pub cfg: CodecConfig,
     ps: ParamStore,
-    /// The vendor GEMM the decode's products take where it is active, in binary32 (the codec is stored and gated in
-    /// fp32); the encoder keeps the kernels until its codes are pinned against them.
+    /// The vendor GEMM the codec's products take where it is active, in binary32 (the codec is stored and gated in
+    /// fp32).
     gemm: gpu_core::provider::library::LibraryGemmProvider,
 }
 
@@ -209,7 +209,7 @@ impl Codec {
         assert_eq!(codes.len() % nq, 0, "codes length not a multiple of {nq}");
         let t = (codes.len() / nq) as u32;
         assert!(t > 0, "empty codes");
-        let p = Pass::new(self, true);
+        let p = Pass::new(self);
         let dim = self.cfg.codebook_dim / 2; // per-codebook dim (256)
         let lat = self.cfg.codebook_dim; // 512 (quantizer output)
         let hidden = self.cfg.hidden_size; // 512
@@ -333,7 +333,7 @@ impl Codec {
         assert_eq!(codes.len() % nq, 0, "codes length not a multiple of {nq}");
         let t = (codes.len() / nq) as u32;
         assert!(t > 0, "empty codes");
-        let p = Pass::new(self, true);
+        let p = Pass::new(self);
         let hidden = self.cfg.hidden_size; // 1024
 
         // --- 1. code_embedding(codes + code_offset).mean(1) ---
@@ -421,7 +421,7 @@ impl Codec {
         assert_eq!(codes.len() % nq, 0, "codes length not a multiple of {nq}");
         let t = (codes.len() / nq) as u32;
         assert!(t > 0, "empty codes");
-        let p = Pass::new(self, true);
+        let p = Pass::new(self);
         let hidden = self.cfg.hidden_size;
 
         // --- front: identical to decode_omni's own (correctly
@@ -502,8 +502,6 @@ const RETAIN_BYTES: u64 = 4 << 30;
 /// handle read the same as on the codec itself.
 struct Pass<'a> {
     codec: &'a Codec,
-    /// Whether the pass's products take the vendor GEMM (see [`Pass::new`]).
-    vendor_gemm: bool,
     steps: RefCell<Vec<Step>>,
     /// Bytes allocated for activations since the last submit.
     pending_bytes: Cell<u64>,
@@ -536,13 +534,13 @@ fn conv_kernels(direct_fwd: usize) -> ConvGemmKernels {
 }
 
 impl<'a> Pass<'a> {
-    /// A pass over `codec`; its lowered products take the vendor GEMM when `vendor_gemm` (the decode) and the
-    /// kernels otherwise (the encoder).
-    fn new(codec: &'a Codec, vendor_gemm: bool) -> Pass<'a> {
+    /// A pass over `codec`: its products take the vendor GEMM where it is active (the decode's and the encoder's
+    /// alike; the encoder's codes are pinned against the CPU backend on it).
+    fn new(codec: &'a Codec) -> Pass<'a> {
         codec.gpu.hold_freed_blocks(true);
         codec.gpu.retain_freed_blocks(RETAIN_BYTES);
-        let scratch = if vendor_gemm { ConvScratch::new().with_gemm(codec.gemm.clone()) } else { ConvScratch::new() };
-        Pass { codec, vendor_gemm, steps: RefCell::new(Vec::new()), pending_bytes: Cell::new(0), scratch: RefCell::new(scratch) }
+        let scratch = ConvScratch::new().with_gemm(codec.gemm.clone());
+        Pass { codec, steps: RefCell::new(Vec::new()), pending_bytes: Cell::new(0), scratch: RefCell::new(scratch) }
     }
 
     fn w(&self, name: &str) -> &DeviceBuffer {
@@ -586,7 +584,7 @@ impl<'a> Pass<'a> {
         use gpu_core::provider::library::Operand;
         let out = self.st((m * n) as usize);
         let mut steps = Vec::new();
-        let on_library = self.vendor_gemm && self.codec.gemm.forward_f32(&self.gpu, &mut steps, &Operand { buf: x, range: (0, 0) }, &Operand { buf: self.w(wname), range: (0, 0) }, &Operand { buf: &out, range: (0, 0) }, m, n, k);
+        let on_library = self.codec.gemm.forward_f32(&self.gpu, &mut steps, &Operand { buf: x, range: (0, 0) }, &Operand { buf: self.w(wname), range: (0, 0) }, &Operand { buf: &out, range: (0, 0) }, m, n, k);
         if on_library {
             self.run_all(steps);
         } else {
@@ -892,7 +890,7 @@ impl Codec {
                 return;
             }
             let clips: Vec<&[f32]> = group.iter().map(|&i| wavs[i]).collect();
-            for (i, codes) in group.drain(..).zip(Pass::new(self, false).encode(&clips)) {
+            for (i, codes) in group.drain(..).zip(Pass::new(self).encode(&clips)) {
                 out[i] = codes;
             }
         };
@@ -1212,7 +1210,7 @@ mod tests {
     /// Encoder transformer output for `x` (`[t, hidden]` token-major).
     fn run_enc(codec: &Codec, x: &[f32], t: u32) -> Vec<f32> {
         let d = codec.cfg.enc.hidden_size as usize;
-        let pass = Pass::new(codec, false);
+        let pass = Pass::new(codec);
         let out = pass.enc_transformer(&pass.upload(x), 1, t);
         pass.read(&out, t as usize * d)
     }
@@ -1240,4 +1238,75 @@ mod tests {
             assert_eq!(row(&late, i), row(&base, i), "frame {last} leaked into earlier frame {i}");
         }
     }
+
+    /// The host loop the device quantizer replaced (`MimiEuclideanCodebook.quantize`: squared Euclidean distance
+    /// summed over the dimension in order, the lowest index on ties, then the residual), as the test's oracle.
+    fn host_rvq(residual: &mut [f32], tables: &[Vec<f32>], dim: usize) -> Vec<u32> {
+        tables
+            .iter()
+            .map(|table| {
+                let bins = table.len() / dim;
+                let (mut best, mut best_d) = (0usize, f32::INFINITY);
+                for b in 0..bins {
+                    let mut d = 0.0f32;
+                    for c in 0..dim {
+                        let diff = residual[c] - table[b * dim + c];
+                        d += diff * diff;
+                    }
+                    if d < best_d {
+                        best_d = d;
+                        best = b;
+                    }
+                }
+                for c in 0..dim {
+                    residual[c] -= table[best * dim + c];
+                }
+                best as u32
+            })
+            .collect()
+    }
+
+    /// The device quantizer gives the host loop's codes bit for bit, on the codec's own shapes (a 512-wide
+    /// embedding projected to 256, 1 semantic + 15 acoustic codebooks of 2048 rows), over enough frames that a
+    /// distance rounded differently would show as a flipped near-tie.
+    #[test]
+    fn the_device_quantizer_codes_as_the_host_loop() {
+        let (h, cd, cs, nq) = (512u32, 256u32, 2048u32, 16u32);
+        let enc = EncoderConfig { hidden_size: h, codebook_dim: cd, codebook_size: cs, num_semantic_quantizers: 1, ..Default::default() };
+        let cfg = CodecConfig { num_quantizers: nq, enc, ..Default::default() };
+        let mut rng = Lcg::new(data::rng::random_seed());
+        let mut w: HashMap<String, Vec<f32>> = HashMap::new();
+        let mut tables: Vec<(String, Vec<f32>)> = Vec::new();
+        for (group, layers) in [("semantic", 1), ("acoustic", nq - 1)] {
+            let prefix = format!("encoder.quantizer.{group}_residual_vector_quantizer");
+            w.insert(format!("{prefix}.input_proj.weight"), rng.vec_scaled((cd * h) as usize, 1.0 / (h as f32).sqrt()));
+            for q in 0..layers {
+                // Codebooks that shrink stage by stage, as a trained residual quantizer's do.
+                let t = rng.vec_scaled((cs * cd) as usize, 0.8f32.powi(q as i32 + 1));
+                tables.push((group.to_string(), t.clone()));
+                w.insert(format!("{prefix}.layers.{q}.table"), t);
+            }
+        }
+        let codec = Codec::from_weights_on(gpu_core::testgpu::dev(PIPELINES), cfg, w);
+        let (n, t) = (3u32, 400u32);
+        let pass = Pass::new(&codec);
+        let emb = pass.upload(&rng.vec_scaled((n * h * t) as usize, 1.0));
+        let device = pass.rvq_encode(&emb, n, t);
+        let tm = pass.to_token_major(&emb, n, h, t);
+        let proj = |g: &str| pass.read(&pass.matmul(&tm, &format!("encoder.quantizer.{g}_residual_vector_quantizer.input_proj.weight"), n * t, h, cd), (n * t * cd) as usize);
+        let (sem, aco) = (proj("semantic"), proj("acoustic"));
+        let (sem_t, aco_t): (Vec<_>, Vec<_>) = tables.into_iter().partition(|(g, _)| g == "semantic");
+        let sem_t: Vec<Vec<f32>> = sem_t.into_iter().map(|(_, t)| t).collect();
+        let aco_t: Vec<Vec<f32>> = aco_t.into_iter().map(|(_, t)| t).collect();
+        let cd = cd as usize;
+        let mut flipped = 0usize;
+        for f in 0..(n * t) as usize {
+            let mut want = host_rvq(&mut sem[f * cd..(f + 1) * cd].to_vec(), &sem_t, cd);
+            want.extend(host_rvq(&mut aco[f * cd..(f + 1) * cd].to_vec(), &aco_t, cd));
+            let got: Vec<u32> = device[f * nq as usize..(f + 1) * nq as usize].iter().map(|&c| c as u32).collect();
+            flipped += usize::from(got != want);
+        }
+        assert_eq!(flipped, 0, "{flipped} of {} frames quantise differently on {}", n * t, gpu_core::backend_name());
+    }
+
 }
