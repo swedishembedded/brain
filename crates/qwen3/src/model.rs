@@ -3252,6 +3252,22 @@ impl Qwen {
         }
     }
 
+    /// The device buffer the input rows live in ([`Self::enable_input_rows`] builds only), for a caller that assembles
+    /// them on the device instead of uploading them ([`Self::write_input_rows`]): `[rows·run, d_model]` at the current
+    /// batch's computed rows and run length ([`Self::batch_run`], [`Self::run_len`], decided by [`Self::set_batch`]),
+    /// row `r` of sequence `s` at `s·run + r`. Write it after `set_batch` and before the forward.
+    pub fn input_rows_buffer(&self) -> &DeviceBuffer {
+        assert!(self.input_rows, "Qwen::input_rows_buffer: call enable_input_rows first");
+        &self.res[0]
+    }
+
+    /// The gradient of the loss with respect to the input rows after a backward ([`Self::enable_input_rows`] builds
+    /// only), on the device and in [`Self::input_rows_buffer`]'s layout.
+    pub fn input_rows_grad_buffer(&self) -> &DeviceBuffer {
+        assert!(self.input_rows, "Qwen::input_rows_grad_buffer: call enable_input_rows first");
+        &self.dres[0]
+    }
+
     /// Stop the decoder at its final-norm hidden states and let the caller
     /// own the head and the loss, as a model with an output head of its own
     /// needs (Janus-Pro's image-token head). [`Self::forward_hidden`] then
