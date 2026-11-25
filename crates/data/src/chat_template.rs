@@ -597,13 +597,25 @@ impl ChatTemplate {
     /// ([`Self::reply_flavor`]): the same reasoning and the same content up to the whitespace around them, and the same
     /// calls (names, and arguments compared as JSON values, so `{"a": 1}` and `{"a":1}` agree), with no byte of either
     /// discarded by the reader (a call's trailing text). Each may end with the
-    /// end-of-turn marker. `thinking_open`: the prompt before the answer opened the think block. `false` for a template
-    /// whose replies brain does not read: there only [`Tokenizer`](crate::tokenizer::Tokenizer)-exact ids are admitted.
+    /// end-of-turn marker. `thinking_open`: the prompt before the answer opened the think block. Two texts that are
+    /// the same once the marker is taken off are the same reply under any template (the sampled bytes need not be
+    /// UTF-8 the tokenizer re-encodes to the same ids: every decode renders them as U+FFFD alike). Otherwise `false`
+    /// for a template whose replies brain does not read: there only [`Tokenizer`](crate::tokenizer::Tokenizer)-exact
+    /// ids are admitted.
     #[must_use]
     pub fn reads_as_same_reply(&self, rendered: &str, generated: &str, thinking_open: bool) -> bool {
+        fn unended<'t>(text: &'t str, end: &str) -> &'t str {
+            text.strip_suffix(end).filter(|_| !end.is_empty()).unwrap_or(text)
+        }
+        let marker = self.assistant_turn_end().ok();
+        let end = marker.as_deref().map_or("", str::trim_end);
+        if unended(rendered, end) == unended(generated, end) {
+            return true;
+        }
         let Some(flavor) = self.reply_flavor() else { return false };
-        let Ok(end) = self.assistant_turn_end() else { return false };
-        let end = end.trim_end();
+        if marker.is_none() {
+            return false;
+        }
         let read = |text: &str| {
             let text = text.strip_suffix(end).unwrap_or(text);
             let mut scanner = crate::qwen_chat::ChatScanner::with_flavor(thinking_open, flavor);
@@ -986,6 +998,19 @@ mod tests {
         let b = ChatTemplate::compile(marked).unwrap().render(msgs, None, true, &BTreeMap::new()).unwrap();
         assert_eq!(a, b);
         assert_eq!(a, "<user>hi<A>");
+    }
+
+    /// A sampled reply whose text is the answer's own text (the end-of-turn marker aside) reads as the same reply
+    /// under any template, also one whose replies brain does not read and whose tokenizer does not re-encode the
+    /// text to the sampled ids (bytes that are not UTF-8, which every decode renders as U+FFFD); another text does not.
+    #[test]
+    fn a_reply_whose_text_is_the_answers_reads_as_the_same_reply_under_any_template() {
+        let bare = ChatTemplate::compile("{% for m in messages %}{% if m.role == 'user' %}{{ m.content }}={% elif m.role == 'assistant' %}{{ m.content }}<|im_end|>{% endif %}{% endfor %}").unwrap();
+        assert!(bare.reply_flavor().is_none(), "brain does not read this template's replies");
+        let text = "f\u{fffd}}<|im_start|>x";
+        assert!(bare.reads_as_same_reply(text, &format!("{text}<|im_end|>"), false));
+        assert!(bare.reads_as_same_reply(text, text, false));
+        assert!(!bare.reads_as_same_reply(text, "f\u{fffd}}x<|im_end|>", false));
     }
 
     fn tiny_env() -> ChatTemplate {
