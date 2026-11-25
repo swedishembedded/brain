@@ -36,6 +36,7 @@ use std::collections::HashMap;
 
 use audio::conv::{ConvGemmKernels, ConvKernels, ConvScratch};
 use bytemuck::cast_slice;
+use gpu_core::select::{DefaultSelector, Dtype, KernelSelector, KernelVariant, Op, OpShape, VQ_TILE_ROWS};
 use gpu_core::{f, BufUsage, DeviceBuffer, Gpu, Step};
 use backend_cpu::par;
 use model::block::{self, Gqa, KernelIds};
@@ -81,6 +82,7 @@ const NCL_LEN_MASK: usize = 29;
 const PAD1D_EDGE_LENS: usize = 30;
 const VQ_ARGMIN: usize = 31;
 const VQ_RESIDUAL: usize = 32;
+const VQ_ARGMIN_TILED: usize = 33;
 
 /// The kernel set this decoder dispatches. `pub` so a caller building the
 /// codec on its own device handle (`Codec::load_inference_on`) can construct
@@ -122,6 +124,7 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("pad1d_edge_lens", kernels::PAD1D_EDGE_LENS),
     ("vq_argmin", kernels::VQ_ARGMIN),
     ("vq_residual", kernels::VQ_RESIDUAL),
+    ("vq_argmin_tiled", kernels::VQ_ARGMIN_TILED),
 ];
 
 /// SnakeBeta's `no_div_by_zero` (the reference's fixed epsilon).
@@ -177,7 +180,17 @@ impl Codec {
     }
 
     /// [`Self::from_weights`] on an existing device handle.
-    pub fn from_weights_on(gpu: Gpu, cfg: CodecConfig, init: HashMap<String, Vec<f32>>) -> Codec {
+    pub fn from_weights_on(gpu: Gpu, cfg: CodecConfig, mut init: HashMap<String, Vec<f32>>) -> Codec {
+        // Each encoder codebook also transposed (`[dim, bins]`), for the
+        // row-tiled assignment (`vq_argmin_tiled`) that reads it coalesced.
+        let dim = cfg.enc.codebook_dim as usize;
+        let tables: Vec<String> = init.keys().filter(|n| n.starts_with("encoder.quantizer.") && n.ends_with(".table")).cloned().collect();
+        for name in tables {
+            let t = &init[&name];
+            let bins = t.len() / dim;
+            let transposed: Vec<f32> = (0..dim * bins).map(|j| t[(j % bins) * dim + j / bins]).collect();
+            init.insert(transposed_name(&name), transposed);
+        }
         let roles: Vec<(String, usize, Role)> =
             init.iter().map(|(n, v)| (n.clone(), v.len(), Role::Frozen)).collect();
         let ps = ParamStore::new_with_roles(&gpu, roles, &init);
@@ -1098,15 +1111,27 @@ impl Pass<'_> {
             let prefix = format!("encoder.quantizer.{group}_residual_vector_quantizer");
             let residual = self.matmul(&emb_tm, &format!("{prefix}.input_proj.weight"), m, h, cd);
             for q in 0..layers {
-                let table = self.w(&format!("{prefix}.layers.{q}.table"));
+                let name = format!("{prefix}.layers.{q}.table");
+                let table = self.w(&name);
                 let assign = self.st(2 * m as usize);
-                self.run(self.gpu.step(VQ_ARGMIN, &[&residual, table, &assign], &[m, cs, cd], m));
+                let shape = OpShape { m, n: cs, k: cd, dtype: Dtype::F32 };
+                if DefaultSelector.select(Op::VqAssign, shape, &self.gpu.caps()) == KernelVariant::RowTiled {
+                    let tiles = m.div_ceil(VQ_TILE_ROWS);
+                    self.run(self.gpu.dispatch(VQ_ARGMIN_TILED, &[&residual, self.w(&transposed_name(&name)), &assign], &[m, cs, cd], gpu_core::Dispatch::Workgroups(tiles)));
+                } else {
+                    self.run(self.gpu.step(VQ_ARGMIN, &[&residual, table, &assign], &[m, cs, cd], m));
+                }
                 self.run(self.gpu.step(VQ_RESIDUAL, &[&assign, table, &residual, &codes], &[m, cd, nq, col], m * cd));
                 col += 1;
             }
         }
         self.read(&codes, (m * nq) as usize)
     }
+}
+
+/// The name of an encoder codebook's transposed copy.
+fn transposed_name(table: &str) -> String {
+    format!("{table}:t")
 }
 
 /// Kernel-id map for the shared `model::block` builders (only forward ids used).

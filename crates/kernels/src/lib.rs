@@ -1821,6 +1821,8 @@ pub const VQ_ARGMAX_DOT: &str = include_str!("../wgsl/vq_argmax_dot.wgsl");
 pub const VQ_ARGMIN: &str = include_str!("../wgsl/vq_argmin.wgsl");
 /// `wgsl/vq_argmin_rows.wgsl`
 pub const VQ_ARGMIN_ROWS: &str = include_str!("../wgsl/vq_argmin_rows.wgsl");
+/// `wgsl/vq_argmin_tiled.wgsl`
+pub const VQ_ARGMIN_TILED: &str = include_str!("../wgsl/vq_argmin_tiled.wgsl");
 /// `wgsl/vq_residual.wgsl`
 pub const VQ_RESIDUAL: &str = include_str!("../wgsl/vq_residual.wgsl");
 /// `wgsl/vsa_coarse.wgsl`
@@ -2682,6 +2684,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("vq_argmax_dot", VQ_ARGMAX_DOT),
     ("vq_argmin", VQ_ARGMIN),
     ("vq_argmin_rows", VQ_ARGMIN_ROWS),
+    ("vq_argmin_tiled", VQ_ARGMIN_TILED),
     ("vq_residual", VQ_RESIDUAL),
     ("vsa_coarse", VSA_COARSE),
     ("vsa_gate_add", VSA_GATE_ADD),

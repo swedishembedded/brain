@@ -54,3 +54,31 @@ fn the_cooperative_assignment_reproduces_the_reference_bits() {
         }
     }
 }
+
+/// The row-tiled form (`vq_argmin_tiled`, the codebook transposed, 8 queries a
+/// workgroup) gives the reference's every output word too, on full and partial
+/// tiles, with ties and duplicate rows.
+#[test]
+fn the_row_tiled_assignment_reproduces_the_reference_bits() {
+    let gpu = gpu_core::testgpu::dev(&[(REFERENCE_ALIAS, kernels::VQ_ARGMIN), ("vq_argmin_tiled", kernels::VQ_ARGMIN_TILED)]);
+    if !gpu.caps().workgroup_reductions {
+        brain_testutil::skip_unavailable("vq_argmin_tiled (it needs workgroup reductions, which the CPU JIT lacks)");
+        return;
+    }
+    let (reference, tiled) = (gpu.kernel_index(REFERENCE_ALIAS).expect("registered"), gpu.kernel_index("vq_argmin_tiled").expect("registered"));
+    let mut rng = Lcg::new(random_seed());
+    for (m, k, d) in [(8u32, 2048u32, 256u32), (301, 2048, 256), (77, 40, 8), (5, 3, 16), (130, 129, 7)] {
+        let xv = grid(&mut rng, m as usize, d as usize, false);
+        let cbv = grid(&mut rng, k as usize, d as usize, true);
+        let cbt: Vec<f32> = (0..(k * d) as usize).map(|j| cbv[(j % k as usize) * d as usize + j / k as usize]).collect();
+        let (x, cb, cbt) = (gpu.storage_init("x", &xv), gpu.storage_init("cb", &cbv), gpu.storage_init("cbt", &cbt));
+        let run = |kind: usize, table: &gpu_core::DeviceBuffer, grid: gpu_core::Dispatch| {
+            let out = gpu.storage(2 * u64::from(m));
+            gpu.submit(&[], &[gpu.dispatch(kind, &[&x, table, &out], &[m, k, d], grid)]);
+            gpu.read(&out, 2 * m as usize).iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        };
+        let want = run(reference, &cb, gpu_core::Dispatch::Threads(m));
+        let got = run(tiled, &cbt, gpu_core::Dispatch::Workgroups(m.div_ceil(gpu_core::select::VQ_TILE_ROWS)));
+        assert_eq!(got, want, "{m} queries x {k} codebook rows x {d}");
+    }
+}

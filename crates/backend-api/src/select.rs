@@ -920,6 +920,19 @@ pub const FLASH_EXT_TILE_WORKGROUP_BYTES: u32 = (4096 + 4096 + 2176 + 1024 + 512
 /// and 64 rows and its single linears at 64 won, its single linears at 32 rows did not).
 pub const LORA_TILE_MIN_OUTPUTS: u64 = 2048;
 
+/// Queries one workgroup of the row-tiled VQ assignment (`vq_argmin_tiled`) takes: from a full tile of them it
+/// leads `Op::VqAssign`, reading the (transposed) codebook once per tile where the per-query twin reads it once per
+/// query. Measured on a GH200 over a speech codec's 2048 x 256 residual codebooks (`mimi`'s batched encode, 1318 s
+/// of speech): the codec encode went from 375 to 495 audio seconds per wall second at a batch of 8 clips; a tile of 8
+/// on 64 lanes was slower than the per-query twin (too few threads per query at a serving batch).
+pub const VQ_TILE_ROWS: u32 = 4;
+
+/// The row-tiled VQ assignment's workgroup width (a device must allow it).
+pub const VQ_TILE_LANES: u32 = 256;
+
+/// The widest query the row-tiled VQ assignment stages in workgroup memory (`VQ_TILE_ROWS` rows of it).
+pub const VQ_TILE_MAX_DIM: u32 = 256;
+
 /// Every variant that can EXECUTE for `(op, shape)` on this device, with the
 /// static best guess FIRST. Never empty: `Reference` is always executable.
 ///
@@ -1131,7 +1144,11 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         Op::DepthAttention => vec![WorkgroupPerOutput, Reference],
         // The sigmoid router: `Op::MaxAbsRow`'s rule (see the Op's doc).
         Op::RouterGate => vec![WorkgroupPerOutput, Reference],
-        // The VQ assignment: `Op::MaxAbsRow`'s rule (see the Op's doc).
+        // The VQ assignment: `Op::MaxAbsRow`'s rule (see the Op's doc), and from a full tile of queries over a
+        // dimension the tile stages the row-tiled form (see [`VQ_TILE_ROWS`]).
+        Op::VqAssign if shape.m >= VQ_TILE_ROWS && shape.k <= VQ_TILE_MAX_DIM && caps.max_workgroup_size >= VQ_TILE_LANES => {
+            vec![RowTiled, WorkgroupPerOutput, Reference]
+        }
         Op::VqAssign => vec![WorkgroupPerOutput, Reference],
         // The extended attention: `Op::RmsNorm`'s rule (see the Op's doc), and from a full block of query rows a
         // sequence the query-tiled twin, where the device holds its workgroup memory.
@@ -2192,8 +2209,11 @@ mod tests {
             assert_eq!(s.select(Op::DepthAttention, sh, &cpu_caps()), KernelVariant::Reference, "m={m}");
             assert_eq!(s.select(Op::RouterGate, sh, &gpu_caps()), KernelVariant::WorkgroupPerOutput, "m={m}");
             assert_eq!(s.select(Op::RouterGate, sh, &cpu_caps()), KernelVariant::Reference, "m={m}");
-            assert_eq!(s.select(Op::VqAssign, sh, &gpu_caps()), KernelVariant::WorkgroupPerOutput, "m={m}");
-            assert_eq!(s.select(Op::VqAssign, sh, &cpu_caps()), KernelVariant::Reference, "m={m}");
+            let vq = shape(m, 2048, 256, Dtype::F32);
+            let tiled = if m >= VQ_TILE_ROWS { KernelVariant::RowTiled } else { KernelVariant::WorkgroupPerOutput };
+            assert_eq!(s.select(Op::VqAssign, vq, &gpu_caps()), tiled, "m={m}");
+            assert_eq!(s.select(Op::VqAssign, shape(m, 2048, 512, Dtype::F32), &gpu_caps()), KernelVariant::WorkgroupPerOutput, "m={m}: too wide to stage");
+            assert_eq!(s.select(Op::VqAssign, vq, &cpu_caps()), KernelVariant::Reference, "m={m}");
             assert_eq!(s.select(Op::FlashAttentionExt, sh, &gpu_caps()), KernelVariant::WorkgroupPerOutput, "m={m}");
             assert_eq!(s.select(Op::FlashAttentionExt, sh, &cpu_caps()), KernelVariant::Reference, "m={m}");
         }
