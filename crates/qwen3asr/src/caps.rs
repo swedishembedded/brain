@@ -50,23 +50,27 @@ pub const PROMPT_SUFFIX: [u32; 6] = [151670, 151645, 198, 151644, 77091, 198];
 /// The `<asr_text>` token: the end of the model's `language <Name>` preamble.
 pub const ASR_TEXT_ID: u32 = 151704;
 
-/// The languages the model card lists, in the names its `language <Name>`
-/// preamble uses.
-pub const LANGUAGES: &[&str] = &[
-    "Chinese", "English", "Cantonese", "Arabic", "German", "French", "Spanish", "Portuguese", "Indonesian", "Italian", "Korean", "Russian", "Thai", "Vietnamese", "Japanese",
-    "Turkish", "Hindi", "Malay", "Dutch", "Swedish", "Danish", "Finnish", "Polish", "Czech", "Filipino", "Persian", "Greek", "Hungarian", "Macedonian", "Romanian",
+/// The languages the model card lists: the name its `language <Name>`
+/// preamble uses, and the ISO 639 code (639-1 where one exists) an
+/// OpenAI-style request names it by.
+pub const LANGUAGES: &[(&str, &str)] = &[
+    ("Chinese", "zh"), ("English", "en"), ("Cantonese", "yue"), ("Arabic", "ar"), ("German", "de"), ("French", "fr"), ("Spanish", "es"), ("Portuguese", "pt"),
+    ("Indonesian", "id"), ("Italian", "it"), ("Korean", "ko"), ("Russian", "ru"), ("Thai", "th"), ("Vietnamese", "vi"), ("Japanese", "ja"), ("Turkish", "tr"),
+    ("Hindi", "hi"), ("Malay", "ms"), ("Dutch", "nl"), ("Swedish", "sv"), ("Danish", "da"), ("Finnish", "fi"), ("Polish", "pl"), ("Czech", "cs"),
+    ("Filipino", "fil"), ("Persian", "fa"), ("Greek", "el"), ("Hungarian", "hu"), ("Macedonian", "mk"), ("Romanian", "ro"),
 ];
 
-/// The language a caller names (case-insensitive), as the model spells it;
-/// `""` or `auto` is `None` (the model identifies the language itself). A name
-/// the model does not list is refused with the ones it does.
+/// The language a caller names, by name or ISO code (case-insensitive), as the
+/// model spells it; `""` or `auto` is `None` (the model identifies the language
+/// itself). A language the model does not list is refused with the ones it does.
 pub fn language(name: &str) -> Result<Option<&'static str>, String> {
     let n = name.trim();
     if n.is_empty() || n.eq_ignore_ascii_case("auto") {
         return Ok(None);
     }
-    LANGUAGES.iter().find(|l| l.eq_ignore_ascii_case(n)).copied().map(Some).ok_or_else(|| {
-        capability::failure::tag(capability::failure::FailureClass::InvalidRequest, format!("qwen-asr: language {name:?} is not one the model transcribes; it names {LANGUAGES:?}, or \"auto\""))
+    LANGUAGES.iter().find(|(l, code)| l.eq_ignore_ascii_case(n) || code.eq_ignore_ascii_case(n)).map(|(l, _)| Some(*l)).ok_or_else(|| {
+        let known: Vec<String> = LANGUAGES.iter().map(|(l, c)| format!("{l} ({c})")).collect();
+        capability::failure::tag(capability::failure::FailureClass::InvalidRequest, format!("qwen-asr: language {name:?} is not one the model transcribes; it names {known:?}, or \"auto\""))
     })
 }
 
@@ -330,6 +334,7 @@ mod tests {
     #[test]
     fn a_named_language_is_resolved_and_an_unknown_one_refused() {
         assert_eq!(language("swedish").unwrap(), Some("Swedish"));
+        assert_eq!(language("SV").unwrap(), Some("Swedish"), "an OpenAI-style request names it by its ISO code");
         assert_eq!(language(" Auto ").unwrap(), None);
         assert_eq!(language("").unwrap(), None);
         let e = language("klingon").unwrap_err();

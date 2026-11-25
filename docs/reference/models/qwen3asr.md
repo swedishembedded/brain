@@ -54,8 +54,8 @@ protocol.
 
 ## Options
 
-- `language` - the language spoken, by the model card's name (`Swedish`, `English`, `German`, ... 30 in all),
-  case-insensitive; empty or `auto` (the default) lets the model identify it. A named language is pre-filled as the
+- `language` - the language spoken, by the model card's name (`Swedish`, `English`, `German`, ... 30 in all) or its
+  ISO 639 code (`sv`, `en`, `de`; what `/v1/audio/transcriptions` passes), case-insensitive; empty or `auto` (the default) lets the model identify it. A named language is pre-filled as the
   model's own `language <Name><asr_text>` preamble, so the transcript is in that language: identification fails on
   short or accented speech (synthesized Swedish read as Danish, or translated into English). An unknown name is
   refused with the list.
