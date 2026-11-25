@@ -17,7 +17,9 @@ use capability::{Action, ActionResult, ActionSpec, Invocation, Outcome, ParamSpe
 use serde_json::json;
 
 pub fn spec() -> ActionSpec {
+    // It writes weights and reads none: run with whatever the store holds (or nothing), never asked to pick one.
     ActionSpec::new("toy", "write a tiny randomly initialised chat checkpoint that trains and samples on the CPU in seconds, for tests that need no real weights")
+        .from_scratch()
         .param(ParamSpec::new("out", ParamType::Str, "the directory to write model.safetensors, tokenizer.json and tokenizer_config.json into").host_resolved().required())
         .param(ParamSpec::new("seed", ParamType::Int, "RNG seed: the same seed writes the same weights (omit for random; the outcome echoes the one used)"))
         .param(ParamSpec::new("store_layout", ParamType::Bool, "name the weights as the model store reads them (model.brain.safetensors), so `out` can be <models-dir>/local/<name>").default(json!(false)))
@@ -52,6 +54,12 @@ mod tests {
 
     /// The toy checkpoint is written with the files a consumer's tests load, the same seed writes the same
     /// weights, and in the model store's layout the store finds it by name.
+    /// The action reads no checkpoint, so the store's contents (none, or several qwen3 releases) never stop it.
+    #[test]
+    fn toy_needs_no_checkpoint_from_the_store() {
+        assert!(spec().from_scratch);
+    }
+
     #[test]
     fn toy_writes_a_loadable_checkpoint_the_store_finds_by_name() {
         let dir = std::env::temp_dir().join(format!("qwen3-toy-{}", std::process::id()));
