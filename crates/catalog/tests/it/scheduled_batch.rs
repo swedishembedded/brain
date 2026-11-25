@@ -411,6 +411,50 @@ fn a_whole_row_draws_top_list_comes_from_the_decode_and_agrees_with_the_trainer(
     }
 }
 
+/// SPEC: on a real engine (tiny qwen35 on the CPU) a cut draw (`top_k` 4, `top_p` 0.9) that asks for its support reports,
+/// from the decode steps that drew the tokens, each token's support (at most the `top_k`, the token among it, best first)
+/// and its figure under that support, and the trainer replays it: its teacher-forced log-probability of the token,
+/// renormalised over its log-probabilities at the support's ids, is the sampler's figure, while the whole-row figure is
+/// the trainer's own.
+#[test]
+fn a_cut_draws_support_comes_from_the_decode_and_the_trainer_replays_it() {
+    const TOLERANCE: f32 = 2e-3;
+    let front = front();
+    let spec = llmserve::generate_spec("trace", true);
+    let temperature = 0.8f32;
+    let asked = spec
+        .validate(inv("policy trace", 7, f64::from(temperature), 23).set("top_k", json!(4)).set("top_p", json!(0.9)).set("policy_trace", json!(true)).set("policy_trace_support", json!(4)).set("policy_trace_top_log_probs", json!(2)))
+        .expect("valid");
+    let mut sched = scheduler(1);
+    let trace = run_batch_scheduled(&mut sched, &front, &[asked], &mut |_, _| {}).remove(0).expect("request succeeds").outputs["policy_trace"].clone();
+    assert_eq!((trace["log_prob_source"].clone(), trace["support_cap"].clone()), (json!("decode"), json!(4)));
+    let (prompt, generated): (Vec<u32>, Vec<u32>) = (serde_json::from_value(trace["prompt_token_ids"].clone()).unwrap(), serde_json::from_value(trace["generation_token_ids"].clone()).unwrap());
+    let whole: Vec<f32> = serde_json::from_value(trace["generation_log_probs"].clone()).unwrap();
+    let sampler: Vec<f32> = serde_json::from_value(trace["generation_sampler_log_probs"].clone()).unwrap();
+    let offsets: Vec<usize> = serde_json::from_value(trace["generation_support_offsets"].clone()).unwrap();
+    let ids: Vec<u32> = serde_json::from_value(trace["generation_support_ids"].clone()).unwrap();
+    assert_eq!((sampler.len(), offsets.len()), (generated.len(), generated.len() + 1));
+    let want = trainer_logprobs(&prompt.iter().chain(&generated).copied().collect::<Vec<_>>(), prompt.len(), temperature);
+    for (i, &token) in generated.iter().enumerate() {
+        let support = &ids[offsets[i]..offsets[i + 1]];
+        assert!(!support.is_empty() && support.len() <= 4 && support.contains(&token), "position {i}: {support:?}");
+        assert!((whole[i] - want[i]).abs() < TOLERANCE, "position {i}: whole-row decode {}, trainer {}", whole[i], want[i]);
+        assert!(sampler[i] >= whole[i] - 1e-6, "position {i}: a support holds at least the token's share of the row");
+        let context: Vec<u32> = prompt.iter().chain(&generated[..i]).copied().collect();
+        let at: Vec<f64> = support
+            .iter()
+            .map(|&id| {
+                let mut one = context.clone();
+                one.push(id);
+                f64::from(trainer_logprobs(&one, context.len(), temperature)[0])
+            })
+            .collect();
+        let max = at.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let replayed = f64::from(want[i]) - (max + at.iter().map(|l| (l - max).exp()).sum::<f64>().ln());
+        assert!((f64::from(sampler[i]) - replayed).abs() < f64::from(TOLERANCE), "position {i}: sampler {}, trainer replayed over the support {replayed}", sampler[i]);
+    }
+}
+
 /// A policy trace is refused by name where it would not be the sampling policy's, and never silently without one.
 #[test]
 fn a_policy_trace_is_refused_when_the_request_reshapes_the_distribution() {

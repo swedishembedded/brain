@@ -45,6 +45,10 @@ pub struct RowDraw {
     /// draw's temperature ([`Drawn::Traced`]); `0` for none. Only a draw over the whole row (no `top_k`, nucleus or
     /// min-p cut) carries one: a cut draw's list would be of a distribution it did not draw from.
     pub top: usize,
+    /// The most tokens of a cut draw's survivors (`top_k`, nucleus, min-p) the draw reports as the support it drew
+    /// from ([`Drawn::Supported`]); `0` for none. A draw that keeps more survivors reports that it overflowed, never a
+    /// shortened set; a draw that cuts nothing has the whole row as its support and reports none.
+    pub support: usize,
 }
 
 impl RowDraw {
@@ -57,7 +61,8 @@ impl RowDraw {
             top_p: params.top_p,
             top_k: params.top_k,
             key: draw_key(seed, position as u64, 0),
-            top: if params.draws_from_whole_distribution() { params.trace_top } else { 0 },
+            top: if params.draws_from_whole_distribution() || params.trace_support > 0 { params.trace_top } else { 0 },
+            support: params.trace_support,
         })
     }
 
@@ -65,6 +70,25 @@ impl RowDraw {
     /// list fits what a device keeps ([`crate::readout::MAX_DRAW_CANDIDATES`]) and the row.
     pub fn carries_top_list(&self, vocab: usize) -> bool {
         self.top > 0 && self.top <= vocab && self.top <= crate::readout::MAX_DRAW_CANDIDATES as usize && !self.truncates(vocab) && self.min_p <= 0.0
+    }
+
+    /// Whether the draw reports its support: it asks for one ([`Self::support`]) and cuts the row (a `top_k` inside the
+    /// vocabulary, a nucleus or a min-p floor).
+    pub fn reports_support(&self, vocab: usize) -> bool {
+        self.support > 0 && (self.truncates(vocab) || self.min_p > 0.0)
+    }
+
+    /// Whether the draw is made from its best-first list of [`Self::support_list`] candidates against the whole row's
+    /// mass: a draw that reports its support and has no `top_k` (a nucleus or a min-p floor), so that the list's cut
+    /// is the support it drew from and a survivor past the cap shows in the list.
+    pub fn list_drawn(&self, vocab: usize) -> bool {
+        self.reports_support(vocab) && !self.keeps_top_k(vocab)
+    }
+
+    /// The best-first candidates a [`Self::list_drawn`] draw is made from: one more than its cap, so a draw whose
+    /// survivors overflow the cap keeps the extra one (or the whole row, when that is shorter).
+    pub fn support_list(&self, vocab: usize) -> usize {
+        (self.support + 1).min(vocab)
     }
 
     /// Whether the draw keeps the best `top_k` of a `vocab`-wide row.
@@ -100,8 +124,28 @@ pub enum Drawn {
     /// arithmetic of the draw. The third figure is the drawn token's entry in that list whenever it is among them (the
     /// same number, bit for bit).
     Traced(u32, f32, f32, Vec<(u32, f32)>),
+    /// [`Self::Token`] for a cut draw that reports its support ([`RowDraw::support`]).
+    Supported(Supported),
     /// The row's whole `[vocab]` logits, for the host sampler.
     Row(Vec<f32>),
+}
+
+/// The answer of a cut draw that reports its support ([`Drawn::Supported`]): the arithmetic that drew the token, kept
+/// for a trainer that replays the sampler's support.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Supported {
+    /// The drawn token.
+    pub token: u32,
+    /// Its log-probability under the distribution it was drawn from: the softmax of `logit / temp` over the support.
+    pub sampler: f32,
+    /// Its log-probability under the whole row at the draw's temperature.
+    pub whole: f32,
+    /// The survivors of the cut the token was drawn from, best first (equal logits lowest id first), the token among
+    /// them; `None` when they are more than the draw's cap ([`RowDraw::support`]).
+    pub support: Option<Vec<u32>>,
+    /// The row's [`RowDraw::top`] most probable `(token, whole-row log-probability)` pairs, from the same candidate list,
+    /// when the draw asked for them and the list holds them.
+    pub top: Option<Vec<(u32, f32)>>,
 }
 
 /// The 32-bit finaliser the keyed noise is built from: every input bit reaches every output bit.
@@ -209,6 +253,13 @@ fn draw_truncated_row(row: &[f32], d: RowDraw) -> (u32, f32) {
 /// softmax normaliser of the whole row when the list is only its prefix and the nucleus is measured against the row),
 /// then the Gumbel-max rule over what survives, with the drawn token's log-probability.
 pub fn draw_list(list: &[(u32, f32)], d: RowDraw, full_mass: Option<f32>) -> (u32, f32) {
+    let (token, lp, _) = draw_list_cut(list, d, full_mass);
+    (token, lp)
+}
+
+/// [`draw_list`], and how many of the list's first entries survived the cut: the support the token was drawn from is
+/// `list[..cut]` (the device draw writes the same count, `draw_list.wgsl`).
+pub fn draw_list_cut(list: &[(u32, f32)], d: RowDraw, full_mass: Option<f32>) -> (u32, f32, usize) {
     assert!(!list.is_empty(), "draw_list: empty candidate list");
     let (weights, kept) = super::truncated_weights_of(list, d.params(), full_mass);
     let (mut pick, mut top) = (0usize, f32::NEG_INFINITY);
@@ -221,7 +272,35 @@ pub fn draw_list(list: &[(u32, f32)], d: RowDraw, full_mass: Option<f32>) -> (u3
             (pick, top) = (i, k);
         }
     }
-    (list[pick].0, weights[pick].ln() - kept.ln())
+    (list[pick].0, weights[pick].ln() - kept.ln(), weights.len())
+}
+
+/// The support a cut draw reports from its best-first `list` and the cut it drew from: the first `cut` entries of
+/// finite logit, or `None` when the survivors are more than `cap`.
+pub fn support_of_cut(list: &[(u32, f32)], cut: usize, cap: usize) -> Option<Vec<u32>> {
+    (cut <= cap).then(|| list[..cut.min(list.len())].iter().filter(|e| e.1.is_finite()).map(|e| e.0).collect())
+}
+
+/// [`draw_row_whole`] for a cut draw that reports its support ([`RowDraw::reports_support`]): the host reference of the
+/// device's answer. A `top_k` row is drawn from its best `top_k`, a nucleus or min-p row from its best
+/// [`RowDraw::support_list`] against the whole row's mass; the support is the list's cut. A row of no finite logit
+/// answers its first best index, as [`draw_row`] does, with that index as its support.
+pub fn draw_row_supported(row: &[f32], d: RowDraw) -> Drawn {
+    assert!(!row.is_empty(), "draw_row_supported: empty logits row");
+    let temp = d.temp.max(1e-6);
+    let mut entries: Vec<(u32, f32)> = row.iter().enumerate().map(|(i, &l)| (i as u32, l)).collect();
+    let Some(best) = super::fullrow::best_logit(&entries) else {
+        let token = super::argmax(row);
+        return Drawn::Supported(Supported { token, sampler: 0.0, whole: 0.0, support: Some(vec![token]), top: None });
+    };
+    let drawn_from = if d.keeps_top_k(row.len()) { d.top_k } else { d.support_list(row.len()) };
+    let list = super::fullrow::best_first(&mut entries, drawn_from.max(d.top));
+    let full_mass = (!d.keeps_top_k(row.len())).then(|| row.iter().map(|&l| super::fullrow::weight_of(l, temp, best) as f64).sum::<f64>() as f32);
+    let (token, sampler, cut) = draw_list_cut(&list[..drawn_from.min(list.len())], d, full_mass);
+    let scored = crate::logprobs::scored_position(row, token, d.top, temp);
+    let whole = if scored.log_prob.is_nan() { sampler } else { scored.log_prob };
+    let top = (d.top > 0).then_some(scored.top);
+    Drawn::Supported(Supported { token, sampler, whole, support: support_of_cut(&list, cut, d.support), top })
 }
 
 /// Every row's answer to a keyed step whose rows were read back: `draws[i]` drawn from `rows[i]` where it is
@@ -230,6 +309,7 @@ pub fn draw_rows_host(rows: Vec<Vec<f32>>, draws: &[Option<RowDraw>]) -> Vec<Dra
     assert_eq!(rows.len(), draws.len(), "draw_rows_host: {} rows for {} draws", rows.len(), draws.len());
     let drawn = backend_cpu::par::map(rows.len(), |i| {
         draws[i].map(|d| match d.top {
+            _ if d.reports_support(rows[i].len()) => draw_row_supported(&rows[i], d),
             0 => {
                 let (t, lp, whole) = draw_row_whole(&rows[i], d);
                 Drawn::Token(t, lp, whole)

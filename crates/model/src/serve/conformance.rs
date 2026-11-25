@@ -68,7 +68,8 @@
 //! * [`keyed_draws_are_the_rows_draws`]: a decoder that reads its rows back
 //!   answers a keyed step ([`PagedDecoder::forward_batched_drawn`]) with the
 //!   tokens the host reference draws from those rows, so a decoder that draws
-//!   on its device draws what every other decoder draws.
+//!   on its device draws what every other decoder draws, and a cut draw that
+//!   asks for its support reports the survivors the host reference keeps.
 //!
 //! A server that receives SIGTERM with nothing in flight exits within a bound:
 //! that lives in the process layer (`brain_shutdown::bound_drain`), not the
@@ -475,10 +476,12 @@ pub fn full_rows_rank_what_the_candidate_list_ranks<D: PagedDecoder>(c: &Conform
     }
 }
 
-/// One batched decode step of four sequences (a plain draw, a row read back, a nucleus with a floor, a `top_k`) read back as whole rows and answered as a keyed step, on two identical
+/// Two batched decode steps (a plain draw, a row read back, a nucleus with a floor and a `top_k`; then two cut draws that
+/// ask for their support beside a row read back) read back as whole rows and answered as keyed steps, on two identical
 /// decoders: every keyed row is the token [`super::draw_row`] draws from the row and its log-probability, wherever the
-/// decoder draws it, and the row whose draw is `None` comes back as the row. A decoder without row readback passes
-/// trivially.
+/// decoder draws it, a row that asked for its support is answered with the survivors the host reference keeps
+/// ([`super::draw_row_supported`]), and the row whose draw is `None` comes back as the row. A decoder without row
+/// readback passes trivially.
 pub fn keyed_draws_are_the_rows_draws<D: PagedDecoder>(c: &Conformance<D>) {
     keyed_draws(c);
 }
@@ -493,28 +496,44 @@ pub fn keyed_draws_answer_the_top_list_they_are_asked_for<D: PagedDecoder>(c: &C
 
 /// [`keyed_draws_are_the_rows_draws`]'s checks; whether a row that asked for its top list was answered with it.
 fn keyed_draws<D: PagedDecoder>(c: &Conformance<D>) -> bool {
-    use super::{draw_key, draw_row, Drawn, RowDraw};
+    use super::{draw_key, RowDraw};
+    let whole = [Some(RowDraw { temp: 1.0, min_p: 0.0, top_p: 1.0, top_k: 0, top: 4, support: 0, key: draw_key(1, 9, 0) }), None, Some(RowDraw { temp: 0.7, min_p: 0.05, top_p: 0.9, top_k: 0, top: 0, support: 0, key: draw_key(2, 9, 0) }), Some(RowDraw { temp: 1.0, min_p: 0.0, top_p: 1.0, top_k: 5, top: 0, support: 0, key: draw_key(3, 9, 0) })];
+    // Two cut draws that report their support (a `top_k` with a nucleus and its top list, a nucleus with a floor) beside
+    // a row read back.
+    let supported = [
+        Some(RowDraw { temp: 0.9, min_p: 0.0, top_p: 0.8, top_k: 6, top: 2, support: 6, key: draw_key(4, 9, 0) }),
+        None,
+        Some(RowDraw { temp: 0.8, min_p: 0.01, top_p: 0.5, top_k: 0, top: 0, support: 128, key: draw_key(5, 9, 0) }),
+    ];
+    let answered_a_list = keyed_step(c, &whole);
+    keyed_step(c, &supported);
+    answered_a_list
+}
+
+/// One keyed step of `draws` (at most four rows) checked against the rows the same step reads back; whether a row that
+/// asked for its top list was answered with it.
+fn keyed_step<D: PagedDecoder>(c: &Conformance<D>, draws: &[Option<super::RowDraw>]) -> bool {
+    use super::{draw_row, draw_row_supported, Drawn};
     let mut answered_a_list = false;
     let (mut by_row, mut by_draw) = ((c.make)(), (c.make)());
     if !by_row.full_row_readback() {
         return false;
     }
     let vocab = by_row.vocab();
-    let prompts: Vec<Vec<u32>> = (0..4).map(|s| tokens(vocab, 3 + s, 9)).collect();
-    let next: Vec<u32> = (0..4).map(|s| tokens(vocab, 7 + s, 1)[0]).collect();
+    let prompts: Vec<Vec<u32>> = (0..draws.len()).map(|s| tokens(vocab, 3 + s, 9)).collect();
+    let next: Vec<u32> = (0..draws.len()).map(|s| tokens(vocab, 7 + s, 1)[0]).collect();
     let mut row_tables: Vec<crate::paged::BlockTable> = prompts.iter().map(|_| crate::paged::BlockTable::new()).collect();
     let mut draw_tables: Vec<crate::paged::BlockTable> = prompts.iter().map(|_| crate::paged::BlockTable::new()).collect();
     for (p, (a, b)) in prompts.iter().zip(row_tables.iter_mut().zip(draw_tables.iter_mut())) {
         by_row.prefill(a, p);
         by_draw.prefill(b, p);
     }
-    let draws = [Some(RowDraw { temp: 1.0, min_p: 0.0, top_p: 1.0, top_k: 0, top: 4, key: draw_key(1, 9, 0) }), None, Some(RowDraw { temp: 0.7, min_p: 0.05, top_p: 0.9, top_k: 0, top: 0, key: draw_key(2, 9, 0) }), Some(RowDraw { temp: 1.0, min_p: 0.0, top_p: 1.0, top_k: 5, top: 0, key: draw_key(3, 9, 0) })];
     let rows = by_row.forward_batched_logit_rows(&mut row_tables.iter_mut().collect::<Vec<_>>(), &next);
-    let drawn = by_draw.forward_batched_drawn(&mut draw_tables.iter_mut().collect::<Vec<_>>(), &next, &draws);
+    let drawn = by_draw.forward_batched_drawn(&mut draw_tables.iter_mut().collect::<Vec<_>>(), &next, draws);
     assert_eq!(drawn.len(), draws.len(), "a keyed step answers every row");
     for (i, (d, got)) in draws.iter().zip(&drawn).enumerate() {
         match (d, got) {
-            (Some(d), Drawn::Token(t, lp, whole) | Drawn::Traced(t, lp, whole, _)) => {
+            (Some(d), Drawn::Token(t, lp, whole) | Drawn::Traced(t, lp, whole, _)) if !d.reports_support(vocab) => {
                 let (want, want_lp) = draw_row(&rows[i], *d);
                 assert_eq!(*t, want, "row {i}: the keyed draw is not the row's draw");
                 assert!((lp - want_lp).abs() <= 1e-3 * want_lp.abs().max(1.0), "row {i}: logprob {lp} against the row's {want_lp}");
@@ -537,6 +556,17 @@ fn keyed_draws<D: PagedDecoder>(c: &Conformance<D>) -> bool {
                     }
                 }
             }
+            // A cut draw that asked for its support is answered with it: the survivors the host reference keeps of the
+            // same row (or the same overflow), the token among them, both figures the row's.
+            (Some(d), Drawn::Supported(got)) => {
+                assert!(d.reports_support(vocab), "row {i}: a support for a draw that does not report one");
+                let Drawn::Supported(want) = draw_row_supported(&rows[i], *d) else { unreachable!("the host reference answers a support") };
+                assert_eq!((got.token, &got.support), (want.token, &want.support), "row {i}: the support is not the row's");
+                assert!((got.sampler - want.sampler).abs() <= 1e-3 * want.sampler.abs().max(1.0), "row {i}: sampler logprob {} against the row's {}", got.sampler, want.sampler);
+                assert!((got.whole - want.whole).abs() <= 1e-3 * want.whole.abs().max(1.0), "row {i}: whole-row logprob {} against the row's {}", got.whole, want.whole);
+                assert_eq!(got.top.as_ref().map(|t| t.iter().map(|e| e.0).collect::<Vec<_>>()), want.top.as_ref().map(|t| t.iter().map(|e| e.0).collect::<Vec<_>>()), "row {i}: the top ids");
+            }
+            (Some(d), _) if d.reports_support(vocab) => panic!("row {i}: a cut draw that asked for its support was answered without it: {got:?}"),
             (None, Drawn::Row(row)) => assert_eq!(row, &rows[i], "row {i}: the row handed back is not the step's row"),
             other => panic!("row {i}: {other:?} for draw {d:?}"),
         }

@@ -209,12 +209,18 @@ struct Capture {
     /// `policy_trace_top_log_probs`: how many of the most probable tokens of each generated position's row the trace
     /// carries besides the sampled token's figure (`0`: none).
     top: usize,
+    /// `policy_trace_support`: the most survivors of a cut draw the trace reports as each token's support (`0`: none).
+    support: usize,
     prompt: Vec<u32>,
 }
 
 /// The most tokens per generated position a policy trace may carry ([`with_token_capture`]'s
 /// `policy_trace_top_log_probs`): the reply holds `max_new x` this many ids and figures.
 pub const MAX_TRACE_TOP_LOG_PROBS: usize = 20;
+
+/// The widest support per generated position a policy trace may carry ([`with_token_capture`]'s
+/// `policy_trace_support`): the reply holds at most `max_new x` this many ids, one more figure and one offset per token.
+pub const MAX_TRACE_SUPPORT: usize = 256;
 
 /// `spec` with the token-capture parameters every action served through this
 /// crate honours ([`Capture`]): one declaration, so a client of any surface
@@ -235,6 +241,15 @@ pub fn with_token_capture(spec: ActionSpec) -> ActionSpec {
             )
             .min(1.0)
             .max(MAX_TRACE_TOP_LOG_PROBS as f64),
+        )
+        .param(
+            ParamSpec::new(
+                "policy_trace_support",
+                ParamType::Int,
+                "with policy_trace: also return, for every generated position, the support its sampler drew it from - the token ids that survived top_k, top_p and min_p, best first, at most this many (generation_support_offsets, generation_support_ids) - and the token's log-probability under that support (generation_sampler_log_probs), from the arithmetic of the decode step that drew it; a draw that cuts nothing reports empty supports (the whole row); refused for a greedy request, a top_k above the cap, or a decoder whose decode cannot report it, and a draw that keeps more survivors than the cap fails the request",
+            )
+            .min(1.0)
+            .max(MAX_TRACE_SUPPORT as f64),
         )
         .param(ParamSpec::new(
             "return_raw",
@@ -291,14 +306,30 @@ impl Capture {
         let token_ids = inv.get_bool("return_token_ids").unwrap_or(false);
         let raw = inv.get_bool("return_raw").unwrap_or(false);
         let trace = inv.get_bool("policy_trace").unwrap_or(false);
-        Capture { logprobs, token_ids, raw, trace: None, top: inv.get_i64("policy_trace_top_log_probs").map_or(0, |k| k as usize), prompt: if token_ids || trace { prompt.to_vec() } else { Vec::new() } }
+        Capture { logprobs, token_ids, raw, trace: None, top: inv.get_i64("policy_trace_top_log_probs").map_or(0, |k| k as usize), support: inv.get_i64("policy_trace_support").map_or(0, |n| n as usize), prompt: if token_ids || trace { prompt.to_vec() } else { Vec::new() } }
     }
 
     /// Why this request's policy trace cannot be the sampling policy's, when it asked for one.
-    fn trace_refusal(inv: &Invocation, sampler: &model::serve::SampleParams, scores: bool, scores_top: bool) -> Option<String> {
+    fn trace_refusal(inv: &Invocation, sampler: &model::serve::SampleParams, scores: bool, scores_top: bool, reports_supports: bool) -> Option<String> {
+        use capability::failure::{tag, FailureClass};
         let top = inv.get_i64("policy_trace_top_log_probs").is_some();
+        let support = inv.get_i64("policy_trace_support");
         if !inv.get_bool("policy_trace").unwrap_or(false) {
-            return top.then(|| capability::failure::tag(capability::failure::FailureClass::InvalidRequest, "policy_trace_top_log_probs: it is the top list of a policy trace, so the request must set policy_trace"));
+            if support.is_some() {
+                return Some(tag(FailureClass::InvalidRequest, "policy_trace_support: it is the sampler support of a policy trace, so the request must set policy_trace"));
+            }
+            return top.then(|| tag(FailureClass::InvalidRequest, "policy_trace_top_log_probs: it is the top list of a policy trace, so the request must set policy_trace"));
+        }
+        if let Some(cap) = support {
+            if sampler.is_greedy() {
+                return Some(tag(FailureClass::InvalidRequest, "policy_trace_support: a greedy request (temp 0) draws no token from a sampler, so it has no support to replay"));
+            }
+            if sampler.top_k as i64 > cap {
+                return Some(tag(FailureClass::InvalidRequest, format!("policy_trace_support: the sampler keeps top_k {} tokens, more than the support cap {cap}; raise policy_trace_support to at least top_k", sampler.top_k)));
+            }
+            if !reports_supports {
+                return Some(tag(FailureClass::UnsupportedCapability, "policy_trace_support: this model's decode does not draw from rows it reads back, so it cannot report the support a cut draw kept"));
+            }
         }
         if top && scores && !scores_top {
             return Some(capability::failure::tag(capability::failure::FailureClass::UnsupportedCapability, "policy_trace_top_log_probs: this model's scoring pass reports only the scored token's log-probability, not the most probable tokens of its row"));
@@ -430,8 +461,8 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
                 let seed = req.seed;
                 job.capture = Capture::of(&inv, &req.ids);
                 // The decode steps report the top lists a trace asks for, where the draw is over the whole row.
-                let sample = model::serve::SampleParams { trace_top: job.capture.top, ..req.sampler };
-                if let Some(why) = Capture::trace_refusal(&inv, &sample, self.sched.scores_continuations(), self.sched.scores_top_log_probs()) {
+                let sample = model::serve::SampleParams { trace_top: job.capture.top, trace_support: job.capture.support, ..req.sampler };
+                if let Some(why) = Capture::trace_refusal(&inv, &sample, self.sched.scores_continuations(), self.sched.scores_top_log_probs(), self.sched.reports_sampler_supports()) {
                     self.set_job(bi, job);
                     return (bi, Some(Err(why)));
                 }
@@ -559,7 +590,8 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
 
     /// [`Self::conclude`] for job `bi`. A request that asked for a policy trace is not final yet: it waits in
     /// [`Self::awaiting`] until [`Self::score_awaiting`] has scored its prompt and generation (`None`).
-    fn conclude_scored(&mut self, bi: usize, seq: SeqState, toks: &[u32], logprobs: &[f32], trace: Option<Vec<f32>>, top_lists: Option<Vec<Vec<(u32, f32)>>>, completion: model::serve::Completion, progress: &mut dyn FnMut(usize, Progress)) -> Option<ActionResult> {
+    #[allow(clippy::too_many_arguments)]
+    fn conclude_scored(&mut self, bi: usize, seq: SeqState, toks: &[u32], logprobs: &[f32], trace: Option<Vec<f32>>, top_lists: Option<Vec<Vec<(u32, f32)>>>, supports: Option<model::serve::Supports>, completion: model::serve::Completion, progress: &mut dyn FnMut(usize, Progress)) -> Option<ActionResult> {
         let tok = self.front.tok();
         let outcome = match Self::conclude(&self.jobs[bi], self.front.label(), seq, tok, toks, logprobs, completion, &mut |p| progress(bi, p)) {
             Ok(outcome) => outcome,
@@ -577,13 +609,18 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
         // other kernels and another batch shape, which round differently on a card (knowledge #446) and, run
         // serially for every reply, left a loaded lane host-bound (knowledge #528).
         let wants_top = self.jobs[bi].capture.top > 0;
+        // A cut draw that asked for its support is reported from the decode steps that drew it or not at all: a scoring
+        // pass cannot know which survivors a draw kept.
+        if self.jobs[bi].capture.support > 0 && self.jobs[bi].sample.as_ref().is_some_and(|s| self.sched.draw_reports_support(s)) {
+            return Some(self.with_decoded_support(bi, outcome, generated, logprobs, &completion, trace, top_lists, supports));
+        }
         if let Some(traced) = trace.filter(|t| t.len() == generated.len()) {
             // A request that asked for the top lists takes the decode's only when the decode reported every row's list
             // (a draw over the whole row): the figures and the lists are then one arithmetic, and no scoring pass runs.
             let lists = top_lists.filter(|l| l.len() == generated.len());
             if !wants_top || lists.is_some() {
                 let prompt = self.jobs[bi].capture.prompt.clone();
-                return Some(Ok(self.with_trace(bi, outcome, prompt, generated, traced, lists, "decode")));
+                return Some(Ok(self.with_trace(bi, outcome, prompt, generated, traced, lists, None, "decode")));
             }
         }
         // A whole-distribution draw whose steps did not all report it still has the sampler's own figures, which are the
@@ -593,16 +630,51 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
             let mut traced = logprobs.to_vec();
             traced.extend(completion.stop_logprob);
             let prompt = self.jobs[bi].capture.prompt.clone();
-            return Some(Ok(self.with_trace(bi, outcome, prompt, generated, traced, None, "decode")));
+            return Some(Ok(self.with_trace(bi, outcome, prompt, generated, traced, None, None, "decode")));
         }
         self.awaiting.push(AwaitingTrace { bi, outcome, generated, since: std::time::Instant::now() });
         None
     }
 
+    /// The policy trace of a cut draw that asked for its support ([`Capture::support`]), from the decode steps alone: the
+    /// whole-row figures, the sampler's figures under each token's support and the supports, with the top lists when
+    /// asked. A position whose step reported no support, or whose draw kept more survivors than the cap, fails the
+    /// request by name.
+    #[allow(clippy::too_many_arguments)]
+    fn with_decoded_support(&self, bi: usize, outcome: capability::Outcome, generated: Vec<u32>, logprobs: &[f32], completion: &model::serve::Completion, trace: Option<Vec<f32>>, top_lists: Option<Vec<Vec<(u32, f32)>>>, supports: Option<model::serve::Supports>) -> ActionResult {
+        use capability::failure::{tag, FailureClass};
+        let label = self.front.label();
+        let cap = self.jobs[bi].capture.support;
+        let unreported = |position: usize| tag(FailureClass::UnsupportedCapability, format!("{label}: policy_trace_support: generated position {position} was not drawn by a decode step that reports its support (a speculated, forced or host-sampled token), and a scoring pass cannot know which survivors a draw kept"));
+        let supports = match supports {
+            Some(Ok(lists)) if lists.len() == generated.len() => lists,
+            Some(Ok(lists)) => return Err(unreported(lists.len())),
+            Some(Err(model::serve::SupportGap::Overflow { position })) => return Err(tag(FailureClass::InvalidRequest, format!("{label}: policy_trace_support: the draw of generated position {position} kept more than {cap} tokens (the support cap); raise policy_trace_support or narrow top_p / min_p"))),
+            Some(Err(model::serve::SupportGap::Unreported { position })) => return Err(unreported(position)),
+            None => return Err(unreported(0)),
+        };
+        let mut sampler = logprobs.to_vec();
+        sampler.extend(completion.stop_logprob.filter(|_| completion.stop_token.is_some()));
+        let Some(whole) = trace.filter(|t| t.len() == generated.len() && sampler.len() == generated.len()) else {
+            return Err(unreported(sampler.len().min(generated.len())));
+        };
+        let wants_top = self.jobs[bi].capture.top > 0;
+        let lists = top_lists.filter(|l| l.len() == generated.len());
+        if wants_top && lists.is_none() {
+            return Err(tag(FailureClass::UnsupportedCapability, format!("{label}: policy_trace_top_log_probs: a cut draw that reports its support takes its top list from its own candidates, and this decode reported none")));
+        }
+        let prompt = self.jobs[bi].capture.prompt.clone();
+        Ok(self.with_trace(bi, outcome, prompt, generated, whole, lists, Some((sampler, supports)), "decode"))
+    }
+
     /// `outcome` with job `bi`'s policy trace: its prompt and generated ids, a log-probability per generated id at the
     /// request temperature, where those came from (`decode`: the decode steps that drew the tokens; `score`: a
-    /// teacher-forced pass after the generation) and the identity of the tokenizer and prompt path.
-    fn with_trace(&self, bi: usize, outcome: capability::Outcome, prompt: Vec<u32>, generated: Vec<u32>, log_probs: Vec<f32>, top: Option<Vec<Vec<(u32, f32)>>>, source: &str) -> capability::Outcome {
+    /// teacher-forced pass after the generation) and the identity of the tokenizer and prompt path. A request that asked
+    /// for its sampler's support carries the sampler's figure of each token and the support it was drawn from
+    /// (`support`: from a cut draw's decode steps; `None`: a draw that cut nothing, whose support is the whole row, so
+    /// every range is empty and the sampler's figure is the whole row's).
+    #[allow(clippy::too_many_arguments)]
+    fn with_trace(&self, bi: usize, outcome: capability::Outcome, prompt: Vec<u32>, generated: Vec<u32>, log_probs: Vec<f32>, top: Option<Vec<Vec<(u32, f32)>>>, support: Option<(Vec<f32>, Vec<Vec<u32>>)>, source: &str) -> capability::Outcome {
         let temperature = self.jobs[bi].capture.trace.expect("only a traced request has a trace");
         let mut trace = serde_json::json!({
             "prompt_token_ids": prompt,
@@ -617,6 +689,19 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
             trace["top_log_probs"] = serde_json::json!(self.jobs[bi].capture.top);
             trace["generation_top_ids"] = top.iter().map(|row| row.iter().map(|e| e.0).collect::<Vec<_>>()).collect::<Vec<_>>().into();
             trace["generation_top_log_probs"] = top.iter().map(|row| row.iter().map(|e| e.1).collect::<Vec<_>>()).collect::<Vec<_>>().into();
+        }
+        let cap = self.jobs[bi].capture.support;
+        if cap > 0 {
+            let (sampler, supports) = support.unwrap_or_else(|| (log_probs.clone(), vec![Vec::new(); generated.len()]));
+            let mut offsets = Vec::with_capacity(supports.len() + 1);
+            offsets.push(0u64);
+            for ids in &supports {
+                offsets.push(offsets[offsets.len() - 1] + ids.len() as u64);
+            }
+            trace["support_cap"] = serde_json::json!(cap);
+            trace["generation_sampler_log_probs"] = serde_json::json!(sampler);
+            trace["generation_support_offsets"] = serde_json::json!(offsets);
+            trace["generation_support_ids"] = serde_json::json!(supports.into_iter().flatten().collect::<Vec<u32>>());
         }
         outcome.set("policy_trace", trace)
     }
@@ -650,10 +735,10 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
                 self.sched.score_continuation_top(adapter, &all, prompt.len(), temperature, top).map_err(unavailable).map(|scored| {
                     let log_probs = scored.iter().map(|s| s.log_prob).collect();
                     let top = scored.into_iter().map(|s| s.top).collect();
-                    self.with_trace(bi, outcome, prompt, generated, log_probs, Some(top), "score")
+                    self.with_trace(bi, outcome, prompt, generated, log_probs, Some(top), None, "score")
                 })
             } else {
-                self.sched.score_continuation(adapter, &all, prompt.len(), temperature).map_err(unavailable).map(|scored| self.with_trace(bi, outcome, prompt, generated, scored, None, "score"))
+                self.sched.score_continuation(adapter, &all, prompt.len(), temperature).map_err(unavailable).map(|scored| self.with_trace(bi, outcome, prompt, generated, scored, None, None, "score"))
             };
             finished.push((bi, result));
         }
@@ -692,9 +777,10 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
             let completion = self.sched.completion_of(id);
             let trace = self.sched.trace_logprobs_of(id);
             let top_lists = self.sched.trace_top_lists_of(id);
+            let supports = self.sched.trace_supports_of(id);
             let (toks, logprobs) = self.sched.cancel_detailed(id).unwrap_or_default();
             let seq = self.jobs[bi].seq.take().expect("checked above");
-            let result = self.conclude_scored(bi, seq, &toks, &logprobs, trace, top_lists, completion, progress);
+            let result = self.conclude_scored(bi, seq, &toks, &logprobs, trace, top_lists, supports, completion, progress);
             self.open.remove(&bi);
             finished.extend(result.map(|r| (bi, r)));
         }
@@ -730,12 +816,13 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
         let mut meta_of: std::collections::HashMap<u64, model::serve::Completion> = report.completed_meta.into_iter().collect();
         let mut trace_of: std::collections::HashMap<u64, Vec<f32>> = report.completed_traces.into_iter().collect();
         let mut top_of: std::collections::HashMap<u64, Vec<Vec<(u32, f32)>>> = report.completed_top_lists.into_iter().collect();
+        let mut supports_of: std::collections::HashMap<u64, model::serve::Supports> = report.completed_supports.into_iter().collect();
         for (id, toks) in report.completed {
             let bi = job_of(&self.jobs, id);
             let logprobs = logprobs_of.remove(&id).unwrap_or_default();
             if let Some(seq) = self.jobs[bi].seq.take() {
                 let completion = meta_of.remove(&id).unwrap_or_default();
-                let result = self.conclude_scored(bi, seq, &toks, &logprobs, trace_of.remove(&id), top_of.remove(&id), completion, progress);
+                let result = self.conclude_scored(bi, seq, &toks, &logprobs, trace_of.remove(&id), top_of.remove(&id), supports_of.remove(&id), completion, progress);
                 finished.extend(result.map(|r| (bi, r)));
             }
             self.open.remove(&bi);

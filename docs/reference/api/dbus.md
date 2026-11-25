@@ -145,7 +145,7 @@ those directories' READMEs for the exact commands.
 The token facts of a text `generate` are params of the same action over D-Bus as over HTTP: `logprobs` and `return_token_ids`
 (the sampler's figure, `completion_logprobs` and the ids in the result) and `policy_trace: true`, which adds a `policy_trace`
 object to the result (prompt ids, generated ids with the stop token, and their log-probabilities under the model's full
-distribution at the request temperature, with `tokenizer_digest` and `chat_template_digest`; `policy_trace_top_log_probs: K`, an integer in `1..=20`, adds the K most probable ids and log-probabilities of every generated position's row); the served identity is the
+distribution at the request temperature, with `tokenizer_digest` and `chat_template_digest`; `policy_trace_top_log_probs: K`, an integer in `1..=20`, adds the K most probable ids and log-probabilities of every generated position's row; `policy_trace_support: N`, an integer in `1..=256`, adds the sampler's support of every generated position and the tokens' log-probabilities under it, as over HTTP); the served identity is the
 result's `base_digest` and `adapter` (`id`, `digest`, `version`). The validation is the generate spec's, the same on both
 surfaces; a request that sets penalties, DRY, no-repeat bans or a thinking budget, or a model that cannot score its own
 generation, fails with the `invalid-request` or `unsupported-capability` class. The HTTP reference

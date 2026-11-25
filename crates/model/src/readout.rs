@@ -224,7 +224,7 @@ pub struct DrawShape {
 /// How the drawer treats a row: over the whole row (flag 1), over its nucleus (flag 2, the threshold found on the
 /// device), or from its best-first candidates (flag 1 too: the row's statistics are what the list is cut with).
 fn flag_of(d: &crate::serve::RowDraw, vocab: usize) -> u32 {
-    if d.has_nucleus() && !d.keeps_top_k(vocab) {
+    if d.has_nucleus() && !d.keeps_top_k(vocab) && !d.list_drawn(vocab) {
         2
     } else {
         1
@@ -264,6 +264,8 @@ pub struct RowDrawer {
     state: DeviceBuffer,
     /// `[max_rows, 4]` drawn token (as f32), its log-probability, the row's best `logit / temp` and its mass.
     out: DeviceBuffer,
+    /// `[max_rows]` how many of each row's candidates survived its cut (`draw_list`): the support it drew from.
+    kept: DeviceBuffer,
     /// `[max_rows, candidates]` best-first candidates of a step that takes them (logits and token ids).
     cand_vals: DeviceBuffer,
     cand_idx: DeviceBuffer,
@@ -306,6 +308,7 @@ impl RowDrawer {
             part: g.storage(rows * DRAW_SLICES as u64 * 4),
             state: g.storage(rows * 4),
             out: g.storage(rows * 4),
+            kept: g.storage(rows),
             cand_vals: g.storage(cands),
             cand_idx: g.storage(cands),
             hist: g.storage(rows * window as u64),
@@ -334,12 +337,15 @@ impl RowDrawer {
     pub fn shape_for(draws: &[Option<crate::serve::RowDraw>], vocab: u32, extracts: bool) -> DrawShape {
         let v = vocab as usize;
         let keyed = || draws.iter().flatten();
-        let floors = keyed().any(|d| flag_of(d, v) == 1 && d.min_p > 0.0);
+        let floors = keyed().any(|d| flag_of(d, v) == 1 && d.min_p > 0.0 && !d.list_drawn(v));
         let nucleus = keyed().any(|d| flag_of(d, v) == 2);
         // A `top_k` row is answered from its best-first list; a whole-row row that asks for its top list takes that many.
+        // A row that reports its support takes its top list from the same candidates.
         let want = |d: &crate::serve::RowDraw| {
-            if d.keeps_top_k(v) && d.top_k as u32 <= MAX_DRAW_CANDIDATES {
-                d.top_k as u32
+            if d.list_drawn(v) {
+                d.support_list(v).max(d.top) as u32
+            } else if d.keeps_top_k(v) && d.top_k as u32 <= MAX_DRAW_CANDIDATES {
+                if d.reports_support(v) { d.top_k.max(d.top) as u32 } else { d.top_k as u32 }
             } else if d.carries_top_list(v) {
                 d.top as u32
             } else {
@@ -360,7 +366,8 @@ impl RowDrawer {
         for ((s, k), d) in rows.chunks_mut(8).zip(keys.iter_mut()).zip(draws) {
             if let Some(d) = d {
                 let top_k = u32::try_from(d.top_k).unwrap_or(u32::MAX);
-                s[..5].copy_from_slice(&[d.temp.to_bits(), d.min_p.to_bits(), top_k, flag_of(d, vocab as usize), d.top_p.to_bits()]);
+                let list = if d.list_drawn(vocab as usize) { d.support_list(vocab as usize) as u32 } else { 0 };
+                s[..6].copy_from_slice(&[d.temp.to_bits(), d.min_p.to_bits(), top_k, flag_of(d, vocab as usize), d.top_p.to_bits(), list]);
                 *k = d.key;
             }
         }
@@ -437,7 +444,7 @@ impl RowDrawer {
         if let (Some(k), true) = (self.topk, shape.candidates > 0) {
             let n = shape.candidates;
             steps.extend(topk_rows_steps(g, k, logits, &self.cand_vals, &self.cand_idx, rows, vocab, n, n));
-            let bufs = [&self.spec, &self.cand_vals, &self.cand_idx, &self.out];
+            let bufs = [&self.spec, &self.cand_vals, &self.cand_idx, &self.out, &self.kept];
             steps.push(match self.list_rows_kernel {
                 Some(kernel) => g.dispatch(kernel, &bufs, &[rows, n, vocab, step], gpu_core::Dispatch::Workgroups(rows)),
                 None => g.step(self.list_kernel, &bufs, &[rows, n, vocab, step], rows),
@@ -451,13 +458,15 @@ impl RowDrawer {
     /// its `top_k` is wider than the candidates), and row `i` of `logits` read back where it is `None`. Only those
     /// rows cross to the host.
     pub fn answer(&self, g: &Gpu, logits: &DeviceBuffer, draws: &[Option<crate::serve::RowDraw>], vocab: u32, shape: DrawShape) -> Vec<crate::serve::Drawn> {
-        use crate::serve::{draw_row_whole, Drawn};
+        use crate::serve::{draw_row_whole, support_of_cut, Drawn, Supported};
         let rows = draws.len();
         let v = vocab as usize;
         let out = if draws.iter().any(Option::is_some) { g.read(&self.out, rows * 4) } else { Vec::new() };
         let n = shape.candidates as usize;
         let (vals, idx) = if n > 0 { (g.read(&self.cand_vals, rows * n), g.read(&self.cand_idx, rows * n)) } else { (Vec::new(), Vec::new()) };
         let list = |i: usize| -> Vec<(u32, f32)> { (0..n).map(|c| (idx[i * n + c] as u32, vals[i * n + c])).collect() };
+        let held = |d: &crate::serve::RowDraw| n > 0 && n >= d.top && if d.list_drawn(v) { n >= d.support_list(v) } else { d.top_k <= n };
+        let kept = if n > 0 && draws.iter().flatten().any(|d| d.reports_support(v) && held(d)) { g.read(&self.kept, rows) } else { Vec::new() };
         // A row read back has its candidates masked by the extraction: they are written back from the list.
         let read_row = |i: usize| {
             let mut row = vec![0.0f32; v];
@@ -472,6 +481,18 @@ impl RowDrawer {
             .enumerate()
             .map(|(i, d)| match d {
                 None => Some(Drawn::Row(read_row(i))),
+                // A cut draw that reports its support was drawn from its candidates on the device: the support is the
+                // list's cut as the draw counted it, the figures the row's own (a row of no mass is drawn whole).
+                Some(d) if d.reports_support(v) && held(d) && out[4 * i + 3] > 0.0 => {
+                    let (token, sampler, best, mass) = (out[4 * i] as u32, out[4 * i + 1], out[4 * i + 2], out[4 * i + 3]);
+                    let candidates = list(i);
+                    let figure = |logit: f32| logit / d.temp.max(1e-6) - best - mass.ln();
+                    let logit = candidates.iter().find(|&&(t, _)| t == token).map(|&(_, l)| l).expect("draw_list draws a token of the row's candidates");
+                    let whole = figure(logit);
+                    let top = (d.top > 0).then(|| candidates.iter().take(d.top).map(|&(t, l)| (t, figure(l))).collect());
+                    let support = support_of_cut(&candidates, kept[i] as usize, d.support);
+                    Some(Drawn::Supported(Supported { token, sampler, whole: if whole.is_nan() { sampler } else { whole }, support, top }))
+                }
                 // A whole-row draw that asked for its top list: the figures are the row's own (`logit / temp - best -
                 // ln(mass)`, the statistics the draw reduced), the drawn token's among them the same number as its entry.
                 Some(d) if d.carries_top_list(v) && n >= d.top => {
@@ -487,7 +508,7 @@ impl RowDrawer {
                     let whole = figure(logit);
                     Some(if whole.is_nan() { Drawn::Token(token, out[4 * i + 1], out[4 * i + 1]) } else { Drawn::Traced(token, out[4 * i + 1], whole, top) })
                 }
-                Some(d) if !d.keeps_top_k(v) => {
+                Some(d) if !d.keeps_top_k(v) && !d.reports_support(v) => {
                     let (token, lp) = (out[4 * i] as u32, out[4 * i + 1]);
                     // A row drawn over every token has its own figure; a nucleus or min-p floor drew over fewer, and the
                     // whole row's figure needs the token's logit with the row's best and mass.
@@ -506,7 +527,7 @@ impl RowDrawer {
                 }
                 // A top-k row the candidates hold was drawn from them on the device; a row of no mass has no
                 // distribution and is drawn whole, as the host sampler draws it.
-                Some(d) if n > 0 && d.top_k <= n && out[4 * i + 3] > 0.0 => {
+                Some(d) if n > 0 && d.top_k <= n && out[4 * i + 3] > 0.0 && !d.reports_support(v) => {
                     let (token, lp, best, mass) = (out[4 * i] as u32, out[4 * i + 1], out[4 * i + 2], out[4 * i + 3]);
                     let logit = list(i).iter().find(|&&(t, _)| t == token).map(|&(_, l)| l).expect("draw_list draws a token of the row's candidates");
                     Some(Drawn::Token(token, lp, logit / d.temp.max(1e-6) - best - mass.ln()))
@@ -518,7 +539,9 @@ impl RowDrawer {
         let whole: Vec<(usize, Vec<f32>)> = answers.iter().enumerate().filter(|(_, a)| a.is_none()).map(|(i, _)| (i, read_row(i))).collect();
         let drawn = backend_cpu::par::map(whole.len(), |j| {
             let d = draws[whole[j].0].expect("a keyed row");
-            if d.carries_top_list(v) {
+            if d.reports_support(v) {
+                crate::serve::draw_row_supported(&whole[j].1, d)
+            } else if d.carries_top_list(v) {
                 crate::serve::draw_row_traced(&whole[j].1, d)
             } else {
                 let (t, lp, whole) = draw_row_whole(&whole[j].1, d);

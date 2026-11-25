@@ -391,3 +391,112 @@ fn a_whole_row_draw_reports_its_top_list_from_the_decode_and_a_mixed_batch_keeps
     assert_eq!(outs[3]["policy_trace"]["log_prob_source"], json!("score"));
     assert_eq!(outs[3]["policy_trace"]["top_log_probs"], json!(k));
 }
+
+/// The survivors of the toy row after `previous` under a cut (`top_k`, `top_p`, `min_p`) at `temperature`, best first,
+/// with their weights relative to the best: the oracle a reported support is read against.
+fn toy_survivors(previous: u32, temperature: f64, top_k: usize, top_p: f64, min_p: f64) -> Vec<(u32, f64)> {
+    let weighted: Vec<(u32, f64)> = row(previous).into_iter().map(|(t, l)| (t, (f64::from(l) / temperature).exp())).collect();
+    let best = weighted[0].1;
+    let kept: Vec<(u32, f64)> = weighted.into_iter().map(|(t, w)| (t, w / best)).take(if top_k > 0 { top_k } else { VOCAB }).collect();
+    let total: f64 = kept.iter().map(|e| e.1).sum();
+    let (mut acc, mut cut) = (0.0, kept.len());
+    for (r, e) in kept.iter().enumerate() {
+        acc += e.1;
+        if top_p < 1.0 && acc / total >= top_p {
+            cut = r + 1;
+            break;
+        }
+    }
+    kept[..cut].iter().copied().filter(|e| e.1 >= min_p).collect()
+}
+
+/// SPEC: `policy_trace_support: N` on a cut draw (`top_k`, `top_p`, `min_p`) returns, for every generated position (the
+/// stop token's included), the support the sampler drew it from - the survivors of the cut, best first, as ragged
+/// `generation_support_offsets` / `generation_support_ids` - and the token's log-probability under that support
+/// (`generation_sampler_log_probs`, the sampler's own figure, `completion_logprobs`), beside the whole-row
+/// `generation_log_probs`, all from the decode steps that drew the tokens (no scoring pass). A top list asked with it
+/// comes from the same draw. A draw that cuts nothing reports empty supports and its sampler figures are the whole
+/// row's.
+#[test]
+fn a_cut_draw_reports_the_support_each_token_was_drawn_from_and_both_figures() {
+    let spec = chat_spec();
+    let temperature = 0.9f64;
+    let request = |seed: u64, top_k: i64, top_p: f64, min_p: f64, extra: &[(&str, serde_json::Value)]| {
+        let inv = Invocation::new().set("prompt", json!("t1t2t3t4")).set("chat", json!(false)).set("max_new", json!(10)).set("seed", json!(seed)).set("logprobs", json!(true)).set("policy_trace", json!(true)).set("temp", json!(temperature)).set("top_k", json!(top_k)).set("top_p", json!(top_p)).set("min_p", json!(min_p));
+        spec.validate(extra.iter().fold(inv, |inv, (key, value)| inv.set(key, value.clone()))).expect("a valid request")
+    };
+    let cuts = [(5i64, 0.9f64, 0.0f64, 8i64), (0, 0.6, 0.0, 64), (0, 1.0, 0.3, 64), (0, 1.0, 0.0, 16)];
+    let batch: Vec<Invocation> = cuts.iter().enumerate().map(|(i, &(k, p, m, cap))| request(11 + i as u64, k, p, m, &[("policy_trace_support", json!(cap)), ("policy_trace_top_log_probs", json!(3))])).collect();
+    let front = Parsed { tok: tokenizer() };
+    let mut sched = Scheduler::new(Toy::new(BlockAllocator::new(256, 8), 0).sampling().scoring_top(), 4);
+    let outs: Vec<_> = run_batch_scheduled(&mut sched, &front, &batch, &mut |_, _| {}).into_iter().map(|r| r.expect("served").outputs).collect();
+    assert_eq!(sched.decoder_mut().scores_run, 0, "every figure, support and list comes from the decode");
+    for (i, out) in outs.iter().enumerate() {
+        let (k, p, m, cap) = cuts[i];
+        let trace = &out["policy_trace"];
+        assert_eq!((&trace["log_prob_source"], &trace["support_cap"]), (&json!("decode"), &json!(cap)), "{:?}", cuts[i]);
+        let prompt: Vec<u32> = serde_json::from_value(trace["prompt_token_ids"].clone()).unwrap();
+        let generated: Vec<u32> = serde_json::from_value(trace["generation_token_ids"].clone()).unwrap();
+        let whole: Vec<f32> = serde_json::from_value(trace["generation_log_probs"].clone()).unwrap();
+        let sampler: Vec<f32> = serde_json::from_value(trace["generation_sampler_log_probs"].clone()).unwrap();
+        let offsets: Vec<usize> = serde_json::from_value(trace["generation_support_offsets"].clone()).unwrap();
+        let ids: Vec<u32> = serde_json::from_value(trace["generation_support_ids"].clone()).unwrap();
+        let completion: Vec<f32> = serde_json::from_value(out["completion_logprobs"].clone()).unwrap();
+        let top_ids: Vec<Vec<u32>> = serde_json::from_value(trace["generation_top_ids"].clone()).unwrap();
+        assert!(sampler.len() == generated.len() && whole.len() == generated.len() && offsets.len() == generated.len() + 1 && top_ids.len() == generated.len(), "{:?}: one entry per generated token", cuts[i]);
+        assert_eq!((offsets[0], *offsets.last().unwrap()), (0, ids.len()), "{:?}: offsets frame the ids", cuts[i]);
+        let cut = k > 0 || p < 1.0 || m > 0.0;
+        let mut previous = *prompt.last().unwrap();
+        for (j, &token) in generated.iter().enumerate() {
+            let oracle = host_log_softmax(previous, temperature);
+            assert!((f64::from(whole[j]) - oracle.iter().find(|e| e.0 == token).unwrap().1).abs() < 1e-5, "{:?} position {j}: the whole-row figure", cuts[i]);
+            let mut ranked = oracle.clone();
+            ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+            assert_eq!(top_ids[j], ranked[..3].iter().map(|e| e.0).collect::<Vec<_>>(), "{:?} position {j}: the top list", cuts[i]);
+            let support = &ids[offsets[j]..offsets[j + 1]];
+            if !cut {
+                assert!(support.is_empty() && sampler[j].to_bits() == whole[j].to_bits(), "{:?} position {j}: a draw that cuts nothing has the whole row", cuts[i]);
+            } else {
+                let survivors = toy_survivors(previous, temperature, k as usize, p, m);
+                assert_eq!(support, survivors.iter().map(|e| e.0).collect::<Vec<_>>(), "{:?} position {j}: the support", cuts[i]);
+                let mass: f64 = survivors.iter().map(|e| e.1).sum();
+                let own = (survivors.iter().find(|e| e.0 == token).expect("the token is in its support").1 / mass).ln();
+                assert!((f64::from(sampler[j]) - own).abs() < 1e-5, "{:?} position {j}: the sampler figure {} vs {own}", cuts[i], sampler[j]);
+            }
+            if let Some(&c) = completion.get(j).filter(|_| cut) {
+                assert_eq!(c.to_bits(), sampler[j].to_bits(), "{:?} position {j}: the sampler figure is the sampled token's own", cuts[i]);
+            }
+            previous = token;
+        }
+    }
+}
+
+/// SPEC: the support is bounded and named. Above the declared maximum or below one is refused by param name; so is a
+/// support without a trace, one asked of a greedy request, a `top_k` above the cap, and one asked of a decoder whose
+/// decode cannot report it, before decoding. A draw that keeps more survivors than the cap fails the request naming the
+/// position and the cap, never with a shortened support.
+#[test]
+fn a_support_request_is_bounded_and_refused_by_name_where_it_cannot_be_served() {
+    let spec = chat_spec();
+    let base = || Invocation::new().set("prompt", json!("t1t2t3t4")).set("chat", json!(false)).set("max_new", json!(3)).set("policy_trace", json!(true)).set("temp", json!(1.0)).set("top_k", json!(4));
+    let max = llmserve::MAX_TRACE_SUPPORT;
+    assert_eq!(max, 256);
+    assert!(spec.validate(base().set("policy_trace_support", json!(max))).is_ok());
+    for bad in [json!(max + 1), json!(0), json!(-1), json!(2.5)] {
+        let error = spec.validate(base().set("policy_trace_support", bad.clone())).expect_err("out of range");
+        assert!(error.contains("policy_trace_support"), "{bad}: {error}");
+    }
+    let front = Parsed { tok: tokenizer() };
+    let run = |toy: Toy, inv: Invocation| run_batch_scheduled(&mut Scheduler::new(toy, 4), &front, &[spec.validate(inv).unwrap()], &mut |_, _| {}).remove(0);
+    let toy = || Toy::new(BlockAllocator::new(128, 8), 0).sampling().scoring();
+    let refused = |toy: Toy, inv: Invocation, class: &str, words: &[&str]| {
+        let error = run(toy, inv).expect_err("refused");
+        assert!(error.starts_with(class) && error.contains("policy_trace_support") && words.iter().all(|w| error.contains(w)), "{error}");
+    };
+    let no_trace = Invocation::new().set("prompt", json!("t1t2t3t4")).set("chat", json!(false)).set("max_new", json!(3)).set("temp", json!(1.0)).set("top_k", json!(4)).set("policy_trace_support", json!(8));
+    refused(toy(), no_trace, "[invalid-request]", &["policy_trace"]);
+    refused(toy(), base().set("temp", json!(0.0)).set("policy_trace_support", json!(8)), "[invalid-request]", &["greedy"]);
+    refused(toy(), base().set("policy_trace_support", json!(3)), "[invalid-request]", &["top_k"]);
+    refused(Toy::new(BlockAllocator::new(128, 8), 0).scoring(), base().set("policy_trace_support", json!(8)), "[unsupported-capability]", &[]);
+    refused(toy(), base().set("top_k", json!(0)).set("top_p", json!(0.99)).set("policy_trace_support", json!(2)), "[invalid-request]", &["position 0", "2"]);
+}

@@ -28,13 +28,20 @@
 // a device without workgroup reductions runs draw_list.
 //
 // The token (as f32) and its log-probability go to out[4 r], out[4 r + 1]; the row's best and mass that pass 0 of
-// draw_final wrote (out[4 r + 2], out[4 r + 3]) are left for the whole-row figure. Rows that do not keep a top_k
-// inside the vocabulary (or one wider than the list) are left alone.
+// draw_final wrote (out[4 r + 2], out[4 r + 3]) are left for the whole-row figure. The number of candidates that
+// survived the cut, the support the token was drawn from, goes to kept[r].
 //
-//   spec : [M, 8] u32 per row (see draw_part; slot 2 holds the row's top_k), then [W, M] the keys of each step
+// A row with no top_k inside the vocabulary whose spec slot 5 is a list length L (a nucleus or min-p row that reports
+// its support) is drawn the same way from its first min(L, n) candidates, with the nucleus measured against the
+// whole row's mass (out[4 r + 3], scaled from the row's best to the list's), as draw_list draws it. Other rows (no
+// top_k and no list length, or a top_k wider than the list) are left alone.
+//
+//   spec : [M, 8] u32 per row (see draw_part; slot 2 holds the row's top_k, slot 5 a list length or 0), then [W, M]
+//          the keys of each step
 //   vals : [M, n] candidate logits, best first
 //   idx  : [M, n] their token ids (as f32)
 //   out  : [M, 4] see draw_final
+//   kept : [M] the survivors of the cut (as f32)
 //
 // params: m, n (candidates per row), vocab, step (of the decode window)
 
@@ -50,6 +57,7 @@ struct Params {
 @group(0) @binding(2) var<storage, read>       vals: array<f32>;
 @group(0) @binding(3) var<storage, read>       idx:  array<f32>;
 @group(0) @binding(4) var<storage, read_write> out:  array<f32>;
+@group(0) @binding(5) var<storage, read_write> kept: array<f32>;
 
 const WG: u32 = 64u;
 const MAXC: u32 = 1024u;
@@ -104,7 +112,14 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
     if (r >= pr.m) { return; }
     let flag = spec[8u * r + 3u];
     let k = spec[8u * r + 2u];
-    if (flag == 0u || k == 0u || k >= pr.vocab || k > pr.n || k > MAXC) { return; }
+    if (flag == 0u) { return; }
+    let list = spec[8u * r + 5u];
+    let whole_row = k == 0u || k >= pr.vocab;
+    if (whole_row && list == 0u) { return; }
+    if (!whole_row && k > pr.n) { return; }
+    var len = k;
+    if (whole_row) { len = min(list, pr.n); }
+    if (len > MAXC) { return; }
     let temp = max(bitcast<f32>(spec[8u * r]), 1e-6);
     let min_p = bitcast<f32>(spec[8u * r + 1u]);
     let top_p = bitcast<f32>(spec[8u * r + 4u]);
@@ -114,7 +129,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
 
     // The maximum of the scaled logits: the host's fold(-inf, f32::max), so a NaN never wins.
     var mx = ninf;
-    for (var c = lid; c < k; c = c + WG) {
+    for (var c = lid; c < len; c = c + WG) {
         let s = vals[base + c] / temp;
         if (s > mx) { mx = s; }
     }
@@ -130,19 +145,22 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
     mx = red_v[0];
     workgroupBarrier();
 
-    for (var c = lid; c < k; c = c + WG) {
+    for (var c = lid; c < len; c = c + WG) {
         w[c] = exp(vals[base + c] / temp - mx);
     }
     workgroupBarrier();
     if (lid == 0u) {
         var sum = 0.0;
-        for (var c = 0u; c < k; c = c + 1u) { sum = sum + w[c]; }
-        var cut = k;
-        if (top_p > 0.0 && top_p < 1.0 && sum > 0.0) {
-            var kept = 0.0;
-            for (var c = 0u; c < k; c = c + 1u) {
-                kept = kept + w[c];
-                if (kept / sum >= top_p) {
+        for (var c = 0u; c < len; c = c + 1u) { sum = sum + w[c]; }
+        var cut = len;
+        // The nucleus against the list a top_k keeps, or against the whole row for a listed row.
+        var denom = sum;
+        if (whole_row) { denom = out[4u * r + 3u] * exp(out[4u * r + 2u] - mx); }
+        if (top_p > 0.0 && top_p < 1.0 && denom > 0.0) {
+            var acc = 0.0;
+            for (var c = 0u; c < len; c = c + 1u) {
+                acc = acc + w[c];
+                if (acc / denom >= top_p) {
                     cut = c + 1u;
                     break;
                 }
@@ -190,5 +208,6 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>,
         let p = select(red_i[0], 0u, red_i[0] == 0xffffffffu);
         out[4u * r] = idx[base + p];
         out[4u * r + 1u] = log(w[p]) - log(kept_s);
+        kept[r] = f32(cut);
     }
 }

@@ -311,6 +311,35 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       policy is served over a lossy KV cache or has fallen back to the host; measure fp8 KV against f32 at version 1.
 - [ ] **Support replay for truncated samplers**: the sampler's support per position in the trace, the trainer's
       log-probabilities renormalised over it, so cut samplers can train without bias.
+      Serving (lane agrpo-support, 2026-11-25): `policy_trace: {"support": N}` (N in 1..=256,
+      `llmserve::MAX_TRACE_SUPPORT`; alone or beside `top_log_probs`; param `policy_trace_support` over D-Bus) returns
+      `support_cap`, `generation_sampler_log_probs` (each generated token's figure under the survivors it was drawn from,
+      stop token included; `generation_log_probs` stays the whole row's) and the ragged `generation_support_offsets` /
+      `generation_support_ids` (best first, the token among them), all from the decode step that drew the token. A cut
+      draw that asks (`SampleParams::trace_support` -> `RowDraw::support`, `RowDraw::reports_support`) is answered
+      `Drawn::Supported`: a `top_k` row's support is its candidate list's cut as `draw_list.wgsl` counted it (new `kept`
+      output), and a nucleus or min-p row without a `top_k` is drawn from its best `N + 1` candidates against the whole
+      row's mass instead of the threshold search (`RowDraw::list_drawn`), so a survivor past the cap shows in the list
+      and is reported as an overflow, never a shortened set; the host reference (`draw_row_supported`, used by
+      `draw_rows_host` and the admission draw) is the same arithmetic. A top list asked beside it comes from the same
+      candidates. Such rows take single steps (no keyed window). Refused by name before decoding: without
+      `policy_trace`, greedy, `top_k` above N, a decoder without row readback (`Scheduler::reports_sampler_supports`);
+      a position not drawn by a step that reports it (`SupportGap::Unreported`) or a draw over the cap
+      (`SupportGap::Overflow`) fails the request by name: a scoring pass is never substituted, it cannot know the
+      survivors. A draw that cuts nothing reports empty supports and its sampler figures are the whole row's. Tests:
+      `model` `it::readout_draw::a_cut_draw_reports_the_support_it_drew_from` (device and host reference against the
+      exact truncation's survivors and figures for top-k, nucleus, min-p and their combinations, overflows; checked to
+      fail with the kernel's count off by one), `it::serve_keyed_draw::a_cut_draw_reports_the_support_of_every_token_it_drew`
+      (scheduler, stop token, overflow, host and device double), the generic conformance
+      (`serve::conformance::keyed_draws_are_the_rows_draws` now asks two cut rows for their support, run on every
+      serving engine: qwen3, qwen35 incl. edgerock, qwen35moe, ouro, deepseek2, huginn, inkling2, ricursive),
+      `llmserve` `it::outcome_report` (reply shape, both figures, no scoring pass, every refusal and the overflow),
+      `apiserve` `it::api::a_policy_trace_object_asks_for_the_sampler_support_and_is_bounded`, `catalog`
+      `it::scheduled_batch::a_cut_draws_support_comes_from_the_decode_and_the_trainer_replays_it` (tiny qwen35: the
+      trainer's teacher-forced figure renormalised over the reported support equals the sampler's within 2e-3).
+      API audit (api-security.md): one integer param bounded by the action spec (1..=256, refused by name as
+      `policy_trace.support`), the `policy_trace` object takes no other key, no path or secret; the reply grows by at most
+      N ids, one offset and one figure per generated token, within the existing `max_new` and body limits.
 - [ ] Later, each driven by a profile and recorded as a knowledge entry (bottleneck, baseline, evidence, change,
       oracle, result, decision): colocated serve-and-train scheduling and whether the frozen base can be shared
       (A37-A39); merging append-only calls of one session and group-prefix packing in training, against the per-call

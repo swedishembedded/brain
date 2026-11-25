@@ -79,7 +79,7 @@ fn the_keyed_draw_follows_the_row_samplers_distribution_and_reports_its_logprob(
         let probs = exact(&row, temp, min_p);
         let mut counts = vec![0u64; row.len()];
         for pos in 0..n {
-            let (t, lp) = draw_row(&row, RowDraw { temp, min_p, top_p: 1.0, top_k: 0, top: 0, key: draw_key(seed, pos, 0) });
+            let (t, lp) = draw_row(&row, RowDraw { temp, min_p, top_p: 1.0, top_k: 0, top: 0, support: 0, key: draw_key(seed, pos, 0) });
             counts[t as usize] += 1;
             assert!((lp as f64 - probs[t as usize].ln()).abs() < 1e-4, "temp {temp} min_p {min_p}: token {t} logprob {lp} vs {}", probs[t as usize].ln());
         }
@@ -102,7 +102,7 @@ fn the_keyed_draw_follows_the_truncated_distributions() {
         let probs = exact_truncated(&row, temp, min_p, top_p, top_k);
         let mut counts = vec![0u64; row.len()];
         for pos in 0..n {
-            let (t, lp) = draw_row(&row, RowDraw { temp, min_p, top_p, top_k, top: 0, key: draw_key(seed, pos, 0) });
+            let (t, lp) = draw_row(&row, RowDraw { temp, min_p, top_p, top_k, top: 0, support: 0, key: draw_key(seed, pos, 0) });
             counts[t as usize] += 1;
             assert!((lp as f64 - probs[t as usize].ln()).abs() < 1e-4, "{temp} {min_p} {top_p} {top_k}: token {t} logprob {lp} vs {}", probs[t as usize].ln());
         }
@@ -242,6 +242,10 @@ impl PagedDecoder for Echo {
             .iter()
             .zip(draws)
             .map(|(&i, d)| match d {
+                Some(d) if d.reports_support(VOCAB) => {
+                    self.drawn += 1;
+                    model::serve::draw_row_supported(&row_for(i), *d)
+                }
                 Some(d) => {
                     self.drawn += 1;
                     let (t, lp, whole) = model::serve::draw_row_whole(&row_for(i), *d);
@@ -401,5 +405,64 @@ fn a_whole_row_draw_reports_the_top_of_the_row_it_drew_from_and_the_others_repor
         }
         assert!((f64::from(*own) - oracle[token as usize]).abs() < 1e-5, "position {i}: the figure of the drawn token");
         previous = token;
+    }
+}
+
+/// SPEC: a request whose draw cuts the row (`top_k`, `top_p`, `min_p`) and asks for its sampler's support
+/// (`SampleParams::trace_support`) gets, per generated token and its stop token, the survivors its draw kept (the drawn
+/// token among them), and its tokens' figures (`completed_logprobs`, the stop token's `stop_logprob`) are their
+/// log-probabilities under those survivors. A request that did not ask reports none, and one whose draw keeps more than
+/// its cap reports the first position that did, never a shortened set. On the host draw and on the device draw alike.
+#[test]
+fn a_cut_draw_reports_the_support_of_every_token_it_drew() {
+    const TEMP: f32 = 0.8;
+    for on_device in [false, true] {
+        let params = SampleParams { temp: TEMP, ..SampleParams::greedy() };
+        let request = |prompt: u32| Request { prompt: vec![prompt], max_new: 10, stop: vec![3] };
+        let mut s = echo(on_device);
+        let top_k = s.submit_sampled(request(5), SampleParams { top_k: 6, top_p: 0.9, trace_support: 6, ..params }, 31);
+        let nucleus = s.submit_sampled(request(6), SampleParams { top_p: 0.4, min_p: 0.05, trace_support: 40, ..params }, 32);
+        let plain = s.submit_sampled(request(7), SampleParams { top_k: 6, ..params }, 33);
+        let overflow = s.submit_sampled(request(8), SampleParams { top_p: 0.95, trace_support: 2, ..params }, 34);
+        let (mut tokens, mut logprobs, mut meta, mut supports) = (std::collections::HashMap::new(), std::collections::HashMap::new(), std::collections::HashMap::new(), std::collections::HashMap::new());
+        while s.pending() {
+            let report = s.step_report();
+            tokens.extend(report.completed.clone());
+            logprobs.extend(report.completed_logprobs);
+            meta.extend(report.completed_meta);
+            supports.extend(report.completed_supports);
+        }
+        assert!(!supports.contains_key(&plain), "on_device {on_device}: a request that did not ask reports no support");
+        assert_eq!(supports[&overflow], Err(model::serve::SupportGap::Overflow { position: 0 }), "on_device {on_device}: a cap below the survivors");
+        for (id, (k, p, m)) in [(top_k, (6usize, 0.9f32, 0.0f32)), (nucleus, (0, 0.4, 0.05))] {
+            let (generated, lists) = (&tokens[&id], supports[&id].as_ref().expect("every token reported its support"));
+            let stop: Option<(u32, f32)> = meta[&id].stop_token.zip(meta[&id].stop_logprob);
+            let figures: Vec<f32> = logprobs[&id].iter().copied().chain(stop.map(|s| s.1)).collect();
+            let drawn: Vec<u32> = generated.iter().copied().chain(stop.map(|s| s.0)).collect();
+            assert_eq!(lists.len(), drawn.len(), "on_device {on_device}: one support per token, the stop token's included");
+            let mut previous = [5u32, 6][usize::from(id == nucleus)];
+            for (i, ((list, &token), &figure)) in lists.iter().zip(&drawn).zip(&figures).enumerate() {
+                let row = row_for(previous);
+                // The survivors: best first (ties lowest id first), the best `k`, the nucleus, the min-p floor.
+                let mut order: Vec<usize> = (0..VOCAB).collect();
+                order.sort_by(|&a, &b| row[b].partial_cmp(&row[a]).unwrap().then(a.cmp(&b)));
+                let w = |t: usize| ((f64::from(row[t]) - f64::from(row[order[0]])) / f64::from(TEMP)).exp();
+                let kept: Vec<usize> = if k > 0 { order[..k].to_vec() } else { order.clone() };
+                let whole: f64 = kept.iter().map(|&t| w(t)).sum();
+                let (mut acc, mut cut) = (0.0, kept.len());
+                for (r, &t) in kept.iter().enumerate() {
+                    acc += w(t);
+                    if acc / whole >= f64::from(p) {
+                        cut = r + 1;
+                        break;
+                    }
+                }
+                let survivors: Vec<u32> = kept[..cut].iter().filter(|&&t| w(t) >= f64::from(m)).map(|&t| t as u32).collect();
+                assert_eq!(list, &survivors, "on_device {on_device} request {id} position {i}");
+                let mass: f64 = survivors.iter().map(|&t| w(t as usize)).sum();
+                assert!((f64::from(figure) - (w(token as usize) / mass).ln()).abs() < 1e-5, "on_device {on_device} request {id} position {i}: the figure under the support");
+                previous = token;
+            }
+        }
     }
 }

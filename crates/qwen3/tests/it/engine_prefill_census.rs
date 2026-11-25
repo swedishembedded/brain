@@ -136,7 +136,7 @@ fn a_keyed_window_draws_what_single_keyed_steps_draw() {
     let w = qwen3::init_weights(&cfg, 13); // seed: any weights serve
     let (rows, k) = (3usize, 4usize);
     let params = [(1.0f32, 0.0f32, 1.0f32), (0.8, 0.1, 1.0), (1.2, 0.0, 0.7)];
-    let draw = |i: usize, pos: usize| RowDraw { temp: params[i].0, min_p: params[i].1, top_p: params[i].2, top_k: 0, top: 0, key: draw_key(i as u64 + 1, pos as u64, 0) };
+    let draw = |i: usize, pos: usize| RowDraw { temp: params[i].0, min_p: params[i].1, top_p: params[i].2, top_k: 0, top: 0, support: 0, key: draw_key(i as u64 + 1, pos as u64, 0) };
     let prepare = |e: &mut Engine| -> Vec<BlockTable> {
         let mut tables: Vec<BlockTable> = (0..rows).map(|_| BlockTable::new()).collect();
         for (i, t) in tables.iter_mut().enumerate() {

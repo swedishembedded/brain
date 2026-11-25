@@ -92,6 +92,7 @@ fn draws_as_the_host_does(g: &gpu_core::Gpu) {
                         top_p: [1.0, 1.0, 1.0, 1.0, 0.9, 0.5, 1.0, 0.7][k],
                         top_k: [0, 0, 0, 0, 0, 0, 40, 2000][k],
                         top: 0,
+                        support: 0,
                         key: draw_key(round * 1000 + r as u64, round, 0),
                     }),
                 })
@@ -140,7 +141,7 @@ fn follows_the_exact_distribution(g: &gpu_core::Gpu) {
         let z: f64 = w.iter().sum();
         let mut counts = vec![0u64; vocab];
         for round in 0..640u64 {
-            let draws: Vec<Option<RowDraw>> = (0..rows).map(|r| Some(RowDraw { temp, min_p, top_p, top_k, top: 0, key: draw_key(r as u64, round, 0) })).collect();
+            let draws: Vec<Option<RowDraw>> = (0..rows).map(|r| Some(RowDraw { temp, min_p, top_p, top_k, top: 0, support: 0, key: draw_key(r as u64, round, 0) })).collect();
             let logits = g.storage_init("logits", &row.repeat(rows));
             let shape = drawer.shape(&draws, vocab as u32);
             g.submit(&[], &drawer.steps(g, &logits, &draws, vocab as u32));
@@ -181,9 +182,9 @@ fn a_whole_row_draw_answers_the_top_of_its_row_from_the_launches_the_batch_share
         let host: Vec<f32> = (0..rows * vocab).map(|_| (uniform(&mut rng) * 20.0 - 10.0).round() / 4.0).collect();
         let draws: Vec<Option<RowDraw>> = (0..rows)
             .map(|r| match r % 4 {
-                0 | 1 => Some(RowDraw { temp: [0.8, 1.3][r % 2], min_p: 0.0, top_p: 1.0, top_k: 0, top, key: draw_key(r as u64, 3, 0) }),
-                2 => Some(RowDraw { temp: 1.0, min_p: 0.0, top_p: 1.0, top_k: 0, top: 0, key: draw_key(r as u64, 3, 0) }),
-                _ => Some(RowDraw { temp: 1.0, min_p: 0.0, top_p: 1.0, top_k: 3, top: 0, key: draw_key(r as u64, 3, 0) }),
+                0 | 1 => Some(RowDraw { temp: [0.8, 1.3][r % 2], min_p: 0.0, top_p: 1.0, top_k: 0, top, support: 0, key: draw_key(r as u64, 3, 0) }),
+                2 => Some(RowDraw { temp: 1.0, min_p: 0.0, top_p: 1.0, top_k: 0, top: 0, support: 0, key: draw_key(r as u64, 3, 0) }),
+                _ => Some(RowDraw { temp: 1.0, min_p: 0.0, top_p: 1.0, top_k: 3, top: 0, support: 0, key: draw_key(r as u64, 3, 0) }),
             })
             .collect();
         let logits = g.storage_init("logits", &host);
@@ -218,7 +219,80 @@ fn a_whole_row_draw_answers_the_top_of_its_row_from_the_launches_the_batch_share
     assert_eq!(steps_for[0], steps_for[1], "the extraction launches do not grow with the rows: {steps_for:?}");
     // A batch that asks for no list dispatches none of the extraction.
     let drawer = RowDrawer::new(&g, 3).unwrap();
-    let plain: Vec<Option<RowDraw>> = (0..3).map(|r| Some(RowDraw { temp: 1.0, min_p: 0.0, top_p: 1.0, top_k: 0, top: 0, key: draw_key(r, 3, 0) })).collect();
+    let plain: Vec<Option<RowDraw>> = (0..3).map(|r| Some(RowDraw { temp: 1.0, min_p: 0.0, top_p: 1.0, top_k: 0, top: 0, support: 0, key: draw_key(r, 3, 0) })).collect();
     let logits = g.storage_init("logits", &vec![0.5f32; 3 * vocab]);
     assert!(drawer.steps(&g, &logits, &plain, vocab as u32).len() < steps_for[0], "the candidate extraction is only dispatched for a batch that asks");
+}
+
+/// A cut draw that asks for its support (`top_k`, a nucleus, a min-p floor and their combinations, at several
+/// temperatures) reports the survivors it drew from: on the device (from its candidates) and on the host reference
+/// alike, the support is the exact truncation's survivors, it holds the drawn token, the sampler figure is the token's
+/// log-probability under the survivors and the whole-row figure its log-probability under the row. A draw whose survivors
+/// pass the cap reports the overflow instead of a shortened set. Without the candidate extraction the rows are read back
+/// and the host answers the same.
+#[test]
+fn a_cut_draw_reports_the_support_it_drew_from() {
+    for kernels in [&DRAW_KERNELS[..], &WITH_CANDIDATES[..]] {
+        reports_its_support(&gpu_core::testgpu::dev(kernels));
+    }
+}
+
+fn reports_its_support(g: &gpu_core::Gpu) {
+    use model::serve::draw_row_supported;
+    let vocab = 300usize;
+    let mut rng = Lcg::new(41); // seed: fixed fixture so a failure reproduces on the same rows
+    // (temp, min_p, top_p, top_k, cap, top): the last two rows keep more than their cap.
+    let cases: [(f32, f32, f32, usize, usize, usize); 9] = [
+        (1.0, 0.0, 1.0, 7, 7, 0),
+        (0.7, 0.0, 0.6, 12, 12, 3),
+        (1.0, 0.0, 0.5, 0, 64, 0),
+        (1.4, 0.0, 0.3, 0, 64, 4),
+        (1.0, 0.3, 1.0, 0, 64, 0),
+        (0.9, 0.2, 0.8, 0, 64, 0),
+        (1.0, 0.1, 1.0, 20, 20, 0),
+        (1.0, 0.0, 0.99, 0, 3, 0),
+        (1.0, 0.001, 1.0, 0, 2, 0),
+    ];
+    let rows = cases.len();
+    let drawer = RowDrawer::new(g, rows as u32).expect("the kernels are registered");
+    for round in 0..3u64 {
+        let host: Vec<f32> = (0..rows * vocab).map(|_| uniform(&mut rng) * 8.0 - 4.0).collect();
+        let draws: Vec<Option<RowDraw>> = cases.iter().enumerate().map(|(r, &(temp, min_p, top_p, top_k, support, top))| Some(RowDraw { temp, min_p, top_p, top_k, top, support, key: draw_key(round * 100 + r as u64, round, 0) })).collect();
+        let logits = g.storage_init("logits", &host);
+        let shape = drawer.shape(&draws, vocab as u32);
+        g.submit(&[], &drawer.steps(g, &logits, &draws, vocab as u32));
+        let got = drawer.answer(g, &logits, &draws, vocab as u32, shape);
+        for (r, (d, got)) in draws.iter().zip(&got).enumerate() {
+            let (d, row) = (d.expect("a keyed row"), &host[r * vocab..(r + 1) * vocab]);
+            assert!(d.reports_support(vocab), "row {r}: the fixture's draws all cut the row");
+            let Drawn::Supported(got) = got else { panic!("round {round} row {r} {d:?}: {got:?}") };
+            let Drawn::Supported(want) = draw_row_supported(row, d) else { panic!("the host reference answers a support") };
+            assert_eq!((got.token, &got.support), (want.token, &want.support), "round {round} row {r} {d:?}: the device and the host reference");
+            let weights = exact_truncated(row, d.temp, d.min_p, d.top_p, d.top_k);
+            let survivors: Vec<u32> = (0..vocab as u32).filter(|&t| weights[t as usize] > 0.0).collect();
+            let Some(support) = &got.support else {
+                assert!(survivors.len() > d.support, "round {round} row {r}: an overflow for {} survivors under a cap of {}", survivors.len(), d.support);
+                continue;
+            };
+            let mut sorted = support.clone();
+            sorted.sort_unstable();
+            assert_eq!(sorted, survivors, "round {round} row {r} {d:?}: the support is the exact truncation's survivors");
+            assert!(support.contains(&got.token), "round {round} row {r}: the token is in its support");
+            let kept: f64 = weights.iter().sum();
+            let sampler = (weights[got.token as usize] / kept).ln();
+            assert!((f64::from(got.sampler) - sampler).abs() < 1e-4, "round {round} row {r}: sampler figure {} vs {sampler}", got.sampler);
+            let whole = f64::from(model::logprobs::row_logprob_at(row, got.token as usize, d.temp));
+            assert!((f64::from(got.whole) - whole).abs() < 1e-4, "round {round} row {r}: whole-row figure {} vs {whole}", got.whole);
+            assert!(got.sampler >= got.whole - 1e-6, "round {round} row {r}: a support never holds less than the token's share of the row");
+            match (d.top, &got.top) {
+                (0, None) => {}
+                (k, Some(top)) => {
+                    let want = model::logprobs::row_top_logprobs_at(row, k, d.temp);
+                    assert_eq!(top.iter().map(|e| e.0).collect::<Vec<_>>(), want.iter().map(|e| e.0).collect::<Vec<_>>(), "round {round} row {r}: the top list's ids");
+                    assert!(top.iter().zip(&want).all(|(a, b)| (a.1 - b.1).abs() < 1e-4), "round {round} row {r}: {top:?} vs {want:?}");
+                }
+                other => panic!("round {round} row {r}: top list {other:?}"),
+            }
+        }
+    }
 }

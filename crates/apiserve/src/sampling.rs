@@ -102,10 +102,14 @@ pub const MAX_TOKENS_PARAM: &str = "max_new";
 /// The token-capture fields [`apply_token_capture`] forwards, each to the param of its own name.
 pub const TOKEN_CAPTURE: [&str; 3] = ["logprobs", "return_token_ids", "policy_trace"];
 
-/// The `policy_trace` object's one option and the `generate` param it sets: how many of the most probable tokens of
-/// each generated position's row the trace returns. Its range is the action's to declare (and refuse by name).
+/// The `policy_trace` object's options and the `generate` params they set: how many of the most probable tokens of
+/// each generated position's row the trace returns, and the most survivors of a cut draw it returns as each
+/// position's support. Their ranges are the action's to declare (and refuse by name).
 const TRACE_TOP_FIELD: &str = "top_log_probs";
 const TRACE_TOP_PARAM: &str = "policy_trace_top_log_probs";
+const TRACE_SUPPORT_FIELD: &str = "support";
+const TRACE_SUPPORT_PARAM: &str = "policy_trace_support";
+const TRACE_OPTIONS: [(&str, &str); 2] = [(TRACE_TOP_FIELD, TRACE_TOP_PARAM), (TRACE_SUPPORT_FIELD, TRACE_SUPPORT_PARAM)];
 
 /// The request fields [`apply`] reads ([`FIELDS`]).
 pub fn request_fields() -> impl Iterator<Item = &'static str> {
@@ -161,6 +165,9 @@ pub fn request_field(param: &str) -> &str {
     if param == TRACE_TOP_PARAM {
         return "policy_trace.top_log_probs";
     }
+    if param == TRACE_SUPPORT_PARAM {
+        return "policy_trace.support";
+    }
     FIELDS.iter().find(|f| f.param == param).map_or(param, |f| f.name)
 }
 
@@ -206,16 +213,24 @@ pub fn apply_token_capture(provider: Provider, body: &Value, mut inv: Invocation
     for name in TOKEN_CAPTURE {
         match present(body, name) {
             None => {}
-            // `policy_trace: {"top_log_probs": K}` is the trace plus the sampler's top K per generated position.
+            // `policy_trace: {"top_log_probs": K, "support": N}` is the trace plus the sampler's top K and its support (at
+            // most N ids) per generated position; either option alone, at least one.
             Some(Value::Object(options)) if name == "policy_trace" => {
-                if let Some(unknown) = options.keys().find(|k| k.as_str() != TRACE_TOP_FIELD) {
-                    return Err(ApiError::invalid_request(provider, format!("'policy_trace.{unknown}' is not a policy trace option; the only one is '{TRACE_TOP_FIELD}'")));
+                if let Some(unknown) = options.keys().find(|k| !TRACE_OPTIONS.iter().any(|(field, _)| field == k)) {
+                    return Err(ApiError::invalid_request(provider, format!("'policy_trace.{unknown}' is not a policy trace option; the options are '{TRACE_TOP_FIELD}' and '{TRACE_SUPPORT_FIELD}'")));
                 }
-                let k = options.get(TRACE_TOP_FIELD).and_then(Value::as_i64).ok_or_else(|| ApiError::invalid_request(provider, format!("'policy_trace.{TRACE_TOP_FIELD}' must be an integer (the policy trace object takes no other form)")))?;
-                inv = inv.set(name, json!(true)).set(TRACE_TOP_PARAM, json!(k));
+                if options.is_empty() {
+                    return Err(ApiError::invalid_request(provider, format!("'policy_trace' as an object takes '{TRACE_TOP_FIELD}', '{TRACE_SUPPORT_FIELD}' or both; send true for the plain trace")));
+                }
+                inv = inv.set(name, json!(true));
+                for (field, param) in TRACE_OPTIONS {
+                    let Some(value) = options.get(field) else { continue };
+                    let n = value.as_i64().ok_or_else(|| ApiError::invalid_request(provider, format!("'policy_trace.{field}' must be an integer")))?;
+                    inv = inv.set(param, json!(n));
+                }
             }
             Some(v) => {
-                let on = v.as_bool().ok_or_else(|| ApiError::invalid_request(provider, if name == "policy_trace" { format!("'{name}' must be a boolean or an object {{\"{TRACE_TOP_FIELD}\": K}}") } else { format!("'{name}' must be a boolean") }))?;
+                let on = v.as_bool().ok_or_else(|| ApiError::invalid_request(provider, if name == "policy_trace" { format!("'{name}' must be a boolean or an object {{\"{TRACE_TOP_FIELD}\": K, \"{TRACE_SUPPORT_FIELD}\": N}}") } else { format!("'{name}' must be a boolean") }))?;
                 if on {
                     inv = inv.set(name, json!(true));
                 }

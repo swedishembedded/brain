@@ -69,9 +69,9 @@ fn padded_columns_are_never_picked_drawn_or_returned_on_the_device() {
     for key in 0..60u32 {
         let draws: Vec<Option<RowDraw>> = (0..ROWS)
             .map(|r| match r % 3 {
-                0 => Some(RowDraw { temp: 3.0, min_p: 0.0, top_p: 1.0, top_k: 0, top: 0, key: draw_key(7, 100 + u64::from(key), r as u32) }),
-                1 => Some(RowDraw { temp: 2.0, min_p: 0.01, top_p: 0.95, top_k: 0, top: 0, key: draw_key(8, u64::from(key), r as u32) }),
-                _ => Some(RowDraw { temp: 1.5, min_p: 0.0, top_p: 1.0, top_k: 6, top: 0, key: draw_key(9, u64::from(key), r as u32) }),
+                0 => Some(RowDraw { temp: 3.0, min_p: 0.0, top_p: 1.0, top_k: 0, top: 0, support: 0, key: draw_key(7, 100 + u64::from(key), r as u32) }),
+                1 => Some(RowDraw { temp: 2.0, min_p: 0.01, top_p: 0.95, top_k: 0, top: 0, support: 0, key: draw_key(8, u64::from(key), r as u32) }),
+                _ => Some(RowDraw { temp: 1.5, min_p: 0.0, top_p: 1.0, top_k: 6, top: 0, support: 0, key: draw_key(9, u64::from(key), r as u32) }),
             })
             .collect();
         for (r, d) in draw_rows(&g, &fresh(true), &draws, VOCAB as u32).into_iter().enumerate() {
@@ -121,7 +121,7 @@ fn host_rows_are_cut_capped_and_a_distribution_over_the_valid_vocabulary() {
     let total: f64 = (0..VALID as usize).map(|i| f64::from(t.logprob_at(raw.clone(), i, 1.0)).exp()).sum();
     assert!((total - 1.0).abs() <= 1e-4, "probabilities over the valid vocabulary sum to {total}");
     for key in 0..200u32 {
-        let (token, _) = draw_row(&served, RowDraw { temp: 3.0, min_p: 0.0, top_p: 1.0, top_k: 0, top: 0, key: draw_key(1, u64::from(key), 0) });
+        let (token, _) = draw_row(&served, RowDraw { temp: 3.0, min_p: 0.0, top_p: 1.0, top_k: 0, top: 0, support: 0, key: draw_key(1, u64::from(key), 0) });
         assert!(token < VALID, "drew {token}");
     }
 }

@@ -354,6 +354,20 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   "score"`, the extra prefill above), under the adapter the request ran with, and a model whose scoring pass cannot report a
   top list fails with `unsupported-capability` naming `policy_trace_top_log_probs`. The reply grows by at most 20 ids and 20
   figures per generated token. Over D-Bus the same two params are `policy_trace: true` and `policy_trace_top_log_probs: K`.
+  The object may also carry `"support": N` (an integer `1..=256`, alone or beside `top_log_probs`; a value outside is a
+  400 naming `policy_trace.support`): the sampler's support, which a trainer needs to replay a cut draw without bias. The
+  trace then also carries `support_cap` (N), `generation_sampler_log_probs[i]`, the log-probability of generated token
+  `i` (stop token included) under the distribution it was drawn from (the survivors of `top_k`, `top_p` and `min_p` at
+  the request temperature; `generation_log_probs[i]` stays the whole row's), and `generation_support_offsets` (one more
+  than the generated tokens, starting at 0) with `generation_support_ids`: token `i`'s support is
+  `generation_support_ids[offsets[i]..offsets[i + 1]]`, the token ids that survived the cut, best first (ties to the lower
+  id), the token among them. They come from the decode steps that drew the tokens (`log_prob_source: "decode"`, a top
+  list asked beside them included); a draw that cuts nothing has the whole row as its support, so every range is empty
+  and the sampler's figures are `generation_log_probs`. It is refused (400, `invalid-request`) for a greedy request and
+  for a `top_k` above N, and fails with `unsupported-capability` on a model whose decode does not draw from rows it reads
+  back; a request whose draw at some position keeps more than N survivors fails (`invalid-request`, naming the position
+  and `policy_trace_support`) rather than return a shortened support. The reply grows by at most N ids, one offset and
+  one figure per generated token. Over D-Bus the param is `policy_trace_support: N`.
 - **Scoring given text (`score`).** A served Qwen3 or Qwen3.8 chat model (the Qwen3.8-27B served from a released FP8
   or GGUF checkpoint included), and each adapter id riding on it, has a
   `score` action, called through `POST /v1/run` with `model` the base or adapter id and `blobs.records` a

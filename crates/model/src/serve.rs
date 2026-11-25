@@ -35,7 +35,7 @@ pub mod rows;
 pub mod conformance;
 pub mod visit_state;
 pub use budget::{MixedLimits, StepCost};
-pub use draw::{draw_key, draw_list, draw_row, draw_row_traced, draw_row_whole, draw_rows_host, mix32, token_gumbel, token_uniform, Drawn, RowDraw};
+pub use draw::{draw_key, draw_list, draw_list_cut, draw_row, draw_row_supported, draw_row_traced, draw_row_whole, draw_rows_host, mix32, support_of_cut, token_gumbel, token_uniform, Drawn, RowDraw, Supported};
 pub use embeds::{ContentKey, PromptEmbeds};
 pub use fullrow::{best_candidates, sample_logits_row};
 pub use round_rows::{prefill_round_rows_for, PREFILL_ROUND_ROWS, TENSOR_CORE_PREFILL_ROUND_ROWS};
@@ -943,6 +943,20 @@ pub enum AdapterAvailability {
     Unknown,
 }
 
+/// Why a request that asked for its sampler's support ([`SampleParams::trace_support`]) has none to report.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SupportGap {
+    /// The token at `position` (counted over the generated tokens, the stop token last) was chosen by a step that does
+    /// not report its draw's support: a greedy, speculated, host-sampled or forced token.
+    Unreported { position: usize },
+    /// The draw at `position` kept more survivors than the request's cap.
+    Overflow { position: usize },
+}
+
+/// A request's sampler supports: per generated token (and its stop token) the ids its cut draw kept, best first, or
+/// why they cannot be reported.
+pub type Supports = Result<Vec<Vec<u32>>, SupportGap>;
+
 /// A request's top lists: per generated token (and its stop token) the most probable `(token, whole-row log-probability)`
 /// pairs of the row it was drawn from, most probable first ([`StepReport::completed_top_lists`]).
 pub type TopLists = Vec<Vec<(u32, f32)>>;
@@ -984,6 +998,10 @@ pub struct SampleParams {
     /// none. A draw that cuts the row, a greedy one and a speculated one report none, and a caller that needs them
     /// scores the tokens afterwards ([`PagedDecoder::score_continuation_top`]).
     pub trace_top: usize,
+    /// The most survivors a cut draw (`top_k`, `top_p`, `min_p`) reports as the support each token was drawn from
+    /// ([`RowDraw::support`], [`StepReport::completed_supports`]); `0` for none. A request whose draw cuts the row and
+    /// asks for it takes single decode steps, and its top list ([`Self::trace_top`]) then comes from the same candidates.
+    pub trace_support: usize,
 }
 
 impl Default for SampleParams {
@@ -994,7 +1012,7 @@ impl Default for SampleParams {
 
 impl SampleParams {
     pub fn greedy() -> SampleParams {
-        SampleParams { temp: 0.0, top_k: 0, top_p: 1.0, min_p: 0.0, presence_penalty: 0.0, frequency_penalty: 0.0, repetition_penalty: 1.0, dry: DryParams::off(), thinking: None, no_repeat: NoRepeatNgram::off(), trace_top: 0 }
+        SampleParams { temp: 0.0, top_k: 0, top_p: 1.0, min_p: 0.0, presence_penalty: 0.0, frequency_penalty: 0.0, repetition_penalty: 1.0, dry: DryParams::off(), thinking: None, no_repeat: NoRepeatNgram::off(), trace_top: 0, trace_support: 0 }
     }
     pub fn is_greedy(&self) -> bool {
         self.temp <= 0.0
@@ -1445,6 +1463,11 @@ pub struct StepReport {
     /// none, or drew a token from a path that cannot report the list (a cut draw, a greedy, speculated or host-sampled
     /// token): a caller that needs the lists scores the tokens.
     pub completed_top_lists: Vec<(u64, TopLists)>,
+    /// For each of `completed` that asked for its sampler's support ([`SampleParams::trace_support`]) and whose draw cuts
+    /// the row: per generated token and one more for the stop token, the survivors its draw kept ([`Drawn::Supported`]),
+    /// or the first position that could not report them. The sampled tokens' figures under those supports are
+    /// [`Self::completed_logprobs`] (and the stop token's [`Completion::stop_logprob`]).
+    pub completed_supports: Vec<(u64, Supports)>,
     /// For each of `completed`, how its prompt was served and why it stopped (see [`Completion`]).
     pub completed_meta: Vec<(u64, Completion)>,
     /// For each of `completed`, the MoE routing the decoder recorded for its prompt and generated tokens, while
@@ -1495,6 +1518,8 @@ struct Resume {
     /// The whole-row figures of `generated` ([`Running::whole`]) and their top lists ([`Running::tops`]).
     whole: Option<Vec<f32>>,
     tops: Option<TopLists>,
+    /// The supports of `generated` ([`Running::supports`]).
+    supports: Option<Supports>,
     generated: Vec<u32>,
     /// The log-probability of each token in `generated`.
     logprobs: Vec<f32>,
@@ -1577,6 +1602,14 @@ struct Running {
     /// The stop token's row, with [`Self::stop_whole`], and the row of the token about to be accepted ([`Self::next_whole`]).
     stop_top: Option<Vec<(u32, f32)>>,
     next_top: Option<Vec<(u32, f32)>>,
+    /// For a request whose cut draw reports its support ([`SampleParams::trace_support`]): the support of each of
+    /// `generated`, or the first position that reported none. `None` for a request that did not ask (or draws
+    /// over the whole row).
+    supports: Option<Supports>,
+    /// The stop token's support, and the support the step that drew the next token reported (`Some(None)`: the draw
+    /// overflowed its cap).
+    stop_support: Option<Vec<u32>>,
+    next_support: Option<Option<Vec<u32>>>,
     max_new: usize,
     stop: Vec<u32>,
     next_input: u32,
@@ -1643,7 +1676,7 @@ fn row_draws(running: &[Running], active: &[usize]) -> Vec<Option<RowDraw>> {
 fn settle_drawn(running: &mut [Running], active: &[usize], drawn: Vec<Drawn>) -> Vec<Vec<(u32, f32)>> {
     assert_eq!(active.len(), drawn.len(), "a keyed step answers every row");
     debug_assert!(active.windows(2).all(|w| w[0] < w[1]), "the active sequences are in running order");
-    let mut picked: Vec<Option<(u32, f32)>> = drawn.iter().map(|d| match d { Drawn::Token(t, lp, _) | Drawn::Traced(t, lp, _, _) => Some((*t, *lp)), Drawn::Row(_) => None }).collect();
+    let mut picked: Vec<Option<(u32, f32)>> = drawn.iter().map(|d| match d { Drawn::Token(t, lp, _) | Drawn::Traced(t, lp, _, _) => Some((*t, *lp)), Drawn::Supported(s) => Some((s.token, s.sampler)), Drawn::Row(_) => None }).collect();
     let mut drawn = drawn;
     for (&si, d) in active.iter().zip(&mut drawn) {
         match d {
@@ -1652,11 +1685,16 @@ fn settle_drawn(running: &mut [Running], active: &[usize], drawn: Vec<Drawn>) ->
                 running[si].next_whole = Some(*whole);
                 running[si].next_top = Some(std::mem::take(top));
             }
+            Drawn::Supported(s) => {
+                running[si].next_whole = Some(s.whole);
+                running[si].next_top = s.top.take();
+                running[si].next_support = Some(s.support.take());
+            }
             Drawn::Row(_) => {}
         }
     }
     // The sequences whose rows came back, each with its row and a slot for its token, in running order.
-    let mut rows = active.iter().zip(drawn).filter_map(|(&si, d)| match d { Drawn::Row(row) => Some((si, row)), Drawn::Token(..) | Drawn::Traced(..) => None }).peekable();
+    let mut rows = active.iter().zip(drawn).filter_map(|(&si, d)| match d { Drawn::Row(row) => Some((si, row)), Drawn::Token(..) | Drawn::Traced(..) | Drawn::Supported(..) => None }).peekable();
     let mut on_host: Vec<(&mut Running, Vec<f32>, (u32, f32))> = Vec::new();
     for (si, r) in running.iter_mut().enumerate() {
         if rows.peek().is_some_and(|&(want, _)| want == si) {
@@ -1698,7 +1736,19 @@ fn accept_token(r: &mut Running, next: u32, logprob: f32) {
     if r.tops.is_some() && top.is_none() {
         r.tops = None;
     }
-    if r.stop.contains(&next) {
+    // A request that reports its supports keeps them only while every token's step reported one.
+    let support = r.next_support.take();
+    let stopping = r.stop.contains(&next);
+    if let Some(Ok(supports)) = r.supports.as_mut() {
+        let position = r.generated.len();
+        match support {
+            None => r.supports = Some(Err(SupportGap::Unreported { position })),
+            Some(None) => r.supports = Some(Err(SupportGap::Overflow { position })),
+            Some(Some(ids)) if stopping => r.stop_support = Some(ids),
+            Some(Some(ids)) => supports.push(ids),
+        }
+    }
+    if stopping {
         r.done = true;
         r.stop_token = Some(next);
         r.stop_logprob = Some(logprob);
@@ -1995,6 +2045,21 @@ impl<D: PagedDecoder> Scheduler<D> {
         (lists.len() == r.generated.len() + usize::from(r.stop_token.is_some())).then_some(lists)
     }
 
+    /// The supports of `r`'s tokens and its stop token ([`Running::supports`]), when the request asked for them, in the
+    /// order of [`Self::trace_of`].
+    fn supports_of(r: &Running) -> Option<Supports> {
+        let supports = r.supports.clone()?;
+        Some(supports.map(|mut lists| {
+            lists.extend(r.stop_token.and(r.stop_support.clone()));
+            lists
+        }))
+    }
+
+    /// [`StepReport::completed_supports`] for request `id` still in the scheduler (see [`Self::trace_logprobs_of`]).
+    pub fn trace_supports_of(&self, id: u64) -> Option<Supports> {
+        self.running.iter().chain(self.swapped.iter()).find(|r| r.id == id).and_then(Self::supports_of)
+    }
+
     /// [`StepReport::completed_top_lists`] for request `id` still in the scheduler (see [`Self::trace_logprobs_of`]).
     pub fn trace_top_lists_of(&self, id: u64) -> Option<TopLists> {
         self.running.iter().chain(self.swapped.iter()).find(|r| r.id == id).and_then(Self::top_lists_of)
@@ -2232,6 +2297,19 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// Whether the decoder can return a policy trace ([`Self::score_continuation`]).
     pub fn scores_continuations(&self) -> bool {
         self.dec.scores_continuations()
+    }
+
+    /// Whether this decoder's decode steps can report a cut draw's support ([`SampleParams::trace_support`]): it draws
+    /// its sampled rows from rows it can read back ([`PagedDecoder::full_row_readback`]).
+    pub fn reports_sampler_supports(&self) -> bool {
+        self.dec.full_row_readback()
+    }
+
+    /// Whether a request sampled with `sample` reports a support per token ([`StepReport::completed_supports`]): it asks
+    /// for one ([`SampleParams::trace_support`]) and its draw cuts this decoder's row. A request that asks and whose draw
+    /// cuts nothing has the whole row as every token's support.
+    pub fn draw_reports_support(&self, sample: &SampleParams) -> bool {
+        RowDraw::of(sample, 0, 0).is_some_and(|d| d.reports_support(self.dec.vocab()))
     }
 
     /// Whether the log-probability this scheduler reports for a token drawn with `sample` is the token's under the
@@ -2550,11 +2628,11 @@ impl<D: PagedDecoder> Scheduler<D> {
     fn requeue_for_recompute(&mut self, mut r: Running) {
         self.dec.release_table(&mut r.table);
         let routing = r.table.take_routing_log();
-        let Running { id, adapter, generated, logprobs, whole, tops, max_new, stop, next_input, mut context, spec, sample, seed, rng, think, embeds, cached_tokens, .. } = r;
+        let Running { id, adapter, generated, logprobs, whole, tops, supports, max_new, stop, next_input, mut context, spec, sample, seed, rng, think, embeds, cached_tokens, .. } = r;
         let uncached = context.pop();
         debug_assert_eq!(uncached, Some(next_input), "the newest token is the one with no cache entry yet");
         let req = Request { prompt: context, max_new, stop };
-        self.waiting.push_front(Waiting { id, req, adapter, sample, seed, resume: Some(Resume { generated, logprobs, whole, tops, next_input, spec, rng, think, cached_tokens, routing }), embeds, bad_token: None });
+        self.waiting.push_front(Waiting { id, req, adapter, sample, seed, resume: Some(Resume { generated, logprobs, whole, tops, supports, next_input, spec, rng, think, cached_tokens, routing }), embeds, bad_token: None });
     }
 
     /// Index of the first waiting request that can be admitted this
@@ -2731,12 +2809,12 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// picked from the prefill's final hidden state.
     fn start_running(&mut self, p: Prefilling, hidden: Vec<f32>, first_candidates: Vec<(u32, f32)>, report: &mut StepReport) {
         let Prefilling { id, prompt, max_new, stop, adapter, sample, seed, table, resume, embeds, .. } = p;
-        if let Some(Resume { generated, logprobs, whole, tops, next_input, spec, rng, think, cached_tokens, .. }) = resume {
+        if let Some(Resume { generated, logprobs, whole, tops, supports, next_input, spec, rng, think, cached_tokens, .. }) = resume {
             // The cache is whole again; the token to decode next was chosen
             // before the preemption, so the prefill's own output is not used.
             let mut context = prompt;
             context.push(next_input);
-            self.running.push(Running { id, table, adapter, generated, logprobs, whole, stop_whole: None, next_whole: None, tops, stop_top: None, next_top: None, max_new, stop, next_input, context, spec, done: false, sample, think, procs: ProcessorState::default(), seed, rng, embeds, cached_tokens, stop_token: None, stop_logprob: None });
+            self.running.push(Running { id, table, adapter, generated, logprobs, whole, stop_whole: None, next_whole: None, tops, stop_top: None, next_top: None, supports, stop_support: None, next_support: None, max_new, stop, next_input, context, spec, done: false, sample, think, procs: ProcessorState::default(), seed, rng, embeds, cached_tokens, stop_token: None, stop_logprob: None });
             return;
         }
         let cached_tokens = table.cached_rows() as usize;
@@ -2746,6 +2824,9 @@ impl<D: PagedDecoder> Scheduler<D> {
         // the host for this one-time-per-request first token, matching
         // the steady-state per-token decode loop.
         let think = sample.thinking.map(sampler::ThinkState::new);
+        // A cut draw that asked for its support reports one per token, the first included.
+        let reports_support = RowDraw::of(&sample, seed, prompt.len()).is_some_and(|d| d.reports_support(self.dec.vocab()));
+        let mut first_support = None;
         let (first, first_logprob, first_whole, first_top) = if let Some(forced) = think.and_then(|t| t.forced_next()).and_then(|f| forced_token(f, &stop)) {
             // A prompt that ends inside a think block whose budget is zero: the closing tag comes first.
             (forced, 0.0, None, None)
@@ -2756,6 +2837,13 @@ impl<D: PagedDecoder> Scheduler<D> {
             // carries its whole-row log-probability like every later one: its trace is then complete without a scoring pass.
             let mut row = self.dec.logits(&hidden);
             match RowDraw::of(&sample, seed, prompt.len()) {
+                Some(d) if d.reports_support(self.dec.vocab()) => match draw_row_supported(&row, d) {
+                    Drawn::Supported(s) => {
+                        first_support = Some(s.support);
+                        (s.token, s.sampler, Some(s.whole), s.top)
+                    }
+                    other => unreachable!("a row that reports its support is answered with it: {other:?}"),
+                },
                 Some(d) if d.carries_top_list(self.dec.vocab()) => match draw_row_traced(&row, d) {
                     Drawn::Traced(token, lp, whole, top) => (token, lp, Some(whole), Some(top)),
                     other => unreachable!("a row that carries a top list is answered with it: {other:?}"),
@@ -2779,7 +2867,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             };
             (token, lp, None, None)
         };
-        let mut r = Running { id, table, adapter, generated: Vec::new(), logprobs: Vec::new(), whole: Some(Vec::new()), stop_whole: None, next_whole: first_whole, tops: (sample.trace_top > 0).then(Vec::new), stop_top: None, next_top: first_top, max_new, stop, next_input: first, context: prompt, spec: speculate::SeqSpec::new(), done: false, sample, think, procs: ProcessorState::default(), seed, rng, embeds, cached_tokens, stop_token: None, stop_logprob: None };
+        let mut r = Running { id, table, adapter, generated: Vec::new(), logprobs: Vec::new(), whole: Some(Vec::new()), stop_whole: None, next_whole: first_whole, tops: (sample.trace_top > 0).then(Vec::new), stop_top: None, next_top: first_top, supports: reports_support.then(|| Ok(Vec::new())), stop_support: None, next_support: first_support, max_new, stop, next_input: first, context: prompt, spec: speculate::SeqSpec::new(), done: false, sample, think, procs: ProcessorState::default(), seed, rng, embeds, cached_tokens, stop_token: None, stop_logprob: None };
         accept_token(&mut r, first, first_logprob);
         report.admitted.push(id);
         self.running.push(r);
@@ -3251,7 +3339,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             // draws are keyed by position, so a window draws what single steps would.
             let keyed = !all_greedy && {
                 let vocab = self.dec.vocab();
-                active.iter().all(|&i| RowDraw::of(&self.running[i].sample, self.running[i].seed, 0).is_some_and(|d| !d.keeps_top_k(vocab) && !d.carries_top_list(vocab)))
+                active.iter().all(|&i| RowDraw::of(&self.running[i].sample, self.running[i].seed, 0).is_some_and(|d| !d.keeps_top_k(vocab) && !d.carries_top_list(vocab) && !d.reports_support(vocab)))
             };
             let capacity = if all_greedy {
                 self.dec.decode_window_capacity()
@@ -3341,6 +3429,9 @@ impl<D: PagedDecoder> Scheduler<D> {
                 self.unpin(r.adapter);
                 if let Some(trace) = Self::trace_of(&r) {
                     report.completed_traces.push((r.id, trace));
+                }
+                if let Some(supports) = Self::supports_of(&r) {
+                    report.completed_supports.push((r.id, supports));
                 }
                 if let Some(lists) = Self::top_lists_of(&r) {
                     report.completed_top_lists.push((r.id, lists));
@@ -3700,6 +3791,9 @@ mod tests {
             tops: None,
             stop_top: None,
             next_top: None,
+            supports: None,
+            stop_support: None,
+            next_support: None,
             max_new,
             stop: stop.to_vec(),
             next_input: 0,

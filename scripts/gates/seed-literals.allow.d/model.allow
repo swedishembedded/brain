@@ -8,3 +8,5 @@ crates/model/src/serve/conformance.rs	adapters_serve_embedded_prompts_apart_from
 crates/model/src/serve/conformance.rs	keyed_draws:draw_key#0=1	positional	world: a fixed probe key, the same on both decoders whose answers are compared
 crates/model/src/serve/conformance.rs	keyed_draws:draw_key#0=2	positional	world: a fixed probe key, the same on both decoders whose answers are compared
 crates/model/src/serve/conformance.rs	keyed_draws:draw_key#0=3	positional	world: a fixed probe key, the same on both decoders whose answers are compared
+crates/model/src/serve/conformance.rs	keyed_draws:draw_key#0=4	positional	world: a fixed probe key, the same on both decoders whose answers are compared
+crates/model/src/serve/conformance.rs	keyed_draws:draw_key#0=5	positional	world: a fixed probe key, the same on both decoders whose answers are compared
