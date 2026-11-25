@@ -4340,7 +4340,7 @@ impl Qwen35GgufResident {
     }
 
     fn plan_uncached(&self) -> Plan {
-        let refused = |why: String| Plan { refusal: Some(format!("{MODEL}: {why}")), ..Plan::default() };
+        let refused = |why: String| Plan { refusal: Some(format!("{}: {why}", self.model_id)), ..Plan::default() };
         if let Some(why) = self.gdn_state_refusal() {
             return refused(why);
         }
@@ -5495,6 +5495,9 @@ mod tests {
         assert!(no_room.unservable_reason().unwrap().contains("budgeted GPU(s) offer"), "{:?}", no_room.unservable_reason());
         let no_vocab = on_gpu(&tokenizerless, 24 * GB);
         assert!(no_vocab.unservable_reason().unwrap().contains("tokenizer"), "{:?}", no_vocab.unservable_reason());
+        let renamed = Qwen35GgufResident::new(complete.clone(), vec![], 64, TierPolicy::uniform(Dtype::I8)).with_model_id("unsloth/Qwen3.5-2B-GGUF-Q4_K_M");
+        assert!(renamed.unservable_reason().unwrap().starts_with("unsloth/Qwen3.5-2B-GGUF-Q4_K_M: "), "{:?}", renamed.unservable_reason());
+        assert_eq!(renamed.unservable_reason().unwrap().find("27B"), None, "the refusal names the checkpoint being served, not the well-known release");
 
         std::fs::remove_file(complete).ok();
         std::fs::remove_file(tokenizerless).ok();
