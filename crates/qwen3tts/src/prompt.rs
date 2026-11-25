@@ -232,37 +232,15 @@ impl TtsSpecials {
     }
 }
 
-/// Build a `tokenizer.json`-shaped value in memory from the checkpoint's
-/// `vocab.json` + `merges.txt` + `tokenizer_config.json` (the Base model ships
-/// these rather than a single `tokenizer.json`), then load [`QwenBpe`].
+/// The checkpoint's tokenizer: [`QwenBpe::from_dir`], the one canonical Qwen
+/// loader, so the split-file layout the Base model ships (`vocab.json` +
+/// `merges.txt` + `tokenizer_config.json`) gets Qwen2's pre-tokenizer and its
+/// special tokens exactly as every other Qwen model does. A parallel loader
+/// that omitted the pre-tokenizer merged whitespace runs across word
+/// boundaries and encoded 7.9% of the Sten-TTS training transcripts
+/// differently from the reference.
 pub fn load_tokenizer(dir: &str) -> Result<data::qwen_tokenizer::QwenBpe, String> {
-    let dir = std::path::Path::new(dir);
-    let vocab: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(dir.join("vocab.json")).map_err(|e| e.to_string())?)
-            .map_err(|e| format!("vocab.json: {e}"))?;
-    let merges_txt = std::fs::read_to_string(dir.join("merges.txt")).map_err(|e| e.to_string())?;
-    let merges: Vec<serde_json::Value> = merges_txt
-        .lines()
-        .filter(|l| !l.is_empty() && !l.starts_with("#version"))
-        .map(serde_json::Value::from)
-        .collect();
-    let tcfg: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(dir.join("tokenizer_config.json")).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| format!("tokenizer_config.json: {e}"))?;
-    let mut added = Vec::new();
-    if let Some(m) = tcfg["added_tokens_decoder"].as_object() {
-        for (id, info) in m {
-            if let (Ok(id), Some(content)) = (id.parse::<u64>(), info["content"].as_str()) {
-                added.push(serde_json::json!({"content": content, "id": id}));
-            }
-        }
-    }
-    let tj = serde_json::json!({
-        "model": {"vocab": vocab, "merges": merges},
-        "added_tokens": added,
-    });
-    data::qwen_tokenizer::QwenBpe::from_json_bytes(tj.to_string().as_bytes())
+    data::qwen_tokenizer::QwenBpe::from_dir(dir)
 }
 
 /// The assembled Talker generation prompt.
