@@ -241,3 +241,91 @@ fn a_speech_fine_tune_over_the_bus_takes_its_shard_as_a_descriptor() {
     });
     assert!(work_is_clean(&rig.work_root));
 }
+
+/// The real 0.6B Base trained over the bus with the real objective on the CPU backend (a handful of steps on one
+/// recording, encoded by the model's own `encode`), installed, then served and spoken in its new voice and language:
+/// the release's trained tensors are the run's, not the base's. Needs a session bus, the checkpoint in the model store
+/// and the voice-clone clip under testdata; slow (it trains a 0.6B on the CPU).
+#[test]
+#[ignore = "slow: trains the real 0.6B on the CPU backend"]
+fn the_real_base_trains_over_the_bus_and_its_release_speaks_in_its_new_voice() {
+    if !session_bus_reachable() {
+        brain_testutil::skip_unavailable("no reachable session bus (run under `dbus-run-session -- cargo test ...`)");
+        return;
+    }
+    let Some(real) = brain_testutil::model_dir("Qwen/Qwen3-TTS-12Hz-0.6B-Base").filter(|d| std::path::Path::new(d).join("model.safetensors").is_file()) else {
+        brain_testutil::skip("Qwen/Qwen3-TTS-12Hz-0.6B-Base is not in the model store");
+        return;
+    };
+    let Ok(clip) = std::fs::read(brain_testutil::testdata("tts/voice-clone-example-voice.wav")) else {
+        brain_testutil::skip("testdata/tts/voice-clone-example-voice.wav absent (make testdata/fetch)");
+        return;
+    };
+    // The shard: one recording as the served `encode` gives it.
+    let paths = qwen3tts::TtsPaths::new(&real, real.as_str());
+    let encoder = qwen3tts::encode::Encoder::load(&paths).unwrap();
+    let text = "Det här är en mening på svenska.";
+    let req = qwen3tts::encode::Request::parse(&clip, Some(text.to_string())).unwrap();
+    let enc = encoder.encode(&req);
+    let meta = qwen3tts::shard::ShardMeta { format: qwen3tts::shard::FORMAT.into(), codebooks: 16, codebook_size: 2048, xvector_dim: enc.xvector.len() as u32, frame_rate: 12.5, languages: vec!["swedish".into()], voices: vec!["astrid".into()], records: 0, producers: encoder.producers().clone() };
+    let mut w = qwen3tts::shard::ShardWriter::new(meta);
+    let id = qwen3tts::shard::RecordId { id: "u1".into(), speaker: "s1".into(), source: "test".into(), text: text.into() };
+    w.push(&qwen3tts::shard::Record { id, text_ids: enc.text_ids.as_deref().unwrap(), codes: &enc.codes, xvector: &enc.xvector, voice: 0, language: 0, complete: true }).unwrap();
+    let shard = w.to_bytes();
+
+    let rig = rig("dbus-speech-real", 96 << 30, true);
+    let vendor = rig.dir.join("models").join("Qwen");
+    std::fs::create_dir_all(&vendor).unwrap();
+    std::os::unix::fs::symlink(&real, vendor.join("Qwen3-TTS-12Hz-0.6B-Base")).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let report = rt.block_on(async {
+        let manager = brain_dbus::service::Manager::new(rig.exec.clone()).with_training(true);
+        let name = format!("com.swedishembedded.Brain1.speechreal{}", std::process::id());
+        let _conn = zbus::connection::Builder::session().name(name.as_str()).serve_at(brain_dbus::OBJECT_PATH, manager).build().await.unwrap();
+        let client = zbus::Connection::session().await.unwrap();
+        let proxy = zbus::Proxy::new(&client, name.as_str(), brain_dbus::OBJECT_PATH, "com.swedishembedded.Brain1.Manager").await.unwrap();
+        let params = json!({"base": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "languages": r#"{"swedish": {"new": true, "init_from": ["english", "german"]}}"#, "voices": r#"{"astrid": {"new": true}}"#,
+                            "steps": 3, "batch_utterances": 1, "max_frames": 64, "lr": 1e-4, "new_row_lr_multiplier": 10.0, "seed": 3, "install_as": "sv-real", "allow_cpu": true});
+        let mut fds: HashMap<String, ZOwnedFd> = HashMap::new();
+        fds.insert("dataset".into(), memfd(&shard));
+        let (_job, stream): (u64, ZOwnedFd) = proxy.call("Subscribe", &(trainjob::MODEL, trainjob::speech::ACTION, params.to_string(), fds, r#"{"dataset":{"media":"bytes"}}"#)).await.unwrap();
+        let stream = std::sync::Arc::new(OwnedFd::from(stream));
+        let (mut steps, mut done) = (Vec::new(), None);
+        loop {
+            let reader = stream.clone();
+            let Some((frame, _)) = tokio::task::spawn_blocking(move || next_frame(&reader)).await.unwrap() else { break };
+            match frame["type"].as_str().unwrap() {
+                "progress" if frame["event"]["type"] == "step" => {
+                    eprintln!("step {}", frame["event"]);
+                    steps.push(frame["event"].clone());
+                }
+                "done" => {
+                    done = Some(frame["result"].clone());
+                    break;
+                }
+                "error" => panic!("the job failed: {frame}"),
+                _ => {}
+            }
+        }
+        assert_eq!(steps.len(), 3, "a frame per step");
+        for step in &steps {
+            for metric in ["loss", "talker_ce", "code_predictor_ce", "eos_accuracy", "grad_norm", "lr", "frames_per_s"] {
+                assert!(step[metric].is_number(), "{metric}: {step}");
+            }
+        }
+        done.expect("a done frame")
+    });
+    eprintln!("report {report}");
+    assert!(report["trained_tensors"].as_u64().unwrap() > 0, "{report}");
+    let installed = rig.dir.join("models").join("local").join("sv-real");
+    let (before, after) = (checkpoint::mmap::MmapSafetensors::open(std::path::Path::new(&real).join("model.safetensors")).unwrap(), checkpoint::mmap::MmapSafetensors::open(installed.join("model.safetensors")).unwrap());
+    let head = "talker.codec_head.weight";
+    assert_ne!(before.raw_range(head, 0..before.nbytes(head).unwrap() as usize), after.raw_range(head, 0..after.nbytes(head).unwrap() as usize), "the release carries the trained weights");
+
+    let served = catalog::resident_tts::TtsResident::all_from_store(&loader::served::ServedStore::new(Some(rig.dir.join("models"))));
+    let sv = served.iter().find(|r| residency::ResidentModel::manifest(*r).model == "local/sv-real").expect("the release is served under its own id");
+    let inv = capability::Invocation::new().set("text", json!("Hej, det här är ett test.")).set("speaker", json!("astrid")).set("lang", json!("swedish")).set("max_frames", json!(8)).set("seed", json!(1));
+    let mut inst = residency::ResidentModel::activate(sv, &residency::ResidentModel::instance_key(sv, "design", &inv), residency::Device::Cpu).unwrap();
+    let spoken = inst.run("design", &inv, &mut |_| {}).unwrap();
+    assert!(!audio::wav::parse(&spoken.blobs["audio"].bytes).unwrap().samples.is_empty(), "it speaks in its new voice and language");
+}

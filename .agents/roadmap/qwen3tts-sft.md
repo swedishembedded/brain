@@ -134,15 +134,21 @@ ledger is the engine work it needs.
       under the old rule keeps its `family: "qwen3asr"` manifest until it is
       pulled again.
 
-- [ ] Served speech training: `brain/train` `speech_sft` (`crates/trainjob/src/speech.rs`) stages shards by blob or
-      digest, checks them and the languages/voices against the base at the door, runs under the `resume_key`
-      contract, exports over the base, publishes the manifest and installs; every installed release is served under
-      its own id (`TtsResident::all_from_store`) with its voices as preset voices and `language` on
-      `/v1/audio/speech`. Gated on a toy upstream-layout base (in-process, HTTP, D-Bus) and on the real 0.6B (served
-      with its new voice and language). Open: the objective is a stand-in (`speech::objective`, the base's tensors
-      unchanged, new rows taken from the top of the codec vocabulary, no steps) until `qwen3tts::speech_sft` lands;
-      swapping it in is the module's one call. A release installed by a running server is served from the server's
-      next start (no job registers a model live).
+- [x] Served speech training: `brain/train` `speech_sft` (`crates/trainjob/src/speech.rs`) stages shards by blob or
+      digest, checks them and the languages/voices against the base at the door, maps its params onto
+      `SpeechSftConfig` (every setting the objective takes; left out, the objective's default), runs
+      `qwen3tts::speech_sft` under the `resume_key` contract, streams each step's measurements, exports over the
+      base, publishes the manifest and installs; every installed release is served under its own id
+      (`TtsResident::all_from_store`) with its voices as preset voices and `language` on `/v1/audio/speech`. Gated on
+      a tiny trainable upstream-layout base (in-process, HTTP, D-Bus) and, over D-Bus on the real 0.6B on the CPU
+      backend (`dbus::the_real_base_trains_over_the_bus_and_its_release_speaks_in_its_new_voice`, ignored: slow):
+      3 steps of one 29-frame recording, loss 3.06 -> 0.91, 397 tensors trained, the release served and spoken in
+      its new voice and language; about 15 s and 1.2-2.0 frames/s per step on a shared 288-core host.
+- [ ] A release installed by a running server is served from the server's next start (no job registers a model
+      live).
+- [ ] Collecting a published artifact over the API: a remote client without the artifact directory cannot fetch a
+      checkpoint's files by digest. Needs a streamed, size-bounded read (a capability blob is held in memory, a
+      1.8 GB `model.safetensors` included), so it is a transport change, not an action.
 
 Gates: tiny random configs for the objective's gradients (finite differences
 through Talker, code predictor and the routed tables); teacher-forced rows equal

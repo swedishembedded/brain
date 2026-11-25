@@ -231,6 +231,8 @@ impl TrainResident {
         self.check_digests(&request.digests())?;
         // The base, its languages and voices are checked here, before the run is queued.
         let base_dir = speech::resolve_base(&self.env, &request)?;
+        // The objective's own checks of its configuration, before the run is queued.
+        speech::sft_config(&request, &base_dir, None)?;
         if p.validate_only {
             return Ok(Reservation::Host(64 << 20));
         }

@@ -149,20 +149,35 @@ arrays). Params:
 | `base` | the Qwen3-TTS base, `<vendor>/<repo>` in the model store (required) |
 | `dataset_digest` or the blob `dataset` | the training shard (exactly one of the two) |
 | `held_out_digest` or the blob `held_out` | a held-out shard (at most one), scored every `eval_every` steps |
-| `languages` | JSON object naming every language the shards hold (required): `{"<name>": {"new": true, "init_from": ["english", ...]}}` for one the base lacks, its codec row initialised from the mix of those, or `{"<name>": {"new": false}}` for one of the base's. Names are 1 to 64 lowercase `[a-z0-9_-]`; at most 256, the document at most 64 KiB |
+| `languages` | JSON object naming every language the shards hold (required): `{"<name>": {"new": true, "init_from": ["english", ...]}}` for one the base lacks, its codec row starting at the mean of those (every base language when omitted; every new language of a run names the same `init_from`), or `{"<name>": {"new": false}}` for one of the base's. Names are 1 to 64 lowercase `[a-z0-9_-]`; at most 256, the document at most 64 KiB |
 | `voices` | JSON object naming every voice the shards train (default `{}`): `{"<name>": {"new": true}}`, its row initialised from its speaker's x-vectors, or `{"new": false}` for one of the base's |
-| `steps`, `lr`, `grad_accum`, `seed`, `eval_every`, `residual_weight` | the optimiser's settings; `residual_weight` (default 0.3, upstream's) weighs the code predictor's loss beside the Talker's |
+| `steps` or `epochs` | the run's length: optimiser steps, or passes over the training shard (exactly one) |
+| `lr`, `weight_decay`, `warmup`, `schedule`, `grad_clip` | the optimiser: peak rate, AdamW decay, steps of linear warmup, `cosine` (to a tenth by the last step) or `constant` after it, the global gradient-norm clip |
+| `batch_utterances`, `grad_accum` | utterances per micro-batch, micro-batches per optimiser step |
+| `max_frames` | the most codec frames a record may hold: a longer one is refused by name, never cut; it sizes the build |
+| `residual_weight` | the weight of the code predictor's loss beside the Talker's (upstream's 0.3) |
+| `streaming_fraction` | the share of drawn records trained in the streaming text layout; the rest train non-streaming |
+| `talker_lr_multiplier`, `code_predictor_lr_multiplier`, `codec_table_lr_multiplier`, `new_row_lr_multiplier` | the learning-rate multiplier of the Talker decoder and head, the code predictor, the codec rows the base trained, and the new languages' and voices' rows |
+| `voice_outlier_fraction`, `free_row_fraction` | the share of a new voice's x-vectors left out of the centroid its row starts at, and the norm (as a share of the median named row's) below which a codec row is free for a new name |
+| `eval_every`, `eval_batches` | score the held-out shard every this many steps, over this many micro-batches (0: every record) |
+| `seed` | the batch order and the layout draws (random when omitted; reported) |
+
+Every setting left out is the objective's own default, which `GET /v1/capabilities` lists as the param's
+`implied_default`.
 | `cards` | 1: a speech fine-tune trains on one card |
 | `install_as`, `resume_key`, `checkpoint_every`, `allow_cpu` | as for `full_train` |
 | `validate_only` | stage and check the shards (format, codebooks and x-vector width against the base, every language and voice named) and the names against the base, and answer `{"status": "valid", "records", "held_out_records", "languages", "voices", "device_bytes"}` without training: host work |
 
-A language or voice the request calls new that the base already names, one it calls the base's that the base lacks,
+The languages and voices named are exactly the shards' own. A language or voice the request calls new that the base already names, one it calls the base's that the base lacks,
 an `init_from` that is not a base language, a shard language or voice the request does not name, and a shard of
 another codebook count or x-vector width are refused by name. The run is charged four copies of the Talker's and the
-code predictor's f32 weights and a step's activations on its card. Step frames carry `step`, `steps`, `loss`, `lr`,
-`grad_norm`, `seconds`, `eval_loss` on an evaluating step, and the objective's own metrics. The result is the report
-(`objective: "speech_sft"`, `base`, `seed`, `languages` and `voices` with the codec row of each, `tts_model_type`,
-`trained_tensors`), `checkpoint_digest` and `files`, and with `install_as` the installed id. Installed as
+code predictor's f32 weights and a step's activations on its card. Step frames carry `step`, `steps`, `loss`
+(`talker_ce + residual_weight * code_predictor_ce`), `talker_ce`, `code_predictor_ce`, `eos_accuracy` (end-of-speech
+targets the Talker's greedy pick got right), `frames` and `frames_per_s`, `grad_norm`, `lr`, `seconds`, and after an
+evaluation `eval_loss`, `held_out_talker_ce`, `held_out_code_predictor_ce` and `held_out_eos_accuracy`. The result is
+the report (`objective: "speech_sft"`, `base`, `seed`, `initial_loss`, `final_loss`, `steps_completed`,
+`evaluations`, `last_step` with the measurements above, `languages` and `voices` with the codec row of each,
+`tts_model_type`, `trained_tensors`), `checkpoint_digest` and `files`, and with `install_as` the installed id. Installed as
 `local/<name>`, the checkpoint is served (from the server's next start) as a model of its own under that id:
 `POST /v1/audio/speech` with `"model": "local/<name>"`, `"voice": "<voice>"` and `"language": "<language>"`.
 

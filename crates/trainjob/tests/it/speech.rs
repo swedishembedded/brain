@@ -16,48 +16,96 @@ use crate::support::{data_digest, rig, Frames, Rig};
 /// The model-store name the base is put under.
 pub const TTS_BASE: &str = "local/tts-base";
 
-/// A Qwen3-TTS base in the layout upstream releases it: the root config, tokenizer and generation files, a BF16
-/// `model.safetensors` (a handful of tensors under upstream names, the speaker encoder's among them) and the codec in
-/// `speech_tokenizer/`, with the manifest `brain pull` writes.
+/// The tiny release's widths: a 2-layer Talker 16 wide over 48 codec rows, a 2-layer code predictor over 4 codebooks
+/// of 16, x-vectors 16 wide.
+const D: u32 = 16;
+const GROUPS: u32 = 4;
+const CODEBOOK: u32 = 16;
+/// The base's one language row and its codec specials, above the codebook.
+const ENGLISH: u32 = 30;
+const SPECIALS: [(&str, u32); 7] = [("codec_nothink_id", 20), ("codec_think_id", 21), ("codec_think_bos_id", 22), ("codec_think_eos_id", 23), ("codec_pad_id", 24), ("codec_bos_id", 25), ("codec_eos_token_id", 26)];
+
+/// A tiny trainable Qwen3-TTS base in the layout upstream releases it: `config.json`, `model.safetensors` under
+/// upstream names (its named codec rows trained, the rest of the special band untrained, as in a release), the
+/// tokenizer and generation files and the codec in `speech_tokenizer/`, with the manifest `brain pull` writes.
 pub fn write_tts_base(models: &Path) {
+    use model::Model;
+    use qwen3tts::speech_sft::{SftShape, SpeechSftModel};
     let dir = models.join(TTS_BASE);
     std::fs::create_dir_all(dir.join("speech_tokenizer")).unwrap();
-    let config = json!({
-        "architectures": ["Qwen3TTSForConditionalGeneration"], "tts_model_type": "base", "tts_model_size": "0b6",
-        "speaker_encoder_config": {"enc_dim": 4, "sample_rate": 24000},
-        "talker_config": {"vocab_size": 3072, "num_code_groups": 16, "codec_language_id": {"english": 2050, "german": 2053}, "spk_id": {}, "spk_is_dialect": {}},
+    let talker = qwen3tts::TalkerConfig { vocab: 48, d_model: D, num_code_groups: GROUPS, ..qwen3tts::TalkerConfig::tiny() };
+    let mtp = qwen3tts::MtpConfig { vocab: CODEBOOK, embedding_dim: D, num_code_groups: GROUPS, ..qwen3tts::MtpConfig::tiny() };
+    let mut specials = qwen3tts_specials();
+    specials.lang.insert("english".into(), ENGLISH);
+    let shape = SftShape { talker: talker.clone(), mtp: mtp.clone(), specials, batch: 1, block: 1, frames: 1, mtp_weight: 0.3, lr: Default::default(), new_rows: Vec::new(), text_inter: 20 };
+    let mut tensors = SpeechSftModel::init_weights(&shape, 0x7a6); // seed: a fixed fixture
+    let table = tensors.get_mut(qwen3tts::speech_sft::model::TALKER_TABLE).unwrap();
+    let named: Vec<u32> = SPECIALS.iter().map(|(_, id)| *id).chain([ENGLISH]).collect();
+    for id in CODEBOOK..48 {
+        let scale = if named.contains(&id) { 1.0 } else { 0.002 };
+        table[id as usize * D as usize..(id as usize + 1) * D as usize].fill(scale);
+    }
+    let mut talker_cfg = json!({
+        "num_hidden_layers": talker.n_layers, "hidden_size": D, "head_dim": talker.head_dim, "num_attention_heads": talker.n_heads,
+        "num_key_value_heads": talker.n_kv_heads, "intermediate_size": talker.d_ff, "vocab_size": 48, "num_code_groups": GROUPS,
+        "text_hidden_size": talker.text_hidden_size, "text_vocab_size": talker.text_vocab_size,
+        "codec_language_id": {"english": ENGLISH}, "spk_id": {}, "spk_is_dialect": {},
+        "code_predictor_config": {"num_hidden_layers": mtp.n_layers, "hidden_size": mtp.d_model, "head_dim": mtp.head_dim, "num_attention_heads": mtp.n_heads, "num_key_value_heads": mtp.n_kv_heads, "intermediate_size": mtp.d_ff, "vocab_size": CODEBOOK, "num_code_groups": GROUPS},
     });
+    for (key, id) in SPECIALS {
+        talker_cfg[key] = json!(id);
+    }
+    let config = json!({"architectures": ["Qwen3TTSForConditionalGeneration"], "tts_bos_token_id": 0, "tts_eos_token_id": 1, "tts_pad_token_id": 2, "tts_model_type": "base", "tts_model_size": "tiny", "speaker_encoder_config": {"enc_dim": D, "sample_rate": 24000}, "talker_config": talker_cfg});
     std::fs::write(dir.join("config.json"), serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+    let mut names: Vec<&String> = tensors.keys().collect();
+    names.sort();
+    let plan: Vec<(String, Vec<u64>)> = names.iter().map(|n| ((*n).clone(), vec![tensors[*n].len() as u64])).collect();
+    let mut w = checkpoint::weightio::StWriter::create(dir.join("model.safetensors").to_str().unwrap(), &plan, &Value::Null, None).unwrap();
+    for n in names {
+        w.write(n, &tensors[n]).unwrap();
+    }
+    w.finish().unwrap();
     for (file, body) in [("generation_config.json", "{}"), ("tokenizer_config.json", "{}"), ("vocab.json", "{}"), ("merges.txt", "#version: 0.2\n"), ("preprocessor_config.json", "{}"), ("speech_tokenizer/config.json", "{}")] {
         std::fs::write(dir.join(file), body).unwrap();
     }
-    let bf16 = |n: usize| -> Vec<u8> { (0..n).flat_map(|i| half_bits(i as f32 * 0.25)).collect() };
-    let (a, b, c) = (bf16(3072 * 2), bf16(8), bf16(4));
-    let views = vec![
-        ("talker.model.codec_embedding.weight", safetensors::tensor::TensorView::new(safetensors::Dtype::BF16, vec![3072, 2], &a).unwrap()),
-        ("talker.model.norm.weight", safetensors::tensor::TensorView::new(safetensors::Dtype::BF16, vec![8], &b).unwrap()),
-        ("speaker_encoder.fc.bias", safetensors::tensor::TensorView::new(safetensors::Dtype::BF16, vec![4], &c).unwrap()),
-    ];
-    std::fs::write(dir.join("model.safetensors"), safetensors::serialize(views, None).unwrap()).unwrap();
     std::fs::write(dir.join("speech_tokenizer/model.safetensors"), safetensors::serialize(Vec::<(&str, safetensors::tensor::TensorView)>::new(), None).unwrap()).unwrap();
     let manifest = json!({"id": TTS_BASE, "family": "qwen3tts", "roles": {"ckpt": ".", "weights_dir": "."}});
     std::fs::write(dir.join(brain_modelstore::MANIFEST_FILE), manifest.to_string()).unwrap();
 }
 
-fn half_bits(v: f32) -> [u8; 2] {
-    // Round to nearest even, as a release stores BF16.
-    let bits = v.to_bits();
-    (((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16) as u16).to_le_bytes()
+/// The tiny release's specials, as its config names them.
+fn qwen3tts_specials() -> qwen3tts::TtsSpecials {
+    let get = |k: &str| SPECIALS.iter().find(|(n, _)| *n == k).unwrap().1;
+    qwen3tts::TtsSpecials {
+        tts_bos: 0,
+        tts_eos: 1,
+        tts_pad: 2,
+        codec_nothink: get("codec_nothink_id"),
+        codec_think: get("codec_think_id"),
+        codec_think_bos: get("codec_think_bos_id"),
+        codec_think_eos: get("codec_think_eos_id"),
+        codec_pad: get("codec_pad_id"),
+        codec_bos: get("codec_bos_id"),
+        codec_eos: get("codec_eos_token_id"),
+        lang: Default::default(),
+        spk_id: Default::default(),
+        checkpoint: None,
+    }
 }
 
-/// A shard of one Swedish utterance by the voice `astrid`, at the base's codebooks and x-vector width.
+/// A shard of three Swedish utterances, two by the voice `astrid`, at the tiny base's codebooks and x-vector width.
 pub fn shard() -> Vec<u8> {
-    use qwen3tts::shard::{Record, RecordId, ShardMeta, ShardWriter, FORMAT};
-    let meta = ShardMeta { format: FORMAT.into(), codebooks: 16, codebook_size: 2048, xvector_dim: 4, frame_rate: 12.5, languages: vec!["swedish".into()], voices: vec!["astrid".into()], records: 0, producers: Default::default() };
+    use qwen3tts::shard::{Record, RecordId, ShardMeta, ShardWriter, FORMAT, NO_VOICE};
+    let meta = ShardMeta { format: FORMAT.into(), codebooks: GROUPS, codebook_size: CODEBOOK, xvector_dim: D, frame_rate: 12.5, languages: vec!["swedish".into()], voices: vec!["astrid".into()], records: 0, producers: Default::default() };
     let mut w = ShardWriter::new(meta);
-    let codes: Vec<u16> = (0..32).collect();
-    let id = RecordId { id: "u1".into(), speaker: "s1".into(), source: "test".into(), text: "hej".into() };
-    w.push(&Record { id, text_ids: &[151644, 77091, 198, 9707, 151645], codes: &codes, xvector: &[0.1, 0.2, 0.3, 0.4], voice: 0, language: 0, complete: true }).unwrap();
+    let mut rng = data::rng::Lcg::new(0x56); // seed: a fixed fixture
+    for (i, (text, frames, voice)) in [(&[11u32, 12, 13][..], 4usize, true), (&[14, 15][..], 3, false), (&[16, 17, 18, 19][..], 5, true)].into_iter().enumerate() {
+        let ids: Vec<u32> = [3, 4, 5].iter().chain(text).chain(&[6, 7, 8, 9, 10]).copied().collect();
+        let codes: Vec<u16> = (0..frames * GROUPS as usize).map(|_| (rng.next_u64() % u64::from(CODEBOOK)) as u16).collect();
+        let xvector = rng.vec_scaled(D as usize, 0.5);
+        let id = RecordId { id: format!("u{i}"), speaker: "s1".into(), source: "test".into(), text: String::new() };
+        w.push(&Record { id, text_ids: &ids, codes: &codes, xvector: &xvector, voice: if voice { 0 } else { NO_VOICE }, language: 0, complete: true }).unwrap();
+    }
     w.to_bytes()
 }
 
@@ -67,11 +115,11 @@ fn tts_rig(tag: &str) -> Rig {
     rig
 }
 
-pub const LANGUAGES: &str = r#"{"swedish": {"new": true, "init_from": ["english", "german"]}}"#;
+pub const LANGUAGES: &str = r#"{"swedish": {"new": true, "init_from": ["english"]}}"#;
 pub const VOICES: &str = r#"{"astrid": {"new": true}}"#;
 
 fn params(extra: Value) -> Value {
-    let mut p = json!({"base": TTS_BASE, "languages": LANGUAGES, "voices": VOICES, "steps": 2, "seed": 5, "allow_cpu": true});
+    let mut p = json!({"base": TTS_BASE, "languages": LANGUAGES, "voices": VOICES, "steps": 2, "batch_utterances": 2, "max_frames": 8, "lr": 1e-2, "seed": 5, "allow_cpu": true});
     for (k, v) in extra.as_object().unwrap() {
         p[k] = v.clone();
     }
@@ -90,6 +138,14 @@ fn a_speech_fine_tune_leaves_as_an_upstream_layout_checkpoint_installed_and_serv
     let report = &out.outputs;
     assert_eq!((report["status"].as_str(), report["objective"].as_str(), report["tts_model_type"].as_str()), (Some("completed"), Some("speech_sft"), Some("custom_voice")), "{report}");
     assert!(frames.events().iter().any(|e| e["type"] == "stage"), "the run streams its stages");
+    let steps = frames.steps();
+    assert_eq!(steps.len(), 2, "one frame per step: {steps:?}");
+    for step in &steps {
+        for metric in ["loss", "talker_ce", "code_predictor_ce", "eos_accuracy", "grad_norm", "lr", "frames_per_s"] {
+            assert!(step[metric].is_number(), "a step frame carries {metric}: {step}");
+        }
+    }
+    assert!(report["trained_tensors"].as_u64().unwrap() > 0 && report["steps_completed"] == 2, "{report}");
 
     // It leaves as a manifest of its files by digest.
     let manifest_digest = trainjob::Digest::parse(report["checkpoint_digest"].as_str().unwrap()).unwrap();
@@ -104,6 +160,9 @@ fn a_speech_fine_tune_leaves_as_an_upstream_layout_checkpoint_installed_and_serv
     assert_eq!(report["installed_as"], "local/sv-voices");
     let installed = rig.dir.join("models").join("local").join("sv-voices");
     let specials = qwen3tts::TtsSpecials::from_config_dir(installed.to_str().unwrap()).unwrap();
+    let (before, after) = (checkpoint::mmap::MmapSafetensors::open(rig.dir.join("models").join(TTS_BASE).join("model.safetensors")).unwrap(), checkpoint::mmap::MmapSafetensors::open(installed.join("model.safetensors")).unwrap());
+    let head = "talker.codec_head.weight";
+    assert_ne!(before.tensor_f32(head), after.tensor_f32(head), "the trained weights are the release's");
     let (lang, voice) = (report["languages"]["swedish"].as_u64().unwrap() as u32, report["voices"]["astrid"].as_u64().unwrap() as u32);
     assert_eq!((specials.language_id("swedish").unwrap(), specials.speaker_id("astrid")), (Some(lang), Some(voice)));
     let served = catalog::resident_tts::TtsResident::all_from_store(&loader::served::ServedStore::new(Some(rig.dir.join("models"))));
@@ -128,7 +187,7 @@ fn a_speech_fine_tune_by_digest_resumes_by_key_and_answers_a_completed_run_again
 fn validate_only_checks_the_shards_against_the_names_and_trains_nothing() {
     let rig = tts_rig("speech-validate");
     let out = run(&rig, params(json!({"validate_only": true})), &[("dataset", shard())], &Frames::default()).unwrap();
-    assert_eq!((out.outputs["status"].as_str(), out.outputs["records"].as_u64()), (Some("valid"), Some(1)), "{}", out.outputs);
+    assert_eq!((out.outputs["status"].as_str(), out.outputs["records"].as_u64()), (Some("valid"), Some(3)), "{}", out.outputs);
     let refused = run(&rig, params(json!({"validate_only": true, "voices": "{}"})), &[("dataset", shard())], &Frames::default()).unwrap_err();
     assert!(refused.contains("astrid") && refused.contains("voices"), "a shard voice the request does not name: {refused}");
     let garbage = run(&rig, params(json!({"validate_only": true})), &[("dataset", b"not a shard".to_vec())], &Frames::default()).unwrap_err();
@@ -168,38 +227,4 @@ fn a_shard_larger_than_the_job_may_stage_is_refused_and_leaves_nothing() {
     let e = run(&rig, params(json!({})), &[("dataset", vec![0u8; 4 << 20])], &Frames::default()).unwrap_err();
     assert!(e.contains("bytes"), "{e}");
     assert!(crate::support::work_is_clean(&rig.work_root));
-}
-
-/// On the real Base checkpoint (skips when the model store holds none): the exported release is served under its
-/// own id and speaks in its new voice and language; the base's tensors come back byte for byte while the objective
-/// is the stand-in, so this proves the path, not the training.
-#[test]
-fn a_trained_release_of_the_real_base_is_served_with_its_voice_and_language() {
-    let Some(real) = brain_testutil::model_dir("Qwen/Qwen3-TTS-12Hz-0.6B-Base").filter(|d| Path::new(d).join("model.safetensors").is_file()) else {
-        brain_testutil::skip("Qwen/Qwen3-TTS-12Hz-0.6B-Base is not in the model store");
-        return;
-    };
-    let rig = rig("speech-real", 64 << 30, true);
-    let vendor = rig.dir.join("models").join("Qwen");
-    std::fs::create_dir_all(&vendor).unwrap();
-    std::os::unix::fs::symlink(&real, vendor.join("Qwen3-TTS-12Hz-0.6B-Base")).unwrap();
-    let meta = qwen3tts::shard::ShardMeta { format: qwen3tts::shard::FORMAT.into(), codebooks: 16, codebook_size: 2048, xvector_dim: 1024, frame_rate: 12.5, languages: vec!["swedish".into()], voices: vec!["astrid".into()], records: 0, producers: Default::default() };
-    let mut w = qwen3tts::shard::ShardWriter::new(meta);
-    let codes: Vec<u16> = (0..32).collect();
-    let id = qwen3tts::shard::RecordId { id: "u1".into(), speaker: "s1".into(), source: "test".into(), text: "hej".into() };
-    w.push(&qwen3tts::shard::Record { id, text_ids: &[151644, 77091, 198, 9707, 151645], codes: &codes, xvector: &[0.01; 1024], voice: 0, language: 0, complete: true }).unwrap();
-    let p = json!({"base": "Qwen/Qwen3-TTS-12Hz-0.6B-Base", "languages": LANGUAGES, "voices": VOICES, "steps": 1, "install_as": "sv-real", "allow_cpu": true});
-    let out = run(&rig, p, &[("dataset", w.to_bytes())], &Frames::default()).unwrap();
-    assert_eq!(out.outputs["installed_as"], "local/sv-real", "{}", out.outputs);
-
-    let served = catalog::resident_tts::TtsResident::all_from_store(&loader::served::ServedStore::new(Some(rig.dir.join("models"))));
-    let sv = served.iter().find(|r| residency::ResidentModel::manifest(*r).model == "local/sv-real").expect("the release is served under its own id");
-    let inv = capability::Invocation::new().set("text", json!("Hej, det här är ett test.")).set("speaker", json!("astrid")).set("lang", json!("swedish")).set("max_frames", json!(6)).set("seed", json!(1));
-    let key = residency::ResidentModel::instance_key(sv, "design", &inv);
-    let mut inst = residency::ResidentModel::activate(sv, &key, residency::Device::Cpu).unwrap();
-    let spoken = inst.run("design", &inv, &mut |_| {}).unwrap();
-    let wav = audio::wav::parse(&spoken.blobs["audio"].bytes).unwrap();
-    assert!(!wav.samples.is_empty(), "it speaks as its voice, in its language");
-    let refused = inst.run("design", &inv.clone().set("speaker", json!("nobody")), &mut |_| {}).unwrap_err();
-    assert!(refused.contains("nobody") || refused.contains("speaker"), "{refused}");
 }

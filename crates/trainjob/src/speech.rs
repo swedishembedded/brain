@@ -12,7 +12,7 @@
 //!
 //! The datasets are training shards (`brain-tts-shard-v1`, [`qwen3tts::shard`]): the call's blobs `dataset` and
 //! `held_out`, or digests of the artifact store. The run trains through the speech objective
-//! ([`objective::speech_sft`]) under the `resume_key` contract the other jobs share ([`crate::runs`]), and the trained
+//! ([`qwen3tts::speech_sft`]) under the `resume_key` contract the other jobs share ([`crate::runs`]), and the trained
 //! tensors are exported over the base ([`qwen3tts::export`]): a checkpoint in the base's own names, dtypes and files,
 //! with the new languages and voices in its `config.json`, that brain and the upstream package load as they are. It
 //! leaves like every checkpoint of this service, as a manifest of its files by digest (`checkpoint_digest`), and with
@@ -26,6 +26,8 @@ use std::time::Instant;
 use capability::{ActionResult, ActionSpec, BlobSpec, Invocation, Media, Outcome, ParamSpec, ParamType, Progress};
 use serde::Deserialize;
 use serde_json::{json, Value};
+
+use qwen3tts::speech_sft::SpeechSftConfig;
 
 use crate::consolidate::{check_install_name, check_resume, checkpoint_every_param, checkpoint_outcome_of, open_run, resume_key_param};
 use crate::job::{self, bring, JobEnv, Workdir};
@@ -45,72 +47,55 @@ const DEFAULT_ID: &str = "local/qwen3tts-speech";
 /// The working set a run is charged on its card beside four copies of the trained weights (weights, gradients and the
 /// two AdamW moments): activations of a step of utterances.
 const ACTIVATION_BYTES: u64 = 2 << 30;
+/// The most utterances one micro-batch may hold.
+const MAX_BATCH: f64 = 1_024.0;
+/// The most frames a record may hold (about 22 minutes at 12.5 frames per second).
+const MAX_FRAMES: f64 = 16_384.0;
+/// The largest learning-rate multiplier of a parameter group.
+const MAX_LR_MULTIPLIER: f64 = 1_000.0;
 
-/// The trainer this action drives, `qwen3tts::speech_sft`'s interface. Until that objective is in the tree, this
-/// stand-in keeps the base's tensors and only allocates rows for the new names, so every layer around it (staging,
-/// resumption, export, publication, installation, serving) runs for real.
-pub mod objective {
-    use std::collections::BTreeMap;
-    use std::path::PathBuf;
+/// How the request names a language of the shards: one of the base's, or a new one initialised from a mix of the
+/// base's.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LanguageInit {
+    pub new: bool,
+    pub init_from: Vec<String>,
+}
 
-    use qwen3tts::shard::Shard;
+/// The objective's own defaults: what a setting the request leaves out trains with.
+fn objective_defaults() -> SpeechSftConfig {
+    serde_json::from_value(json!({"base": "", "steps": 1, "rows": {}})).expect("the objective's defaults parse")
+}
 
-    /// How a language is trained: an existing one of the base, or a new one initialised from a mix of existing ones.
-    #[derive(Clone, Debug, PartialEq)]
-    pub struct LanguageInit {
-        pub new: bool,
-        pub init_from: Vec<String>,
-    }
-
-    /// The run's settings.
-    #[derive(Clone, Debug)]
-    pub struct SpeechSftConfig {
-        /// The base checkpoint directory, as downloaded.
-        pub base: PathBuf,
-        pub steps: u32,
-        pub lr: Option<f32>,
-        pub grad_accum: u32,
-        pub seed: u64,
-        pub eval_every: Option<u32>,
-        pub residual_weight: f32,
-        pub languages: BTreeMap<String, LanguageInit>,
-        /// Voice name -> whether it is new to the base.
-        pub voices: BTreeMap<String, bool>,
-    }
-
-    /// What a run hands back: the trained tensors under their upstream names, the codec row of every language and
-    /// voice the checkpoint names, and the run's report.
-    pub struct SpeechSftResult {
-        pub tensors: Vec<(String, Vec<u64>, Vec<f32>)>,
-        pub languages: BTreeMap<String, u32>,
-        pub voices: BTreeMap<String, u32>,
-        pub report: serde_json::Value,
-    }
-
-    /// The stand-in: no step is taken and the base's tensors are kept; each new language and voice gets the highest
-    /// codec row no language, voice or special token of the base holds.
-    pub fn speech_sft(cfg: &SpeechSftConfig, train: &Shard, _held_out: Option<&Shard>, control: model::train::FitControl<'_>) -> Result<SpeechSftResult, String> {
-        let base = cfg.base.to_str().ok_or("the base directory is not UTF-8")?;
-        let specials = qwen3tts::TtsSpecials::from_config_dir(base)?;
-        let config: serde_json::Value = serde_json::from_slice(&std::fs::read(cfg.base.join("config.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-        let vocab = config["talker_config"]["vocab_size"].as_u64().ok_or("config.json has no talker_config.vocab_size")? as u32;
-        let mut taken: std::collections::BTreeSet<u32> = specials.lang.values().chain(specials.spk_id.values()).copied().collect();
-        taken.extend([specials.codec_nothink, specials.codec_think, specials.codec_think_bos, specials.codec_think_eos, specials.codec_pad, specials.codec_bos, specials.codec_eos]);
-        let mut free = (0..vocab).rev().filter(|r| !taken.contains(r)).collect::<Vec<_>>().into_iter();
-        let mut take = || free.next().ok_or("the codec vocabulary has no free row left");
-        let mut languages = BTreeMap::new();
-        for (name, init) in &cfg.languages {
-            let row = if init.new { take()? } else { *specials.lang.get(name).ok_or_else(|| format!("language {name:?} is not the base's"))? };
-            languages.insert(name.clone(), row);
-        }
-        let mut voices = BTreeMap::new();
-        for (name, new) in &cfg.voices {
-            let row = if *new { take()? } else { *specials.spk_id.get(name).ok_or_else(|| format!("voice {name:?} is not the base's"))? };
-            voices.insert(name.clone(), row);
-        }
-        drop(control);
-        Ok(SpeechSftResult { tensors: Vec::new(), languages, voices, report: serde_json::json!({"trainer": "stand-in: the base's tensors, unchanged", "records": train.len(), "steps_completed": 0}) })
-    }
+/// The objective's settings as served params, each bounded, with the objective's own default as its implied one.
+fn training_params() -> Vec<ParamSpec> {
+    let d = objective_defaults();
+    let int = |name: &str, help: &str, max: f64| ParamSpec::new(name, ParamType::Int, help).min(1.0).max(max).step(1.0);
+    let float = |name: &str, help: &str, max: f64, implied: f32| ParamSpec::new(name, ParamType::Float, help).min(0.0).max(max).implied_default(json!(implied));
+    let multiplier = |name: &str, group: &str, implied: f32| float(name, &format!("learning-rate multiplier of {group}"), MAX_LR_MULTIPLIER, implied);
+    vec![
+        int("steps", "optimiser steps; exactly one of steps and epochs", capability::bounds::TRAIN_STEPS),
+        int("epochs", "passes over the training shard, instead of steps", capability::bounds::TRAIN_COUNT),
+        float("lr", "peak learning rate", 1.0, d.lr),
+        float("weight_decay", "AdamW weight decay", 1.0, d.weight_decay),
+        ParamSpec::new("warmup", ParamType::Int, "steps of linear learning-rate warmup").min(0.0).max(capability::bounds::TRAIN_COUNT).step(1.0).implied_default(json!(d.warmup)),
+        ParamSpec::new("schedule", ParamType::Str, "the learning-rate curve after warmup: `cosine` (decay to a tenth by the last step) or `constant`").implied_default(json!(d.schedule)),
+        int("batch_utterances", "utterances per micro-batch", MAX_BATCH).implied_default(json!(d.batch)),
+        int("grad_accum", "micro-batches per optimiser step", 4096.0).implied_default(json!(d.grad_accum)),
+        int("max_frames", "the most codec frames a record may hold; a longer one is refused by name, never cut (it sizes the build)", MAX_FRAMES).implied_default(json!(d.max_frames)),
+        float("grad_clip", "the global gradient-norm clip", 1_000.0, d.grad_clip),
+        float("residual_weight", "the weight of the code predictor's residual-codebook loss beside the Talker's (upstream trains with 0.3)", 10.0, d.mtp_weight),
+        float("streaming_fraction", "the share of drawn records trained in the streaming text layout; the rest train non-streaming", 1.0, d.streaming_fraction),
+        multiplier("talker_lr_multiplier", "the Talker decoder and its head", d.lr_multipliers.talker),
+        multiplier("code_predictor_lr_multiplier", "the code predictor", d.lr_multipliers.code_predictor),
+        multiplier("codec_table_lr_multiplier", "the codec table rows the base already trained", d.lr_multipliers.codec_tables),
+        multiplier("new_row_lr_multiplier", "the rows of the new languages and voices", d.lr_multipliers.new_rows),
+        float("voice_outlier_fraction", "the share of a new voice's x-vectors, least aligned with their mean direction, left out of the centroid its row starts at", 0.99, d.rows.voice_outlier_fraction),
+        float("free_row_fraction", "a codec row is free for a new name when its norm is below this share of the median norm of the rows the base names", 0.99, d.rows.free_row_fraction),
+        ParamSpec::new("eval_every", ParamType::Int, "score the held-out shard every this many steps (needs one)").min(1.0).max(capability::bounds::TRAIN_COUNT).step(1.0),
+        ParamSpec::new("eval_batches", ParamType::Int, "held-out micro-batches per evaluation (0: every record)").min(0.0).max(capability::bounds::TRAIN_COUNT).step(1.0).implied_default(json!(d.eval_batches)),
+        ParamSpec::new("seed", ParamType::Int, "seed of the batch order and the layout draws (random when omitted; the report carries the one used)").min(0.0).max(capability::bounds::EXACT_INTEGER),
+    ]
 }
 
 /// What `speech_sft` is.
@@ -123,14 +108,9 @@ pub fn spec() -> ActionSpec {
         .param(ParamSpec::new("base", ParamType::Str, "the Qwen3-TTS base, `<vendor>/<repo>` in the server's model store").required())
         .param(ParamSpec::new("dataset_digest", ParamType::Str, "the training shard (`brain-tts-shard-v1`), as a blake3 digest of the server's artifact store (or attach it as the input blob `dataset`; exactly one of the two)"))
         .param(ParamSpec::new("held_out_digest", ParamType::Str, "a held-out shard scored every eval_every steps, as a digest (or the input blob `held_out`; at most one of the two)"))
-        .param(ParamSpec::new("languages", ParamType::Str, "JSON object naming every language the shards hold: name -> {\"new\": true, \"init_from\"?: [existing names]} for one the base lacks (its codec row initialised from the mix of those), or {\"new\": false} for one of the base's; names are lowercase [a-z0-9_-]").required())
+        .param(ParamSpec::new("languages", ParamType::Str, "JSON object naming every language the shards hold: name -> {\"new\": true, \"init_from\"?: [existing names]} for one the base lacks (its codec row starts at the mean of those, by default of every base language; every new language of a run names the same init_from), or {\"new\": false} for one of the base's; names are lowercase [a-z0-9_-]").required())
         .param(ParamSpec::new("voices", ParamType::Str, "JSON object naming every voice the shards train: name -> {\"new\": true} for a new voice (its row initialised from its speaker's x-vectors), or {\"new\": false} for one of the base's; a checkpoint with named voices is exported as `custom_voice`").default(json!("{}")))
-        .param(ParamSpec::new("steps", ParamType::Int, "optimiser steps").default(json!(100)).min(1.0).max(capability::bounds::TRAIN_STEPS).step(1.0))
-        .param(ParamSpec::new("lr", ParamType::Float, "peak learning rate (default: the objective's)").min(0.0).max(1.0))
-        .param(ParamSpec::new("grad_accum", ParamType::Int, "utterances averaged into one optimiser step").default(json!(1)).min(1.0).max(4096.0).step(1.0))
-        .param(ParamSpec::new("eval_every", ParamType::Int, "score the held-out shard every this many steps (needs one)").min(1.0).max(capability::bounds::TRAIN_COUNT).step(1.0))
-        .param(ParamSpec::new("residual_weight", ParamType::Float, "the weight of the code predictor's residual-codebook loss beside the Talker's (upstream trains with 0.3)").default(json!(0.3)).min(0.0).max(10.0))
-        .param(ParamSpec::new("seed", ParamType::Int, "seed of the batch order and of new rows (random when omitted; the report carries the one used)").min(0.0).max(capability::bounds::EXACT_INTEGER))
+        .params(training_params())
         .param(ParamSpec::new("cards", ParamType::Int, "cards the run trains on; a speech fine-tune trains on one").default(json!(1)).min(1.0).max(1.0).step(1.0))
         .param(ParamSpec::new("install_as", ParamType::Str, "also install the checkpoint in the server's model store as `local/<this name>` (letters, digits, `.`, `_`, `-`; it must not exist yet), where it is served as a model of its own with its voices and languages"))
         .param(resume_key_param())
@@ -166,11 +146,26 @@ pub struct Params {
     pub held_out_digest: Option<String>,
     pub languages: String,
     pub voices: String,
-    pub steps: u32,
+    pub steps: Option<u32>,
+    pub epochs: Option<u32>,
     pub lr: Option<f32>,
-    pub grad_accum: u32,
+    pub weight_decay: Option<f32>,
+    pub warmup: Option<u32>,
+    pub schedule: Option<String>,
+    pub batch_utterances: Option<u32>,
+    pub grad_accum: Option<u32>,
+    pub max_frames: Option<u32>,
+    pub grad_clip: Option<f32>,
+    pub residual_weight: Option<f32>,
+    pub streaming_fraction: Option<f32>,
+    pub talker_lr_multiplier: Option<f32>,
+    pub code_predictor_lr_multiplier: Option<f32>,
+    pub codec_table_lr_multiplier: Option<f32>,
+    pub new_row_lr_multiplier: Option<f32>,
+    pub voice_outlier_fraction: Option<f32>,
+    pub free_row_fraction: Option<f32>,
     pub eval_every: Option<u32>,
-    pub residual_weight: f32,
+    pub eval_batches: Option<u32>,
     pub seed: Option<u64>,
     pub cards: u32,
     pub install_as: Option<String>,
@@ -186,7 +181,7 @@ pub struct Request {
     pub params: Params,
     pub dataset: Source,
     pub held_out: Option<Source>,
-    pub languages: BTreeMap<String, objective::LanguageInit>,
+    pub languages: BTreeMap<String, LanguageInit>,
     pub voices: BTreeMap<String, bool>,
 }
 
@@ -242,7 +237,17 @@ impl Request {
             for from in &doc.init_from {
                 check_name("language", from)?;
             }
-            languages.insert(name, objective::LanguageInit { new: doc.new, init_from: doc.init_from });
+            languages.insert(name, LanguageInit { new: doc.new, init_from: doc.init_from });
+        }
+        let mixes: std::collections::BTreeSet<&Vec<String>> = languages.values().filter(|l| l.new).map(|l| &l.init_from).collect();
+        if mixes.len() > 1 {
+            return Err(format!("{ACTION}: every new language of a run starts from the same mix; the languages name different init_from"));
+        }
+        if params.steps.is_some() == params.epochs.is_some() {
+            return Err(format!("{ACTION}: name exactly one of steps and epochs"));
+        }
+        if let Some(schedule) = &params.schedule {
+            serde_json::from_value::<qwen3tts::speech_sft::Schedule>(json!(schedule)).map_err(|_| format!("{ACTION}: schedule {schedule:?} is neither cosine nor constant"))?;
         }
         if languages.is_empty() {
             return Err(format!("{ACTION}: languages names no language; name every language the shards hold"));
@@ -306,7 +311,7 @@ pub(crate) fn device_bytes(base_dir: &Path) -> u64 {
 }
 
 /// The staged shards, each opened and checked against the base and the request: the codebooks and x-vector width of
-/// the base, every language the shard holds named in `languages`, every voice in `voices`.
+/// the base, and exactly the languages and voices the request names.
 fn open_shard(path: &Path, what: &str, base_dir: &Path, request: &Request) -> Result<qwen3tts::shard::Shard, String> {
     let shard = qwen3tts::shard::Shard::open(path).map_err(|e| format!("{ACTION}: {what}: {e}"))?;
     let config: Value = serde_json::from_slice(&std::fs::read(base_dir.join("config.json")).map_err(|e| format!("{ACTION}: base config: {e}"))?).map_err(|e| format!("{ACTION}: base config: {e}"))?;
@@ -324,15 +329,23 @@ fn open_shard(path: &Path, what: &str, base_dir: &Path, request: &Request) -> Re
     if let Some(name) = shard.meta.voices.iter().find(|v| !request.voices.contains_key(*v)) {
         return Err(format!("{ACTION}: {what} trains voice {name:?}, which voices does not name"));
     }
+    if let Some(name) = request.languages.keys().find(|l| !shard.meta.languages.contains(l)) {
+        return Err(format!("{ACTION}: languages names {name:?}, which {what} does not hold"));
+    }
+    if let Some(name) = request.voices.keys().find(|v| !shard.meta.voices.contains(v)) {
+        return Err(format!("{ACTION}: voices names {name:?}, which {what} does not train"));
+    }
     if shard.is_empty() {
         return Err(format!("{ACTION}: {what} holds no record"));
     }
     Ok(shard)
 }
 
-/// A step's frame: what the objective reported for it.
+/// A step's frame: what the objective reported for it (its loss, the Talker's and the code predictor's cross-entropy,
+/// end-of-speech accuracy and frames, and after an evaluation the held-out ones).
 fn step_frame(step: &model::train::StepReport, seconds: f64) -> Value {
-    let mut frame = json!({"type": "step", "step": step.step, "steps": step.steps, "loss": step.loss, "lr": step.lr, "grad_norm": step.grad_norm, "seconds": seconds});
+    let frames_per_s = step.work.useful_tokens_per_s();
+    let mut frame = json!({"type": "step", "step": step.step, "steps": step.steps, "loss": step.loss, "lr": step.lr, "grad_norm": step.grad_norm, "frames_per_s": if frames_per_s.is_finite() { json!(frames_per_s) } else { Value::Null }, "seconds": seconds});
     if let Some(eval) = step.eval_loss {
         frame["eval_loss"] = json!(eval);
     }
@@ -342,6 +355,65 @@ fn step_frame(step: &model::train::StepReport, seconds: f64) -> Value {
     frame
 }
 
+/// The objective's configuration for `request` over the base at `base_dir`: the settings it names, the objective's own
+/// defaults for the rest, validated as the run would ([`SpeechSftConfig::validate`]).
+pub(crate) fn sft_config(request: &Request, base_dir: &Path, seed: Option<u64>) -> Result<SpeechSftConfig, String> {
+    let p = &request.params;
+    let source = |new: bool| if new { "new" } else { "base" };
+    let mix = request.languages.values().find(|l| l.new && !l.init_from.is_empty()).map(|l| l.init_from.iter().map(|n| (n.clone(), 1.0 / l.init_from.len() as f32)).collect::<BTreeMap<String, f32>>());
+    let mut rows = json!({
+        "languages": request.languages.iter().map(|(n, l)| (n.clone(), json!(source(l.new)))).collect::<serde_json::Map<_, _>>(),
+        "voices": request.voices.iter().map(|(n, new)| (n.clone(), json!(source(*new)))).collect::<serde_json::Map<_, _>>(),
+        "language_init": mix,
+    });
+    let mut cfg = json!({"base": job::utf8(base_dir)?, "rows": {}});
+    let set = |cfg: &mut Value, key: &str, v: Option<Value>| {
+        if let Some(v) = v {
+            cfg[key] = v;
+        }
+    };
+    for (key, v) in [
+        ("steps", p.steps.map(|v| json!(v))),
+        ("epochs", p.epochs.map(|v| json!(v))),
+        ("lr", p.lr.map(|v| json!(v))),
+        ("weight_decay", p.weight_decay.map(|v| json!(v))),
+        ("warmup", p.warmup.map(|v| json!(v))),
+        ("schedule", p.schedule.clone().map(Value::from)),
+        ("batch", p.batch_utterances.map(|v| json!(v))),
+        ("grad_accum", p.grad_accum.map(|v| json!(v))),
+        ("max_frames", p.max_frames.map(|v| json!(v))),
+        ("grad_clip", p.grad_clip.map(|v| json!(v))),
+        ("mtp_weight", p.residual_weight.map(|v| json!(v))),
+        ("streaming_fraction", p.streaming_fraction.map(|v| json!(v))),
+        ("eval_interval", p.eval_every.map(|v| json!(v))),
+        ("eval_batches", p.eval_batches.map(|v| json!(v))),
+        ("seed", seed.or(p.seed).map(|v| json!(v))),
+    ] {
+        set(&mut cfg, key, v);
+    }
+    let mut multipliers = json!({});
+    for (key, v) in [("talker", p.talker_lr_multiplier), ("code_predictor", p.code_predictor_lr_multiplier), ("codec_tables", p.codec_table_lr_multiplier), ("new_rows", p.new_row_lr_multiplier)] {
+        set(&mut multipliers, key, v.map(|v| json!(v)));
+    }
+    cfg["lr_multipliers"] = multipliers;
+    set(&mut rows, "voice_outlier_fraction", p.voice_outlier_fraction.map(|v| json!(v)));
+    set(&mut rows, "free_row_fraction", p.free_row_fraction.map(|v| json!(v)));
+    cfg["rows"] = rows;
+    let cfg: SpeechSftConfig = serde_json::from_value(cfg).map_err(|e| format!("{ACTION}: {e}"))?;
+    cfg.validate().map_err(|e| format!("{ACTION}: {e}"))?;
+    Ok(cfg)
+}
+
+/// What the run reports about its training: the shared loop's totals and the last step's measurements.
+fn training_report(report: &qwen3tts::speech_sft::SpeechSftReport) -> Value {
+    let fit = &report.fit;
+    let last = report.steps.last().map(|s| {
+        json!({"step": s.step, "loss": s.loss, "talker_ce": s.talker_ce, "code_predictor_ce": s.code_predictor_ce, "eos_accuracy": s.eos_accuracy, "grad_norm": s.grad_norm, "lr": s.lr, "frames_per_s": s.frames_per_s,
+               "held_out": s.held_out.map(|h| json!({"loss": h.loss, "talker_ce": h.talker_ce, "code_predictor_ce": h.code_predictor_ce, "eos_accuracy": h.eos_accuracy}))})
+    });
+    json!({"initial_loss": fit.initial_loss, "final_loss": fit.final_loss, "steps_completed": fit.steps_completed, "evaluations": fit.evaluations.len(), "last_step": last})
+}
+
 /// Runs the `speech_sft` job `inv` on the device this thread is scoped to.
 pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
     inv.cancel.check()?;
@@ -349,7 +421,8 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
     let p = &request.params;
     let base_dir = resolve_base(env, &request)?;
     let work = Workdir::create(env)?;
-    progress(Progress::event(0, p.steps, json!({"type": "stage", "stage": "staging the shards"})));
+    let total = p.steps.unwrap_or(0);
+    progress(Progress::event(0, total, json!({"type": "stage", "stage": "staging the shards"})));
     let stage = |source: &Source, name: &str| -> Result<std::path::PathBuf, String> {
         let path = work.path().join(name);
         bring(source, &inv.blobs, env.store.as_ref(), work.staging(), &path)?;
@@ -360,7 +433,7 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
     if p.validate_only {
         let mut outcome = Outcome::new();
         outcome.outputs = json!({
-            "status": "valid", "objective": ACTION, "base": p.base, "steps": p.steps, "grad_accum": p.grad_accum,
+            "status": "valid", "objective": ACTION, "base": p.base, "steps": p.steps, "epochs": p.epochs,
             "records": train.len(), "held_out_records": held_out.as_ref().map(qwen3tts::shard::Shard::len),
             "languages": request.languages.keys().collect::<Vec<_>>(), "voices": request.voices.keys().collect::<Vec<_>>(),
             "device_bytes": device_bytes(&base_dir),
@@ -377,19 +450,8 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
         Some(crate::runs::Opened::Run(run)) => Some(run),
         None => None,
     };
-    let seed = run.as_ref().map(crate::runs::Run::seed).or(p.seed).unwrap_or_else(brain::random_seed);
-    let cfg = objective::SpeechSftConfig {
-        base: base_dir.clone(),
-        steps: p.steps,
-        lr: p.lr,
-        grad_accum: p.grad_accum,
-        seed,
-        eval_every: p.eval_every,
-        residual_weight: p.residual_weight,
-        languages: request.languages.clone(),
-        voices: request.voices.clone(),
-    };
-    progress(Progress::event(0, p.steps, json!({"type": "stage", "stage": "loading the base and training"})));
+    let cfg = sft_config(&request, &base_dir, run.as_ref().map(crate::runs::Run::seed))?;
+    progress(Progress::event(0, total, json!({"type": "stage", "stage": "loading the base and training"})));
     let began = Instant::now();
     let mut on_step = |step: &model::train::StepReport| {
         progress(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64())));
@@ -398,18 +460,21 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
     let state = run.as_ref().map(crate::runs::Run::state_path);
     let identity = json!({"base": p.base, "dataset": request.digests().iter().map(Digest::hex).collect::<Vec<_>>()});
     let control = model::train::FitControl { on_step: Some(&mut on_step), state: state.as_deref(), state_every: p.checkpoint_every.unwrap_or(crate::runs::DEFAULT_CHECKPOINT_EVERY), identity, snapshots: None, grad_sync: None };
-    let trained = objective::speech_sft(&cfg, &train, held_out.as_ref(), control).map_err(|e| format!("{ACTION}: {e}"))?;
-    inv.cancel.check()?;
+    let trained = qwen3tts::speech_sft::speech_sft(&cfg, &train, held_out.as_ref(), control).map_err(|e| format!("{ACTION}: {e}"))?;
+    if trained.report.fit.interrupted {
+        return Err(capability::failure::CANCELLED.to_string());
+    }
 
     let id = p.install_as.as_ref().map_or_else(|| DEFAULT_ID.to_string(), |name| format!("local/{name}"));
     let out = work.path().join("release");
     let exported = qwen3tts::export::export(&base_dir, &out, &id, &qwen3tts::export::Trained { tensors: &trained.tensors, languages: &trained.languages, voices: &trained.voices }, &mut || !inv.cancel.is_cancelled())
         .map_err(|e| if e == capability::failure::CANCELLED { e } else { format!("{ACTION}: {e}") })?;
-    let mut report = trained.report;
+    let mut report = training_report(&trained.report);
+    let resumed_at = trained.report.fit.resumed_at;
     report["status"] = json!("completed");
     report["objective"] = json!(ACTION);
     report["base"] = json!(p.base);
-    report["seed"] = json!(seed);
+    report["seed"] = json!(trained.report.seed);
     report["languages"] = json!(trained.languages);
     report["voices"] = json!(trained.voices);
     report["tts_model_type"] = json!(match exported.kind {
@@ -419,14 +484,18 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
     });
     report["trained_tensors"] = json!(trained.tensors.len());
     work.ensure_within_quota()?;
-    checkpoint_outcome_of(env, &out, p.install_as.as_deref(), report, run.map(|r| (r, None)))
+    checkpoint_outcome_of(env, &out, p.install_as.as_deref(), report, run.map(|r| (r, resumed_at)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn validated(params: Value, blobs: &[&str]) -> Result<Request, String> {
+    /// `params` as a remote caller's request, with `steps: 3` unless it names steps or epochs.
+    fn validated(mut params: Value, blobs: &[&str]) -> Result<Request, String> {
+        if params.get("steps").is_none() && params.get("epochs").is_none() {
+            params["steps"] = json!(3);
+        }
         let mut inv = Invocation::new();
         inv.params = params;
         for name in blobs {
@@ -445,9 +514,9 @@ mod tests {
     /// a held-out loss when one was measured, and the objective's own metrics by name.
     #[test]
     fn a_step_frame_carries_the_reports_fields() {
-        let step = model::train::StepReport { step: 3, steps: 9, loss: 1.5, lr: 1e-4, grad_norm: Some(0.5), work: Default::default(), eval_loss: Some(2.0), metrics: vec![("residual_loss", 0.25)] };
+        let step = model::train::StepReport { step: 3, steps: 9, loss: 1.5, lr: 1e-4, grad_norm: Some(0.5), work: Default::default(), eval_loss: Some(2.0), metrics: vec![("talker_ce", 1.25), ("code_predictor_ce", 0.75), ("eos_accuracy", 0.5), ("held_out_talker_ce", 2.25)] };
         let frame = step_frame(&step, 7.0);
-        assert_eq!(frame, json!({"type": "step", "step": 3, "steps": 9, "loss": 1.5, "lr": 1e-4_f32, "grad_norm": 0.5, "seconds": 7.0, "eval_loss": 2.0, "residual_loss": 0.25}));
+        assert_eq!(frame, json!({"type": "step", "step": 3, "steps": 9, "loss": 1.5, "lr": 1e-4_f32, "grad_norm": 0.5, "frames_per_s": 0.0, "seconds": 7.0, "eval_loss": 2.0, "talker_ce": 1.25, "code_predictor_ce": 0.75, "eos_accuracy": 0.5, "held_out_talker_ce": 2.25}));
     }
 
     /// A cancelled job stops before it reads anything.
@@ -463,9 +532,15 @@ mod tests {
     #[test]
     fn a_request_names_its_shards_languages_and_voices_and_refuses_what_it_cannot_take() {
         let ok = validated(json!({"base": "a/b", "languages": SV, "voices": r#"{"astrid": {"new": true}}"#, "install_as": "sv-1"}), &["dataset"]).unwrap();
+        let cfg = sft_config(&ok, Path::new("base"), None).unwrap();
+        assert_eq!((cfg.steps, cfg.batch, cfg.mtp_weight, cfg.rows.voices["astrid"]), (Some(3), objective_defaults().batch, 0.3, qwen3tts::speech_sft::RowSource::New));
+        assert_eq!(cfg.rows.language_init, Some(BTreeMap::from([("english".to_string(), 0.5), ("german".to_string(), 0.5)])));
+        let named = validated(json!({"base": "a/b", "languages": SV, "batch_utterances": 2, "residual_weight": 0.5, "new_row_lr_multiplier": 10.0, "streaming_fraction": 1.0, "warmup": 4, "schedule": "constant", "lr": 1e-4, "eval_batches": 2, "seed": 9}), &["dataset"]).unwrap();
+        let cfg = sft_config(&named, Path::new("base"), None).unwrap();
+        assert_eq!((cfg.batch, cfg.mtp_weight, cfg.lr_multipliers.new_rows, cfg.streaming_fraction, cfg.warmup, cfg.seed), (2, 0.5, 10.0, 1.0, 4, Some(9)));
         assert_eq!(ok.dataset, Source::Blob("dataset".into()));
-        assert_eq!(ok.languages["swedish"], objective::LanguageInit { new: true, init_from: vec!["english".into(), "german".into()] });
-        assert_eq!((ok.voices["astrid"], ok.params.steps, ok.params.residual_weight), (true, 100, 0.3));
+        assert_eq!(ok.languages["swedish"], LanguageInit { new: true, init_from: vec!["english".into(), "german".into()] });
+        assert_eq!((ok.voices["astrid"], ok.params.steps, ok.params.residual_weight), (true, Some(3), None));
         let by_digest = validated(json!({"base": "a/b", "languages": SV, "dataset_digest": digest(1), "held_out_digest": digest(2), "eval_every": 10}), &[]).unwrap();
         assert_eq!(by_digest.digests().len(), 2);
         let cases: Vec<(Value, Vec<&str>, &str)> = vec![
@@ -486,6 +561,13 @@ mod tests {
             (json!({"base": "a/b", "languages": SV, "cards": 2}), vec!["dataset"], "cards"),
             (json!({"base": "a/b", "languages": SV, "out": "x"}), vec!["dataset"], "unknown param"),
             (json!({"base": "a/b", "languages": SV, "steps": 0}), vec!["dataset"], "steps"),
+            (json!({"base": "a/b", "languages": SV, "steps": 3, "epochs": 1}), vec!["dataset"], "exactly one of steps and epochs"),
+            (json!({"base": "a/b", "languages": SV, "schedule": "linear"}), vec!["dataset"], "schedule"),
+            (json!({"base": "a/b", "languages": SV, "batch_utterances": 0}), vec!["dataset"], "batch_utterances"),
+            (json!({"base": "a/b", "languages": SV, "max_frames": 1_000_000}), vec!["dataset"], "max_frames"),
+            (json!({"base": "a/b", "languages": SV, "streaming_fraction": 1.5}), vec!["dataset"], "streaming_fraction"),
+            (json!({"base": "a/b", "languages": SV, "new_row_lr_multiplier": -1.0}), vec!["dataset"], "new_row_lr_multiplier"),
+            (json!({"base": "a/b", "languages": r#"{"swedish": {"new": true, "init_from": ["english"]}, "norwegian": {"new": true, "init_from": ["german"]}}"#}), vec!["dataset"], "same mix"),
         ];
         for (params, blobs, why) in cases {
             let e = validated(params.clone(), &blobs).unwrap_err();
