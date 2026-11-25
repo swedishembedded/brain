@@ -81,7 +81,7 @@ impl ResidentModel for NemotronResident {
         if let Device::Npu(_) = device {
             return Ok(Box::new(NemotronNpuInstance::new(&self.dir, cfg, model, detok)?));
         }
-        Ok(Box::new(NemotronInstance { model, detok, sessions: nemotronasr::caps::StreamSessions::new() }))
+        Ok(Box::new(NemotronInstance { model, detok, sessions: nemotronasr::caps::StreamSessions::new(), device }))
     }
 }
 
@@ -177,6 +177,8 @@ struct NemotronInstance {
     /// the model (residency swap) drops any in-flight streams - a restarted stream
     /// id simply begins a fresh session.
     sessions: nemotronasr::caps::StreamSessions,
+    /// Where it was built: every run happens there too.
+    device: Device,
 }
 
 /// One `transcribe_stream` job decoded from its `Invocation`:
@@ -194,6 +196,16 @@ impl Instance for NemotronInstance {
     /// one batched encoder step over every concurrent stream's window
     /// (`StreamSessions::step_batch`). Per-job decode errors stay per-job.
     fn run_batch(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
+        let device = self.device;
+        match residency::on_device(device, || self.run_batch_here(action, invs, progress)) {
+            Ok(results) => results,
+            Err(e) => invs.iter().map(|_| Err(e.clone())).collect(),
+        }
+    }
+}
+
+impl NemotronInstance {
+    fn run_batch_here(&mut self, action: &str, invs: &[Invocation], progress: &mut dyn FnMut(usize, Progress)) -> Vec<ActionResult> {
         if action != "transcribe_stream" {
             return self.offline_batch(invs, progress);
         }
@@ -338,17 +350,20 @@ impl ResidentModel for QwenAsrResident {
         if let Device::Npu(_) = device {
             return Ok(Box::new(QwenAsrNpuInstance::new(&self.dir, cfg, provider)?));
         }
-        Ok(Box::new(QwenAsrInstance { provider }))
+        Ok(Box::new(QwenAsrInstance { provider, device }))
     }
 }
 
 struct QwenAsrInstance {
     provider: qwen3asr::caps::QwenAsrProvider,
+    /// Where it was built: every run happens there too, so nothing it creates
+    /// lazily lands on another card.
+    device: Device,
 }
 
 impl Instance for QwenAsrInstance {
     fn run(&mut self, _action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        qwen3asr::caps::run_transcribe(&self.provider, inv, progress)
+        residency::on_device(self.device, || qwen3asr::caps::run_transcribe(&self.provider, inv, progress))?
     }
     // run_batch: default sequential loop (offline autoregressive decode; the audio
     // encoder still amortises within the fixed-window instance).
