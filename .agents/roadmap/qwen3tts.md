@@ -1385,19 +1385,12 @@ discovers capabilities generically.
       and where it was actually missing" below for what the window is, which
       two of the codec's THREE copies of that transformer were ignoring it
       (including the one behind the default serve path), and the numbers.
-- [ ] The SAME gap, still open, on the ENCODE side: the Mimi encoder
-      transformer (`mimi::model::Codec::enc_transformer`) parses
-      `encoder_config.sliding_window` (250, confirmed in the released
-      `speech_tokenizer/config.json`) and dispatches plain `gqa_fwd`, so
-      encoding more than 250 encoder frames - 10 s of audio, at the
-      pre-downsample 25 Hz rate, well inside the length of a voice-cloning
-      reference clip - over-attends exactly the way decode used to. Left
-      unfixed deliberately rather than shipped alongside the decode fix:
-      the encode path's only correctness witness is the reference
-      code-match golden, whose clip is far shorter than 250 frames, so the
-      one-line change cannot be shown red-then-green and would land as an
-      unverified edit under an existing 100%-code-match parity claim.
-      Needs a >250-frame reference dump first; that dump is the work item.
+- [x] The encode side's window **(2026-11-25)**: the opposite of the decode
+      gap. The reference encode (transformers' Mimi encoder under `qwen-tts`)
+      never applies `encoder_config.sliding_window` (250); brain did, so codes
+      of clips over 10 s diverged from frame 125 on (62 % code match on a 24 s
+      golden). The encoder attention is plain causal now: 100 % on that golden
+      (knowledge #582).
 - [ ] A fused single-inference MTP graph
 - [x] **A real TTS model in the runtime event/state-machine flow.**
       `runtime::tts::Qwen3TtsSynthModel` (`crates/runtime/src/tts.rs`)

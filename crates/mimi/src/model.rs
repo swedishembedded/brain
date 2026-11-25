@@ -1000,9 +1000,14 @@ impl Pass<'_> {
             let scores = self.st((nh * t * t) as usize);
             let probs = self.st((nh * t * t) as usize);
             let ctx = self.st((t * hq) as usize);
-            // Sliding window `EncoderConfig::sliding_window` (250), with the same
-            // 0 = unbounded normalization as the decoder's `transformer`.
-            let window = if e.sliding_window == 0 { t } else { e.sliding_window };
+            // Plain causal attention over the whole clip. The released config
+            // carries `encoder_config.sliding_window` (250), but the reference
+            // encode (transformers' Mimi encoder, which `qwen-tts` runs) builds
+            // its mask with `create_causal_mask` and never applies that window
+            // in a single-shot encode: windowing here diverged from the
+            // reference's codes from encoder frame 250 (10 s) on (knowledge
+            // #582). A window of `t` is unbounded.
+            let window = t;
             self.run_all(block::gqa_fwd_win(&self.gpu, GQA_SCORES_WIN, &ids, &ga, window, &q, &k, &v, &scores, &probs, &ctx));
             let attn = self.matmul(&ctx, &p("self_attn.o_proj.weight"), t, hq, d);
             let attn = self.scale_chan(&attn, &p("self_attn_layer_scale.scale"), t * d, d, 1);
@@ -1121,9 +1126,9 @@ mod tests {
     use crate::config::EncoderConfig;
     use data::rng::Lcg;
 
-    /// One-layer tiny encoder transformer with random weights and the given
-    /// attention window; every weight `enc_transformer` reads.
-    fn tiny_encoder(window: u32) -> Codec {
+    /// One-layer tiny encoder transformer with random weights; every weight
+    /// `enc_transformer` reads.
+    fn tiny_encoder() -> Codec {
         let (d, heads, hd, ff) = (8u32, 2u32, 4u32, 16u32);
         let enc = EncoderConfig {
             hidden_size: d,
@@ -1134,7 +1139,6 @@ mod tests {
             intermediate_size: ff,
             rope_theta: 10000.0,
             norm_eps: 1e-5,
-            sliding_window: window,
             ..Default::default()
         };
         let cfg = CodecConfig { enc, ..Default::default() };
@@ -1170,38 +1174,27 @@ mod tests {
         pass.read(&out, t as usize * d)
     }
 
-    /// The reference masks key `j` out of query `i` once `i - j >= sliding_window`
-    /// (`create_sliding_window_causal_mask`): a frame at or beyond the window
-    /// must not reach output frame `i`, a frame inside it must.
+    /// The reference encode attends every earlier frame of the clip (plain
+    /// causal, no window: see `enc_transformer`): a perturbed frame however far
+    /// back reaches the last output frame, a later one never reaches an earlier.
     #[test]
-    fn encoder_attention_is_windowed() {
-        let (t, window, d) = (10u32, 4u32, 8usize);
-        let codec = tiny_encoder(window);
+    fn encoder_attention_is_causal_over_the_whole_clip() {
+        let (t, d) = (40u32, 8usize);
+        let codec = tiny_encoder();
         let x = Lcg::new(7).vec(t as usize * d);
         let base = run_enc(&codec, &x, t);
-        let i = t as usize - 1;
-        let row = |v: &[f32]| v[i * d..(i + 1) * d].to_vec();
+        let row = |v: &[f32], i: usize| v[i * d..(i + 1) * d].to_vec();
         let perturbed = |j: usize| {
             let mut y = x.clone();
             y[j * d] += 1.0;
             run_enc(&codec, &y, t)
         };
-        for j in 0..=(i - window as usize) {
-            assert_eq!(row(&perturbed(j)), row(&base), "frame {j} is outside the window of frame {i} but leaked");
+        let last = t as usize - 1;
+        let first = perturbed(0);
+        assert_ne!(row(&first, last), row(&base, last), "frame 0 did not reach frame {last}");
+        let late = perturbed(last);
+        for i in 0..last {
+            assert_eq!(row(&late, i), row(&base, i), "frame {last} leaked into earlier frame {i}");
         }
-        for j in (i - window as usize + 1)..=i {
-            assert_ne!(row(&perturbed(j)), row(&base), "frame {j} is inside the window of frame {i} but had no effect");
-        }
-    }
-
-    /// `0` means unset (a hand-built config) and must mean unbounded, as on the
-    /// decoder path, not "mask every key".
-    #[test]
-    fn encoder_window_zero_is_causal_unbounded() {
-        let t = 10u32;
-        let x = Lcg::new(7).vec(t as usize * 8);
-        let zero = run_enc(&tiny_encoder(0), &x, t);
-        let wide = run_enc(&tiny_encoder(t), &x, t);
-        assert_eq!(zero, wide);
     }
 }

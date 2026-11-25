@@ -63,7 +63,6 @@ pub struct EncoderConfig {
     pub intermediate_size: u32,   // 2048
     pub rope_theta: f32,          // 10000
     pub norm_eps: f32,            // 1e-5
-    pub sliding_window: u32,      // 250
     // RVQ
     pub codebook_dim: u32,        // 256 (vector_quantization_hidden_dimension)
     pub codebook_size: u32,       // 2048
@@ -126,7 +125,6 @@ impl CodecConfig {
                     intermediate_size: gu(e, "intermediate_size", 2048),
                     rope_theta: gf(e, "rope_theta", 10000.0),
                     norm_eps: gf(e, "norm_eps", 1e-5),
-                    sliding_window: gu(e, "sliding_window", 250),
                     codebook_dim: gu(e, "vector_quantization_hidden_dimension", 256),
                     codebook_size: gu(e, "codebook_size", 2048),
                     num_semantic_quantizers: gu(e, "num_semantic_quantizers", 1),
