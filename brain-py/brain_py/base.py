@@ -164,6 +164,9 @@ class EncodedAudio:
     text_ids: Optional[array.array]
     sample_rate_in: int
     seconds: float
+    #: The content digests of the codec, speaker encoder and tokenizer that made
+    #: the arrays: what a shard's ``meta.producers`` records.
+    producers: dict[str, str] = field(default_factory=dict)
 
     def frame(self, i: int) -> list[int]:
         """The ``codebooks`` codes of frame ``i``."""
@@ -382,6 +385,7 @@ class BrainBase:
             text_ids=None if ids is None else _le_array("I", ids),
             sample_rate_in=int(out.outputs["sample_rate_in"]),
             seconds=float(out.outputs["seconds"]),
+            producers=dict(out.outputs.get("producers") or {}),
         )
 
     # -- structured perception (Mirage) ---------------------------------------

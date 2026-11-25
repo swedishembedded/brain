@@ -278,8 +278,9 @@ pub fn encode_spec() -> ActionSpec {
 }
 
 /// The outcome of an `encode`: the blobs, plus `frames`, `codebooks`,
-/// `frame_rate`, `xvector_dim`, `sample_rate_in` (the rate of the WAV given)
-/// and `seconds` (its duration).
+/// `frame_rate`, `xvector_dim`, `sample_rate_in` (the rate of the WAV given),
+/// `seconds` (its duration) and `producers` (the content digests of the codec,
+/// the speaker encoder and the tokenizer, as a shard's `meta.producers`).
 fn encode_outcome(encoder: &crate::encode::Encoder, req: &crate::encode::Request, out: crate::encode::Encoded) -> Outcome {
     let codes: Vec<u8> = out.codes.iter().flat_map(|c| c.to_le_bytes()).collect();
     let xvector: Vec<u8> = out.xvector.iter().flat_map(|v| v.to_le_bytes()).collect();
@@ -290,6 +291,7 @@ fn encode_outcome(encoder: &crate::encode::Encoder, req: &crate::encode::Request
         .set("xvector_dim", json!(out.xvector.len()))
         .set("sample_rate_in", json!(req.wav.sample_rate))
         .set("seconds", json!(req.seconds()))
+        .set("producers", json!(encoder.producers()))
         .blob("codes", Blob::new(Media::Bytes, codes).with_meta(json!({"dtype": "u16", "shape": [out.frames, encoder.codebooks()]})))
         .blob("xvector", Blob::new(Media::Bytes, xvector).with_meta(json!({"dtype": "f32", "shape": [out.xvector.len()]})));
     if let Some(ids) = out.text_ids {

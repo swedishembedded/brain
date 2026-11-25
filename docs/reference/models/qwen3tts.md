@@ -114,7 +114,10 @@ the codec's 24 kHz), optional param `text` (its transcript). Outputs: blob
 `<|im_start|>assistant\n{text}<|im_end|>\n<|im_start|>assistant\n`, exactly what
 generation tokenises the same text into), and the values `frames`,
 `codebooks`, `frame_rate`, `xvector_dim`, `sample_rate_in` (the given WAV's
-rate) and `seconds` (its duration). It needs a Base checkpoint (the speaker
+rate), `seconds` (its duration) and `producers`: the content digests of the
+codec, the speaker encoder and the tokenizer (`sha256:` of one
+`<file>\t<sha256>` line per file read), what a shard's `meta.producers`
+records so codes from another codec are never mixed in. It needs a Base checkpoint (the speaker
 encoder). Served, it keeps its encoders loaded and spreads concurrent requests
 over several of them. From Python, `encode_audio(wav_bytes, text)` on any
 `brain_py` client returns the decoded arrays.

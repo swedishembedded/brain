@@ -31,7 +31,7 @@ class FakeTts(BrainBase):
     def run(self, model, action, params=None, *, blobs=None, meta=None, timeout=1800.0):
         self.calls.append((model, action, params, blobs, meta))
         out = Outcome(
-            outputs={"frames": 2, "codebooks": 16, "frame_rate": 12.5, "xvector_dim": 3, "sample_rate_in": 16000, "seconds": 0.16},
+            outputs={"frames": 2, "codebooks": 16, "frame_rate": 12.5, "xvector_dim": 3, "sample_rate_in": 16000, "seconds": 0.16, "producers": {"codec": "sha256:" + "a" * 64}},
             blobs={"codes": struct.pack(f"<{len(CODES)}H", *CODES), "xvector": struct.pack("<3f", *XVEC)},
         )
         if self.with_text:
@@ -53,6 +53,7 @@ def test_encode_audio_sends_the_wav_and_text_and_decodes_the_arrays():
     assert list(enc.xvector) == XVEC
     assert list(enc.text_ids) == IDS
     assert (enc.sample_rate_in, enc.seconds, enc.frame_rate) == (16000, 0.16, 12.5)
+    assert enc.producers == {"codec": "sha256:" + "a" * 64}
 
 
 def test_encode_audio_without_text_sends_no_text_and_returns_no_ids():

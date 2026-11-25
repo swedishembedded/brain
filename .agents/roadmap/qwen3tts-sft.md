@@ -83,9 +83,10 @@ ledger is the engine work it needs.
     as one recorded device pass over several clips (it runs eager, one
     submit per op, `mimi::Codec::encode`), and the encode instance placed on
     a card (it pins the CPU path today so its codes equal the clone path's).
+  - [x] `encode` returns `producers` (content digests of the codec, the
+        speaker encoder and the tokenizer) for a shard's `meta.producers`.
   - [ ] Shard assembly from `encode` outputs: the caller writes
-        `brain-tts-shard-v1` itself today; the producers' digests the shard
-        records are not returned by `encode`.
+        `brain-tts-shard-v1` itself today.
 - [x] The speech SFT objective: the Talker full-weight on the teacher-forced
       prompt (cb0 next-frame CE, end of speech supervised on complete
       utterances only), the code predictor batched over frames (`[frames, 16]`

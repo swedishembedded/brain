@@ -94,6 +94,41 @@ pub struct Encoder {
     codec: mimi::Codec,
     speaker: ecapatdnn::SpeakerEncoder,
     tokenizer: data::qwen_tokenizer::QwenBpe,
+    producers: std::collections::BTreeMap<String, String>,
+}
+
+/// The content digest of the files a component is read from: `sha256:` and the SHA-256 of one line per file,
+/// `<name>\t<sha256 of its bytes>\n`, in name order, so the same files give the same digest wherever they sit.
+fn content_digest(files: &[std::path::PathBuf]) -> Result<String, String> {
+    let mut lines: Vec<String> = Vec::with_capacity(files.len());
+    for f in files {
+        let name = f.file_name().and_then(|n| n.to_str()).ok_or_else(|| format!("{}: not a file name", f.display()))?;
+        let digest = brain_modelstore::fetch::sha256_file(f).map_err(|e| format!("{}: {e}", f.display()))?;
+        lines.push(format!("{name}\t{digest}\n"));
+    }
+    lines.sort();
+    Ok(format!("sha256:{}", brain_modelstore::fetch::bytes_digest(lines.concat().as_bytes())))
+}
+
+/// The files a component at `path` (a checkpoint directory or one weights file) is read from.
+fn component_files(path: &str, in_dir: &[&str]) -> Vec<std::path::PathBuf> {
+    let p = std::path::Path::new(path);
+    if p.is_dir() {
+        in_dir.iter().map(|f| p.join(f)).collect()
+    } else {
+        vec![p.to_path_buf()]
+    }
+}
+
+/// The content digests of what produces a recording's arrays, as a training shard records them
+/// (`ShardMeta::producers`): the codec, the speaker encoder and the tokenizer.
+pub fn producers(paths: &TtsPaths) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let ckpt = std::path::Path::new(&paths.ckpt_dir);
+    Ok(std::collections::BTreeMap::from([
+        ("codec".to_string(), content_digest(&component_files(&paths.codec, &["config.json", "model.safetensors"]))?),
+        ("speaker_encoder".to_string(), content_digest(&component_files(&paths.speaker, &["config.json", "model.safetensors"]))?),
+        ("tokenizer".to_string(), content_digest(&["vocab.json", "merges.txt", "tokenizer_config.json"].map(|f| ckpt.join(f)))?),
+    ]))
 }
 
 impl Encoder {
@@ -110,7 +145,12 @@ impl Encoder {
             return Err("the codec's codebooks are wider than a u16 code".to_string());
         }
         let speaker = ecapatdnn::SpeakerEncoder::load_inference(&paths.speaker);
-        Ok(Encoder { codec, speaker, tokenizer })
+        Ok(Encoder { codec, speaker, tokenizer, producers: producers(paths)? })
+    }
+
+    /// The content digests of the codec, the speaker encoder and the tokenizer ([`producers`]).
+    pub fn producers(&self) -> &std::collections::BTreeMap<String, String> {
+        &self.producers
     }
 
     /// Codebooks per frame.

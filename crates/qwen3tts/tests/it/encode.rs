@@ -62,6 +62,13 @@ fn encode_returns_the_codec_codes_the_x_vector_and_the_generation_token_ids_of_a
     assert!(xvector == speaker.embed_wav(&wav.samples, wav.sample_rate), "the x-vector is the speaker encoder's");
     assert_eq!(out.outputs["xvector_dim"], json!(xvector.len()));
 
+    let producers = out.outputs["producers"].as_object().expect("the producers' digests");
+    assert_eq!(producers.keys().map(String::as_str).collect::<Vec<_>>(), ["codec", "speaker_encoder", "tokenizer"]);
+    for (what, digest) in producers {
+        let hex = digest.as_str().and_then(|d| d.strip_prefix("sha256:")).unwrap_or_default();
+        assert!(hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()), "{what}: {digest}");
+    }
+    assert_eq!(out.outputs["producers"], serde_json::to_value(qwen3tts::encode::producers(&paths).unwrap()).unwrap(), "the same files, the same digests");
     let ids: Vec<u32> = words::<4>(&out.blobs["text_ids"]).into_iter().map(u32::from_le_bytes).collect();
     let tok = qwen3tts::prompt::load_tokenizer(&paths.ckpt_dir).unwrap();
     assert_eq!(ids, tok.encode(&qwen3tts::pipeline::assistant_text(text)), "the ids generation tokenises the request into");
