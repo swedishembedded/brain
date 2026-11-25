@@ -71,29 +71,68 @@ impl Basis {
 /// The basis of a stream whose second-moment matrix is `cov` (`[d, d]`,
 /// symmetric, f64).
 pub fn basis_from_covariance(cov: &[f64], d: usize, kind: BasisKind) -> Result<Basis, String> {
+    let groups: Vec<Vec<usize>> = match kind {
+        BasisKind::Pca => vec![(0..d).collect()],
+        BasisKind::Identity => (0..d).map(|c| vec![c]).collect(),
+    };
+    basis_within_groups(cov, d, kind, &groups)
+}
+
+/// The principal directions of `cov` within each group of channels (each
+/// direction mixes the channels of one group only), all groups' directions
+/// ordered by their eigenvalue. Groups of one channel each are the identity
+/// basis; one group of every channel is plain PCA. A rotation within groups
+/// of channels whose shared-norm gain is equal commutes with that gain, so it
+/// keeps a shared norm exact ([`gain_groups`]).
+pub fn basis_within_groups(cov: &[f64], d: usize, kind: BasisKind, groups: &[Vec<usize>]) -> Result<Basis, String> {
     if cov.len() != d * d || d == 0 {
         return Err(format!("a covariance of {} values is not {d} x {d}", cov.len()));
     }
     if cov.iter().any(|v| !v.is_finite()) {
         return Err("the covariance holds a value that is not finite".into());
     }
-    match kind {
-        BasisKind::Pca => {
-            let (values, vectors) = model::eigen::symmetric_eigen(cov, d);
-            let rows = vectors.iter().rev().flat_map(|v| v.iter().map(|&x| x as f32)).collect();
-            Ok(Basis { kind, d, rows, energy: values.into_iter().rev().collect() })
-        }
-        BasisKind::Identity => {
-            let diag: Vec<f64> = (0..d).map(|i| cov[i * d + i]).collect();
-            let mut order: Vec<usize> = (0..d).collect();
-            order.sort_by(|&a, &b| diag[b].total_cmp(&diag[a]).then(a.cmp(&b)));
-            let mut rows = vec![0f32; d * d];
-            for (r, &c) in order.iter().enumerate() {
-                rows[r * d + c] = 1.0;
-            }
-            Ok(Basis { kind, d, rows, energy: order.iter().map(|&c| diag[c]).collect() })
+    let mut seen = vec![false; d];
+    for &c in groups.iter().flatten() {
+        if c >= d || std::mem::replace(&mut seen[c], true) {
+            return Err(format!("channel {c} is past the stream's {d} or in two groups"));
         }
     }
+    if seen.iter().any(|s| !s) {
+        return Err("the groups leave a channel out".into());
+    }
+    let mut directions: Vec<(f64, Vec<f32>)> = Vec::with_capacity(d);
+    for g in groups {
+        let n = g.len();
+        let sub: Vec<f64> = g.iter().flat_map(|&i| g.iter().map(move |&j| cov[i * d + j])).collect();
+        let (values, vectors) = model::eigen::symmetric_eigen(&sub, n);
+        for (value, v) in values.into_iter().zip(vectors) {
+            let mut row = vec![0f32; d];
+            for (&c, &x) in g.iter().zip(&v) {
+                row[c] = x as f32;
+            }
+            directions.push((value, row));
+        }
+    }
+    directions.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let energy = directions.iter().map(|(v, _)| *v).collect();
+    Ok(Basis { kind, d, rows: directions.into_iter().flat_map(|(_, r)| r).collect(), energy })
+}
+
+/// The channels of a gain vector grouped by value: sorted by gain, a new
+/// group starting wherever the next gain differs from the group's first by
+/// more than `tolerance` relative to it (0: exactly equal gains only).
+pub fn gain_groups(gain: &[f32], tolerance: f64) -> Vec<Vec<usize>> {
+    let mut order: Vec<usize> = (0..gain.len()).collect();
+    order.sort_by(|&a, &b| gain[a].total_cmp(&gain[b]).then(a.cmp(&b)));
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for c in order {
+        let start = groups.last().map(|g| f64::from(gain[g[0]]));
+        match start {
+            Some(s) if (f64::from(gain[c]) - s).abs() <= tolerance * s.abs() => groups.last_mut().expect("a group").push(c),
+            _ => groups.push(vec![c]),
+        }
+    }
+    groups
 }
 
 /// The calibration states of a shared norm's input, each scaled to unit mean

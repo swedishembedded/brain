@@ -30,8 +30,10 @@
 //! stream cosines, MLP and text-projection activations, the streams' second
 //! moments), and the Fisher and group-Taylor channel estimates when the plan
 //! scores by them. A plan that trims the text vocabulary keeps every token
-//! the shards hold and every token the corpus encodes to
-//! ([`modelopt::surgery::bpe`]). The plan is applied
+//! the calibration shard holds and its utterance texts and the corpus encode
+//! to ([`modelopt::surgery::bpe`]); the held-out shard's texts and the probe
+//! measure how many texts outside it would tokenise differently, and only
+//! held-out records of kept tokens are measured on. The plan is applied
 //! ([`modelopt::surgery::plan::apply`]), each edit's loss and KL divergence
 //! from the unedited predictions measured on the held-out shard (the
 //! calibration shard when none is given), and the result exported over the
@@ -255,13 +257,21 @@ impl SpeechSurgery {
             calibration.curvature = curvature(&ck, &graph, &cal_ev)?;
         }
         modelopt::surgery::calibration::save(&out.join(CALIBRATION_FILE), &calibration).map_err(backend)?;
+        // A vocabulary trim keeps what the calibration shard and the corpus need; the held-out records it would
+        // re-tokenise are left out of the measurement and counted in its report.
+        let (vocab_keep, trimmed) = self.vocabulary(&ck, &shard, held_out.as_ref())?;
+        let measured_shard = held_out.as_ref().unwrap_or(&shard);
+        let kept: Option<std::collections::HashSet<u32>> = vocab_keep.get("text").map(|k| k.iter().map(|&i| i as u32).collect());
+        let candidates: Vec<usize> = (0..measured_shard.len()).filter(|&r| kept.as_ref().is_none_or(|k| measured_shard.record(r).text_ids.iter().all(|t| k.contains(t)))).collect();
+        let measured_records: Vec<usize> = cal::spread(candidates.len(), self.held_out_records).into_iter().map(|i| candidates[i]).collect();
         let measure_on = match &held_out {
-            Some(h) => Evaluator::new(base_of(&ck)?, h, &opts(self.held_out_records)).map_err(backend)?.0,
+            Some(h) => Evaluator::on_records(base_of(&ck)?, h, &measured_records, &opts(self.held_out_records)).map_err(backend)?.0,
+            None if kept.is_some() => Evaluator::on_records(base_of(&ck)?, &shard, &measured_records, &opts(self.held_out_records)).map_err(backend)?.0,
             None => cal_ev,
         };
         let baseline = measure_on.baseline();
+        on_progress(&format!("held-out records, unedited: loss {:.4} over {} records ({} of {} held out records hold only kept tokens)", baseline.loss, measured_records.len(), candidates.len(), measured_shard.len()));
 
-        let (vocab_keep, trimmed) = self.vocabulary(&ck, &shard, held_out.as_ref())?;
         let model = plan::Model { graph: &qwen3tts_graph, check: &|c: &Checkpoint| qwen3tts::surgery::check_upstream(&c.config, &|n| c.tensors.contains_key(n)) };
         let mut costs = Vec::new();
         let mut manifest = Manifest { source: source.clone(), calibration: Some(modelopt_digest(&out.join(CALIBRATION_FILE))?), edits: Vec::new() };
@@ -337,12 +347,9 @@ impl SpeechSurgery {
         }
         let read = |f: &str| std::fs::read_to_string(self.base.join(f)).map_err(|e| backend(format!("{f}: {e}")));
         let files = TokenizerFiles { vocab_json: read("vocab.json")?, merges_txt: read("merges.txt")?, tokenizer_config: serde_json::from_str(&read("tokenizer_config.json")?).map_err(backend)? };
-        let mut extra: Vec<usize> = Vec::new();
-        for s in std::iter::once(shard).chain(held_out) {
-            for r in 0..s.len() {
-                extra.extend(s.record(r).text_ids.iter().map(|&t| t as usize));
-            }
-        }
+        // The corpus: every utterance text of the calibration shard (its token ids kept exactly as tokenised) and
+        // the texts given; the probe: the held-out shard's texts and the probe texts given.
+        let mut extra: Vec<usize> = (0..shard.len()).flat_map(|r| shard.record(r).text_ids.iter().map(|&t| t as usize)).collect();
         // The config's own special tokens stay whatever the corpus holds.
         for key in qwen3tts::surgery::TOKEN_ID_KEYS {
             if let Some(id) = ck.config.get(key).and_then(serde_json::Value::as_u64) {
@@ -351,8 +358,11 @@ impl SpeechSurgery {
         }
         extra.sort_unstable();
         extra.dedup();
-        let corpus: Vec<&str> = self.corpus.iter().map(String::as_str).collect();
-        let probe: Vec<&str> = self.probe.iter().map(String::as_str).collect();
+        let texts = |s: &qwen3tts::shard::Shard| -> Vec<String> { (0..s.len()).map(|r| s.record(r).id.text.clone()).filter(|t| !t.is_empty()).collect() };
+        let shard_texts = texts(shard);
+        let held_out_texts = held_out.map(texts).unwrap_or_default();
+        let corpus: Vec<&str> = shard_texts.iter().chain(&self.corpus).map(String::as_str).collect();
+        let probe: Vec<&str> = held_out_texts.iter().chain(&self.probe).map(String::as_str).collect();
         let t = bpe::trim(&files, &corpus, &extra, &probe).map_err(backend)?;
         Ok((BTreeMap::from([("text".to_string(), t.keep.clone())]), Some((t.files, t.report))))
     }

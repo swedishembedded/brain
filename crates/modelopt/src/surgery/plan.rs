@@ -24,7 +24,7 @@ use model::surgery::{Calibration, SurgeryGraph};
 use serde::{Deserialize, Serialize};
 
 use super::scores::{act_rms, wanda, Score};
-use super::{basis_from_covariance, top_k, Basis, BasisKind, Change, Checkpoint, SharedNormFit};
+use super::{basis_from_covariance, basis_within_groups, gain_groups, top_k, Basis, BasisKind, Change, Checkpoint, SharedNormFit};
 
 /// What a layer removal ranks layers by (the least costly go).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,8 +48,18 @@ pub enum Edit {
     FoldEmbedding { fold: String, keep: usize, score: Score },
     /// Keep `keep` channels of every dimension matching `dims`, ranked by `score`.
     SelectChannels { dims: String, keep: usize, score: Score },
-    /// Rotate a stream into `basis` and keep `width` directions.
-    RotateStream { stream: String, width: usize, basis: BasisKind },
+    /// Rotate a stream into `basis` and keep `width` directions. On a stream
+    /// with a shared norm a PCA basis mixes only channels whose shared gain
+    /// is equal to within `gain_tolerance` (relative; default 0, which keeps
+    /// the rotation exact at full width): a wider tolerance mixes more and
+    /// approximates the shared norm.
+    RotateStream {
+        stream: String,
+        width: usize,
+        basis: BasisKind,
+        #[serde(default)]
+        gain_tolerance: Option<f64>,
+    },
     /// Remove `count` layers of a stack ranked by `by`, or exactly `layers`.
     RemoveLayers {
         stack: String,
@@ -168,13 +178,18 @@ pub fn apply(ck: &mut Checkpoint, plan: &[Edit], cal: &Calibration, vocab_keep: 
                 let kept: Vec<Vec<usize>> = matched.iter().map(|d| channel_scores(ck, cal, d, *score).map(|s| top_k(&s, *keep))).collect::<Result<_, _>>()?;
                 (super::select_channels(ck, &matched, &kept)?, format!("{score:?}").to_lowercase())
             }
-            Edit::RotateStream { stream, width, basis } => {
+            Edit::RotateStream { stream, width, basis, gain_tolerance } => {
                 let s = g.stream(stream)?;
                 let stats = cal.streams.get(stream).ok_or_else(|| format!("{stream}: the calibration has no statistics of it"))?;
                 if stats.width != s.width {
                     return Err(format!("{stream}: calibrated {} wide, the checkpoint is {}", stats.width, s.width));
                 }
-                let b = basis_from_covariance(&stats.covariance, s.width, *basis)?;
+                let shared: Vec<&str> = s.norms.iter().filter(|n| n.shared).map(|n| n.tensor.as_str()).collect();
+                let b = match (basis, shared.as_slice()) {
+                    (BasisKind::Pca, [norm]) => basis_within_groups(&stats.covariance, s.width, *basis, &gain_groups(&ck.get(norm)?.data, gain_tolerance.unwrap_or(0.0)))?,
+                    (BasisKind::Pca, [_, _, ..]) => return Err(format!("{stream}: a PCA basis keeps one shared norm exact, the stream has {}", shared.len())),
+                    _ => basis_from_covariance(&stats.covariance, s.width, *basis)?,
+                };
                 let fits: Vec<SharedNormFit> = stats.shared.iter().map(|(norm, c)| SharedNormFit { norm: norm.clone(), covariance: c.clone() }).collect();
                 let change = super::rotate_stream(ck, s, &b, *width, &fits)?;
                 applied.inputs.streams.insert(stream.clone(), (b, *width));

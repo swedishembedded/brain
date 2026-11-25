@@ -286,7 +286,7 @@ fn a_full_width_rotation_predicts_what_the_original_predicts() {
     surgery::rotate_stream(&mut rotated, talker, &perm, 24, &[]).unwrap();
     assert_same("rotation", &want, &predict(&rotated, &in_basis(&ex, &perm, 24)).0, 1e-4);
 
-    // A general rotation of the talker keeps its own head exact; the code predictor reads the fitted gain.
+    // A general rotation of the talker keeps its own head exact (the gains here are all one, so the code predictor too).
     let mut pca = ck.clone();
     let basis = basis_from_covariance(&covariance(5, 24), 24, BasisKind::Pca).unwrap(); // seed: fixed fixture
     surgery::rotate_stream(&mut pca, talker, &basis, 24, &[]).unwrap();
@@ -435,4 +435,30 @@ fn a_calibrated_plan_edits_the_checkpoint_and_its_measurement_sees_the_cost() {
     let cost = ev.measure(base_of(&edited), &Inputs::default()).unwrap();
     assert!(cost.talker_kl > 1e-6 && cost.loss.is_finite(), "{cost:?}");
     assert!(edited.params() < ck.params());
+}
+
+/// The talker's final norm is shared with the raw codec embeddings (both enter `small_to_mtp_projection`): a general
+/// rotation cannot keep both inputs of that projection exact, a rotation within channels of equal gain does.
+#[test]
+fn a_pca_rotation_within_equal_gains_keeps_the_shared_norm_exact() {
+    let mut ck = tiny(config(24, 16, 2, 2), 0x9a1); // seed: fixed fixture
+    let gains = [1.0f32, 2.5, -0.5, 4.0];
+    ck.get_mut("talker.model.norm.weight").unwrap().data = (0..24).map(|i| gains[i % 4]).collect();
+    let ex = examples(&ck, &TEXTS);
+    let want = predict(&ck, &ex).0;
+    let cov = covariance(8, 24); // seed: fixed fixture
+    let stats = model::surgery::StreamStats { width: 24, covariance: cov.clone(), rows: 1, shared: BTreeMap::new() };
+    let cal = model::surgery::Calibration { streams: BTreeMap::from([("talker".to_string(), stats)]), ..Default::default() };
+    let m = surgery::plan::Model { graph: &|c: &Checkpoint| qwen3tts::surgery::graph(&c.config, &|n| c.tensors.contains_key(n)), check: &|_| Ok(()) };
+    let plan: Vec<surgery::plan::Edit> = serde_json::from_str(r#"[{"rotate_stream": {"stream": "talker", "width": 24, "basis": "pca"}}]"#).unwrap();
+    let mut grouped = ck.clone();
+    let applied = surgery::plan::apply(&mut grouped, &plan, &cal, &BTreeMap::new(), &m).unwrap();
+    let (basis, k) = &applied.inputs.streams["talker"];
+    assert_same("pca within equal gains", &want, &predict(&grouped, &in_basis(&ex, basis, *k)).0, 1e-4);
+
+    let mut general = ck.clone();
+    let b = basis_from_covariance(&cov, 24, BasisKind::Pca).unwrap();
+    surgery::rotate_stream(&mut general, graph(&ck).stream("talker").unwrap(), &b, 24, &[]).unwrap();
+    let got = predict(&general, &in_basis(&ex, &b, 24)).0;
+    assert!(max_diff(&want.talker, &got.talker) <= 1e-4 && max_diff(&want.cp, &got.cp) > 1e-3, "a general rotation keeps the head exact and moves the code predictor's input");
 }

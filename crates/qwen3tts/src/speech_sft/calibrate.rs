@@ -104,6 +104,12 @@ pub fn row_map(sp: &TtsSpecials, shard: &Shard) -> Result<RowMap, String> {
     Ok(RowMap { languages, voices })
 }
 
+/// `n` of `len` record indices spread evenly (`0`: all): a shard may hold its speakers one after another.
+pub fn spread(len: usize, n: usize) -> Vec<usize> {
+    let n = if n == 0 { len } else { n.min(len) };
+    (0..n).map(|i| i * len / n).collect()
+}
+
 /// Mean KL divergence `KL(p || q)` over the rows of two `[rows, vocab]` logit sets.
 fn mean_kl(p: &[f32], q: &[f32], vocab: usize) -> f64 {
     if p.is_empty() {
@@ -128,7 +134,7 @@ fn mean_kl(p: &[f32], q: &[f32], vocab: usize) -> f64 {
 
 fn measurement(stats: &ForwardStats, kl: (f64, f64), mtp_weight: f32) -> Measurement {
     let mean = |s: f64, n: u32| if n == 0 { 0.0 } else { s / f64::from(n) };
-    Measurement { loss: f64::from(stats.loss(mtp_weight)), talker_ce: mean(stats.talker_sum, stats.talker_count), code_predictor_ce: mean(stats.cp_sum, stats.cp_count), talker_kl: kl.0, code_predictor_kl: kl.1 }
+    Measurement { loss: f64::from(stats.loss(&super::model::LossWeights::sft(mtp_weight))), talker_ce: mean(stats.talker_sum, stats.talker_count), code_predictor_ce: mean(stats.cp_sum, stats.cp_count), talker_kl: kl.0, code_predictor_kl: kl.1 }
 }
 
 impl Evaluator {
@@ -137,17 +143,22 @@ impl Evaluator {
     /// streaming one), scored on the checkpoint `base`. Answers the
     /// evaluator and the model it built, which stays loaded for calibration.
     pub fn new(base: Base, shard: &Shard, opts: &CalibrationOpts) -> Result<(Evaluator, SpeechSftModel), String> {
+        Self::on_records(base, shard, &spread(shard.len(), opts.records), opts)
+    }
+
+    /// [`Self::new`] on the records `records` of `shard`.
+    pub fn on_records(base: Base, shard: &Shard, records: &[usize], opts: &CalibrationOpts) -> Result<(Evaluator, SpeechSftModel), String> {
         if opts.batch == 0 {
             return Err("calibration: a batch holds at least one record".into());
         }
         let rows = row_map(&base.specials, shard)?;
-        let n = if opts.records == 0 { shard.len() } else { opts.records.min(shard.len()) };
-        if n == 0 {
-            return Err("calibration: the shard holds no record".into());
+        if records.is_empty() {
+            return Err("calibration: no record to calibrate on".into());
         }
-        // Spread over the shard, which may hold its speakers one after another.
-        let picks = (0..n).map(|i| i * shard.len() / n);
-        let examples: Vec<Example> = picks.enumerate().map(|(i, r)| example(&base.specials, &rows, shard, r, if i % 2 == 0 { TextLayout::NonStreaming } else { TextLayout::Streaming })).collect::<Result<_, _>>()?;
+        if let Some(&r) = records.iter().find(|&&r| r >= shard.len()) {
+            return Err(format!("calibration: record {r} is past the shard's {}", shard.len()));
+        }
+        let examples: Vec<Example> = records.iter().enumerate().map(|(i, &r)| example(&base.specials, &rows, shard, r, if i % 2 == 0 { TextLayout::NonStreaming } else { TextLayout::Streaming })).collect::<Result<_, _>>()?;
         let g = base.mtp.num_code_groups as usize;
         let block = examples.iter().map(|e| SpeechSftModel::rows_needed(e.plan.len(), e.codes.len() / g)).max().unwrap_or(1) as u32;
         let batches: Vec<Vec<Example>> = examples.chunks(opts.batch).map(<[Example]>::to_vec).collect();
@@ -180,7 +191,7 @@ impl Evaluator {
 
     /// A model of the checkpoint `base` sized for the calibration batches.
     pub fn build(&self, base: Base) -> Result<SpeechSftModel, String> {
-        let shape = SftShape { talker: base.talker, mtp: base.mtp, specials: base.specials, batch: self.batch, block: self.block, frames: self.frames, mtp_weight: self.mtp_weight, lr: LrMultipliers::default(), new_rows: Vec::new(), text_inter: base.text_inter, gemm: self.gemm };
+        let shape = SftShape { talker: base.talker, mtp: base.mtp, specials: base.specials, batch: self.batch, block: self.block, frames: self.frames, mtp_weight: self.mtp_weight, lr: LrMultipliers::default(), new_rows: Vec::new(), text_inter: base.text_inter, gemm: self.gemm, gt_weight: 1.0, kd: None };
         // seed: the decoders' token tables, which every row bypasses, are all it draws.
         SpeechSftModel::build(shape, base.tensors, data::rng::random_seed())
     }
@@ -314,7 +325,7 @@ pub fn calibrate(base: Base, shard: &Shard, source: &str, opts: &CalibrationOpts
     let projected = base.mtp.embedding_dim != base.mtp.d_model;
     let (text_hidden, text_inter) = (base.talker.text_hidden_size as usize, base.text_inter as usize);
     let (ev, m) = Evaluator::new(base, shard, opts)?;
-    on_progress(&format!("baseline over {} batches: loss {:.4}", ev.batches(), ev.baseline.loss));
+    on_progress(&format!("calibration records, unedited: loss {:.4} over {} batches", ev.baseline.loss, ev.batches()));
     let w = |name: &str| host.get(name).ok_or_else(|| format!("calibration: no tensor {name}"));
 
     let mut cal = Calibration { source: source.to_string(), records: ev.batches.iter().map(Vec::len).sum(), rows: ev.rows(), loss: ev.baseline.loss, ..Calibration::default() };

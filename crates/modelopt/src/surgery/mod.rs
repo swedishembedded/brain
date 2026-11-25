@@ -54,7 +54,7 @@ use serde_json::Value;
 pub use channels::{mask_channels, select_channels};
 pub use fold::fold_embedding;
 pub use layers::{mask_layers, remove_layers};
-pub use stream::{basis_from_covariance, rotate_stream, Basis, BasisKind, SharedNormFit};
+pub use stream::{basis_from_covariance, basis_within_groups, gain_groups, rotate_stream, Basis, BasisKind, SharedNormFit};
 pub use vocab::trim_vocabulary;
 
 /// One stored tensor, as f32, with its shape.
