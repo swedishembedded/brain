@@ -692,6 +692,19 @@ lowers the probability of its action, a positive one raises it.
   (`f32`, `[tokens * K]`, NaN where none), aligned with `<split>.blp.bin`, and `K` as `behavior_top_k` in
   `<split>.rollouts.json`; the examples of one split share one `K` (a split that mixes them is refused naming the
   example); `data::chat_rollout::read_behavior_top` reads them.
+- `"behavior_support_offsets"`, `"behavior_support_ids"` and `"behavior_support_logprobs"` (supervised assistant
+  message, optional, all three together, beside `"behavior_logprobs"`, which they require): the support a cut sampler
+  (`top_k`, `top_p`, `min_p`) drew each token from and the token's log-probability within it, so the trainer can
+  renormalise its own log-probabilities over the same support (a policy trace asked with `support` carries them as
+  `generation_support_offsets`, `generation_support_ids` and `generation_sampler_log_probs`). Token `t`'s support is
+  `behavior_support_ids[offsets[t]..offsets[t + 1]]`: the offsets are one more than `behavior_logprobs` holds values
+  (otherwise rule `behavior_support_count`), start at 0, rise at every token and end at the number of ids; a token's ids
+  are distinct, at most 1024, and hold the token itself where the message carries `token_ids`; each log-probability is
+  finite, at most 0 and at least the token's `behavior_logprobs` value (rule `behavior_support`, naming the field). A
+  `baseline_only` record carries none. The trainer refuses an id past the vocabulary and a trained token outside its
+  support. A prepared split keeps them as `<split>.bso.bin` (`u64` offsets, `[tokens + 1]`, an empty range at a token
+  without one), `<split>.bsi.bin` (`u32` ids) and `<split>.bsl.bin` (`f32` per token, NaN where none), and the widest
+  support as `behavior_support_max` in `<split>.rollouts.json`; `data::chat_rollout::read_behavior_support` reads them.
 - `"token_ids"` (supervised assistant message, optional, beside `"behavior_logprobs"`): the ids the sampler generated
   for the answer, end-of-turn marker included. The trainer trains these ids, never the ids the answer's text renders
   to again (a model writes a call's arguments, its whitespace, its think block its own way; the parsed message renders

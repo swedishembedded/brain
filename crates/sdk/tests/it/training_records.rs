@@ -56,8 +56,8 @@ fn the_rollout_fixture_supervises_the_tokens_its_records_carry() {
     let root = fixtures();
     let check = DatasetCheck { kind: DatasetKind::Chat, thinking: true, pack_answers: false, max_block: 512, list_records: None, truncated: Default::default() };
     let report = check_dataset(root.join("model"), root.join("chat_rollout.jsonl"), &check, &mut || true).unwrap();
-    // Eight records; the ones with two and three answers are two and three examples.
-    assert_eq!((report.valid_records, report.examples), (8, 11));
+    // Nine records; the ones with two and three answers are two and three examples.
+    assert_eq!((report.valid_records, report.examples), (9, 12));
     let text = std::fs::read_to_string(root.join("chat_rollout.jsonl")).unwrap();
     for line in text.lines() {
         let record: serde_json::Value = serde_json::from_str(line).unwrap();

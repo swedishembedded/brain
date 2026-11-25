@@ -28,7 +28,7 @@ rollouts) and in its guide to training as a served job.
 |---|---|---|
 | `model/` | tokenizer | the tokenizer (letters `a` to `w` as ids 0 to 22, `<|endoftext|>` 151643, `<|im_start|>` 151644, `<|im_end|>` 151645) and the chat template every `token_ids` here is computed with; `check_dataset` reads nothing else of a model |
 | `chat.jsonl` | `generic-messages-v2` | supervised records: per-message `train` masks, a record with two supervised answers, an assistant turn that is context |
-| `chat_rollout.jsonl` | `generic-messages-v2` with rollout fields | group `cab`: two rollouts named by `rollout`, one of them two records (two calls) that share its reward, line 1's answer carrying the `prompt_token_ids` it was sampled after, each record naming the `tokenizer_digest`; line 8 a third rollout of group `cab` with the sampler's top-2 per token, a `policy_version` and a `sampler` (the sha256 of `model/tokenizer.json`); group `fed`: three records that are a rollout each, one of them `truncated` (it takes no part in the group); an imitation record (no `reward`) in the same file |
+| `chat_rollout.jsonl` | `generic-messages-v2` with rollout fields | group `cab`: two rollouts named by `rollout`, one of them two records (two calls) that share its reward, line 1's answer carrying the `prompt_token_ids` it was sampled after, each record naming the `tokenizer_digest`; line 8 a third rollout of group `cab` with the sampler's top-2 per token, a `policy_version` and a `sampler` (the sha256 of `model/tokenizer.json`); line 9 a fourth rollout sampled with `top_k` 2, carrying each token's support (the two ids the sampler kept, the token among them) and its log-probability within it; group `fed`: three records that are a rollout each, one of them `truncated` (it takes no part in the group); an imitation record (no `reward`) in the same file |
 | `preference.jsonl` | `generic-preference-v1` | a prompt and its `chosen` and `rejected` answers; line 3's `chosen` is a continuation (a tool call, its result, the answer) against a single `rejected` turn |
 | `feedback.jsonl` | `generic-feedback-v1` | a desirable and an undesirable judged `completion`, and a desirable continuation |
 | `invalid/behavior_logprob_count.jsonl` | line 1 refused | `behavior_logprobs` holds three values for an answer of four tokens |
@@ -36,6 +36,8 @@ rollouts) and in its guide to training as a served job.
 | `invalid/prompt_token_ids_mismatch.jsonl` | line 1 refused | `prompt_token_ids` that are not the context the template renders before the answer (they differ at position 5) |
 | `invalid/behavior_top_count.jsonl` | line 1 refused | `behavior_top_ids` holds three lists for an answer of four tokens |
 | `invalid/behavior_top.jsonl` | line 1 refused | a token whose top-k lists one id twice |
+| `invalid/behavior_support_count.jsonl` | line 1 refused | `behavior_support_offsets` frames three supports for an answer of four tokens |
+| `invalid/behavior_support.jsonl` | line 1 refused | a sampled token (`token_ids`) that is not in its support |
 | `invalid/missing_reward.jsonl` | refused | `behavior_logprobs` on a record with no `reward` |
 | `invalid/missing_group.jsonl` | refused | a `reward` without a `group` |
 | `invalid/advantage_removed.jsonl` | refused | version 1's `advantage` |
@@ -77,6 +79,14 @@ rollouts) and in its guide to training as a served job.
   distinct, the log-probabilities finite and at most 0 and the probabilities of one token sum to at most 1 (they are
   whole-row log-probabilities at the sampling temperature); the sampled token need not be listed (`behavior_top`).
   A prepared split holds one `K` and keeps them as `btk.bin`/`btl.bin`.
+- `behavior_support_offsets`, `behavior_support_ids` and `behavior_support_logprobs` (a supervised message, all three,
+  beside `behavior_logprobs`): the support a cut sampler (`top_k`, `top_p`, `min_p`) drew each token from, and the
+  token's log-probability within it, so a trainer can renormalise its own figures over the same support. Token `t`'s
+  support is `behavior_support_ids[offsets[t]..offsets[t + 1]]`; the offsets are one more than the answer's tokens,
+  start at 0, rise at every token and end at the number of ids (`behavior_support_count` when a count differs). A
+  token's ids are distinct, at most 1024, and hold the token where `token_ids` are given; each log-probability is
+  finite, at most 0 and at least the token's `behavior_logprobs` value (`behavior_support`). A prepared split keeps
+  them as `bso.bin`/`bsi.bin`/`bsl.bin`.
 - `policy_version` (a non-negative integer) and `sampler` (`temperature` above 0, `top_k` at least 1, `top_p` in
   (0, 1], `min_p` in [0, 1)) belong to a rollout; the prepared split keeps them per example.
 - `baseline_only: true` (with `reward` and `group`) marks a rollout that sets its group's baseline and is never

@@ -340,6 +340,18 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       API audit (api-security.md): one integer param bounded by the action spec (1..=256, refused by name as
       `policy_trace.support`), the `policy_trace` object takes no other key, no path or secret; the reply grows by at most
       N ids, one offset and one figure per generated token, within the existing `max_new` and body limits.
+      Records (lane agrpo-support): contract v2 gains, additively, `behavior_support_offsets` / `behavior_support_ids` /
+      `behavior_support_logprobs` on a supervised answer (all three, beside `behavior_logprobs`; ragged, offsets one
+      more than the tokens, from 0, rising at every token, ending at the ids; ids distinct, at most
+      `MAX_BEHAVIOR_SUPPORT` 1024, the sampled token among them where `token_ids` are given; each figure finite, at most
+      0, at least the whole-row one). Rules `behavior_support_count` and `behavior_support`; a `baseline_only` record
+      carries none. Kept as `<split>.bso.bin` (u64 offsets) / `.bsi.bin` / `.bsl.bin` with `behavior_support_max` in
+      `<split>.rollouts.json` (`read_behavior_support`), and on `EncodedSample` / `EncodedSplit::behavior_support` for
+      the stream path. Fixtures: `chat_rollout.jsonl` line 9 (a `top_k` 2 rollout with its supports),
+      `invalid/behavior_support_count.jsonl`, `invalid/behavior_support.jsonl`; `CONTRACT_DIGEST`
+      `sha256:4fb13e2f610fb2d3d4ede4731c5da509d2ccfae1071143c796015e824a4bc20b`. Tests: `data`
+      `it::chat_rollout_records` (positions in the sidecars, packing two widths, a 15-case refusal table, stale removal),
+      the SDK's `it::training_records` (every fixture's verdict).
 - [ ] Later, each driven by a profile and recorded as a knowledge entry (bottleneck, baseline, evidence, change,
       oracle, result, decision): colocated serve-and-train scheduling and whether the frozen base can be shared
       (A37-A39); merging append-only calls of one session and group-prefix packing in training, against the per-call

@@ -620,3 +620,148 @@ fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
         if path.is_dir() { walk(&path) } else { vec![path] }
     }).collect()
 }
+
+/// What a collector whose sampler cut the row records on an answer of `ids`: per token a support of `width` ids that
+/// holds the token (best first: the token, then ids no answer renders), as offsets and flat ids, and the token's
+/// figure under its support, above its whole-row `behavior` figure of -0.5.
+fn support_of(ids: &[u32], width: usize) -> (Vec<u64>, Vec<u32>, Vec<f32>) {
+    let mut offsets = vec![0u64];
+    let mut flat = Vec::new();
+    for (t, &id) in ids.iter().enumerate() {
+        flat.push(id);
+        flat.extend((1..width).map(|j| (1000 + 10 * t + j) as u32));
+        offsets.push(flat.len() as u64);
+    }
+    (offsets, flat, vec![-0.25; ids.len()])
+}
+
+/// A rollout record of group `g` with one supervised answer `a` carrying `behavior_logprobs`, optionally its
+/// `token_ids`, and the given support fields (raw JSON, `None` to omit); `extra` is spliced into the record's own keys.
+fn support_record(extra: &str, token_ids: bool, offsets: Option<serde_json::Value>, ids: Option<serde_json::Value>, lps: Option<serde_json::Value>) -> String {
+    let field = |name: &str, v: Option<serde_json::Value>| v.map(|v| format!(r#","{name}":{v}"#)).unwrap_or_default();
+    let blp = serde_json::to_string(&vec![-0.5f32; ANSWER_TOKENS]).unwrap();
+    let sampled = if token_ids { format!(r#","token_ids":{}"#, serde_json::json!(tokenizer().encode("a<|im_end|>"))) } else { String::new() };
+    format!(
+        r#"{{"reward": 1.0, "group": "g", {extra} "messages": [{{"role":"user","content":"q","train":false}},{{"role":"assistant","content":"a","train":true,"behavior_logprobs":{blp}{sampled}{}{}{}}}]}}"#,
+        field("behavior_support_offsets", offsets),
+        field("behavior_support_ids", ids),
+        field("behavior_support_logprobs", lps)
+    )
+}
+
+fn valid_support(width: usize) -> (Option<serde_json::Value>, Option<serde_json::Value>, Option<serde_json::Value>) {
+    let (o, i, l) = support_of(&tokenizer().encode("a<|im_end|>"), width);
+    (Some(serde_json::json!(o)), Some(serde_json::json!(i)), Some(serde_json::json!(l)))
+}
+
+/// The sampler's support of each token lands on exactly the tokens its `behavior_logprobs` land on, in the prepared
+/// split's `bso`/`bsi`/`bsl` sidecars (offsets over the split's tokens with an empty range where none was recorded, the
+/// ids, the sampler's figure with NaN where none), with the widest support of the split; a split without any has no
+/// sidecar and a stale one is removed.
+#[test]
+fn the_support_of_each_token_is_kept_where_its_behaviour_log_prob_is() {
+    use chat_rollout::read_behavior_support;
+    let tmp = tempfile::tempdir().unwrap();
+    let (o, i, l) = valid_support(3);
+    let lines = [record(None, None), support_record("", true, o, i, l), record(Some("0.5"), Some(vec![-0.3; ANSWER_TOKENS]))];
+    let out = tmp.path().join("prepared");
+    prepare(&examples(&write_records(tmp.path(), &lines)).unwrap(), &out).unwrap();
+    let tokens = binio::read_u32_bin(&out.join("train.u32.bin")).unwrap().len();
+    let starts = binio::read_u64_bin(&out.join("train.ex.bin")).unwrap();
+    let rollout = chat_rollout::read(&out, "train", starts.len(), tokens).unwrap().expect("sidecars");
+    let support = read_behavior_support(&out, "train", tokens).unwrap().expect("support sidecars");
+    assert_eq!((support.offsets.len(), support.logprobs.len(), support.max), (tokens + 1, tokens, 3));
+    let (_, want_ids, _) = support_of(&tokenizer().encode("a<|im_end|>"), 3);
+    let mut seen = 0;
+    for t in 0..tokens {
+        if t >= starts[1] as usize && t < starts[2] as usize && !rollout.behavior[t].is_nan() {
+            assert_eq!(support.of(t), &want_ids[3 * seen..3 * seen + 3], "token {t}");
+            assert_eq!(support.logprobs[t], -0.25, "token {t}: the sampler's figure");
+            seen += 1;
+        } else {
+            assert!(support.of(t).is_empty() && support.logprobs[t].is_nan(), "token {t} has none");
+        }
+    }
+    assert_eq!(seen, ANSWER_TOKENS, "every token of the record that carries a support has its own");
+    assert!(read_behavior_support(&out, "train", tokens + 1).is_err(), "checked against the tokens the split holds");
+
+    let plain = write_records(tmp.path(), &[record(Some("0.5"), Some(vec![-0.3; ANSWER_TOKENS]))]);
+    prepare(&examples(&plain).unwrap(), &out).unwrap();
+    let tokens = binio::read_u32_bin(&out.join("train.u32.bin")).unwrap().len();
+    assert!(read_behavior_support(&out, "train", tokens).unwrap().is_none());
+    assert!(["bso", "bsi", "bsl"].iter().all(|s| !out.join(format!("train.{s}.bin")).exists()), "stale sidecars are removed");
+}
+
+#[test]
+fn a_packed_record_places_each_answers_support_on_that_answers_tokens() {
+    let tmp = tempfile::tempdir().unwrap();
+    let answer: Vec<u32> = (0..ANSWER_TOKENS as u32).collect();
+    let (a, b) = (support_of(&answer, 2), support_of(&answer, 4));
+    let line = format!(
+        r#"{{"reward": 2.0, "group": "g", "messages": [{{"role":"user","content":"q","train":false}},{{"role":"assistant","content":"a","train":true,"behavior_logprobs":{blp},"behavior_support_offsets":{},"behavior_support_ids":{},"behavior_support_logprobs":{}}},{{"role":"user","content":"r","train":false}},{{"role":"assistant","content":"b","train":true,"behavior_logprobs":{blp},"behavior_support_offsets":{},"behavior_support_ids":{},"behavior_support_logprobs":{}}}]}}"#,
+        serde_json::json!(a.0),
+        serde_json::json!(a.1),
+        serde_json::json!(a.2),
+        serde_json::json!(b.0),
+        serde_json::json!(b.1),
+        serde_json::json!(b.2),
+        blp = serde_json::to_string(&vec![-0.5f32; ANSWER_TOKENS]).unwrap()
+    );
+    let record = ChatSample::from_jsonl(&write_records(tmp.path(), &[line])).unwrap().remove(0);
+    let packed = record.answers_packed(&template(), true).unwrap().expect("assistant answers");
+    let encoded = packed.encode_rollout(&tokenizer(), &template(), RenderOpts::default()).unwrap();
+    let support = encoded.behavior_support.expect("support placed");
+    assert_eq!((support.tokens(), support.max), (encoded.ids.len(), 4), "a support row per token; two widths in one record");
+    let placed: Vec<u32> = (0..encoded.ids.len()).filter(|&t| !encoded.behavior[t].is_nan()).flat_map(|t| support.of(t).to_vec()).collect();
+    assert_eq!(placed, [a.1, b.1].concat());
+}
+
+#[test]
+fn a_record_that_misstates_its_support_is_refused_by_rule_and_field() {
+    use chat_rollout::RecordRule::{BaselineTrains, BehaviorSupport, BehaviorSupportCount};
+    use serde_json::json;
+    let answer = tokenizer().encode("a<|im_end|>");
+    type Edit<'a> = &'a dyn Fn(&mut Vec<u64>, &mut Vec<u32>, &mut Vec<f32>);
+    let with = |f: Edit| {
+        let (mut o, mut i, mut l) = support_of(&answer, 3);
+        f(&mut o, &mut i, &mut l);
+        support_record("", true, Some(json!(o)), Some(json!(i)), Some(json!(l)))
+    };
+    let (o, i, l) = valid_support(3);
+    ChatSample::from_json_line_with(&support_record("", true, o.clone(), i.clone(), l.clone()), &data::chat::TextOnly::TRAINER).expect("a valid support");
+    ChatSample::from_json_line_with(&support_record("", false, o.clone(), i.clone(), l.clone()), &data::chat::TextOnly::TRAINER).expect("without token_ids the trainer checks the token");
+    let cap = chat_rollout::MAX_BEHAVIOR_SUPPORT;
+    let cases: Vec<(&str, String, chat_rollout::RecordRule, &str)> = vec![
+        ("offsets count", with(&|o, _, _| { o.pop(); }), BehaviorSupportCount, "messages[1].behavior_support_offsets"),
+        ("logprobs count", with(&|_, _, l| l.push(-0.1)), BehaviorSupportCount, "messages[1].behavior_support_logprobs"),
+        ("offsets start past 0", with(&|o, _, _| o[0] = 1), BehaviorSupport, "messages[1].behavior_support_offsets"),
+        ("offsets end short of the ids", with(&|_, i, _| i.push(7)), BehaviorSupport, "messages[1].behavior_support_offsets"),
+        ("an empty support", with(&|o, i, _| { o[2] = o[1]; i.drain(3..6); o.iter_mut().skip(3).for_each(|x| *x -= 3); }), BehaviorSupport, "messages[1].behavior_support_offsets"),
+        ("duplicate id", with(&|_, i, _| i[4] = i[3]), BehaviorSupport, "messages[1].behavior_support_ids"),
+        ("not an id", with(&|_, i, _| i[1] = u32::MAX), BehaviorSupport, "messages[1].behavior_support_ids"),
+        ("the token outside its support", with(&|_, i, _| i[3] = 999), BehaviorSupport, "messages[1].behavior_support_ids"),
+        ("a figure below the whole row's", with(&|_, _, l| l[2] = -0.75), BehaviorSupport, "messages[1].behavior_support_logprobs"),
+        ("a positive figure", with(&|_, _, l| l[0] = 0.5), BehaviorSupport, "messages[1].behavior_support_logprobs"),
+        ("ids without offsets", support_record("", true, None, i.clone(), l.clone()), BehaviorSupport, "messages[1].behavior_support_offsets"),
+        ("offsets without logprobs", support_record("", true, o.clone(), i.clone(), None), BehaviorSupport, "messages[1].behavior_support_logprobs"),
+        ("over the cap", {
+            let (mut o, mut i, l) = support_of(&answer, 3);
+            i.splice(1..1, (0..cap as u32).map(|j| 5000 + j));
+            o.iter_mut().skip(1).for_each(|x| *x += cap as u64);
+            support_record("", true, Some(json!(o)), Some(json!(i)), Some(json!(l)))
+        }, BehaviorSupport, "messages[1].behavior_support_ids"),
+        (
+            "without behavior_logprobs",
+            support_record("", false, o.clone(), i.clone(), l.clone()).replace(&format!(r#""behavior_logprobs":{},"#, serde_json::to_string(&vec![-0.5f32; ANSWER_TOKENS]).unwrap()), ""),
+            BehaviorSupport,
+            "messages[1].behavior_support_offsets",
+        ),
+        ("on a baseline", support_record(r#""baseline_only": true,"#, false, o.clone(), i.clone(), l.clone()), BaselineTrains, "messages[1].train"),
+    ];
+    for (what, line, rule, field) in cases {
+        let (got_rule, got_field, why) = refusal(&line);
+        assert_eq!((got_rule, got_field.as_str()), (rule, field), "{what}: {why}");
+    }
+    assert_eq!(chat_rollout::RecordRule::BehaviorSupport.name(), "behavior_support");
+    assert_eq!(chat_rollout::RecordRule::BehaviorSupportCount.name(), "behavior_support_count");
+}

@@ -12,8 +12,8 @@
   {
    "path": "chat_rollout.jsonl",
    "kind": "chat",
-   "records": 8,
-   "valid_records": 8,
+   "records": 9,
+   "valid_records": 9,
    "refusals": []
   },
   {
@@ -79,6 +79,32 @@
      "line": 1,
      "rule": "behavior_top",
      "field": "messages[1].behavior_top_ids"
+    }
+   ]
+  },
+  {
+   "path": "invalid/behavior_support_count.jsonl",
+   "kind": "chat",
+   "records": 3,
+   "valid_records": 2,
+   "refusals": [
+    {
+     "line": 1,
+     "rule": "behavior_support_count",
+     "field": "messages[1].behavior_support_offsets"
+    }
+   ]
+  },
+  {
+   "path": "invalid/behavior_support.jsonl",
+   "kind": "chat",
+   "records": 3,
+   "valid_records": 2,
+   "refusals": [
+    {
+     "line": 1,
+     "rule": "behavior_support",
+     "field": "messages[1].behavior_support_ids"
     }
    ]
   },

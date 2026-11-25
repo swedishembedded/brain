@@ -74,7 +74,7 @@ fn encoded(row: &Row) -> data::chat::EncodedSample {
         data::chat_rollout::BehaviorTop { k: *k, ids: all_ids, logprobs: all_lps }
     });
     let provenance = data::chat_rollout::Provenance { policy_version: None, sampler: row.sampler };
-    data::chat::EncodedSample { ids: row.ids.clone(), mask, behavior, loss_weights: None, teacher: None, truncated: row.truncated, teacher_logprobs: Vec::new(), behavior_top, provenance }
+    data::chat::EncodedSample { ids: row.ids.clone(), mask, behavior, loss_weights: None, teacher: None, truncated: row.truncated, teacher_logprobs: Vec::new(), behavior_top, behavior_support: None, provenance }
 }
 
 /// The dataset of `rows` as the record contract lays it out. A row with an advantage and no group of its own is a

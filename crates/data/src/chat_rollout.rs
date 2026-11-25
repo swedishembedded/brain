@@ -33,6 +33,19 @@
 //!   not be among them. A `baseline_only` record carries none (`baseline_trains`) and neither does a record without a
 //!   reward or teacher (`missing_reward`). The data crate does not know the vocabulary of the model a dataset is
 //!   trained on, so an id that is not in it is refused by the trainer, not here.
+//! * `"behavior_support_offsets": [<u64>, ...]`, `"behavior_support_ids": [<id>, ...]` and
+//!   `"behavior_support_logprobs": [<number>, ...]` on a supervised assistant message, beside `behavior_logprobs` (which
+//!   they require; the three come together): the support a cut sampler (`top_k`, `top_p`, `min_p`) drew each token
+//!   from, and the token's log-probability within it, the figures a trainer needs to replay the draw without bias (a
+//!   served reply's `policy_trace` with `support` carries them). Token `t`'s support is
+//!   `behavior_support_ids[offsets[t]..offsets[t + 1]]`: the offsets are one more than `behavior_logprobs` holds
+//!   values, start at 0, rise at every token (no token has an empty support) and end at the number of ids
+//!   (rule `behavior_support_count` for a length that does not number the answer's tokens). The ids of one token are
+//!   distinct, at most [`MAX_BEHAVIOR_SUPPORT`] of them, never [`NO_TOP_ID`], and hold the token's own id where the
+//!   message carries `token_ids`; each log-probability is finite, at most 0 and at least the token's
+//!   `behavior_logprobs` value (renormalising over a part of the row never lowers it) (rule `behavior_support`). As for
+//!   the top-k, an id past the vocabulary, and a token outside its support where no `token_ids` are given, are refused
+//!   by the trainer, which knows the vocabulary and the tokens.
 //! * `"policy_version": <u64>` on the record: the oldest policy version among the requests behind it (a non-negative
 //!   integer). Kept per example in the prepared split.
 //! * `"sampler": {"temperature": <number>?, "top_k": <u32>?, "top_p": <number>?, "min_p": <number>?}` on the record:
@@ -96,8 +109,10 @@
 //! `<split>.trn.bin` (a flag per example, written only when some example is truncated). A sampler's top-k is kept as
 //! `<split>.btk.bin` (header-free `u32` ids, `[tokens * K]`, [`NO_TOP_ID`] where none was recorded) and
 //! `<split>.btl.bin` (`f32` log-probabilities, `[tokens * K]`, NaN where none), `K` as `behavior_top_k` in
-//! `<split>.rollouts.json` ([`read_behavior_top`]); one split holds one `K`. Preparing a split removes a stale
-//! sidecar. The teacher's renderings are kept as `<split>.tch.u32.bin`, `<split>.tch.mask.bin` and
+//! `<split>.rollouts.json` ([`read_behavior_top`]); one split holds one `K`. A sampler's support is kept as
+//! `<split>.bso.bin` (`u64` offsets, `[tokens + 1]`, an empty range at a token without one), `<split>.bsi.bin` (`u32`
+//! ids) and `<split>.bsl.bin` (`f32` per token, NaN where none), the widest support as `behavior_support_max` in
+//! `<split>.rollouts.json` ([`read_behavior_support`]). Preparing a split removes a stale sidecar. The teacher's renderings are kept as `<split>.tch.u32.bin`, `<split>.tch.mask.bin` and
 //! `<split>.tch.ex.bin` (an example without a teacher context holds none of its own: an empty range). A teacher model's
 //! per-token scores are kept as `<split>.tlp.bin` (`f32` per token, NaN where none was recorded), a rollout's
 //! sequence-level signal with its outcome in `<split>.rollouts.json`.
@@ -153,6 +168,15 @@ pub enum RecordRule {
     /// record, or the examples of a split), a repeated id, an id that is [`NO_TOP_ID`], or log-probabilities that are
     /// not finite, above 0 or sum (as probabilities) to more than one.
     BehaviorTop,
+    /// `behavior_support_offsets` or `behavior_support_logprobs` does not number the tokens of the answer's
+    /// `behavior_logprobs` (one more offset, one log-probability per token).
+    BehaviorSupportCount,
+    /// `behavior_support_offsets`, `behavior_support_ids` and `behavior_support_logprobs` stated so that they are not a
+    /// sampler's support: one without the others or without `behavior_logprobs`, offsets that do not start at 0, rise at
+    /// every token and end at the ids, a repeated id, an id that is [`NO_TOP_ID`], more than [`MAX_BEHAVIOR_SUPPORT`]
+    /// ids at a token, a token outside its support, or a log-probability that is not finite, above 0 or below the
+    /// token's whole-row figure.
+    BehaviorSupport,
     /// A teacher model's scores (`teacher_logprobs`, `teacher_logprob`) stated so that no distillation estimator can
     /// use them: both forms in one record, a score on some supervised answers and not on others, beside a
     /// `teacher_context`, a value that is not a log-probability, or a per-answer score without what the
@@ -169,7 +193,7 @@ pub const CONTRACT_VERSION: u32 = 2;
 /// The digest of the contract's example set (`crates/data/tests/fixtures/training-records/v2`, [`contract_digest`]):
 /// what a producer that keeps a copy of the set compares with the digest of its copy to know it writes the records
 /// this build checks. Any change to what the set accepts or refuses changes it; a test holds it to the set.
-pub const CONTRACT_DIGEST: &str = "sha256:fc3d95ec85ab3278fd93a04aab623ad1768038aea152178177d6901667b0ff75";
+pub const CONTRACT_DIGEST: &str = "sha256:4fb13e2f610fb2d3d4ede4731c5da509d2ccfae1071143c796015e824a4bc20b";
 
 /// The digest of a contract example set in `dir`: `sha256:<hex>` of the lines `<path>\0<sha256 hex of the file>\n`,
 /// one per file under `dir` but its `README.md` (the prose), `path` relative to `dir` with `/` separators, sorted by
@@ -221,6 +245,8 @@ impl RecordRule {
             RecordRule::TeacherLogprobCount => "teacher_logprob_count",
             RecordRule::BehaviorTopCount => "behavior_top_count",
             RecordRule::BehaviorTop => "behavior_top",
+            RecordRule::BehaviorSupportCount => "behavior_support_count",
+            RecordRule::BehaviorSupport => "behavior_support",
             RecordRule::TeacherScores => "teacher_scores",
         }
     }
@@ -332,6 +358,163 @@ impl BehaviorTop {
         }
         Ok(Some(out))
     }
+}
+
+/// The most ids a token's support may hold (`"behavior_support_ids"`): a cut sampler's survivors, bounded so a record
+/// cannot ask the trainer for an unbounded number of extra targets per position.
+pub const MAX_BEHAVIOR_SUPPORT: usize = 1024;
+
+/// The support a cut sampler drew each token from and the token's log-probability within it
+/// (`"behavior_support_offsets"`, `"behavior_support_ids"`, `"behavior_support_logprobs"`): of one answer, one example,
+/// or a split's whole token stream. Token `t`'s support is `ids[offsets[t]..offsets[t + 1]]`, empty (and its
+/// log-probability NaN) at a token that has none.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BehaviorSupport {
+    pub offsets: Vec<u64>,
+    pub ids: Vec<u32>,
+    pub logprobs: Vec<f32>,
+    /// The widest support of any token.
+    pub max: usize,
+}
+
+impl BehaviorSupport {
+    /// How many tokens the table holds rows for.
+    pub fn tokens(&self) -> usize {
+        self.logprobs.len()
+    }
+
+    /// Token `t`'s support (empty: none recorded).
+    pub fn of(&self, t: usize) -> &[u32] {
+        &self.ids[self.offsets[t] as usize..self.offsets[t + 1] as usize]
+    }
+
+    /// `tokens` rows with nothing recorded.
+    pub fn none(tokens: usize) -> BehaviorSupport {
+        BehaviorSupport { offsets: vec![0; tokens + 1], ids: Vec::new(), logprobs: vec![f32::NAN; tokens], max: 0 }
+    }
+
+    /// Append `tokens` rows with nothing recorded.
+    pub fn extend_none(&mut self, tokens: usize) {
+        let end = self.ids.len() as u64;
+        self.offsets.extend(std::iter::repeat_n(end, tokens));
+        self.logprobs.extend(std::iter::repeat_n(f32::NAN, tokens));
+    }
+
+    /// Append the rows of `other`.
+    pub fn extend(&mut self, other: &BehaviorSupport) {
+        let base = self.ids.len() as u64;
+        self.offsets.extend(other.offsets[1..].iter().map(|o| base + o));
+        self.ids.extend_from_slice(&other.ids);
+        self.logprobs.extend_from_slice(&other.logprobs);
+        self.max = self.max.max(other.max);
+    }
+
+    /// The rows of consecutive stretches of tokens, `None` for a stretch with no table: `parts` are `(tokens, table)`.
+    /// `None` when no stretch has one.
+    pub fn assemble(parts: &[(usize, Option<&BehaviorSupport>)]) -> Option<BehaviorSupport> {
+        if parts.iter().all(|(_, s)| s.is_none()) {
+            return None;
+        }
+        let mut out = BehaviorSupport::none(0);
+        for (tokens, support) in parts {
+            match support {
+                Some(support) => out.extend(support),
+                None => out.extend_none(*tokens),
+            }
+        }
+        Some(out)
+    }
+}
+
+/// One message's support as the wire gives it: the three fields, any of which may be absent (a fault unless all are).
+pub(crate) struct WireSupport {
+    pub(crate) offsets: Option<serde_json::Value>,
+    pub(crate) ids: Option<serde_json::Value>,
+    pub(crate) logprobs: Option<serde_json::Value>,
+}
+
+/// The supports of a record's messages, checked against the `behavior_logprobs` they sit beside (`supervised[i]`:
+/// message `i` is a supervised assistant message) and, where the message carries them, its sampled `token_ids`.
+pub(crate) fn check_behavior_support(wire: &[WireSupport], supervised: &[bool], behavior: &[Option<Vec<f32>>], token_ids: &[Option<SampledIds>]) -> Result<Vec<Option<BehaviorSupport>>, RecordError> {
+    let refuse = |rule: RecordRule, i: usize, name: &str, why: String| {
+        let field = format!("messages[{i}].{name}");
+        RecordError::of(RecordFault::new(rule, &field), format!("{field}: {why}"))
+    };
+    let (offsets_name, ids_name, lps_name) = ("behavior_support_offsets", "behavior_support_ids", "behavior_support_logprobs");
+    let mut out = Vec::with_capacity(wire.len());
+    for (i, support) in wire.iter().enumerate() {
+        let (offsets, ids, lps) = match (&support.offsets, &support.ids, &support.logprobs) {
+            (None, None, None) => {
+                out.push(None);
+                continue;
+            }
+            (Some(o), Some(ids), Some(l)) => (o, ids, l),
+            (o, ids, _) => {
+                let missing = if o.is_none() { offsets_name } else if ids.is_none() { ids_name } else { lps_name };
+                return Err(refuse(RecordRule::BehaviorSupport, i, missing, format!("\"{offsets_name}\", \"{ids_name}\" and \"{lps_name}\" come together, and \"{missing}\" is missing")));
+            }
+        };
+        if !supervised[i] {
+            return Err(refuse(RecordRule::BehaviorSupport, i, offsets_name, "only a supervised \"assistant\" message carries a sampler's support (its \"train\" is true)".to_string()));
+        }
+        let Some(behavior) = &behavior[i] else {
+            return Err(refuse(RecordRule::BehaviorSupport, i, offsets_name, "a support sits beside the \"behavior_logprobs\" of the same answer, which this message does not carry".to_string()));
+        };
+        let tokens = behavior.len();
+        let offsets: Vec<u64> = offsets
+            .as_array()
+            .and_then(|a| a.iter().map(serde_json::Value::as_u64).collect::<Option<Vec<u64>>>())
+            .ok_or_else(|| refuse(RecordRule::BehaviorSupport, i, offsets_name, format!("\"{offsets_name}\" is not a list of non-negative integers")))?;
+        if offsets.len() != tokens + 1 {
+            return Err(refuse(RecordRule::BehaviorSupportCount, i, offsets_name, format!("\"{offsets_name}\" holds {} offsets, and \"behavior_logprobs\" {tokens} values; the offsets frame one support per token, so they are one more", offsets.len())));
+        }
+        let lp_list = lps.as_array().ok_or_else(|| refuse(RecordRule::BehaviorSupport, i, lps_name, format!("\"{lps_name}\" is not a list of numbers")))?;
+        if lp_list.len() != tokens {
+            return Err(refuse(RecordRule::BehaviorSupportCount, i, lps_name, format!("\"{lps_name}\" holds {} values, and \"behavior_logprobs\" {tokens}; one per token", lp_list.len())));
+        }
+        let id_list = ids.as_array().ok_or_else(|| refuse(RecordRule::BehaviorSupport, i, ids_name, format!("\"{ids_name}\" is not a list of ids")))?;
+        if offsets[0] != 0 || offsets[tokens] != id_list.len() as u64 {
+            return Err(refuse(RecordRule::BehaviorSupport, i, offsets_name, format!("the offsets run from {} to {}, and they frame the {} ids of \"{ids_name}\" from 0", offsets[0], offsets[tokens], id_list.len())));
+        }
+        let mut table = BehaviorSupport { offsets: offsets.clone(), ids: Vec::with_capacity(id_list.len()), logprobs: Vec::with_capacity(tokens), max: 0 };
+        for t in 0..tokens {
+            let bad = |name: &str, why: String| refuse(RecordRule::BehaviorSupport, i, name, format!("token {t}: {why}"));
+            let (a, b) = (offsets[t], offsets[t + 1]);
+            if b <= a {
+                return Err(bad(offsets_name, format!("offsets {a} then {b}; every token's support holds at least the token itself")));
+            }
+            let width = (b - a) as usize;
+            if width > MAX_BEHAVIOR_SUPPORT {
+                return Err(bad(ids_name, format!("{width} ids; a support holds at most {MAX_BEHAVIOR_SUPPORT}")));
+            }
+            let start = table.ids.len();
+            for v in &id_list[a as usize..b as usize] {
+                let id = v.as_u64().and_then(|n| u32::try_from(n).ok()).filter(|&n| n != NO_TOP_ID).ok_or_else(|| bad(ids_name, format!("{v} is not a token id (a non-negative integer below {NO_TOP_ID})")))?;
+                if table.ids[start..].contains(&id) {
+                    return Err(bad(ids_name, format!("id {id} is listed twice")));
+                }
+                table.ids.push(id);
+            }
+            if let Some(token) = token_ids[i].as_ref().and_then(|s| s.answer.get(t)) {
+                if !table.ids[start..].contains(token) {
+                    return Err(bad(ids_name, format!("the sampled token {token} is not in its support; a sampler draws from its support")));
+                }
+            }
+            let v = &lp_list[t];
+            let number = v.as_f64().filter(|n| n.is_finite() && (*n as f32).is_finite()).ok_or_else(|| bad(lps_name, format!("{v} is not a finite number")))?;
+            if number as f32 > LOGPROB_SLACK {
+                return Err(bad(lps_name, format!("{number} is above 0; a log-probability is at most 0")));
+            }
+            let figure = (number as f32).min(0.0);
+            if figure < behavior[t] - LOGPROB_SLACK {
+                return Err(bad(lps_name, format!("{figure} is below the token's whole-row figure {} in \"behavior_logprobs\"; renormalising over a part of the row never lowers it", behavior[t])));
+            }
+            table.logprobs.push(figure);
+            table.max = table.max.max(width);
+        }
+        out.push(Some(table));
+    }
+    Ok(out)
 }
 
 /// The sampling controls a decoder applied (`"sampler"`): what the record's tokens were drawn from.
@@ -539,6 +722,9 @@ pub struct Rollout {
     /// One entry per message of the record: the sampler's top-k at each token of that answer
     /// (`"behavior_top_ids"`, `"behavior_top_logprobs"`), on a supervised assistant message that carries them.
     pub behavior_top: Vec<Option<BehaviorTop>>,
+    /// One entry per message of the record: the support a cut sampler drew each token of that answer from
+    /// (`"behavior_support_*"`), on a supervised assistant message that carries one.
+    pub behavior_support: Vec<Option<BehaviorSupport>>,
     /// The oldest policy version among the requests behind the record (`"policy_version"`).
     pub policy_version: Option<u64>,
     /// The sampling controls the decoder applied (`"sampler"`).
@@ -578,7 +764,7 @@ impl Rollout {
     /// The rollout of a sample derived from this record's (a prefix, one answer, a packing): the same outcome, with
     /// the derived sample's per-message data (`sampled`) and teacher view.
     pub(crate) fn derived(&self, sampled: PerMessage, teacher: Option<Teacher>) -> Rollout {
-        let PerMessage { behavior_logprobs, behavior_top, token_ids, teacher_logprobs } = sampled;
+        let PerMessage { behavior_logprobs, behavior_top, behavior_support, token_ids, teacher_logprobs } = sampled;
         Rollout {
             outcome: self.outcome.clone(),
             truncated: self.truncated,
@@ -589,6 +775,7 @@ impl Rollout {
             tokenizer_digest: self.tokenizer_digest.clone(),
             baseline_only: self.baseline_only,
             behavior_top,
+            behavior_support,
             policy_version: self.policy_version,
             sampler: self.sampler,
         }
@@ -601,7 +788,7 @@ impl Rollout {
 
     /// The per-message data of the first `len` messages.
     pub(crate) fn first_messages(&self, len: usize) -> PerMessage {
-        PerMessage { behavior_logprobs: self.behavior_logprobs[..len].to_vec(), behavior_top: self.behavior_top[..len].to_vec(), token_ids: self.token_ids[..len].to_vec(), teacher_logprobs: self.teacher_logprobs[..len].to_vec() }
+        PerMessage { behavior_logprobs: self.behavior_logprobs[..len].to_vec(), behavior_top: self.behavior_top[..len].to_vec(), behavior_support: self.behavior_support[..len].to_vec(), token_ids: self.token_ids[..len].to_vec(), teacher_logprobs: self.teacher_logprobs[..len].to_vec() }
     }
 }
 
@@ -612,6 +799,7 @@ impl Rollout {
 pub(crate) struct PerMessage {
     pub(crate) behavior_logprobs: Vec<Option<Vec<f32>>>,
     pub(crate) behavior_top: Vec<Option<BehaviorTop>>,
+    pub(crate) behavior_support: Vec<Option<BehaviorSupport>>,
     pub(crate) token_ids: Vec<Option<SampledIds>>,
     pub(crate) teacher_logprobs: Vec<Option<Vec<f32>>>,
 }
@@ -879,10 +1067,13 @@ struct RolloutsFile {
     /// `K` of the split's top-k sidecars (`<split>.btk.bin`, `<split>.btl.bin`), when it has them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     behavior_top_k: Option<usize>,
+    /// The widest support of the split's support sidecars (`<split>.bso.bin`, `.bsi.bin`, `.bsl.bin`), when it has them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    behavior_support_max: Option<usize>,
 }
 
-fn names(dir: &Path, split: &str) -> [PathBuf; 5] {
-    ["rollouts.json", "blp.bin", "trn.bin", "btk.bin", "btl.bin"].map(|suffix| dir.join(format!("{split}.{suffix}")))
+fn names(dir: &Path, split: &str) -> [PathBuf; 8] {
+    ["rollouts.json", "blp.bin", "trn.bin", "btk.bin", "btl.bin", "bso.bin", "bsi.bin", "bsl.bin"].map(|suffix| dir.join(format!("{split}.{suffix}")))
 }
 
 /// Whether `split` of the prepared dataset in `dir` holds rollouts (its rollout sidecar is there).
@@ -893,12 +1084,12 @@ pub fn holds_rollouts(dir: &Path, split: &str) -> bool {
 /// Write a split's sidecars: `rollouts[i]` is example `i`'s rollout (`None`: an imitation example; `Some(None)`: a
 /// rollout without a reward of its own), `behavior[t]` token `t`'s log-probability (NaN for none), `truncated[i]`
 /// whether example `i`'s rollout did not reach an outcome, `provenance[i]` where it came from, `top` the sampler's top-k
-/// per token of the stream (`None`: none recorded). Groups and rollouts are numbered in the order first seen.
+/// per token of the stream and `support` the supports of a cut sampler (`None`: none recorded). Groups and rollouts are numbered in the order first seen.
 /// Nothing is written, and a stale sidecar is removed, when no example is a rollout.
 #[allow(clippy::too_many_arguments)]
-pub fn write(dir: &Path, split: &str, rollouts: &[Option<Option<Outcome>>], baselines: &[Outcome], behavior: &[f32], truncated: &[bool], provenance: &[Provenance], top: Option<&BehaviorTop>) -> io::Result<()> {
-    let [outcomes, blp, trn, btk, btl] = names(dir, split);
-    for stale in [&outcomes, &blp, &trn, &btk, &btl] {
+pub fn write(dir: &Path, split: &str, rollouts: &[Option<Option<Outcome>>], baselines: &[Outcome], behavior: &[f32], truncated: &[bool], provenance: &[Provenance], top: Option<&BehaviorTop>, support: Option<&BehaviorSupport>) -> io::Result<()> {
+    let [outcomes, blp, trn, btk, btl, bso, bsi, bsl] = names(dir, split);
+    for stale in [&outcomes, &blp, &trn, &btk, &btl, &bso, &bsi, &bsl] {
         match std::fs::remove_file(stale) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
             _ => {}
@@ -909,7 +1100,8 @@ pub fn write(dir: &Path, split: &str, rollouts: &[Option<Option<Outcome>>], base
     }
     let (groups, examples, baselines) = number(rollouts, baselines, provenance).map_err(|why| io::Error::new(io::ErrorKind::InvalidInput, why))?;
     let top = top.filter(|t| t.logprobs.iter().any(|l| !l.is_nan()));
-    let file = RolloutsFile { groups, examples, baselines, behavior_top_k: top.map(|t| t.k) };
+    let support = support.filter(|s| !s.ids.is_empty());
+    let file = RolloutsFile { groups, examples, baselines, behavior_top_k: top.map(|t| t.k), behavior_support_max: support.map(|s| s.max) };
     std::fs::write(&outcomes, serde_json::to_vec(&file).map_err(io::Error::other)?)?;
     if behavior.iter().any(|b| !b.is_nan()) {
         binio::write_f32_bin(&blp, behavior)?;
@@ -920,6 +1112,11 @@ pub fn write(dir: &Path, split: &str, rollouts: &[Option<Option<Outcome>>], base
     if let Some(top) = top {
         binio::write_u32_bin(&btk, &top.ids)?;
         binio::write_f32_bin(&btl, &top.logprobs)?;
+    }
+    if let Some(support) = support {
+        binio::write_u64_bin(&bso, &support.offsets)?;
+        binio::write_u32_bin(&bsi, &support.ids)?;
+        binio::write_f32_bin(&bsl, &support.logprobs)?;
     }
     Ok(())
 }
@@ -1020,7 +1217,7 @@ pub fn read(dir: &Path, split: &str, examples: usize, tokens: usize) -> io::Resu
 /// The sampler's top-k of each token of `split` in `dir`, checked against the `tokens` the split holds; `None` when the
 /// split has none (an older dataset, or no record carried a top-k).
 pub fn read_behavior_top(dir: &Path, split: &str, tokens: usize) -> io::Result<Option<BehaviorTop>> {
-    let [outcomes, _, _, btk, btl] = names(dir, split);
+    let [outcomes, _, _, btk, btl, ..] = names(dir, split);
     let bad = |why: String| io::Error::new(io::ErrorKind::InvalidData, why);
     if !outcomes.exists() {
         return Ok(None);
@@ -1042,6 +1239,40 @@ pub fn read_behavior_top(dir: &Path, split: &str, tokens: usize) -> io::Result<O
         return Err(bad(format!("{}: entry {t} is {}, which is not a log-probability", btl.display(), logprobs[t])));
     }
     Ok(Some(BehaviorTop { k, ids, logprobs }))
+}
+
+/// A split's support sidecars ([`write`]), checked against the `tokens` the split holds: offsets that frame the ids,
+/// no support wider than the split's recorded widest, a log-probability at most 0 where a support is and NaN where none
+/// is. `None` when the split has none.
+pub fn read_behavior_support(dir: &Path, split: &str, tokens: usize) -> io::Result<Option<BehaviorSupport>> {
+    let [outcomes, _, _, _, _, bso, bsi, bsl] = names(dir, split);
+    let bad = |why: String| io::Error::new(io::ErrorKind::InvalidData, why);
+    if !outcomes.exists() {
+        return Ok(None);
+    }
+    let file: RolloutsFile = serde_json::from_slice(&std::fs::read(&outcomes)?).map_err(|e| bad(format!("{}: {e}", outcomes.display())))?;
+    let Some(max) = file.behavior_support_max else {
+        return Ok(None);
+    };
+    if !(bso.exists() && bsi.exists() && bsl.exists()) {
+        return Err(bad(format!("{}: a support recorded, and {}, {} or {} is missing", outcomes.display(), bso.display(), bsi.display(), bsl.display())));
+    }
+    let (offsets, ids, logprobs) = (binio::read_u64_bin(&bso)?, binio::read_u32_bin(&bsi)?, binio::read_f32_bin(&bsl)?);
+    if offsets.len() != tokens + 1 || logprobs.len() != tokens {
+        return Err(bad(format!("{} / {}: {} offsets and {} values, the split holds {tokens} tokens", bso.display(), bsl.display(), offsets.len(), logprobs.len())));
+    }
+    if offsets[0] != 0 || offsets[tokens] != ids.len() as u64 {
+        return Err(bad(format!("{}: the offsets run from {} to {}, and {} holds {} ids", bso.display(), offsets[0], offsets[tokens], bsi.display(), ids.len())));
+    }
+    for t in 0..tokens {
+        let (a, b) = (offsets[t], offsets[t + 1]);
+        let lp = logprobs[t];
+        let fine = if b > a { b - a <= max as u64 && lp.is_finite() && lp <= LOGPROB_SLACK } else { b == a && lp.is_nan() };
+        if !fine {
+            return Err(bad(format!("{}: token {t} has offsets {a}..{b} and log-probability {lp}; the split records supports of at most {max} ids", bso.display())));
+        }
+    }
+    Ok(Some(BehaviorSupport { offsets, ids, logprobs, max }))
 }
 
 /// The teacher renderings of a split: every example's tokens and supervision mask, back to back.

@@ -358,9 +358,9 @@ mod tests {
                 listed += 1;
             }
         }
-        // Every valid record of chat.jsonl and chat_rollout.jsonl, the record with the sampler's top-k and policy version
-        // (chat_rollout line 8) included.
-        assert_eq!(listed, 11);
+        // Every valid record of chat.jsonl and chat_rollout.jsonl, the records with the sampler's top-k and policy version
+        // and with the support a cut sampler drew from included.
+        assert_eq!(listed, 12);
 
         // Line 1 breaks the count; line 2, its group's other rollout, is valid.
         let report = check_dataset(&model, root.join("invalid/behavior_logprob_count.jsonl"), &check, &mut || true).unwrap();
