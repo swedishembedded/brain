@@ -1075,6 +1075,16 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (d, rows) = (p(0)?, p(1)?);
             f(3 * rows * d + d, 4 * (2 * rows * d + rows + 2 * d))
         }
+        // params [d_model, n_rows, chunk]: the gain gradient's partial sums, one per channel and chunk of rows; then
+        // params [d_model, chunks]: their reduction into the gradient.
+        "rmsnorm_dw_part" => {
+            let (d, rows, chunk) = (p(0)?, p(1)?, p(2)?.max(1));
+            f(3 * rows * d, 4 * (2 * rows * d + rows + d * rows.div_ceil(chunk)))
+        }
+        "rmsnorm_dw_sum" => {
+            let (d, chunks) = (p(0)?, p(1)?);
+            f(chunks * d + d, 4 * (chunks * d + 2 * d))
+        }
         // params [d_model, n_rows, eps].
         // `*_rows` are the workgroup-per-row variants: same math, same traffic,
         // only the thread mapping differs — so they cost the same (mirrors

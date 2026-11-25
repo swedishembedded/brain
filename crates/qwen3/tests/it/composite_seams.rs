@@ -180,13 +180,13 @@ fn a_trimmed_batch_trains_like_the_whole_block() {
     let mut trimmed = make();
     trimmed.enable_batch_trimming();
     let tokens: Vec<u32> = (0..96u32).map(|i| (i * 5 + 1) % cfg.vocab).collect();
-    // Targets in the first five sequences only: eight are computed.
+    // Targets in the first five sequences only: those five are computed.
     let targets: Vec<u32> = (0..96u32).map(|i| if i < 30 { (i * 3 + 2) % cfg.vocab } else { qwen3::IGNORE }).collect();
     for m in [&whole, &trimmed] {
         m.set_batch(&tokens, &targets);
         m.zero_grads();
     }
-    assert_eq!((whole.batch_run(), trimmed.batch_run()), (16, 8));
+    assert_eq!((whole.batch_run(), trimmed.batch_run()), (16, 5));
     let (want, got) = (whole.forward(), trimmed.forward());
     whole.backward();
     trimmed.backward();

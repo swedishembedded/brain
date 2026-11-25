@@ -184,20 +184,30 @@ const DECODE_PREFILL_ROWS: u32 = 256;
 /// round to an eighth of their power of two, so a dataset meets few distinct lengths and each is recorded once.
 pub const TRIM_QUANTUM: u32 = 64;
 
-/// The run length a trimmed batch whose longest supervised row ends at `last` computes, for a build at trim quantum
-/// `quantum` ([`Qwen::set_trim_quantum`]): `last` rounded up by an eighth of its power of two, at least to a whole
-/// quantum, at most the block `t`. What a batch planner sizes its batches by.
+/// The run length a trimmed batch whose longest supervised row ends at `last` computes, at most the block `t`: with
+/// no fixed step, `last` rounded up by an eighth of its power of two and at least to a whole [`TRIM_QUANTUM`] (eight
+/// lengths an octave, few recorded passes); with a fixed step ([`Qwen::set_trim_step`]), to a whole step. What a
+/// batch planner sizes its batches by.
 #[must_use]
-pub fn trimmed_len(last: u32, quantum: u32, t: u32) -> u32 {
-    let q = (last.max(1).next_power_of_two() / 8).max(quantum);
+pub fn trimmed_len(last: u32, step: Option<u32>, t: u32) -> u32 {
+    let q = step.unwrap_or_else(|| (last.max(1).next_power_of_two() / 8).max(TRIM_QUANTUM));
     last.max(1).next_multiple_of(q).min(t)
+}
+
+/// The sequences a trimmed batch whose last supervised sequence is `last` computes (`last` rounded up by an eighth
+/// of its power of two: exact up to 8, eight counts an octave past it), at most the block's `b`
+/// ([`Qwen::enable_batch_trimming`]).
+#[must_use]
+pub fn trimmed_rows(last: u32, b: u32) -> u32 {
+    let last = last.max(1);
+    last.next_multiple_of((last.next_power_of_two() / 8).max(1)).min(b)
 }
 
 /// The recorded forward and backward of one trimmed run length ([`Qwen::run_tape`]).
 type RunTapes = std::sync::Arc<(Tape, Tape)>;
 
 /// The recorded passes of trimmed run lengths a build keeps at once ([`Qwen::run_tape`]): two octaves of lengths.
-const RUN_TAPES: usize = 32;
+const RUN_TAPES: usize = 64;
 
 /// Rows every activation buffer of a [`Qwen::new_impl`] build holds: `b·t`
 /// for a batched forward, one prefill chunk for a decode-only build (whose
@@ -378,6 +388,9 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         model::ops::extend_kernel_list(&mut v, &model::lsa::device::KERNELS);
         model::ops::extend_kernel_list(&mut v, &model::lsa::native::KERNELS);
         model::ops::extend_kernel_list(&mut v, &gpu_core::sort::KERNELS);
+        // The two-stage RMSNorm gain gradient `model::block::rmsnorm_dw_steps` takes over a long batch: one serial
+        // pass over every row per channel is most of a large training step otherwise.
+        model::ops::extend_kernel_list(&mut v, &[("rmsnorm_dw_part", kernels::RMSNORM_DW_PART), ("rmsnorm_dw_sum", kernels::RMSNORM_DW_SUM)]);
         // The declared head transform of the chunked loss (`Qwen::set_head_transform`).
         model::ops::extend_kernel_list(&mut v, &model::head_transform::KERNELS);
         // Rows of another model's hidden state copied into the residual stream (`Qwen::enable_row_injection`).
@@ -795,8 +808,8 @@ pub struct Qwen {
     // Sequences the current batch computes (`Qwen::enable_batch_trimming`): the block's `b` unless trimmed.
     b_run: Cell<u32>,
     trim_batch: bool,
-    // The smallest step of a trimmed run length (`Qwen::set_trim_quantum`).
-    trim_quantum: u32,
+    // A fixed step of the trimmed run length (`Qwen::set_trim_step`); `None` is the default rule.
+    trim_step: Option<u32>,
     // A gradient another model adds to this one's final-norm hidden states (`Qwen::enable_hidden_grad`), cleared once
     // consumed.
     hidden_grad: Option<DeviceBuffer>,
@@ -1786,7 +1799,7 @@ impl Qwen {
             run_tapes: Default::default(),
             b_run: Cell::new(b),
             trim_batch: false,
-            trim_quantum: TRIM_QUANTUM,
+            trim_step: None,
             hidden_grad: None,
             inv_count: bwd(1),
             head_rows: head_rows as u32,
@@ -1886,7 +1899,7 @@ impl Qwen {
         let last = targets.chunks(self.t as usize).map(|row| row.iter().rposition(|&v| v != IGNORE).map_or(0, |i| i + 1)).max().unwrap_or(0) as u32;
         // An eighth of the length's power of two, at least the trim quantum: at most 12.5 % past the record, eight
         // lengths an octave.
-        trimmed_len(last, self.trim_quantum, self.t)
+        trimmed_len(last, self.trim_step, self.t)
     }
 
     /// Tokens per row the current batch computes ([`Self::needed_len`]).
@@ -1900,8 +1913,8 @@ impl Qwen {
         self.b_run.get()
     }
 
-    /// Compute only the leading rows of a batch that carry a target (rounded up by at most an eighth, at least to 8
-    /// rows, so a run of batches needs few recorded passes), so a batch filled to a token budget rather than to the
+    /// Compute only the leading rows of a batch that carry a target (rounded up by at most an eighth, [`trimmed_rows`],
+    /// so a run of batches needs few recorded passes), so a batch filled to a token budget rather than to the
     /// block's row count costs what it holds. The rows past the last supervised one are not computed and their
     /// input is ignored. Not with a weighted loss or extra targets, whose per-position buffers are laid out for every
     /// row; a build that does not trim (see [`Self::needed_len`]) computes every row as before.
@@ -1909,11 +1922,11 @@ impl Qwen {
         self.trim_batch = true;
     }
 
-    /// Trim a batch's rows to a multiple of `quantum` tokens (at least; [`trimmed_len`]) instead of [`TRIM_QUANTUM`]:
-    /// a planner that buckets its batches by length wastes less on rounding, at the price of more recorded passes.
-    pub fn set_trim_quantum(&mut self, quantum: u32) {
-        assert!(quantum > 0, "the trim quantum must be positive");
-        self.trim_quantum = quantum;
+    /// Trim a batch's rows to a whole multiple of `step` tokens ([`trimmed_len`]) instead of the default rule: a
+    /// planner that buckets its batches by length wastes less on rounding, at the price of more recorded passes.
+    pub fn set_trim_step(&mut self, step: u32) {
+        assert!(step > 0, "the trim step must be positive");
+        self.trim_step = Some(step);
     }
 
     /// The rows a batch of `targets` computes ([`Self::enable_batch_trimming`]).
@@ -1938,8 +1951,7 @@ impl Qwen {
             return self.b;
         }
         let last = targets.chunks(self.t as usize).rposition(|row| row.iter().any(|&v| v != IGNORE)).map_or(1, |i| i + 1) as u32;
-        let quantum = (last.next_power_of_two() / 8).max(8);
-        last.next_multiple_of(quantum).min(self.b)
+        trimmed_rows(last, self.b)
     }
 
     /// The recorded forward and backward of a batch trimmed to `rows` rows of `run` tokens, recorded on first use.
@@ -2343,8 +2355,14 @@ impl Qwen {
             }
             None => {
                 if self.trainable(wname) {
-                    let (bk, bt) = dw_kernel_bw(nout, k);
-                    s.push(self.gpu.dispatch(bk, &[d_out, x, self.g(wname)], &[m, k, nout], bt));
+                    if self.ops.tensor_gemm().is_active() {
+                        // Tensor-core products where the device runs them (TF32 for the fp32 gradient), accumulating
+                        // as the kernel below does; the fp32 reference tier keeps the exact kernel.
+                        self.ops.matmul_dw(s, x, d_out, m, nout, k, self.g(wname));
+                    } else {
+                        let (bk, bt) = dw_kernel_bw(nout, k);
+                        s.push(self.gpu.dispatch(bk, &[d_out, x, self.g(wname)], &[m, k, nout], bt));
+                    }
                 } else if let Some(ft) = &self.resident {
                     // A resident low-precision linear: its dW comes from the shared op against the stored tier.
                     let ft = ft.borrow();
