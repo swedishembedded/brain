@@ -42,6 +42,7 @@ mod prune;
 mod search;
 mod sensitivity;
 mod solve;
+pub mod surgery;
 
 pub use fit::{MeasureFit, PruneFit, PruneReport, SearchFit};
 pub use manifest::{sites, Site, Tensor};

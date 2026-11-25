@@ -114,6 +114,7 @@ pub mod plan;
 pub mod postable;
 pub mod projector;
 pub mod prunable;
+pub mod surgery;
 pub mod probe;
 pub mod hostopt;
 pub mod resident_ft;

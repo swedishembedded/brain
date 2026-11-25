@@ -103,12 +103,6 @@ impl QwenBpe {
         .map_err(|e| format!("vocab.json: {e}"))?;
         let merges_txt = std::fs::read_to_string(format!("{dir}/merges.txt"))
             .map_err(|e| format!("read {dir}/merges.txt: {e}"))?;
-        let merges: Vec<serde_json::Value> = merges_txt
-            .lines()
-            .skip_while(|l| l.starts_with("#version"))
-            .filter(|l| !l.is_empty())
-            .map(|l| serde_json::Value::String(l.to_string()))
-            .collect();
         let from_added_tokens_json = std::fs::read(format!("{dir}/added_tokens.json")).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()).map(|m| {
             // added_tokens.json is { content: id }; unified wants records.
             let arr: Vec<serde_json::Value> =
@@ -116,6 +110,19 @@ impl QwenBpe {
             serde_json::Value::Array(arr)
         });
         let added = from_added_tokens_json.or_else(|| Self::added_tokens_from_tokenizer_config(dir)).unwrap_or(serde_json::Value::Array(Vec::new()));
+        Self::from_split_files(&vocab, &merges_txt, added)
+    }
+
+    /// The split-file layout (`vocab.json`, `merges.txt` and the added tokens
+    /// as `[{content, id}]` records) as one tokenizer, the files already read:
+    /// what [`Self::from_dir`] builds, for a caller holding rewritten files.
+    pub fn from_split_files(vocab: &serde_json::Value, merges_txt: &str, added: serde_json::Value) -> Result<QwenBpe, String> {
+        let merges: Vec<serde_json::Value> = merges_txt
+            .lines()
+            .skip_while(|l| l.starts_with("#version"))
+            .filter(|l| !l.is_empty())
+            .map(|l| serde_json::Value::String(l.to_string()))
+            .collect();
         // The split-file layout is Qwen2's (`Qwen2TokenizerFast`), whose
         // pre-tokenizer is its own pattern: declare it, since these files do
         // not.
