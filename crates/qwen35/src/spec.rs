@@ -234,6 +234,11 @@ impl ArchSpec for EdgeRockSpec {
     }
 }
 
+/// Qwen3.8 as an adapter-serving family: the card family its trainer writes and the linears its bank may correct.
+pub fn served_family() -> llmserve::adapter_release::ServedFamily {
+    llmserve::adapter_release::ServedFamily::of(CARD_FAMILY, "Qwen3.8", &crate::config::Qwen35Config::tiny())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

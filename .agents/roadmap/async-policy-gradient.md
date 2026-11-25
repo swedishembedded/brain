@@ -205,6 +205,18 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       `catalog/tests/it/multi_adapter.rs` (three back-to-back request streams on the tiny qwen3 resident, probe after the
       swap, every reply's text equals its named release's folded server), `scheduled_batch.rs`. Not exercised: a bank with
       fewer device slots than live releases (the new version may wait for a slot while the old one drains).
+- [x] **Cross-architecture conformance of the asynchronous path** (A49, lane agrpo-conf, 2026-11-25):
+      `rl::conformance_async::run_async` on every registered trainer (`rl/tests/conformance.rs`, `*_trains_online`),
+      tiny random models on the CPU, held to `ASYNC_MATRIX`, which the capability gate holds the declaration's
+      `online_pg`, `score_centring` and `policy_publication` cells to both ways. Per architecture: groups fed to a
+      running stream train (four applied steps, the adapter moves); a run stopped after two steps and resumed trains
+      every group exactly once (the committed ones are duplicates); the score-centred weights installed as one backward
+      with extra targets equal the sum of label-equivalent weighted backwards (1e-4 of the largest gradient; zeroing the
+      extra coefficients fails it on qwen3 and inkling2); every published version is read, bound and attached by the
+      architecture's own serving bank family (`ServedFamily`: qwen3's, `qwen35::spec::served_family`,
+      `ricursive::resident::family`, `inkling2::serve::served_family`, the last two moved out of the catalog so the
+      resident and the suite share one). Matrix: qwen3, qwen35, ricursive, inkling2 hold all three; qwen35moe refuses
+      all three (its `ChatTrainer` declares no policy gradient, asserted against the constant).
 - [ ] **Run-level policy identity** (A16): training run, committed update, base and adapter digests beside the serving
       version, in every reply and every `published` event.
 - [ ] End-to-end on Qwen3-4B (one card): serving and the streaming job in one process, rollouts from an orchestrator;

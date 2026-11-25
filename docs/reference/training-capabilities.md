@@ -54,6 +54,19 @@ cell says so.
 | `qwen35moe` | - | bf16, int8 and fp8 compact pool: `qwen35moe/tests/it/engine_tiers.rs::a_compact_kv_pool_answers_like_the_f32_pool` |
 | `ricursive` | a bank of adapter slots over ONE resident base on every stage: a batch mixes base rows and rows of several adapters (`--adapter`, `--adapter-manifest`, `--watch-adapters` and adapters in the model store, per request by model id), each decoded as that adapter alone and as the training forward; the bank is charged in the placement; `TextGenerationPipeline::adapter`; an adapter that fits neither base nor model is refused by name: `ricursive/tests/it/train_bank.rs::a_mixed_batch_decodes_each_row_as_its_adapter_alone_and_as_the_training_forward_does`, `ricursive/tests/it/train_bank.rs::adapters_load_and_unload_while_the_engine_serves`, `ricursive/tests/it/train_bank.rs::the_shared_serving_conformance_suite_passes_with_adapters`, `catalog/tests/it/ricursive_served.rs::two_adapters_and_the_base_are_served_from_one_instance_as_the_training_forward_does`, `catalog/tests/it/ricursive_served.rs::an_adapter_that_does_not_fit_the_base_is_refused_by_name`, `catalog/tests/it/ricursive_served.rs::the_adapter_bank_is_charged_in_the_placement`, `catalog/tests/it/ricursive_served.rs::adapters_are_offered_replaced_and_withdrawn_on_a_running_server`, `sdk/tests/it/text_ricursive.rs::a_ripple_pipeline_serves_an_adapter_and_switches_without_reloading` | - |
 
+## Training while serving (streamed policy gradient)
+
+| Architecture | Rollout groups streamed into a running job | Score-centred estimator | Versions published to the serving bank |
+|---|---|---|---|
+| `qwen3` | groups streamed into a running job train; a resumed stream trains no group twice: `rl/tests/conformance.rs::qwen3_trains_online`, `trainjob/tests/it/stream.rs::a_stream_job_trains_groups_as_they_arrive_and_serves_each_version_it_publishes`, `trainjob/tests/it/stream.rs::a_resumed_stream_takes_again_what_was_applied_and_not_committed` | the estimator's backward equals its label-equivalent backwards: `rl/tests/conformance.rs::qwen3_trains_online`, `trainjob/tests/it/stream.rs::a_stream_trains_the_score_centred_estimator_over_the_records_top_k`, `rl/tests/it/trl_goldens.rs::the_score_centred_term_is_trls` | each published version is taken by the architecture's own serving bank: `rl/tests/conformance.rs::qwen3_trains_online` |
+| `qwen35` | groups streamed into a running job train; a resumed stream trains no group twice: `rl/tests/conformance.rs::qwen35_trains_online` | the estimator's backward equals its label-equivalent backwards: `rl/tests/conformance.rs::qwen35_trains_online` | each published version is taken by the architecture's own serving bank: `rl/tests/conformance.rs::qwen35_trains_online` |
+| `qwen35moe` | - | - | - |
+| `ricursive` | groups streamed into a running job train; a resumed stream trains no group twice: `rl/tests/conformance.rs::ricursive_trains_online` | the estimator's backward equals its label-equivalent backwards: `rl/tests/conformance.rs::ricursive_trains_online` | each published version is taken by the architecture's own serving bank: `rl/tests/conformance.rs::ricursive_trains_online` |
+| `inkling2` | groups streamed into a running job train; a resumed stream trains no group twice: `rl/tests/conformance.rs::inkling2_trains_online` | the estimator's backward equals its label-equivalent backwards: `rl/tests/conformance.rs::inkling2_trains_online` | each published version is taken by the architecture's own serving bank: `rl/tests/conformance.rs::inkling2_trains_online` |
+
+Every architecture whose trainer declares the policy gradient runs the same suite (A49) at toy size on the CPU;
+`-` is a capability the architecture refuses by name, and the refusal is asserted.
+
 ## Serving certification
 
 Being registered does not establish that a model serves correctly. One row

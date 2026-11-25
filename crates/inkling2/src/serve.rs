@@ -789,3 +789,8 @@ impl TapRows for Engine {
         self.read_taps(table, from, count)
     }
 }
+
+/// Inkling 2 as an adapter-serving family: the card family its trainer writes and every site it serves.
+pub fn served_family(cfg: &crate::Inkling2Config) -> llmserve::adapter_release::ServedFamily {
+    llmserve::adapter_release::ServedFamily::of(crate::train::FAMILY, "Inkling 2", &ServedSites::new(cfg, true))
+}

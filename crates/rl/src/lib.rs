@@ -35,6 +35,7 @@
 //! of those tokens are trained on.
 
 pub mod conformance;
+pub mod conformance_async;
 pub mod continual;
 pub mod curriculum;
 pub mod document;

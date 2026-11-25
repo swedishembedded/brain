@@ -241,6 +241,84 @@ subject!(qwen35moe_conforms, qwen35moe_subject());
 subject!(ricursive_conforms, ricursive_subject());
 subject!(inkling2_conforms, inkling2_subject());
 
+/// What the asynchronous policy-gradient suite (A49, [`rl::conformance_async`]) must answer for each architecture whose
+/// trainer is registered: `(name, online policy gradient, score centring, policy publication)`. The capability gate
+/// (`scripts/gates/training-capabilities.py`) holds the declaration's `online_pg`, `score_centring` and
+/// `policy_publication` cells to this table.
+const ASYNC_MATRIX: &[(&str, bool, bool, bool)] = &[
+    ("qwen3", true, true, true),
+    ("qwen35", true, true, true),
+    ("qwen35moe", false, false, false),
+    ("ricursive", true, true, true),
+    ("inkling2", true, true, true),
+];
+
+/// The serving bank's verdict on a published adapter of `family`: read, bound to the base its card names and verified
+/// as `--serve-adapters` does, then attached to a bank of the default settings.
+fn bank_takes(family: llmserve::adapter_release::ServedFamily, base_id: &'static str, base_file: std::path::PathBuf) -> impl Fn(&std::path::Path) -> Result<(), String> {
+    use llmserve::adapter_registry::{AdapterBankSettings, AdapterRegistry};
+    use llmserve::adapter_release::{verify_adapter_among, ServedBase};
+    move |path| {
+        let base = ServedBase::of_family(family.clone(), base_file.clone(), Some(base_id.to_string()));
+        let (_, loaded) = verify_adapter_among(path, std::slice::from_ref(&base)).map_err(|e| e.to_string())?;
+        AdapterRegistry::new(Some(AdapterBankSettings::default()), base).attach(loaded).map(drop)
+    }
+}
+
+/// Runs A49 on `subject` with its trainer's declaration, publishing to `serving`'s bank when it serves adapters, and
+/// holds the answer to [`ASYNC_MATRIX`].
+fn async_conforms<M: model::Model>(subject: model::conformance::Subject<M>, policy_gradient: bool, serving: Option<llmserve::adapter_release::ServedFamily>) {
+    use rl::conformance_async::{run_async, AsyncDeclares, Publication, Verdict};
+    let name = subject.name;
+    let &(_, online, centring, publication) = ASYNC_MATRIX.iter().find(|row| row.0 == name).unwrap_or_else(|| panic!("{name} is not in ASYNC_MATRIX"));
+    assert_eq!(policy_gradient, online, "{name}: its ChatTrainer::POLICY_GRADIENT is not what ASYNC_MATRIX says");
+    let dir = brain_testutil::Scratch::dir(&format!("async-{name}"));
+    let base_file = dir.join("base.safetensors");
+    let (base, _) = model::conformance::build(&subject, None, 1, 41);
+    base.save(base_file.to_str().unwrap());
+    let base_id: &'static str = Box::leak(format!("conformance/{name}").into_boxed_str());
+    let card_id = format!("{base_id}:conformance:policy:v1");
+    let check = serving.clone().map(|family| bank_takes(family, base_id, base_file.clone()));
+    let tag = serving.as_ref().map(|f| f.tag);
+    let publish = check.as_ref().map(|check| Publication { card_id: &card_id, base_id, family: tag.unwrap(), check });
+    let declares = AsyncDeclares { online_policy_gradient: policy_gradient, policy_publication: serving.is_some() };
+    // seed: fixed so a conformance failure reproduces
+    let report = run_async(&subject, declares, publish.as_ref(), &dir, 41).unwrap_or_else(|e| panic!("{e}"));
+    let holds = |v: &Verdict| *v == Verdict::Holds;
+    assert_eq!((holds(&report.online_policy_gradient), holds(&report.score_centring), holds(&report.policy_publication)), (online, centring, publication), "{name}: {report:?}");
+    for (verdict, what) in [(&report.online_policy_gradient, "online policy gradient"), (&report.score_centring, "score centring"), (&report.policy_publication, "policy publication")] {
+        if let Verdict::Refused(why) = verdict {
+            assert!(!why.is_empty(), "{name}: {what} is refused without a reason");
+        }
+    }
+}
+
+#[test]
+fn qwen3_trains_online() {
+    async_conforms(qwen3_subject(), <qwen3::finetune::Qwen3Trainer as model::finetune::ChatTrainer>::POLICY_GRADIENT, Some(llmserve::adapter_release::ServedFamily::qwen3()));
+}
+
+#[test]
+fn qwen35_trains_online() {
+    async_conforms(qwen35_subject(), <qwen35::finetune::Qwen35Trainer as model::finetune::ChatTrainer>::POLICY_GRADIENT, Some(qwen35::spec::served_family()));
+}
+
+#[test]
+fn qwen35moe_trains_online() {
+    async_conforms(qwen35moe_subject(), <qwen35moe::finetune::Qwen35MoeTrainer as model::finetune::ChatTrainer>::POLICY_GRADIENT, None);
+}
+
+#[test]
+fn ricursive_trains_online() {
+    async_conforms(ricursive_subject(), <ricursive::finetune::RippleTrainer as model::finetune::ChatTrainer>::POLICY_GRADIENT, Some(ricursive::resident::family()));
+}
+
+#[test]
+fn inkling2_trains_online() {
+    let cfg = (inkling2_subject().config)(Some(model::conformance::RANK));
+    async_conforms(inkling2_subject(), <inkling2::finetune::Inkling2Trainer as model::finetune::ChatTrainer>::POLICY_GRADIENT, Some(inkling2::serve::served_family(&cfg.cfg)));
+}
+
 #[test]
 fn at_least_one_model_is_registered() {
     assert!(!REGISTERED.is_empty());

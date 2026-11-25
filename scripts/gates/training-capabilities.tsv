@@ -12,6 +12,7 @@
 # One line per capability cell: arch<TAB>capability<TAB>detail<TAB>tests.
 #   capability: full_ft lora_f32 lora_bf16 lora_int8 lora_nf4 other
 #               adapter_serving kv_tiers load certify
+#               online_pg score_centring policy_publication (held to crates/rl/tests/conformance.rs ASYNC_MATRIX)
 #               serving certification: import parity serve cancel batch
 #               quant_serving real
 #   (a cell with no line is rendered "-": not offered, or for serving not
@@ -325,3 +326,15 @@ qwen3asr	cancel	certify on the served transcribe on the real checkpoint	qwen3asr
 qwen3asr	real	greedy transcription on the real 1.7B checkpoint equals the HF reference	qwen3asr/src/lib.rs::qwen_transcribe_matches_reference (real)
 lpips	cancel		catalog/tests/it/cancellation.rs::every_action_built_without_weights_refuses_a_token_fired_before_the_call
 ouro	batch	the conformance suite decodes batched requests as each alone	ouro/tests/it/serve.rs::the_engine_passes_the_serving_conformance_suite
+qwen3	online_pg	groups streamed into a running job train; a resumed stream trains no group twice	rl/tests/conformance.rs::qwen3_trains_online;trainjob/tests/it/stream.rs::a_stream_job_trains_groups_as_they_arrive_and_serves_each_version_it_publishes;trainjob/tests/it/stream.rs::a_resumed_stream_takes_again_what_was_applied_and_not_committed
+qwen3	score_centring	the estimator's backward equals its label-equivalent backwards	rl/tests/conformance.rs::qwen3_trains_online;trainjob/tests/it/stream.rs::a_stream_trains_the_score_centred_estimator_over_the_records_top_k;rl/tests/it/trl_goldens.rs::the_score_centred_term_is_trls
+qwen3	policy_publication	each published version is taken by the architecture's own serving bank	rl/tests/conformance.rs::qwen3_trains_online
+qwen35	online_pg	groups streamed into a running job train; a resumed stream trains no group twice	rl/tests/conformance.rs::qwen35_trains_online
+qwen35	score_centring	the estimator's backward equals its label-equivalent backwards	rl/tests/conformance.rs::qwen35_trains_online
+qwen35	policy_publication	each published version is taken by the architecture's own serving bank	rl/tests/conformance.rs::qwen35_trains_online
+ricursive	online_pg	groups streamed into a running job train; a resumed stream trains no group twice	rl/tests/conformance.rs::ricursive_trains_online
+ricursive	score_centring	the estimator's backward equals its label-equivalent backwards	rl/tests/conformance.rs::ricursive_trains_online
+ricursive	policy_publication	each published version is taken by the architecture's own serving bank	rl/tests/conformance.rs::ricursive_trains_online
+inkling2	online_pg	groups streamed into a running job train; a resumed stream trains no group twice	rl/tests/conformance.rs::inkling2_trains_online
+inkling2	score_centring	the estimator's backward equals its label-equivalent backwards	rl/tests/conformance.rs::inkling2_trains_online
+inkling2	policy_publication	each published version is taken by the architecture's own serving bank	rl/tests/conformance.rs::inkling2_trains_online

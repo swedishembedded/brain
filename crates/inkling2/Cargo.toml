@@ -18,6 +18,8 @@ brain-checkpoint.workspace = true
 brain-dflash2.workspace = true
 # The shared operators the tower runs on: ViT blocks, the position-table taps, the MLP projector, the prompt embeds.
 brain-model.workspace = true
+# `serve::served_family`: the adapter-serving family the catalog's resident and the conformance suite bind adapters to.
+brain-llmserve.workspace = true
 brain-gpu-core.workspace = true
 # The tower's tensors, with gradients where they train, and the adapters' factors.
 brain-paramstore.workspace = true

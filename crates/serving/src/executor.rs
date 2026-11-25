@@ -611,7 +611,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("brain-exec-ckpt-{}", std::process::id()));
         let fp8 = dir_with_config(&root, "fp8");
         let other = dir_with_config(&root, "other");
-        let scanned = [ServedBase::of_family(catalog::resident_qwen35::family(), other.join("."), Some("v/other".into())), ServedBase::of_family(catalog::resident_qwen35::family(), fp8.join("."), Some("v/fp8".into()))];
+        let scanned = [ServedBase::of_family(qwen35::spec::served_family(), other.join("."), Some("v/other".into())), ServedBase::of_family(qwen35::spec::served_family(), fp8.join("."), Some("v/fp8".into()))];
 
         let by_dir = ServedBase::new(&fp8, None);
         assert_eq!(checkpoint_base(&by_dir, &scanned), Some(1), "the same directory, spelled differently");

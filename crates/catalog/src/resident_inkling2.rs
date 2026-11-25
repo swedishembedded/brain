@@ -53,7 +53,7 @@ use inkling2::serve::{Engine, EngineOptions};
 use inkling2::vision::{ImageProcessorSpec, VisionTower, VisionWeights};
 use inkling2::Inkling2Config;
 use llmserve::adapter_registry::{AdaptedInstance, AdapterBankSettings, AdapterHost, AdapterRegistry, ADAPTER_PARAM};
-use llmserve::adapter_release::{LoadedAdapter, ServedBase, ServedFamily};
+use llmserve::adapter_release::{LoadedAdapter, ServedBase};
 use llmserve::image_frontend::ImageFrontend;
 use llmserve::{generate_spec, TextFrontend};
 use model::kv_tier::KvTier;
@@ -170,10 +170,6 @@ pub struct Inkling2Resident {
     adapters: Arc<AdapterRegistry>,
 }
 
-/// Inkling 2 as an adapter-serving family: the card family its trainer writes and every site it serves.
-pub fn family(cfg: &Inkling2Config) -> ServedFamily {
-    ServedFamily::of(FAMILY, "Inkling 2", &inkling2::serve::ServedSites::new(cfg, true))
-}
 
 impl Inkling2Resident {
     /// The resident for the directory `dir` (`config.json`, `hf_quant_config.json`, the safetensors, `tokenizer.json`,
@@ -202,7 +198,7 @@ impl Inkling2Resident {
         // The layout is held to the engine's own check now, so a configuration it cannot serve is refused at the scan.
         Engine::layout(&cfg, kv_tier)?;
         let sampling = data::generation::SamplingDefaults::from_generation_config(path).map_err(|e| format!("{id}: {e}"))?;
-        let adapters = AdapterRegistry::new(None, ServedBase::of_family(family(&cfg), path, Some(id.to_string())));
+        let adapters = AdapterRegistry::new(None, ServedBase::of_family(inkling2::serve::served_family(&cfg), path, Some(id.to_string())));
         Ok(Inkling2Resident { id: id.to_string(), dir: path.to_path_buf(), cfg, opts, linear_activations: sizing.linear_activations.unwrap_or_default(), drafting, sampling, adapters })
     }
 
@@ -214,7 +210,7 @@ impl Inkling2Resident {
             b.validate().map_err(|e| format!("{}: {e}", self.id))?;
             b.bank_config(&inkling2::serve::ServedSites::new(&self.cfg, true)).map_err(|e| format!("{}: {e}", self.id))?;
         }
-        self.adapters = AdapterRegistry::new(bank, ServedBase::of_family(family(&self.cfg), &self.dir, Some(self.id.clone())));
+        self.adapters = AdapterRegistry::new(bank, ServedBase::of_family(inkling2::serve::served_family(&self.cfg), &self.dir, Some(self.id.clone())));
         Ok(self)
     }
 

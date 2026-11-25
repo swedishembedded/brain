@@ -73,6 +73,8 @@ brain-qwen35moe.workspace = true
 brain-ricursive.workspace = true
 # `tests/conformance.rs` registers `inkling2::Inkling2Train` (a looped expert decoder with depth-attention residuals).
 brain-inkling2.workspace = true
+# `tests/conformance.rs` (A49): a published adapter is taken by each architecture's own serving bank.
+brain-llmserve.workspace = true
 # `tests/lora_acceptance.rs` runs the LoRA workflow over the diffusion trainer too.
 brain-flux2.workspace = true
 

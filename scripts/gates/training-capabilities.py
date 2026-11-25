@@ -42,7 +42,9 @@ from pathlib import Path
 SERVE_COLS = [("import", "Import"), ("parity", "Forward parity"), ("serve", "Serve"), ("cancel", "Cancel"), ("batch", "Batch"),
               ("quant_serving", "Quantized"), ("real", "Real weights")]
 SERVE_CAPS = {c for c, _ in SERVE_COLS}
-CAPS = {"full_ft", "lora_f32", "lora_bf16", "lora_int8", "lora_nf4", "lora_fp8", "other", "adapter_serving", "kv_tiers", "load", "certify"} | SERVE_CAPS
+# The asynchronous policy-gradient cells, held to the table crates/rl/tests/conformance.rs runs (ASYNC_MATRIX).
+ASYNC_CAPS = ("online_pg", "score_centring", "policy_publication")
+CAPS = {"full_ft", "lora_f32", "lora_bf16", "lora_int8", "lora_nf4", "lora_fp8", "other", "adapter_serving", "kv_tiers", "load", "certify"} | SERVE_CAPS | set(ASYNC_CAPS)
 # A served architecture is production-supported when every one of these cells
 # is certified, and preview otherwise.
 SUPPORT_REQUIRES = ("parity", "serve", "cancel", "batch")
@@ -80,6 +82,9 @@ TABLES = [
      [("full_ft", "Full and head-only fine-tune"), ("lora_f32", "LoRA, fp32 base"), ("adapter_serving", "Adapters while serving")], ""),
     ("Serving adapters and KV tiers", ["qwen3", "qwen35", "qwen35moe", "ricursive"],
      [("adapter_serving", "Adapters while serving"), ("kv_tiers", "KV tiers")], ""),
+    ("Training while serving (streamed policy gradient)", ["qwen3", "qwen35", "qwen35moe", "ricursive", "inkling2"],
+     [("online_pg", "Rollout groups streamed into a running job"), ("score_centring", "Score-centred estimator"), ("policy_publication", "Versions published to the serving bank")],
+     "Every architecture whose trainer declares the policy gradient runs the same suite (A49) at toy size on the CPU;\n`-` is a capability the architecture refuses by name, and the refusal is asserted.\n"),
 ]
 SERVE_HEAD = """## Serving certification
 
@@ -221,7 +226,7 @@ def check_tests(cells, root):
                 problems.append(f"MISSING TEST: {arch}/{cap}: no `fn {name}` in crates/{f}")
                 continue
             attrs = " ".join(lines[max(0, idx[0] - 6): idx[0]])
-            if "#[test]" not in attrs and "#[tokio::test]" not in attrs:
+            if "#[test]" not in attrs and "#[tokio::test" not in attrs:
                 problems.append(f"NOT A TEST: {arch}/{cap}: `fn {name}` in crates/{f} has no #[test]")
             if "#[ignore" in attrs and not flag:
                 problems.append(f"IGNORED TEST: {arch}/{cap}: `{name}` in crates/{f} is #[ignore]d; flag it (real) or (cuda) or name another test")
@@ -264,6 +269,19 @@ def served_families(root):
     return sorted(served, key=archs.index), unresolved
 
 
+def async_matrix(root):
+    """The rows of `ASYNC_MATRIX` in crates/rl/tests/conformance.rs: architecture -> (online, centring, publication);
+    `None` for a tree without the suite."""
+    conf = root / "crates/rl/tests/conformance.rs"
+    if not conf.exists():
+        return None
+    body = conf.read_text().split("const ASYNC_MATRIX", 1)
+    if len(body) < 2:
+        return None
+    rows = re.findall(r'\("(\w+)", (true|false), (true|false), (true|false)\)', body[1].split("];", 1)[0])
+    return {a: tuple(v == "true" for v in flags) for a, *flags in rows}
+
+
 def check_registrations(cells, root, catalog):
     problems = []
     have = {k for k in cells}
@@ -293,6 +311,17 @@ def check_registrations(cells, root, catalog):
                 problems.append(f"UNDECLARED CAPABILITY: sdk study.rs registers a chat trainer for {a} but there is no {a} full_ft row")
             if re.search(r"const CHAT_LORA_FINE_TUNE: bool = true", block) and not any(k[0] == a and k[1].startswith("lora_") for k in have):
                 problems.append(f"UNDECLARED CAPABILITY: sdk study.rs declares {a} CHAT_LORA_FINE_TUNE but there is no {a} lora_* row")
+    matrix = async_matrix(root)
+    if matrix is not None:
+        for arch, flags in matrix.items():
+            for cap, offered in zip(ASYNC_CAPS, flags):
+                if offered and (arch, cap) not in have:
+                    problems.append(f"UNDECLARED CAPABILITY: rl/tests/conformance.rs ASYNC_MATRIX holds {arch} to {cap} but the declaration has no {arch} {cap} row")
+                if not offered and (arch, cap) in have:
+                    problems.append(f"FALSE CAPABILITY: the declaration offers {arch} {cap} and rl/tests/conformance.rs ASYNC_MATRIX holds {arch} to refuse it")
+        for arch, cap in sorted(have):
+            if cap in ASYNC_CAPS and arch not in matrix:
+                problems.append(f"UNCHECKED CAPABILITY: the declaration offers {arch} {cap} and rl/tests/conformance.rs ASYNC_MATRIX does not run {arch}")
     rendered = {a for _, archs, _, _ in TABLES for a in archs}
     for a, c in sorted(have):
         if c in SERVE_CAPS:

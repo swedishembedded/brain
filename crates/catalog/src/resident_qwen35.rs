@@ -58,7 +58,7 @@ use residency::multi::{MultiDeviceCost, MultiDeviceResidentModel};
 use residency::{Device, Instance, InstanceKey, MemCost, ResidentModel, Tier};
 
 use llmserve::adapter_registry::{AdapterBankSettings, AdapterHost, AdapterRegistry, AdaptedInstance};
-use llmserve::adapter_release::{LoadedAdapter, ServedBase, ServedFamily};
+use llmserve::adapter_release::{LoadedAdapter, ServedBase};
 
 use crate::parkable::{Build, HostWeights, ParkableInstance};
 use crate::resident_llm::{est_vram, open_stored_checkpoint};
@@ -834,7 +834,7 @@ impl Qwen35GgufServed {
     fn new(plan: ServedPlan, bank: Option<AdapterBankSettings>, gguf_path: &str, id: &str, replanner: Replanner) -> Qwen35GgufServed {
         // An adapter trains on the full-precision release and serves on its
         // quantisation: the card names the release, not this file.
-        let base = ServedBase::of_family(family(), gguf_path, Some(id.to_string())).quantizing(&QWEN35_SOURCES);
+        let base = ServedBase::of_family(qwen35::spec::served_family(), gguf_path, Some(id.to_string())).quantizing(&QWEN35_SOURCES);
         Qwen35GgufServed { plan: std::sync::RwLock::new(Arc::new(plan)), adapters: AdapterRegistry::new(bank, base), replanner }
     }
 
@@ -869,11 +869,6 @@ impl Qwen35GgufServed {
 /// Ids of the full-precision releases the Qwen3.8-27B quantisations are made
 /// from, which an adapter's card names as its base: the repo ids and the bare
 /// directory names `brain qwen35 finetune` records for a base it was pointed at.
-/// Qwen3.8 as an adapter-serving family: the linears its bank may correct.
-pub fn family() -> ServedFamily {
-    ServedFamily::of(qwen35::spec::CARD_FAMILY, "Qwen3.8", &qwen35::config::Qwen35Config::tiny())
-}
-
 const QWEN35_SOURCES: [&str; 4] = ["Qwen/Qwen3.8-27B-FP8", "Qwen/Qwen3.8-27B", "Qwen3.8-27B-FP8", "Qwen3.8-27B"];
 
 impl Qwen35GgufServed {
@@ -1518,7 +1513,7 @@ mod tests {
     const Q35_ID: &str = "unsloth/Qwen3.8-27B-GGUF:lab:facts:v1";
 
     fn qwen35_registry(settings: Option<AdapterBankSettings>) -> std::sync::Arc<AdapterRegistry> {
-        AdapterRegistry::new(settings, ServedBase::of_family(family(), "unused.gguf", Some("unsloth/Qwen3.8-27B-GGUF".to_string())).quantizing(&["Qwen/Qwen3.8-27B-FP8"]))
+        AdapterRegistry::new(settings, ServedBase::of_family(qwen35::spec::served_family(), "unused.gguf", Some("unsloth/Qwen3.8-27B-GGUF".to_string())).quantizing(&["Qwen/Qwen3.8-27B-FP8"]))
     }
 
     /// A Qwen3.8 adapter over the named linears of layer 0 (shapes are the
@@ -1566,11 +1561,11 @@ mod tests {
         assert_eq!(adapter.release.id, Q35_ID);
         // The adapter's card names `Qwen/Qwen3.8-27B-FP8`, which the served
         // GGUF declares it quantises, so no file digest of the GGUF is needed.
-        let base = ServedBase::of_family(family(), "unused.gguf", Some("unsloth/Qwen3.8-27B-GGUF".to_string())).quantizing(&["Qwen/Qwen3.8-27B-FP8"]);
+        let base = ServedBase::of_family(qwen35::spec::served_family(), "unused.gguf", Some("unsloth/Qwen3.8-27B-GGUF".to_string())).quantizing(&["Qwen/Qwen3.8-27B-FP8"]);
         assert!(llmserve::adapter_release::verify_adapter(&dir.join("q35-self_attn_q_proj.safetensors"), &base).is_ok());
         let file = dir.join("other.gguf");
         brain_testutil::adapters::write_base(&file, 1.0);
-        let other = ServedBase::of_family(family(), &file, Some("unsloth/Other".to_string()));
+        let other = ServedBase::of_family(qwen35::spec::served_family(), &file, Some("unsloth/Other".to_string()));
         let why = llmserve::adapter_release::verify_adapter(&dir.join("q35-self_attn_q_proj.safetensors"), &other).err().unwrap();
         assert!(why.contains("Qwen/Qwen3.8-27B-FP8") && why.contains("unsloth/Other"), "a base that is not the release's quantisation is refused by name: {why}");
     }

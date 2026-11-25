@@ -161,3 +161,22 @@ regenerate() { python3 "$REPO/scripts/gates/training-capabilities.py" --root "$T
   gate
   [ "$status" -eq 0 ]
 }
+
+@test "the streamed policy-gradient cells follow the conformance suite's ASYNC_MATRIX both ways" {
+  printf '#[tokio::test(flavor = "multi_thread")]\nasync fn streams() {}\n' >"$T/crates/qwen3/tests/s.rs"
+  printf 'fn s() { Subject { name: "qwen3", tiers: vec![Tier { name: "bf16", build: 1 }] } }\nconst ASYNC_MATRIX: &[(&str, bool, bool, bool)] = &[\n    ("qwen3", true, false, true),\n];\n' >"$T/crates/rl/tests/conformance.rs"
+  printf 'qwen3\tlora_f32\t\tqwen3/tests/t.rs::lora_works\nqwen3\tlora_bf16\t\tqwen3/tests/t.rs::lora_works\nqwen3\tonline_pg\t\tqwen3/tests/s.rs::streams\n' >"$BATS_TEST_TMPDIR/decl.tsv"
+  python3 "$REPO/scripts/gates/training-capabilities.py" --root "$T" --decl "$BATS_TEST_TMPDIR/decl.tsv" --write >/dev/null
+  gate
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"UNDECLARED CAPABILITY"*"policy_publication"* ]]
+  printf 'qwen3\tscore_centring\t\tqwen3/tests/s.rs::streams\nqwen3\tpolicy_publication\t\tqwen3/tests/s.rs::streams\n' >>"$BATS_TEST_TMPDIR/decl.tsv"
+  python3 "$REPO/scripts/gates/training-capabilities.py" --root "$T" --decl "$BATS_TEST_TMPDIR/decl.tsv" --write >/dev/null
+  gate
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"FALSE CAPABILITY"*"score_centring"* ]]
+  grep -v score_centring "$BATS_TEST_TMPDIR/decl.tsv" >"$BATS_TEST_TMPDIR/d2" && mv "$BATS_TEST_TMPDIR/d2" "$BATS_TEST_TMPDIR/decl.tsv"
+  python3 "$REPO/scripts/gates/training-capabilities.py" --root "$T" --decl "$BATS_TEST_TMPDIR/decl.tsv" --write >/dev/null
+  gate
+  [ "$status" -eq 0 ]
+}
