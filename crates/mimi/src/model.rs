@@ -125,6 +125,9 @@ pub struct Codec {
     pub cfg: CodecConfig,
     ps: ParamStore,
     host: HashMap<String, Vec<f32>>,
+    /// The vendor GEMM the decode's products take where it is active, in binary32 (the codec is stored and gated in
+    /// fp32); the encoder keeps the kernels until its codes are pinned against them.
+    gemm: gpu_core::provider::library::LibraryGemmProvider,
 }
 
 impl Codec {
@@ -173,7 +176,8 @@ impl Codec {
         let roles: Vec<(String, usize, Role)> =
             init.iter().map(|(n, v)| (n.clone(), v.len(), Role::Frozen)).collect();
         let ps = ParamStore::new_with_roles(&gpu, roles, &init);
-        Codec { gpu, cfg, ps, host }
+        let gemm = gpu_core::provider::library::LibraryGemmProvider::for_gpu(&gpu, gpu_core::provider::library::GemmPrecision::Auto);
+        Codec { gpu, cfg, ps, host, gemm }
     }
 
     /// A pass that records its steps and submits them in a few batches: what
@@ -535,7 +539,9 @@ impl<'a> Pass<'a> {
             codec.gpu.hold_freed_blocks(true);
             codec.gpu.retain_freed_blocks(RETAIN_BYTES);
         }
-        Pass { codec, recorded, steps: RefCell::new(Vec::new()), pending_bytes: Cell::new(0), scratch: RefCell::new(ConvScratch::new()) }
+        // The recorded pass is the decode: its products take the vendor GEMM; the eager one (the encoder) does not.
+        let scratch = if recorded { ConvScratch::new().with_gemm(codec.gemm.clone()) } else { ConvScratch::new() };
+        Pass { codec, recorded, steps: RefCell::new(Vec::new()), pending_bytes: Cell::new(0), scratch: RefCell::new(scratch) }
     }
 
     fn w(&self, name: &str) -> &DeviceBuffer {
@@ -580,8 +586,15 @@ impl<'a> Pass<'a> {
 
     /// `out = x[M,K] @ W[N,K]ᵀ` (PyTorch `nn.Linear`, no bias).
     fn matmul(&self, x: &DeviceBuffer, wname: &str, m: u32, k: u32, n: u32) -> DeviceBuffer {
+        use gpu_core::provider::library::Operand;
         let out = self.st((m * n) as usize);
-        self.run(self.gpu.step(MATMUL, &[x, self.w(wname), &out], &[m, k, n], m * n));
+        let mut steps = Vec::new();
+        let on_library = self.recorded && self.codec.gemm.forward_f32(&self.gpu, &mut steps, &Operand { buf: x, range: (0, 0) }, &Operand { buf: self.w(wname), range: (0, 0) }, &Operand { buf: &out, range: (0, 0) }, m, n, k);
+        if on_library {
+            self.run_all(steps);
+        } else {
+            self.run(self.gpu.step(MATMUL, &[x, self.w(wname), &out], &[m, k, n], m * n));
+        }
         out
     }
     /// In-place per-output-feature bias for a token-major `[M,N]` buffer.

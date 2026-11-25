@@ -202,11 +202,14 @@ pub struct ConvScratch {
     col: Option<(u64, DeviceBuffer)>,
     out: Option<(u64, DeviceBuffer)>,
     budget_mib: u64,
+    /// The vendor GEMM the lowered products take when it is active ([`Self::with_gemm`]), in binary32 throughout:
+    /// the same precision as the register-tiled kernels, a different summation order. `None` keeps the kernels.
+    gemm: Option<gpu_core::provider::library::LibraryGemmProvider>,
 }
 
 impl Default for ConvScratch {
     fn default() -> ConvScratch {
-        ConvScratch { col: None, out: None, budget_mib: COL_BUDGET_MIB }
+        ConvScratch { col: None, out: None, budget_mib: COL_BUDGET_MIB, gemm: None }
     }
 }
 
@@ -228,6 +231,18 @@ impl ConvScratch {
     /// device memory means it.
     pub fn with_budget_mib(mib: u64) -> ConvScratch {
         ConvScratch { budget_mib: mib.max(1), ..ConvScratch::default() }
+    }
+
+    /// The same scratch with the lowered convs' products taken by `gemm`'s fp32 GEMM wherever it is active and
+    /// takes the shape; a product it declines keeps the register-tiled kernel.
+    pub fn with_gemm(mut self, gemm: gpu_core::provider::library::LibraryGemmProvider) -> ConvScratch {
+        self.gemm = Some(gemm);
+        self
+    }
+
+    /// Push the provider's step for one of the lowered products, or answer `false` to dispatch the kernel.
+    fn library(&self, product: impl FnOnce(&gpu_core::provider::library::LibraryGemmProvider) -> bool) -> bool {
+        self.gemm.as_ref().is_some_and(product)
     }
 
     fn grow(slot: &mut Option<(u64, DeviceBuffer)>, g: &Gpu, need: u64) -> DeviceBuffer {
@@ -350,13 +365,12 @@ pub fn conv1d_bias_fwd(
         // width, so the NN GEMM writes the final NCL tensor and the bias is
         // the one shared `add_chan_inplace` over the whole batch.
         for nn in 0..u64::from(c.n) {
-            steps.push(g.dispatch_sliced(
-                k.matmul_nn,
-                &[w, x, y],
-                &[(0, 0), (nn * x_row, x_row), (nn * y_row, y_row)],
-                &[c.cout, c.lo, c.cin, 0],
-                gpu_core::Dispatch::Workgroups(reg_tiles(c.cout, c.lo)),
-            ));
+            use gpu_core::provider::library::Operand;
+            let (xs, ys) = ((nn * x_row, x_row), (nn * y_row, y_row));
+            let on_library = scratch.library(|p| p.dx_f32(g, &mut steps, &Operand { buf: w, range: (0, 0) }, &Operand { buf: x, range: xs }, &Operand { buf: y, range: ys }, c.cout, c.cin, c.lo, false));
+            if !on_library {
+                steps.push(g.dispatch_sliced(k.matmul_nn, &[w, x, y], &[(0, 0), xs, ys], &[c.cout, c.lo, c.cin, 0], gpu_core::Dispatch::Workgroups(reg_tiles(c.cout, c.lo))));
+            }
         }
         steps.push(bias_step(g, k, c, y, bias));
         return steps;
@@ -377,13 +391,17 @@ pub fn conv1d_bias_fwd(
                 &[c.cin, c.l, c.k, c.stride, c.pad, c.dilation, cink, pos, cnt],
                 cnt * cink,
             ));
-            steps.push(g.dispatch_sliced(
-                k.matmul,
-                &[&col, w, &nlc],
-                &[(0, 0), (0, 0), (u64::from(pos) * u64::from(c.cout), u64::from(cnt) * u64::from(c.cout))],
-                &[cnt, cink, c.cout],
-                gpu_core::Dispatch::Workgroups(reg_tiles(cnt, c.cout)),
-            ));
+            let out = (u64::from(pos) * u64::from(c.cout), u64::from(cnt) * u64::from(c.cout));
+            let on_library = {
+                use gpu_core::provider::library::Operand;
+                let mut pushed = Vec::new();
+                let taken = scratch.library(|p| p.forward_f32(g, &mut pushed, &Operand { buf: &col, range: (0, u64::from(cnt) * u64::from(cink)) }, &Operand { buf: w, range: (0, 0) }, &Operand { buf: &nlc, range: out }, cnt, c.cout, cink));
+                steps.extend(pushed);
+                taken
+            };
+            if !on_library {
+                steps.push(g.dispatch_sliced(k.matmul, &[&col, w, &nlc], &[(0, 0), (0, 0), out], &[cnt, cink, c.cout], gpu_core::Dispatch::Workgroups(reg_tiles(cnt, c.cout))));
+            }
             pos += cnt;
         }
         steps.push(g.dispatch_sliced(
@@ -446,13 +464,13 @@ pub fn convtr1d_bias_fwd(
     let mut steps = Vec::new();
     for nn in 0..u64::from(c.n) {
         let (xo, yo) = ((nn * x_row, x_row), (nn * y_row, y_row));
-        steps.push(g.dispatch_sliced(
-            k.matmul_tn,
-            &[w, x, &col],
-            &[(0, 0), xo, (0, 0)],
-            &[c.cin, c.l, c.cout * c.k, 1],
-            gpu_core::Dispatch::Workgroups(reg_tiles(c.cout * c.k, c.l)),
-        ));
+        let on_library = {
+            use gpu_core::provider::library::Operand;
+            scratch.library(|p| p.dw_f32(g, &mut steps, &Operand { buf: w, range: (0, 0) }, &Operand { buf: x, range: xo }, &Operand { buf: &col, range: (0, col_len) }, c.cin, c.cout * c.k, c.l, false))
+        };
+        if !on_library {
+            steps.push(g.dispatch_sliced(k.matmul_tn, &[w, x, &col], &[(0, 0), xo, (0, 0)], &[c.cin, c.l, c.cout * c.k, 1], gpu_core::Dispatch::Workgroups(reg_tiles(c.cout * c.k, c.l))));
+        }
         steps.push(g.step_sliced(
             k.col2im,
             &[&col, bias, y],
