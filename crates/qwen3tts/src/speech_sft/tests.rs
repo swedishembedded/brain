@@ -249,6 +249,31 @@ fn the_heads_device_registers_every_kernel_its_ops_needs() {
     model::ops::assert_training_kernel_list_complete(&super::model::aux_kernels());
 }
 
+/// The Talker rows the device assembles are the rows generation's host builder
+/// makes, bit for bit: both layouts, an x-vector and a named voice in a new row,
+/// each slot at its run, the rows past a record zero.
+#[test]
+fn the_device_assembles_the_rows_generation_feeds() {
+    let d = 16;
+    let s = shard(d, &RECORDS, 0x56); // seed: fixed fixture
+    let mut shape = shape(d, 3, block_for(&s), 15);
+    shape.new_rows = vec![VOICE];
+    let init = SpeechSftModel::init_weights(&shape, 0x7a7); // seed: fixed fixture
+    let host = super::model::host_tables(&shape, &mut init.clone()).unwrap();
+    let m = SpeechSftModel::build(shape, init, 4).unwrap();
+    let exs = examples(&s, &[(0, TextLayout::NonStreaming), (1, TextLayout::Streaming), (2, TextLayout::Streaming)]);
+    m.load(exs.clone()).unwrap();
+    m.forward();
+    let (rows, run) = m.talker_input_rows();
+    let dd = d as usize;
+    for (slot, ex) in exs.iter().enumerate() {
+        let want = crate::train::policy_rows(&host, &host, &ex.plan.materialise(&host, Some(&ex.xvector)), &ex.codes, GROUPS as usize, None).rows;
+        let got = &rows[slot * run * dd..(slot + 1) * run * dd];
+        assert!(got[..want.len()] == want[..], "slot {slot}: the device rows differ from the rows generation feeds");
+        assert!(got[want.len()..].iter().all(|&v| v == 0.0), "slot {slot}: a row past the record is not zero");
+    }
+}
+
 /// Each group steps at its own rate: with the new rows' multiplier at zero a
 /// new voice row stays where it started while the rows beside it train.
 #[test]

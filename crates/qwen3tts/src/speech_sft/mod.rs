@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 pub mod model;
 pub mod objective;
 pub mod rows;
+#[cfg(test)]
 mod tables;
 #[cfg(test)]
 mod tests;

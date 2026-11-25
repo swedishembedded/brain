@@ -106,10 +106,11 @@ ledger is the engine work it needs.
 - [x] New language and voice rows: allocate free codec rows, initialise a
       voice row from its speaker's robust x-vector centroid and a language row
       from a configurable mix of existing rows (`speech_sft::rows`).
-- [ ] Measure the objective on a card: the real-checkpoint overfit and its
+- [x] Measure the objective on a card: the real-checkpoint overfit and its
       frames/s (`speech_sft::tests::the_real_checkpoint_overfits_one_utterance_and_reports_its_frame_rate`,
-      written, ignored, refused on the CPU backend) and the cost of the host
-      side (row materialisation and gradient routing per micro-batch).
+      ignored, refused on the CPU backend): on one GH200, the 0.6B Base, one 60-frame utterance a step, 40
+      steps, the loss falls more than threefold at 711 frames/s (45 before the device-resident build). The
+      host side is index plans only (the throughput item).
 - [ ] Throughput on one card: the full 1.7B fine-tune (3 epochs of 100 h, about 13.5M acoustic frames)
       in under 4 hours needs at least 1000 frames/s sustained (prompt rows not counted) through the served job,
       the real objective. Bench: `crates/qwen3tts/examples/speech_sft_bench.rs` (`synth` writes a shard with a
@@ -122,6 +123,21 @@ ledger is the engine work it needs.
       |---|---|---|
       | fp32 kernels, three device handles (2026-11-25) | 106-121 | 11-12 s for 1400 frames |
       | tensor cores (TF32 GEMMs, fp16 flash attention), the decoders on one handle | 242-283 | 4.5-6 s |
+      | rows, heads, routing, tables and their optimizer on the device; batches trimmed | 2390 (wall, steps 7-30) | 0.38-0.68 s for 1000-1660 frames |
+
+      The device-resident build (2026-11-25): the Talker is a `qwen3::Qwen` fed input rows with its own head
+      (`codec_head`) and trims each batch to its longest record; the code predictor a second one on the
+      Talker's handle, its 15 heads its own head grouped by position (`HeadGroups`), trimmed to the batch's
+      frames; every input row is gathered on the device (`rows_gather_sum3` over the trained tables, the new
+      rows and the frozen text and x-vector rows, in generation's summation order: bit-identical to the host
+      builder), every table gradient is the gather's transpose (`rows_gather_weighted_bwd` over a host-built
+      CSR), the code predictor's position-0 gradient goes to the Talker's hidden state on the device
+      (`Qwen::enable_hidden_grad`), the projection runs through `Ops` at the run's tier, and the tables (one
+      store, the new rows beside them) step on the device optimizer. The host builds index plans and reads
+      the losses, the end-of-speech picks and one gradient norm a step. Device peak 62.5 GB at batch 16
+      (the builds are sized by the longest record: block 505, 6016 code-predictor frames). The largest
+      single cost removed was not in the objective at all: the update gate read every gradient back to the
+      host each step (knowledge 581; 1.9 s of a 2.3-2.8 s step).
 
       `nsys` of that build (4 steps): 79 % of the kernel time in brain's fp32 CUDA-core GEMMs
       (`matmul_f32_tiled` 39 %, `matmul_f32_dw_reg` 21 %, `matmul_f32_dx_reg` 19 %), the portable fp32 flash
@@ -132,13 +148,13 @@ ledger is the engine work it needs.
       tables on the host Adam), the host row build 0.61 s, the code predictor's rows and its heads' gather
       0.3-0.45 s each, and the largest kernels the projection's portable `matmul_dw`/`matmul_dx` (0.22 and
       0.17 s each a step over every frame's 16 rows).
-- [ ] Batches shorter than the build: with every row spliced in, `qwen3::Qwen`
-      runs its whole block (`needed_len` does not trim a spliced or
-      external-head batch), so every micro-batch pays the longest record's
-      rows; trim by the batch's own length or bucket records by length.
-- [ ] One device per run: each decoder (`qwen3::Qwen::new`) opens its own
-      device handle and the heads take a third (`new_like`); a constructor on
-      a shared `Gpu` would let all three share one stream.
+- [x] Batches shorter than the build: both decoders take input rows and their own heads, so each batch is
+      trimmed to its longest record (Talker) and to its frames (code predictor). Records are still drawn in a
+      random order, so a batch pays its longest record's rows: bucketing by length is open (the throughput
+      item).
+- [x] One device per run: the code predictor is built on the Talker's handle (`Qwen::new_training_on`); the
+      tables and the projection take a handle of their own kernel list on the same card (`Gpu::new_like`),
+      ordered against the decoders' stream by the backend's cross-handle fences.
 - [ ] The in-context clone in the non-streaming layout (refused today), and
       training the text projection (frozen in this release).
 - [x] Export to the upstream layout (`qwen3tts::export`, over the generic

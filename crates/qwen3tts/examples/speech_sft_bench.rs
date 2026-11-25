@@ -14,7 +14,7 @@
 //!
 //! ```text
 //! speech_sft_bench synth OUT.bttshrd --records N [--seed S] [--d 2048]
-//! speech_sft_bench run --base DIR --shard PATH [--config '{"steps": 20, ...}']
+//! speech_sft_bench run --base DIR --shard PATH [--config '{"steps": 20, ...}'] [--card N]
 //! ```
 //!
 //! `synth` draws utterances of 1.5-30 s (log-normal, mean about 6.4 s, 12.5
@@ -22,7 +22,8 @@
 //! in one language (`english`). `run` trains with the given
 //! `SpeechSftConfig` fields over defaults (20 steps, the base's `english` row)
 //! and prints each step's frames per second and the mean past the first
-//! steps, and the device memory peak.
+//! steps, and the peak of the memory the run takes on card `N` (default 0, as
+//! the driver reports it).
 
 use std::path::Path;
 
@@ -74,20 +75,28 @@ fn run(args: &[String]) -> Result<(), String> {
     let cfg: qwen3tts::speech_sft::SpeechSftConfig = serde_json::from_value(cfg).map_err(|e| format!("config: {e}"))?;
     let t0 = std::time::Instant::now();
     let mut last = t0;
+    let mut walls = Vec::new();
     let mut on_step = |r: &model::train::StepReport| {
         let now = std::time::Instant::now();
         let frames = r.metrics.iter().find(|(n, _)| *n == "frames").map_or(0.0, |(_, v)| *v);
-        println!("step {:4} loss {:.4} frames {:6} {:8.1} frames/s (step) {:6.2} s wall", r.step, r.loss, frames, r.work.useful_tokens_per_s(), (now - last).as_secs_f64());
+        let wall = (now - last).as_secs_f64();
+        println!("step {:4} loss {:.4} frames {:6} {:8.1} frames/s (step) {:8.1} frames/s (wall, {wall:.2} s)", r.step, r.loss, frames, r.work.useful_tokens_per_s(), f64::from(frames) / wall);
+        walls.push((frames, wall));
         last = now;
         true
     };
     let control = model::train::FitControl { on_step: Some(&mut on_step), ..model::train::FitControl::default() };
-    let r = qwen3tts::speech_sft::speech_sft(&cfg, &shard, None, control)?;
+    // The card's memory peak, sampled from the driver while the run lasts (the card the run is placed on).
+    let card: u32 = arg(args, "--card").map_or(Ok(0), |s| s.parse().map_err(|e| format!("--card: {e}")))?;
+    let baseline = gpu_core::capacity::free_on(card).unwrap_or(0);
+    let (r, peak) = gpu_core::capacity::peak_taken_while(card, baseline, || qwen3tts::speech_sft::speech_sft(&cfg, &shard, None, control));
+    let r = r?;
     let steps = &r.report.steps;
     let skip = (steps.len() / 5).max(1).min(steps.len().saturating_sub(1));
     let tail = &steps[skip..];
     let mean = tail.iter().map(|s| s.frames_per_s).sum::<f64>() / tail.len().max(1) as f64;
-    println!("{} steps, mean {mean:.1} frames/s over steps {}..{}, {:.1} s total", steps.len(), skip + 1, steps.len(), t0.elapsed().as_secs_f64());
+    let (frames, wall) = walls[skip..].iter().fold((0f64, 0f64), |(f, w), &(sf, sw)| (f + f64::from(sf), w + sw));
+    println!("{} steps, mean {mean:.1} frames/s over steps {}..{} ({:.1} by the wall clock), device peak {:.1} GB, {:.1} s total", steps.len(), skip + 1, steps.len(), frames / wall, peak as f64 / 1e9, t0.elapsed().as_secs_f64());
     Ok(())
 }
 

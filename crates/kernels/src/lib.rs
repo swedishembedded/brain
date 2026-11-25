@@ -466,10 +466,10 @@ pub const DORA_GAIN: &str = include_str!("../wgsl/dora_gain.wgsl");
 pub const DORA_GAIN_BWD: &str = include_str!("../wgsl/dora_gain_bwd.wgsl");
 /// `wgsl/draw_feed.wgsl`
 pub const DRAW_FEED: &str = include_str!("../wgsl/draw_feed.wgsl");
-/// `wgsl/draw_list.wgsl`
-pub const DRAW_LIST: &str = include_str!("../wgsl/draw_list.wgsl");
 /// `wgsl/draw_final.wgsl`
 pub const DRAW_FINAL: &str = include_str!("../wgsl/draw_final.wgsl");
+/// `wgsl/draw_list.wgsl`
+pub const DRAW_LIST: &str = include_str!("../wgsl/draw_list.wgsl");
 /// `wgsl/draw_part.wgsl`
 pub const DRAW_PART: &str = include_str!("../wgsl/draw_part.wgsl");
 /// `wgsl/dw_splitk_reduce.wgsl`
@@ -1557,6 +1557,8 @@ pub const ROUTER_TOPK_COMPACT: &str = include_str!("../wgsl/router_topk_compact.
 pub const ROW_DOT: &str = include_str!("../wgsl/row_dot.wgsl");
 /// `wgsl/row_scatter.wgsl`
 pub const ROW_SCATTER: &str = include_str!("../wgsl/row_scatter.wgsl");
+/// `wgsl/rows_gather_sum3.wgsl`
+pub const ROWS_GATHER_SUM3: &str = include_str!("../wgsl/rows_gather_sum3.wgsl");
 /// `wgsl/rows_gather_weighted.wgsl`
 pub const ROWS_GATHER_WEIGHTED: &str = include_str!("../wgsl/rows_gather_weighted.wgsl");
 /// `wgsl/rows_gather_weighted_bwd.wgsl`
@@ -2571,6 +2573,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("router_topk_compact", ROUTER_TOPK_COMPACT),
     ("row_dot", ROW_DOT),
     ("row_scatter", ROW_SCATTER),
+    ("rows_gather_sum3", ROWS_GATHER_SUM3),
     ("rows_gather_weighted", ROWS_GATHER_WEIGHTED),
     ("rows_gather_weighted_bwd", ROWS_GATHER_WEIGHTED_BWD),
     ("rows_scatter_add", ROWS_SCATTER_ADD),

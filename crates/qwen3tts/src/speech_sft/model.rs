@@ -7,17 +7,17 @@
 // sending an email to info@swedishembedded.com.
 
 //! The Talker and its code predictor as ONE trainable [`model::Model`],
-//! teacher forced on recorded speech.
+//! teacher forced on recorded speech, every row and every gradient on the
+//! device.
 //!
 //! Where every parameter lives, and who steps it:
 //!
 //! | parameters | where | optimizer |
 //! |---|---|---|
-//! | Talker decoder layers and final norm | a [`qwen3::Qwen`], every row spliced in, its own head off | its `adamw_step` |
-//! | code-predictor decoder layers and norm | a second [`qwen3::Qwen`] (batch = frames, block = one frame's codebooks) | its `adamw_step` |
-//! | `codec_head`, the 15 residual heads, `small_to_mtp_projection` | a parameter store on a device of their own ([`model::head_ce::HeadCe`], [`model::projector::MlpProjector`]) | `optim::Optim` |
-//! | Talker `codec_embedding`, the 15 residual `codec_embedding`s | host ([`HostTables`]) | [`model::hostopt::HostAdam`] |
-//! | text embedding and text projection | host, frozen in this release | - |
+//! | Talker decoder layers, final norm and `codec_head` (its own head) | a [`qwen3::Qwen`] fed input rows | its `adamw_step` |
+//! | code-predictor decoder layers, norm and the 15 residual heads (its head, grouped by position) | a second [`qwen3::Qwen`] on the Talker's device (batch = frames, block = one frame's codebooks) | its `adamw_step` |
+//! | Talker `codec_embedding` and the 15 residual `codec_embedding`s (one table), the new rows, `small_to_mtp_projection` | a parameter store on the same card | `optim::Optim` |
+//! | text embedding and text projection | host, frozen in this release; each token's projected row is uploaded once | - |
 //!
 //! One global gradient norm spans all of them ([`model::Model::adamw_step`]);
 //! each group has its own learning-rate multiplier ([`LrMultipliers`]).
@@ -30,32 +30,41 @@
 //! one at the row that predicted the frame's first codebook, as generation
 //! feeds it) and head `k` at position `k` predicts codebook `k`.
 //!
-//! **The gradient routes**, all of them: the code predictor's input gradient
-//! at position 0 joins the Talker head's gradient at that Talker row, position 1
-//! lands on the Talker table's row of `cb0`, positions `2..` on the residual
-//! table that embedded them; the Talker's input-row gradient lands on every
-//! codec row its row summed (the frame's codes, the prompt's special, language
-//! and voice rows), never on the frozen text path or the x-vector.
+//! **The rows** are assembled on the device: every Talker input row is a sum of
+//! table rows (`rows_gather_sum3` over the trained tables, the new rows and the
+//! frozen text and x-vector rows, in the order generation sums them), every code
+//! predictor row one table row or the Talker's hidden state of its frame, copied
+//! on the device. The host builds only the index plans.
+//!
+//! **The gradient routes**, all of them, on the device: the code predictor's
+//! input gradient at position 0 joins the Talker's hidden-state gradient at
+//! that Talker row ([`qwen3::Qwen::enable_hidden_grad`]), position 1 lands on
+//! the Talker table's row of `cb0`, positions `2..` on the residual table that
+//! embedded them; the Talker's input-row gradient lands on every codec row its
+//! row summed (the frame's codes, the prompt's special, language and voice
+//! rows), never on the frozen text path or the x-vector. Each table's gradient
+//! is the transpose of its gather (`rows_gather_weighted_bwd` over a host-built
+//! CSR): no atomics, a fixed summation order, so a step is reproducible.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use gpu_core::provider::library::GemmPrecision;
-use gpu_core::{DeviceBuffer, Gpu};
-use model::head_ce::{HeadCe, HeadCeConfig, HeadKernels, IGNORE};
+use gpu_core::{DeviceBuffer, Gpu, Step};
+use model::head_ce::{HeadCe, HeadCeConfig, HeadGroups, HeadKernels, IGNORE};
 use model::ops::{Ops, Weight};
-use model::projector::{MlpProjector, ProjectorConfig, ProjectorKind};
 use optim::gradnorm::{DeviceGradNorm, NormItem};
 use optim::Optim;
-use paramstore::precision::{GradDtype, ParamPrecision};
+use paramstore::precision::GradDtype;
 use paramstore::ParamStore;
 use qwen3::{Qwen, QwenConfig};
 use serde::{Deserialize, Serialize};
 
-use super::tables::{HostGrads, HostTables};
-use crate::config::{MtpConfig, TalkerConfig, SPLICED_VOCAB};
+#[cfg(test)]
+use super::tables::HostTables;
+use crate::config::{MtpConfig, TalkerConfig};
 use crate::import::{mtp_brain_to_hf, mtp_hf_to_brain, talker_brain_to_hf, talker_hf_to_brain};
-use crate::prompt::{Part, PromptPlan, TalkerHost, TtsSpecials};
+use crate::prompt::{Part, PromptPlan, TtsSpecials};
 use crate::talker::TextProjection;
 
 /// The Talker's input table, under its upstream name.
@@ -67,6 +76,20 @@ pub const TEXT_EMBEDDING: &str = "talker.model.text_embedding.weight";
 pub const TEXT_PROJECTION: [&str; 4] = ["talker.text_projection.linear_fc1.weight", "talker.text_projection.linear_fc1.bias", "talker.text_projection.linear_fc2.weight", "talker.text_projection.linear_fc2.bias"];
 /// `small_to_mtp_projection`'s weight and bias (only where the widths differ).
 pub const PROJECTION: [&str; 2] = ["talker.code_predictor.small_to_mtp_projection.weight", "talker.code_predictor.small_to_mtp_projection.bias"];
+
+/// The store's name of the trained codec tables, one after another: the
+/// Talker's `codec_embedding`, then residual table 0, 1, ...
+const TABLES: &str = "speech_sft.codec_tables";
+/// The store's name of the rows a run allocates for new languages and voices.
+const NEW_ROWS: &str = "speech_sft.new_rows";
+
+/// A gather tap that adds nothing (`rows_gather_sum3`).
+const NO_TAP: u32 = u32::MAX;
+/// The table a tap names, in its top two bits: the trained tables, the new rows, the frozen text and x-vector rows.
+const TAG_MASK: u32 = 3 << 30;
+const TAG_TABLES: u32 = 0;
+const TAG_NEW: u32 = 1 << 30;
+const TAG_FROZEN: u32 = 2 << 30;
 
 /// Code predictor residual table `i` (it embeds codebook `i + 1`).
 pub fn residual_table(i: usize) -> String {
@@ -141,13 +164,14 @@ impl SftShape {
         self.talker.d_model as usize
     }
 
+    /// The Talker decoder: its own head is `codec_head`; its token table is never read (every row is an input row).
     fn talker_qwen(&self) -> QwenConfig {
-        // Every input row is spliced in: the decoder's own token table is never read.
-        QwenConfig { vocab: SPLICED_VOCAB, tie_embeddings: true, ..self.talker.to_qwen(self.block) }.with_defaults()
+        QwenConfig { tie_embeddings: false, ..self.talker.to_qwen(self.block) }.with_defaults()
     }
 
+    /// The code predictor: its head is the residual heads stacked, one group of `codebook` columns per position.
     fn cp_qwen(&self) -> QwenConfig {
-        self.mtp.to_qwen(self.mtp.num_code_groups)
+        QwenConfig { vocab: self.residuals() as u32 * self.mtp.vocab, tie_embeddings: false, ..self.mtp.to_qwen(self.mtp.num_code_groups) }.with_defaults()
     }
 
     fn residuals(&self) -> usize {
@@ -158,7 +182,22 @@ impl SftShape {
         self.mtp.embedding_dim != self.mtp.d_model
     }
 
-    /// The device-held parameters outside the two decoders: the heads and the projection.
+    /// The code predictor's batch: whole groups of 64 sequences (its grouped head's binding windows).
+    fn cp_batch(&self) -> u32 {
+        self.frames.next_multiple_of(64)
+    }
+
+    /// Rows of the trained codec tables, one after another.
+    fn table_rows(&self) -> usize {
+        self.talker.vocab as usize + self.residuals() * self.mtp.vocab as usize
+    }
+
+    /// The first row of residual table `i` in the trained tables.
+    fn residual_row0(&self, i: usize) -> usize {
+        self.talker.vocab as usize + i * self.mtp.vocab as usize
+    }
+
+    /// The heads and the projection, under their upstream names.
     fn aux_params(&self) -> Vec<(String, usize)> {
         let (d, v) = (self.d(), self.talker.vocab as usize);
         let (dc, cv) = (self.mtp.d_model as usize, self.mtp.vocab as usize);
@@ -171,7 +210,7 @@ impl SftShape {
         out
     }
 
-    /// The host-held trained tables.
+    /// The trained codec tables, under their upstream names.
     fn table_params(&self) -> Vec<(String, usize)> {
         let d = self.d();
         let mut out = vec![(TALKER_TABLE.to_string(), self.talker.vocab as usize * d)];
@@ -179,7 +218,8 @@ impl SftShape {
         out
     }
 
-    /// The decoders' trained parameters, upstream-named, with the decoder they belong to.
+    /// The decoders' layer parameters, upstream-named, with the decoder they belong to (the heads are in
+    /// [`Self::aux_params`]).
     fn decoder_params(&self) -> Vec<(String, usize, Decoder)> {
         let keep = |n: &String| n != "tok.weight" && n != "lm_head.weight";
         let talker = self.talker_qwen().param_list().into_iter().filter(|(n, _)| keep(n)).map(|(n, s)| (talker_brain_to_hf(&n).unwrap_or_else(|| panic!("talker {n} has no upstream name")), s, Decoder::Talker));
@@ -207,11 +247,17 @@ impl SftShape {
         if name == TALKER_TABLE {
             return Some(Place::Table(0));
         }
+        if name == TALKER_HEAD {
+            return Some(Place::Talker("lm_head.weight".into()));
+        }
         if let Some(i) = (0..self.residuals()).find(|&i| residual_table(i) == name) {
             return Some(Place::Table(i + 1));
         }
-        if self.aux_params().iter().any(|(n, _)| n == name) {
-            return Some(Place::Aux);
+        if let Some(i) = (0..self.residuals()).find(|&i| residual_head(i) == name) {
+            return Some(Place::CpHead(i));
+        }
+        if self.projected() && PROJECTION.contains(&name) {
+            return Some(Place::Projection);
         }
         if name.starts_with("talker.model.layers.") || name == "talker.model.norm.weight" {
             return talker_hf_to_brain(name).map(Place::Talker);
@@ -301,13 +347,15 @@ enum Decoder {
     CodePredictor,
 }
 
-/// Where a trained parameter lives: a decoder (under its brain name), the
-/// device store of heads and projection, or host table `i` (0 = the Talker's).
+/// Where a trained parameter lives: a decoder (under its brain name), a residual
+/// head (rows of the code predictor's stacked head), the projection, or codec
+/// table `i` (0 = the Talker's) of the device tables.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Place {
     Talker(String),
     CodePredictor(String),
-    Aux,
+    CpHead(usize),
+    Projection,
     Table(usize),
 }
 
@@ -322,24 +370,16 @@ pub struct Example {
     pub complete: bool,
 }
 
-/// What a loaded batch supervises, fixed when it is loaded.
+/// What a loaded batch supervises, fixed when it is loaded (its plans are on the device by then).
 struct Loaded {
-    examples: Vec<Example>,
-    /// Talker rows with a target, as global rows `slot * block + row`, and their labels.
-    talker_rows: Vec<usize>,
-    talker_labels: Vec<u32>,
-    /// Per code-predictor frame: `(slot, frame, the Talker row whose hidden it reads)`.
-    frames: Vec<(usize, usize, usize)>,
-}
-
-/// What the latest forward left for the backward.
-struct Forward {
-    talker_hidden: Vec<f32>,
-    cp_hidden: Vec<f32>,
-    /// The code predictor's raw input rows (before the projection).
-    cp_raw: Vec<f32>,
     talker_count: u32,
-    cp_count: u32,
+    /// The rows the Talker and the code predictor compute (`sequences * run`).
+    talker_rows: u32,
+    cp_rows: u32,
+    /// Frames of the batch.
+    frames: u32,
+    /// End-of-speech labels, one per complete utterance.
+    eos: u32,
 }
 
 /// The latest forward's measurements.
@@ -377,35 +417,108 @@ impl ForwardStats {
     }
 }
 
-/// The heads and the projection, on their own device.
+/// A gather's transpose for one trained table, uploaded per batch: for table row
+/// `i`, the edges `ptr[i] .. ptr[i + 1]` name the gathered rows that read it.
+struct Csr {
+    rows: u32,
+    ptr: DeviceBuffer,
+    edge_row: DeviceBuffer,
+}
+
+impl Csr {
+    fn new(gpu: &Gpu, rows: usize, edges: usize) -> Csr {
+        Csr { rows: rows as u32, ptr: gpu.storage(rows as u64 + 1), edge_row: gpu.storage(edges.max(1) as u64) }
+    }
+
+    /// Upload the transpose of `(gathered row, table row)` reads, listed in gathered-row order: each table row's
+    /// edges keep that order, so its gradient is summed in a fixed one.
+    fn upload(&self, gpu: &Gpu, reads: &[(u32, u32)]) {
+        let mut ptr = vec![0u32; self.rows as usize + 1];
+        for &(_, t) in reads {
+            ptr[t as usize + 1] += 1;
+        }
+        for i in 0..self.rows as usize {
+            ptr[i + 1] += ptr[i];
+        }
+        let mut next = ptr.clone();
+        let mut edge_row = vec![0u32; reads.len()];
+        for &(r, t) in reads {
+            edge_row[next[t as usize] as usize] = r;
+            next[t as usize] += 1;
+        }
+        gpu.write(&self.ptr, &ptr);
+        if !edge_row.is_empty() {
+            gpu.write(&self.edge_row, &edge_row);
+        }
+    }
+
+    /// `dtable += transpose * dout` for `width`-wide rows.
+    fn grad_step(&self, gpu: &Gpu, kernel: usize, ones: &DeviceBuffer, dout: &DeviceBuffer, dtable: &DeviceBuffer, width: u32) -> Step {
+        gpu.step(kernel, &[&self.ptr, &self.edge_row, ones, dout, dtable], &[self.rows, width], self.rows * width)
+    }
+}
+
+/// The aux device's kernels, by slot.
+struct AuxKernels {
+    gather: usize,
+    gather_bwd: usize,
+    copy: usize,
+    bias_add: usize,
+    bias_grad: usize,
+}
+
+/// The tables, the projection and their optimizer, with the per-batch plans that feed and drain the decoders.
 struct Aux {
     gpu: Gpu,
     ops: Ops,
     ps: ParamStore,
     opt: Optim,
     norm: DeviceGradNorm,
-    talker_head: HeadCe,
-    cp_heads: Vec<HeadCe>,
-    projector: Option<MlpProjector>,
-    /// Gathered hidden rows and their gradient, for the Talker head and a residual head.
-    talker_h: DeviceBuffer,
-    talker_dh: DeviceBuffer,
-    cp_h: DeviceBuffer,
-    cp_dh: DeviceBuffer,
-    /// The projection's input and its gradient's in/out buffers.
-    proj_in: DeviceBuffer,
-    proj_d_out: DeviceBuffer,
-    proj_d_in: DeviceBuffer,
+    k: AuxKernels,
+    /// The frozen rows: every text token's projected row at its id, then one x-vector per batch slot.
+    frozen: DeviceBuffer,
+    /// Which token rows of [`Self::frozen`] are uploaded.
+    text_ready: RefCell<Vec<bool>>,
+    text: TextProjection,
+    /// The new rows by Talker table row: their row in [`NEW_ROWS`].
+    new_slot: HashMap<u32, u32>,
+    /// A one-word stand-in for an absent new-row table.
+    none: DeviceBuffer,
+    /// The Talker's gather plan ([`frame_taps`] taps a row) and the code predictor's (one tap a row).
+    talker_idx: DeviceBuffer,
+    cp_idx: DeviceBuffer,
+    /// Transposes: Talker rows into the tables and into the new rows, code-predictor rows into the tables.
+    talker_tables: Csr,
+    talker_new: Option<Csr>,
+    cp_tables: Csr,
+    /// Unit edge weights for [`Csr::grad_step`].
+    ones: DeviceBuffer,
+    /// The code predictor's rows before the projection and their gradient (the decoder's own buffers when unprojected).
+    raw: Option<(DeviceBuffer, DeviceBuffer)>,
+    /// `(talker row, code-predictor row)` of every frame's hidden state, and the same reversed for its gradient.
+    hidden_plan: DeviceBuffer,
+    hidden_back: DeviceBuffer,
+    /// The code predictor's gradient of the Talker's hidden states ([`Qwen::enable_hidden_grad`]).
+    hidden_grad: DeviceBuffer,
+    /// The end-of-speech rows' hidden states, gathered for the greedy pick, and their plan.
+    eos_plan: DeviceBuffer,
+    eos_h: DeviceBuffer,
+    eos_head: HeadCe,
+    eos_labels: RefCell<Vec<u32>>,
 }
 
-/// The kernels the device of the heads and the projection dispatches.
+/// The kernels the device of the tables and the projection dispatches.
 pub(crate) fn aux_kernels() -> Vec<(&'static str, &'static str)> {
     let mut list = model::ops::training_kernel_list().to_vec();
     model::ops::extend_kernel_list(&mut list, model::head_ce::kernels());
-    model::ops::extend_kernel_list(&mut list, model::projector::PROJECTOR_PIPELINES);
     model::ops::extend_kernel_list(
         &mut list,
         &[
+            ("rows_gather_sum3", kernels::ROWS_GATHER_SUM3),
+            ("rows_gather_weighted_bwd", kernels::ROWS_GATHER_WEIGHTED_BWD),
+            ("anchor_rows_copy", kernels::ANCHOR_ROWS_COPY),
+            ("bias_add", kernels::BIAS_ADD),
+            ("bias_grad", kernels::BIAS_GRAD),
             ("adamw", kernels::ADAMW),
             ("gradnorm_sq", kernels::GRADNORM_SQ),
             ("grad_scale", kernels::GRAD_SCALE),
@@ -422,38 +535,6 @@ pub(crate) fn aux_kernels() -> Vec<(&'static str, &'static str)> {
     list
 }
 
-/// Rows of logits a head keeps alive for `n` tokens: all of them up to 256,
-/// else 256 (chunk starts stay on 64-row binding boundaries).
-fn head_rows(n: usize) -> u32 {
-    n.clamp(1, 256) as u32
-}
-
-/// The host optimizer's tensors: every table whole, the Talker table cut at the
-/// new rows so they take their own rate. `(table, first element, elements, new)`.
-fn segments(shape: &SftShape, tables: &HostTables) -> Vec<(usize, usize, usize, bool)> {
-    let d = shape.d();
-    let mut new: Vec<u32> = shape.new_rows.clone();
-    new.sort_unstable();
-    new.dedup();
-    let mut out = Vec::new();
-    let mut at = 0usize;
-    for r in new {
-        let start = r as usize * d;
-        if start > at {
-            out.push((0, at, start - at, false));
-        }
-        out.push((0, start, d, true));
-        at = start + d;
-    }
-    if at < tables.codec.len() {
-        out.push((0, at, tables.codec.len() - at, false));
-    }
-    for (i, t) in tables.residual.iter().enumerate() {
-        out.push((i + 1, 0, t.len(), false));
-    }
-    out
-}
-
 /// The composite trainable model. See the module documentation.
 pub struct SpeechSftModel {
     shape: SftShape,
@@ -462,14 +543,12 @@ pub struct SpeechSftModel {
     talker_norm: DeviceGradNorm,
     cp_norm: DeviceGradNorm,
     aux: Aux,
-    tables: RefCell<HostTables>,
-    grads: RefCell<HostGrads>,
-    host_opt: RefCell<model::hostopt::HostAdam>,
-    segments: Vec<(usize, usize, usize, bool)>,
     loaded: RefCell<Option<Loaded>>,
-    forward: RefCell<Option<Forward>>,
     stats: Cell<ForwardStats>,
     last_norm: Cell<Option<f32>>,
+    /// The sum of squares of every accumulated gradient, once measured for the current gradients (the update gate
+    /// asks for their finiteness, the update for their norm: one reduction serves both).
+    grad_sum_sq: Cell<Option<f64>>,
 }
 
 /// Move tensor `name` (of `numel` values) out of `init`.
@@ -481,17 +560,34 @@ fn take(init: &mut HashMap<String, Vec<f32>>, name: &str, numel: usize) -> Resul
     Ok(v)
 }
 
-/// The host tables and the frozen text path of `shape`, moved out of `init`.
-pub(crate) fn host_tables(shape: &SftShape, init: &mut HashMap<String, Vec<f32>>) -> Result<HostTables, String> {
-    let d = shape.d();
+/// The frozen text path of `shape`, moved out of `init`.
+fn text_projection(shape: &SftShape, init: &mut HashMap<String, Vec<f32>>) -> Result<TextProjection, String> {
     let (th, inter) = (shape.talker.text_hidden_size as usize, shape.text_inter as usize);
     let frozen = shape.frozen_params();
     let mut get = |i: usize| take(init, &frozen[i].0, frozen[i].1);
-    let text = TextProjection { text_embedding: Some(get(0)?), fc1_w: get(1)?, fc1_b: get(2)?, fc2_w: get(3)?, fc2_b: get(4)?, in_dim: th, inter, out: d, text_vocab: shape.talker.text_vocab_size as usize };
+    Ok(TextProjection { text_embedding: Some(get(0)?), fc1_w: get(1)?, fc1_b: get(2)?, fc2_w: get(3)?, fc2_b: get(4)?, in_dim: th, inter, out: shape.d(), text_vocab: shape.talker.text_vocab_size as usize })
+}
+
+/// The host tables and the frozen text path of `shape`, moved out of `init`: what generation reads, for checking
+/// that training rows are generation's rows.
+#[cfg(test)]
+pub(crate) fn host_tables(shape: &SftShape, init: &mut HashMap<String, Vec<f32>>) -> Result<HostTables, String> {
+    let text = text_projection(shape, init)?;
     let tparams = shape.table_params();
     let codec = take(init, &tparams[0].0, tparams[0].1)?;
     let residual = tparams[1..].iter().map(|(n, s)| take(init, n, *s)).collect::<Result<Vec<_>, _>>()?;
-    Ok(HostTables::new(d, text, codec, residual))
+    Ok(HostTables::new(shape.d(), text, codec, residual))
+}
+
+/// The taps of a Talker frame row: its residual codebooks, its first codebook and its text, in the order generation
+/// sums them (`train::policy_rows`).
+const fn frame_taps(groups: usize) -> usize {
+    groups + 1
+}
+
+/// The text tokens a plan's rows read.
+fn plan_text(plan: &PromptPlan) -> impl Iterator<Item = u32> + Clone + '_ {
+    plan.rows.iter().flatten().filter_map(|p| if let Part::Text(id) = p { Some(*id) } else { None }).chain(plan.trailing.iter().copied()).chain([plan.tts_pad])
 }
 
 impl SpeechSftModel {
@@ -508,6 +604,17 @@ impl SpeechSftModel {
         if shape.mtp.num_code_groups != shape.talker.num_code_groups {
             return Err(format!("speech sft: the code predictor fills {} codebooks, the Talker has {}", shape.mtp.num_code_groups, shape.talker.num_code_groups));
         }
+        if let Some(&r) = shape.new_rows.iter().find(|&&r| r >= shape.talker.vocab) {
+            return Err(format!("speech sft: new row {r} is past the Talker table's {} rows", shape.talker.vocab));
+        }
+        let (dc, cv) = (shape.mtp.d_model as usize, shape.mtp.vocab as usize);
+        // The heads join their decoders: the Talker's is its own head, the residual heads the code predictor's stacked one.
+        let talker_head = take(&mut init, TALKER_HEAD, shape.talker.vocab as usize * d)?;
+        let mut cp_head = Vec::with_capacity(shape.residuals() * cv * dc);
+        for i in 0..shape.residuals() {
+            cp_head.extend(take(&mut init, &residual_head(i), cv * dc)?);
+        }
+        let mut heads = [Some(talker_head), Some(cp_head)];
         let mut decoder = |cfg: &QwenConfig, which: Decoder, parent: Option<&Gpu>| -> Result<Qwen, String> {
             let mut weights = qwen3::init_weights(cfg, seed);
             for (hf, numel, owner) in shape.decoder_params() {
@@ -521,100 +628,109 @@ impl SpeechSftModel {
                 .expect("a listed parameter maps");
                 weights.insert(brain, take(&mut init, &hf, numel)?);
             }
+            weights.insert("lm_head.weight".into(), heads[which as usize].take().expect("each head is placed once"));
             let (b, t) = match which {
                 Decoder::Talker => (shape.batch, shape.block),
-                Decoder::CodePredictor => (shape.frames, shape.mtp.num_code_groups),
+                Decoder::CodePredictor => (shape.cp_batch(), shape.mtp.num_code_groups),
             };
             // One device for the run: the code predictor is built on the Talker's handle.
             let mut q = Qwen::new_training_on(parent, cfg.clone(), b, t, &weights, shape.gemm, &qwen3::model::FullFtBuild::ambient())?;
-            q.enable_mm_splices(&[(0, b * t)]);
-            q.enable_external_head();
-            let store = model::Model::optimizer_state(&mut q).ok_or("speech sft: the decoder exposes no parameter store")?.store;
-            store.freeze_where(|n| n == "tok.weight");
-            // Every row is spliced: the token ids are never read, and no built-in head runs.
-            q.set_batch(&vec![0u32; (b * t) as usize], &vec![IGNORE; (b * t) as usize]);
+            // Every row is an input row: the token table is never read and takes no gradient.
+            q.freeze_params(|n| n == "tok.weight");
+            q.enable_input_rows();
+            q.enable_batch_trimming();
             Ok(q)
         };
-        let talker = decoder(&shape.talker_qwen(), Decoder::Talker, None)?;
-        let cp = decoder(&shape.cp_qwen(), Decoder::CodePredictor, Some(talker.gpu()))?;
+        let mut talker = decoder(&shape.talker_qwen(), Decoder::Talker, None)?;
+        let mut cp = decoder(&shape.cp_qwen(), Decoder::CodePredictor, Some(talker.gpu()))?;
+        cp.set_head_groups(HeadGroups { period: shape.mtp.num_code_groups, offset: 1, width: shape.mtp.vocab, heads: shape.residuals() as u32, capacity: shape.cp_batch() })?;
+        let aux = Self::build_aux(&shape, &talker, &mut init)?;
+        talker.enable_hidden_grad(&aux.hidden_grad);
         let talker_norm = DeviceGradNorm::new(talker.gpu())?;
         let cp_norm = DeviceGradNorm::new(cp.gpu())?;
-
-        if let Some(&r) = shape.new_rows.iter().find(|&&r| r >= shape.talker.vocab) {
-            return Err(format!("speech sft: new row {r} is past the Talker table's {} rows", shape.talker.vocab));
-        }
-        let tables = host_tables(&shape, &mut init)?;
-        let grads = HostGrads::zeros_like(&tables);
-        let segments = segments(&shape, &tables);
-        let host_params: Vec<(String, usize)> = segments.iter().map(|&(t, at, n, _)| (format!("table{t}@{at}"), n)).collect();
-        let host_opt = model::hostopt::HostAdam::new(&host_params, ParamPrecision::FP32)?;
-
-        let aux = Self::build_aux(&shape, &talker, &mut init)?;
-        Ok(SpeechSftModel {
-            shape,
-            talker,
-            cp,
-            talker_norm,
-            cp_norm,
-            aux,
-            tables: RefCell::new(tables),
-            grads: RefCell::new(grads),
-            host_opt: RefCell::new(host_opt),
-            segments,
-            loaded: RefCell::new(None),
-            forward: RefCell::new(None),
-            stats: Cell::new(ForwardStats::default()),
-            last_norm: Cell::new(None),
-        })
+        Ok(SpeechSftModel { shape, talker, cp, talker_norm, cp_norm, aux, loaded: RefCell::new(None), stats: Cell::new(ForwardStats::default()), last_norm: Cell::new(None), grad_sum_sq: Cell::new(None) })
     }
 
     fn build_aux(shape: &SftShape, talker: &Qwen, init: &mut HashMap<String, Vec<f32>>) -> Result<Aux, String> {
         let gpu = talker.gpu().new_like(&aux_kernels());
         let mut ops = Ops::new(gpu.share())?;
         ops.set_gemm_precision(shape.gemm);
-        let params = shape.aux_params();
-        let mut weights = HashMap::new();
-        for (n, s) in &params {
-            weights.insert(n.clone(), take(init, n, *s)?);
+        let d = shape.d();
+        let (dc, g) = (shape.mtp.d_model as usize, shape.mtp.num_code_groups as usize);
+
+        // The trained tables as one, the new rows beside them (their own rate), the projection.
+        let mut tables = Vec::with_capacity(shape.table_rows() * d);
+        for (n, s) in shape.table_params() {
+            tables.extend(take(init, &n, s)?);
         }
-        let mut ps = ParamStore::new(&gpu, params.clone(), &weights);
-        for (n, _) in &params {
-            let mult = if n == TALKER_HEAD { shape.lr.talker } else { shape.lr.code_predictor };
-            ps.set_lr_mult(n, mult);
+        let mut new_ids: Vec<u32> = shape.new_rows.clone();
+        new_ids.sort_unstable();
+        new_ids.dedup();
+        let new_slot: HashMap<u32, u32> = new_ids.iter().enumerate().map(|(i, &r)| (r, i as u32)).collect();
+        let new_rows: Vec<f32> = new_ids.iter().flat_map(|&r| tables[r as usize * d..(r as usize + 1) * d].to_vec()).collect();
+        let mut params = vec![(TABLES.to_string(), tables.len())];
+        let mut weights = HashMap::from([(TABLES.to_string(), tables)]);
+        if !new_ids.is_empty() {
+            params.push((NEW_ROWS.to_string(), new_rows.len()));
+            weights.insert(NEW_ROWS.to_string(), new_rows);
+        }
+        if shape.projected() {
+            for (n, s) in [(PROJECTION[0], dc * d), (PROJECTION[1], dc)] {
+                params.push((n.to_string(), s));
+                weights.insert(n.to_string(), take(init, n, s)?);
+            }
+        }
+        let mut ps = ParamStore::new(&gpu, params, &weights);
+        drop(weights);
+        ps.set_lr_mult(TABLES, shape.lr.codec_tables);
+        if !new_ids.is_empty() {
+            ps.set_lr_mult(NEW_ROWS, shape.lr.new_rows);
+        }
+        if shape.projected() {
+            for n in PROJECTION {
+                ps.set_lr_mult(n, shape.lr.code_predictor);
+            }
         }
         let k = |name: &str| gpu.kernel_index(name).ok_or_else(|| format!("speech sft: kernel {name} is not registered"));
         let opt = Optim::new(k("adamw")?, k("gradnorm_sq")?, k("grad_scale")?, k("clip_coef")?, k("grad_scale_buf")?);
         let norm = DeviceGradNorm::new(&gpu)?;
-        let (d, v) = (shape.d() as u32, shape.talker.vocab);
-        let (dc, cv) = (shape.mtp.d_model, shape.mtp.vocab);
-        let talker_rows = (shape.batch * shape.block) as usize;
-        let head = |name: &str, n: u32, k: u32, rows: usize| -> Result<HeadCe, String> {
-            let w = Weight::dense_f32(ps.w(name).clone(), n, k);
-            HeadCe::new(&ops, k, n, &w, HeadCeConfig { rows_per_chunk: head_rows(rows), tile_budget_words: None }, HeadKernels::from_gpu(&gpu)?)
-        };
-        let talker_head = head(TALKER_HEAD, v, d, talker_rows)?;
-        let cp_heads = (0..shape.residuals()).map(|i| head(&residual_head(i), cv, dc, shape.frames as usize)).collect::<Result<Vec<_>, _>>()?;
-        let cp_rows = shape.frames * shape.mtp.num_code_groups;
-        let projector = if shape.projected() {
-            let cfg = ProjectorConfig { kind: ProjectorKind::Mlp, depth: 1, input_dim: d, n_embed: dc, out_dim: dc, bias: true };
-            let p: HashMap<String, DeviceBuffer> = [("in.weight", PROJECTION[0]), ("in.bias", PROJECTION[1])].iter().map(|(k, n)| (k.to_string(), ps.w(n).clone())).collect();
-            let g: HashMap<String, DeviceBuffer> = [("in.weight", PROJECTION[0]), ("in.bias", PROJECTION[1])].iter().map(|(k, n)| (k.to_string(), ps.g(n).clone())).collect();
-            Some(MlpProjector::with_buffers(&gpu, cfg, cp_rows, p, g, true)?)
-        } else {
-            None
-        };
-        let st = |n: u64| gpu.storage(n.max(1));
+        let kernels = AuxKernels { gather: k("rows_gather_sum3")?, gather_bwd: k("rows_gather_weighted_bwd")?, copy: k("anchor_rows_copy")?, bias_add: k("bias_add")?, bias_grad: k("bias_grad")? };
+
+        let text = text_projection(shape, init)?;
+        let text_vocab = shape.talker.text_vocab_size as usize;
+        let batch = shape.batch as usize;
+        let frozen = gpu.storage(((text_vocab + batch) * d) as u64);
+
+        let talker_cap = (shape.batch * shape.block) as usize;
+        let cp_cap = shape.cp_batch() as usize * g;
+        let st = |n: usize| gpu.storage(n.max(1) as u64);
+        let talker_edges = talker_cap * frame_taps(g);
+        let ones = gpu.storage_init("speech_sft.ones", &vec![1.0f32; talker_edges.max(cp_cap)]);
+        let raw = shape.projected().then(|| (st(cp_cap * d), st(cp_cap * d)));
+        let head = model::Model::optimizer_parts(talker).ok_or("speech sft: the Talker exposes no parameter store")?.store.w("lm_head.weight").clone();
+        let head_w = Weight::dense_f32(head, shape.talker.vocab, d as u32);
+        let eos_head = HeadCe::new(&ops, d as u32, shape.talker.vocab, &head_w, HeadCeConfig { rows_per_chunk: shape.batch.clamp(1, 256), tile_budget_words: None }, HeadKernels::from_gpu(&gpu)?)?;
         Ok(Aux {
-            talker_h: st(talker_rows as u64 * u64::from(d)),
-            talker_dh: st(talker_rows as u64 * u64::from(d)),
-            cp_h: st(u64::from(shape.frames) * u64::from(dc)),
-            cp_dh: st(u64::from(shape.frames) * u64::from(dc)),
-            proj_in: st(u64::from(cp_rows) * u64::from(d)),
-            proj_d_out: st(u64::from(cp_rows) * u64::from(dc)),
-            proj_d_in: st(u64::from(cp_rows) * u64::from(d)),
-            talker_head,
-            cp_heads,
-            projector,
+            frozen,
+            text_ready: RefCell::new(vec![false; text_vocab]),
+            text,
+            none: st(1),
+            talker_idx: st(talker_edges),
+            cp_idx: st(cp_cap),
+            talker_tables: Csr::new(&gpu, shape.table_rows(), talker_edges),
+            talker_new: (!new_ids.is_empty()).then(|| Csr::new(&gpu, new_ids.len(), talker_cap * 2)),
+            cp_tables: Csr::new(&gpu, shape.table_rows(), cp_cap),
+            new_slot,
+            ones,
+            raw,
+            hidden_plan: st(shape.frames as usize * 2),
+            hidden_back: st(shape.frames as usize * 2),
+            hidden_grad: talker.gpu().storage((talker_cap * d) as u64),
+            eos_plan: st(batch * 2),
+            eos_h: st(batch * d),
+            eos_head,
+            eos_labels: RefCell::new(Vec::new()),
+            k: kernels,
             norm,
             opt,
             ps,
@@ -632,21 +748,53 @@ impl SpeechSftModel {
         self.stats.get()
     }
 
+    /// The rows the loaded batch computes, Talker and code predictor together (each trimmed to what the batch holds).
+    pub fn computed_rows(&self) -> u32 {
+        self.loaded.borrow().as_ref().map_or(0, |l| l.talker_rows + l.cp_rows)
+    }
+
     /// Talker rows a plan of `prefix` rows and `frames` frames takes.
     pub fn rows_needed(prefix: usize, frames: usize) -> usize {
         prefix + frames
     }
 
-    /// Load the next batch: at most [`SftShape::batch`] examples, each fitting the block.
+    /// The tap of a Talker table row: the new rows sit in their own table.
+    fn codec_tap(&self, id: u32) -> u32 {
+        match self.aux.new_slot.get(&id) {
+            Some(&slot) => TAG_NEW | slot,
+            None => TAG_TABLES | id,
+        }
+    }
+
+    /// Upload the projected rows of the text tokens `ids` the device does not hold yet: each token is projected once
+    /// per run (the text path is frozen), on the host, as generation projects it.
+    fn upload_text(&self, ids: impl Iterator<Item = u32>) {
+        let mut ready = self.aux.text_ready.borrow_mut();
+        let mut fresh: Vec<u32> = ids.filter(|&id| !ready[id as usize]).collect();
+        fresh.sort_unstable();
+        fresh.dedup();
+        if fresh.is_empty() {
+            return;
+        }
+        let text = &self.aux.text;
+        let rows = text.project(&text.embed_text(&fresh));
+        let d = self.shape.d();
+        for (i, &id) in fresh.iter().enumerate() {
+            self.aux.gpu.write_f32_at(&self.aux.frozen, id as u64 * d as u64, &rows[i * d..(i + 1) * d]);
+            ready[id as usize] = true;
+        }
+    }
+
+    /// Load the next batch: at most [`SftShape::batch`] examples, each fitting the block. Every plan the forward and
+    /// backward read is on the device when this returns.
     pub fn load(&self, examples: Vec<Example>) -> Result<(), String> {
         let s = &self.shape;
-        let g = s.mtp.num_code_groups as usize;
+        let (g, d) = (s.mtp.num_code_groups as usize, s.d());
+        let text_vocab = s.talker.text_vocab_size;
         if examples.len() > s.batch as usize {
             return Err(format!("speech sft: {} examples for a batch of {}", examples.len(), s.batch));
         }
-        let mut talker_rows = Vec::new();
-        let mut talker_labels = Vec::new();
-        let mut frames = Vec::new();
+        let mut frames = 0usize;
         for (slot, ex) in examples.iter().enumerate() {
             if ex.codes.is_empty() || !ex.codes.len().is_multiple_of(g) {
                 return Err(format!("speech sft: example {slot}: {} codes are not whole frames of {g}", ex.codes.len()));
@@ -655,211 +803,258 @@ impl SpeechSftModel {
             if Self::rows_needed(prefix, n) > s.block as usize {
                 return Err(format!("speech sft: example {slot}: {prefix} prompt rows and {n} frames exceed the block of {}", s.block));
             }
-            if ex.plan.rows.iter().flatten().any(|p| *p == Part::XVector) && ex.xvector.len() != s.d() {
-                return Err(format!("speech sft: example {slot}: an x-vector of {} values, the Talker is {} wide", ex.xvector.len(), s.d()));
+            if ex.plan.rows.iter().flatten().any(|p| *p == Part::XVector) && ex.xvector.len() != d {
+                return Err(format!("speech sft: example {slot}: an x-vector of {} values, the Talker is {} wide", ex.xvector.len(), d));
             }
-            let base = slot * s.block as usize;
-            for t in 0..n {
-                talker_rows.push(base + prefix - 1 + t);
-                talker_labels.push(ex.codes[t * g]);
-                frames.push((slot, t, base + prefix - 1 + t));
+            if let Some(bad) = plan_text(&ex.plan).find(|&id| id >= text_vocab) {
+                return Err(format!("speech sft: example {slot}: text token {bad} is past the text vocabulary of {text_vocab}"));
+            }
+            if let Some((i, c)) = ex.codes.iter().enumerate().find(|&(i, &c)| c >= if i % g == 0 { s.talker.vocab } else { s.mtp.vocab }) {
+                return Err(format!("speech sft: example {slot}: code {c} at {i} is past its codebook"));
+            }
+            if ex.plan.rows.iter().any(|parts| parts.len() > frame_taps(g)) {
+                return Err(format!("speech sft: example {slot}: a prompt row sums more than {} parts", frame_taps(g)));
+            }
+            frames += n;
+        }
+        if frames > s.frames as usize {
+            return Err(format!("speech sft: {frames} frames for a code-predictor capacity of {}", s.frames));
+        }
+        let aux = &self.aux;
+
+        // The Talker's targets decide which rows it computes; its plans are laid out at that run.
+        let (b, t) = (s.batch as usize, s.block as usize);
+        let mut targets = vec![IGNORE; b * t];
+        for (slot, ex) in examples.iter().enumerate() {
+            let (base, prefix, n) = (slot * t, ex.plan.len(), ex.codes.len() / g);
+            for f in 0..n {
+                targets[base + prefix - 1 + f] = ex.codes[f * g];
             }
             if ex.complete {
-                talker_rows.push(base + prefix - 1 + n);
-                talker_labels.push(s.specials.codec_eos);
+                targets[base + prefix - 1 + n] = s.specials.codec_eos;
             }
         }
-        if frames.len() > s.frames as usize {
-            return Err(format!("speech sft: {} frames for a code-predictor capacity of {}", frames.len(), s.frames));
+        let talker_count = targets.iter().filter(|&&y| y != IGNORE).count() as u32;
+        self.talker.set_batch(&vec![0u32; b * t], &targets);
+        let (run, seqs) = (self.talker.run_len() as usize, self.talker.batch_run() as usize);
+
+        self.upload_text(examples.iter().flat_map(|ex| plan_text(&ex.plan)).collect::<Vec<_>>().into_iter());
+        for (slot, ex) in examples.iter().enumerate() {
+            if ex.plan.rows.iter().flatten().any(|p| *p == Part::XVector) {
+                aux.gpu.write_f32_at(&aux.frozen, (u64::from(text_vocab) + slot as u64) * d as u64, &ex.xvector);
+            }
         }
-        *self.loaded.borrow_mut() = Some(Loaded { examples, talker_rows, talker_labels, frames });
-        *self.forward.borrow_mut() = None;
+
+        // Talker rows: each prompt row its parts in order; each frame row its residual codes, its first code and its
+        // text. Reads are listed row by row, so every table row's edges come in row order.
+        let taps = frame_taps(g);
+        let mut idx = vec![NO_TAP; seqs * run * taps];
+        let mut table_reads: Vec<(u32, u32)> = Vec::new();
+        let mut new_reads: Vec<(u32, u32)> = Vec::new();
+        let mut hidden: Vec<(u32, u32)> = Vec::with_capacity(frames);
+        let mut eos_rows: Vec<u32> = Vec::new();
+        let mut read = |row: usize, tap: u32| match tap & TAG_MASK {
+            TAG_TABLES => table_reads.push((row as u32, tap)),
+            TAG_NEW => new_reads.push((row as u32, tap & !TAG_MASK)),
+            _ => {}
+        };
+        for (slot, ex) in examples.iter().enumerate() {
+            let base = slot * run;
+            let prefix = ex.plan.len();
+            for (r, parts) in ex.plan.rows.iter().enumerate() {
+                for (k, part) in parts.iter().enumerate() {
+                    let tap = match *part {
+                        Part::Text(id) => TAG_FROZEN | id,
+                        Part::Codec(id) => self.codec_tap(id),
+                        Part::XVector => TAG_FROZEN | (text_vocab + slot as u32),
+                    };
+                    idx[(base + r) * taps + k] = tap;
+                    read(base + r, tap);
+                }
+            }
+            let n = ex.codes.len() / g;
+            for f in 0..n {
+                let row = base + prefix + f;
+                let frame = &ex.codes[f * g..(f + 1) * g];
+                let mut put = |k: usize, tap: u32| {
+                    idx[row * taps + k] = tap;
+                    read(row, tap);
+                };
+                for (k, &code) in frame.iter().enumerate().skip(1) {
+                    put(k - 1, TAG_TABLES | (s.residual_row0(k - 1) as u32 + code));
+                }
+                put(g - 1, self.codec_tap(frame[0]));
+                put(g, TAG_FROZEN | ex.plan.trailing.get(f).copied().unwrap_or(ex.plan.tts_pad));
+                hidden.push(((base + prefix - 1 + f) as u32, (hidden.len() * g) as u32));
+            }
+            if ex.complete {
+                eos_rows.push((base + prefix - 1 + n) as u32);
+            }
+        }
+        aux.gpu.write(&aux.talker_idx, &idx);
+        aux.talker_tables.upload(&aux.gpu, &table_reads);
+        if let Some(csr) = &aux.talker_new {
+            csr.upload(&aux.gpu, &new_reads);
+        }
+
+        // The code predictor: frame f's rows are f * g + p; position 0 is the Talker's hidden state, copied in.
+        let cpb = s.cp_batch() as usize;
+        let mut cp_targets = vec![IGNORE; cpb * g];
+        for (f, frame) in examples.iter().flat_map(|ex| ex.codes.chunks(g)).enumerate() {
+            cp_targets[f * g + 1..(f + 1) * g].copy_from_slice(&frame[1..]);
+        }
+        self.cp.set_batch(&vec![0u32; cpb * g], &cp_targets);
+        let cp_seqs = self.cp.batch_run() as usize;
+        assert_eq!(self.cp.run_len() as usize, g, "speech sft: every frame's last position is supervised, so the code predictor runs whole frames");
+        let mut cp_idx = vec![NO_TAP; cp_seqs * g];
+        let mut cp_reads: Vec<(u32, u32)> = Vec::with_capacity(frames * (g - 1));
+        for (f, frame) in examples.iter().flat_map(|ex| ex.codes.chunks(g)).enumerate() {
+            for p in 1..g {
+                let row = if p == 1 { frame[0] } else { s.residual_row0(p - 2) as u32 + frame[p - 1] };
+                cp_idx[f * g + p] = TAG_TABLES | row;
+                cp_reads.push(((f * g + p) as u32, row));
+            }
+        }
+        aux.gpu.write(&aux.cp_idx, &cp_idx);
+        aux.cp_tables.upload(&aux.gpu, &cp_reads);
+        let plan: Vec<u32> = hidden.iter().flat_map(|&(trow, crow)| [trow, crow]).collect();
+        let back: Vec<u32> = hidden.iter().flat_map(|&(trow, crow)| [crow, trow]).collect();
+        aux.gpu.write(&aux.hidden_plan, &plan);
+        aux.gpu.write(&aux.hidden_back, &back);
+        if !eos_rows.is_empty() {
+            let pairs: Vec<u32> = eos_rows.iter().enumerate().flat_map(|(i, &r)| [r, i as u32]).collect();
+            aux.gpu.write(&aux.eos_plan, &pairs);
+        }
+        *aux.eos_labels.borrow_mut() = vec![s.specials.codec_eos; eos_rows.len()];
+        *self.loaded.borrow_mut() = Some(Loaded { talker_count, talker_rows: (seqs * run) as u32, cp_rows: (cp_seqs * g) as u32, frames: frames as u32, eos: eos_rows.len() as u32 });
         Ok(())
     }
 
-    /// The code of codebook `k` in frame `f` of the loaded batch.
-    fn code(l: &Loaded, f: usize, k: usize, g: usize) -> u32 {
-        let (slot, t, _) = l.frames[f];
-        l.examples[slot].codes[t * g + k]
+    /// The gather of `rows` rows of `taps` taps over the three tables: trained, new rows (or a stand-in), frozen.
+    fn gather_step(&self, idx: &DeviceBuffer, rows: u32, taps: u32, out: &DeviceBuffer) -> Step {
+        let aux = &self.aux;
+        let new = if aux.talker_new.is_some() { aux.ps.w(NEW_ROWS) } else { &aux.none };
+        let d = self.shape.d() as u32;
+        aux.gpu.step(aux.k.gather, &[idx, aux.ps.w(TABLES), new, &aux.frozen, out], &[rows, taps, d], rows * d)
     }
 
-    /// Rows `rows` of `[*, d]` `x`, concatenated.
-    fn gather(x: &[f32], d: usize, rows: impl Iterator<Item = usize>) -> Vec<f32> {
-        rows.flat_map(|r| x[r * d..(r + 1) * d].iter().copied()).collect()
+    /// The code predictor's rows before the projection and their gradient: the raw buffers, or the decoder's own
+    /// input rows when there is no projection.
+    fn cp_raw(&self) -> (&DeviceBuffer, &DeviceBuffer) {
+        match &self.aux.raw {
+            Some((raw, d_raw)) => (raw, d_raw),
+            None => (self.cp.input_rows_buffer(), self.cp.input_rows_grad_buffer()),
+        }
     }
 
     fn forward_loss(&self) -> f32 {
         let s = &self.shape;
-        let (d, dc, g) = (s.d(), s.mtp.d_model as usize, s.mtp.num_code_groups as usize);
-        let (bt, fg) = ((s.batch * s.block) as usize, (s.frames * s.mtp.num_code_groups) as usize);
+        let (d, g) = (s.d() as u32, s.mtp.num_code_groups);
         let loaded = self.loaded.borrow();
         let l = loaded.as_ref().expect("speech sft: load a batch before the forward");
-        let tables = self.tables.borrow();
-
-        // The Talker's rows: the materialised plan, then one row per frame, as generation feeds them.
-        let rows_range = gpu_core::markers::range(c"speech_sft.rows");
-        let mut rows = vec![0.0f32; bt * d];
-        for (slot, ex) in l.examples.iter().enumerate() {
-            let prompt = ex.plan.materialise(&*tables, Some(&ex.xvector));
-            let r = crate::train::policy_rows(&*tables, &*tables, &prompt, &ex.codes, g, None);
-            let base = slot * s.block as usize * d;
-            rows[base..base + r.rows.len()].copy_from_slice(&r.rows);
-        }
-        self.talker.write_img_embeds(&rows);
-        drop(rows_range);
-        let talker_range = gpu_core::markers::range(c"speech_sft.talker_fwd");
-        let talker_hidden = self.talker.forward_hidden();
-        drop(talker_range);
-        let _heads = gpu_core::markers::range(c"speech_sft.talker_head_fwd");
-
         let aux = &self.aux;
-        let n = l.talker_rows.len();
-        aux.gpu.write_f32(&aux.talker_h, &Self::gather(&talker_hidden, d, l.talker_rows.iter().copied()));
-        let (tl, picks) = aux.talker_head.forward_argmax(&aux.ops, &aux.talker_h, n as u32, &l.talker_labels, 1.0).unwrap_or_else(|e| panic!("speech sft: {e}"));
-        let eos = s.specials.codec_eos;
-        let eos_at: Vec<usize> = (0..n).filter(|&i| l.talker_labels[i] == eos).collect();
-        let eos_hits = eos_at.iter().filter(|&&i| picks[i] == eos).count() as u32;
 
-        // The code predictor's rows: [talker hidden, cb0 (the Talker's table), cb1 .. cb14 (its own)].
-        drop(_heads);
+        let rows = gpu_core::markers::range(c"speech_sft.rows");
+        aux.gpu.submit(&[], &[self.gather_step(&aux.talker_idx, l.talker_rows, frame_taps(g as usize) as u32, self.talker.input_rows_buffer())]);
+        drop(rows);
+        let talker_range = gpu_core::markers::range(c"speech_sft.talker_fwd");
+        let talker_mean = self.talker.forward();
+        drop(talker_range);
+
         let cp_rows_range = gpu_core::markers::range(c"speech_sft.cp_rows");
-        let mut raw = vec![0.0f32; fg * d];
-        for (f, &(_, _, trow)) in l.frames.iter().enumerate() {
-            let at = f * g * d;
-            raw[at..at + d].copy_from_slice(&talker_hidden[trow * d..(trow + 1) * d]);
-            raw[at + d..at + 2 * d].copy_from_slice(TalkerHost::codec_embed(&*tables, Self::code(l, f, 0, g)));
-            for p in 2..g {
-                let row = crate::prompt::MtpHost::codec_embed(&*tables, p - 2, Self::code(l, f, p - 1, g));
-                raw[at + p * d..at + (p + 1) * d].copy_from_slice(row);
-            }
+        let (raw, _) = self.cp_raw();
+        let mut steps = vec![self.gather_step(&aux.cp_idx, l.cp_rows, 1, raw), aux.gpu.step(aux.k.copy, &[&aux.hidden_plan, self.talker.final_hidden_buffer(), raw], &[l.frames, d], l.frames * d)];
+        if aux.raw.is_some() {
+            let dc = s.mtp.d_model;
+            let w = Weight::dense_f32(aux.ps.w(PROJECTION[0]).clone(), dc, d);
+            let out = self.cp.input_rows_buffer();
+            aux.ops.matmul(&mut steps, &w, &aux.ops.act_f32(raw, 0, l.cp_rows, d), out, 0);
+            steps.push(aux.gpu.step(aux.k.bias_add, &[out, aux.ps.w(PROJECTION[1])], &[l.cp_rows, dc], l.cp_rows * dc));
         }
-        let cp_in = match &aux.projector {
-            Some(proj) => {
-                aux.gpu.write_f32(&aux.proj_in, &raw);
-                aux.gpu.submit(&[], &proj.forward_rows(&aux.gpu, &[&aux.proj_in], fg as u32));
-                aux.gpu.read(proj.out(), fg * dc)
-            }
-            None => raw.clone(),
-        };
-        self.cp.write_img_embeds(&cp_in);
+        aux.gpu.submit(&[], &steps);
         drop(cp_rows_range);
         let cp_range = gpu_core::markers::range(c"speech_sft.cp_fwd");
-        let cp_hidden = self.cp.forward_hidden();
-        drop(cp_range);
-        let _cp_heads = gpu_core::markers::range(c"speech_sft.cp_heads_fwd");
-
-        let nf = l.frames.len();
-        let mut cp_sum = 0.0f64;
-        let mut cp_count = 0u32;
-        for (k, head) in aux.cp_heads.iter().enumerate().map(|(i, h)| (i + 1, h)) {
-            aux.gpu.write_f32(&aux.cp_h, &Self::gather(&cp_hidden, dc, (0..nf).map(|f| f * g + k)));
-            let labels: Vec<u32> = (0..nf).map(|f| Self::code(l, f, k, g)).collect();
-            let hl = head.forward(&aux.ops, &aux.cp_h, nf as u32, &labels, None, 1.0);
-            cp_sum += hl.loss_sum;
-            cp_count += hl.count;
+        let cp_count = l.frames * (g - 1);
+        // The code predictor's gradient carries its weight in the loss: its mean is taken over `count / mtp_weight`.
+        let weighted = s.mtp_weight > 0.0;
+        if weighted {
+            self.cp.set_loss_denominator(cp_count as f32 / s.mtp_weight);
         }
-        let stats = ForwardStats { talker_sum: tl.loss_sum, talker_count: tl.count, cp_sum, cp_count, eos_hits, eos_count: eos_at.len() as u32, frames: nf as u32 };
+        let cp_out = self.cp.forward();
+        let cp_mean = if weighted { cp_out / s.mtp_weight } else { cp_out };
+        drop(cp_range);
+
+        let eos_range = gpu_core::markers::range(c"speech_sft.eos");
+        let eos_hits = if l.eos > 0 {
+            aux.gpu.submit(&[], &[aux.gpu.step(aux.k.copy, &[&aux.eos_plan, self.talker.final_hidden_buffer(), &aux.eos_h], &[l.eos, d], l.eos * d)]);
+            let labels = aux.eos_labels.borrow();
+            let (_, picks) = aux.eos_head.forward_argmax(&aux.ops, &aux.eos_h, l.eos, &labels, 1.0).unwrap_or_else(|e| panic!("speech sft: {e}"));
+            picks.iter().filter(|&&p| p == s.specials.codec_eos).count() as u32
+        } else {
+            0
+        };
+        drop(eos_range);
+        let stats = ForwardStats {
+            talker_sum: f64::from(talker_mean) * f64::from(l.talker_count),
+            talker_count: l.talker_count,
+            cp_sum: f64::from(cp_mean) * f64::from(cp_count),
+            cp_count,
+            eos_hits,
+            eos_count: l.eos,
+            frames: l.frames,
+        };
         self.stats.set(stats);
-        *self.forward.borrow_mut() = Some(Forward { talker_hidden, cp_hidden, cp_raw: raw, talker_count: tl.count, cp_count });
         stats.loss(s.mtp_weight)
     }
 
     fn backward_all(&self) {
         let s = &self.shape;
-        let (d, dc, g) = (s.d(), s.mtp.d_model as usize, s.mtp.num_code_groups as usize);
-        let (bt, fg) = ((s.batch * s.block) as usize, (s.frames * s.mtp.num_code_groups) as usize);
+        let (d, dc) = (s.d() as u32, s.mtp.d_model);
         let loaded = self.loaded.borrow();
         let l = loaded.as_ref().expect("speech sft: load a batch before the backward");
-        let fwd = self.forward.borrow();
-        let fw = fwd.as_ref().expect("speech sft: the backward follows a forward");
         let aux = &self.aux;
-        let nf = l.frames.len();
 
-        // Code predictor: every head's gradient into its position's rows, then the decoder.
-        let heads_range = gpu_core::markers::range(c"speech_sft.cp_heads_bwd");
-        let mut d_cp = vec![0.0f32; fg * dc];
-        if fw.cp_count > 0 {
-            let scale = s.mtp_weight / fw.cp_count as f32;
-            for (i, head) in aux.cp_heads.iter().enumerate() {
-                let k = i + 1;
-                aux.gpu.write_f32(&aux.cp_h, &Self::gather(&fw.cp_hidden, dc, (0..nf).map(|f| f * g + k)));
-                let labels: Vec<u32> = (0..nf).map(|f| Self::code(l, f, k, g)).collect();
-                head.backward(&aux.ops, &aux.cp_h, &aux.cp_dh, nf as u32, &labels, None, scale, 1.0, Some(aux.ps.g(&residual_head(i))));
-                let dh = aux.gpu.read(&aux.cp_dh, nf * dc);
-                for f in 0..nf {
-                    d_cp[(f * g + k) * dc..(f * g + k + 1) * dc].copy_from_slice(&dh[f * dc..(f + 1) * dc]);
-                }
+        // A code predictor weighted out of the loss sends no gradient anywhere.
+        if s.mtp_weight > 0.0 {
+            let cp_range = gpu_core::markers::range(c"speech_sft.cp_bwd");
+            self.cp.backward();
+            drop(cp_range);
+            let _route = gpu_core::markers::range(c"speech_sft.cp_route");
+            let (raw, d_raw) = self.cp_raw();
+            let mut steps = Vec::new();
+            if aux.raw.is_some() {
+                let dy = self.cp.input_rows_grad_buffer();
+                let w = Weight::dense_f32(aux.ps.w(PROJECTION[0]).clone(), dc, d);
+                aux.ops.matmul_dw(&mut steps, raw, dy, l.cp_rows, dc, d, aux.ps.g(PROJECTION[0]));
+                steps.push(aux.gpu.step(aux.k.bias_grad, &[dy, aux.ps.g(PROJECTION[1])], &[l.cp_rows, dc], dc));
+                aux.ops.matmul_dx(&mut steps, &w, dy, l.cp_rows, d_raw, false);
             }
+            // Position 0 back to the Talker's hidden state of its frame, positions 1.. into the table rows they read.
+            steps.push(aux.gpu.step(aux.k.copy, &[&aux.hidden_back, d_raw, &aux.hidden_grad], &[l.frames, d], l.frames * d));
+            steps.push(aux.cp_tables.grad_step(&aux.gpu, aux.k.gather_bwd, &aux.ones, d_raw, aux.ps.g(TABLES), d));
+            aux.gpu.submit(&[], &steps);
         }
-        self.cp.backward_hidden(&d_cp);
-        drop(heads_range);
-        let cp_range = gpu_core::markers::range(c"speech_sft.cp_bwd");
-        let d_cp_in = self.cp.read_d_img_embeds();
-        drop(cp_range);
-        let proj_range = gpu_core::markers::range(c"speech_sft.cp_proj_bwd");
-        let d_raw = match &aux.projector {
-            Some(proj) => {
-                aux.gpu.write_f32(&aux.proj_in, &fw.cp_raw);
-                aux.gpu.write_f32(&aux.proj_d_out, &d_cp_in);
-                aux.gpu.submit(&[], &proj.backward_rows(&aux.gpu, &[&aux.proj_in], &aux.proj_d_out, Some(&[&aux.proj_d_in]), fg as u32));
-                aux.gpu.read(&aux.proj_d_in, fg * d)
-            }
-            None => d_cp_in,
-        };
-
-        // Talker: the head's gradient plus the code predictor's at position 0.
-        drop(proj_range);
-        let head_range = gpu_core::markers::range(c"speech_sft.talker_head_bwd");
-        let mut d_hidden = vec![0.0f32; bt * d];
-        if fw.talker_count > 0 {
-            let n = l.talker_rows.len();
-            aux.gpu.write_f32(&aux.talker_h, &Self::gather(&fw.talker_hidden, d, l.talker_rows.iter().copied()));
-            aux.talker_head.backward(&aux.ops, &aux.talker_h, &aux.talker_dh, n as u32, &l.talker_labels, None, 1.0 / fw.talker_count as f32, 1.0, Some(aux.ps.g(TALKER_HEAD)));
-            let dh = aux.gpu.read(&aux.talker_dh, n * d);
-            for (i, &r) in l.talker_rows.iter().enumerate() {
-                d_hidden[r * d..(r + 1) * d].copy_from_slice(&dh[i * d..(i + 1) * d]);
-            }
-        }
-        for (f, &(_, _, trow)) in l.frames.iter().enumerate() {
-            add(&mut d_hidden[trow * d..(trow + 1) * d], &d_raw[f * g * d..(f * g + 1) * d]);
-        }
-        self.talker.backward_hidden(&d_hidden);
-        drop(head_range);
         let talker_range = gpu_core::markers::range(c"speech_sft.talker_bwd");
-        let d_rows = self.talker.read_d_img_embeds();
+        self.talker.backward();
         drop(talker_range);
         let _route = gpu_core::markers::range(c"speech_sft.route");
+        let d_rows = self.talker.input_rows_grad_buffer();
+        let mut steps = vec![aux.talker_tables.grad_step(&aux.gpu, aux.k.gather_bwd, &aux.ones, d_rows, aux.ps.g(TABLES), d)];
+        if let Some(csr) = &aux.talker_new {
+            steps.push(csr.grad_step(&aux.gpu, aux.k.gather_bwd, &aux.ones, d_rows, aux.ps.g(NEW_ROWS), d));
+        }
+        aux.gpu.submit(&[], &steps);
+    }
 
-        // Every codec row a Talker input row summed; the text path and the x-vector are frozen.
-        let mut grads = self.grads.borrow_mut();
-        for (slot, ex) in l.examples.iter().enumerate() {
-            let base = slot * s.block as usize;
-            for (r, parts) in ex.plan.rows.iter().enumerate() {
-                let dr = &d_rows[(base + r) * d..(base + r + 1) * d];
-                for part in parts {
-                    if let Part::Codec(id) = *part {
-                        grads.add_codec(id, dr);
-                    }
-                }
-            }
-            let prefix = ex.plan.len();
-            for t in 0..ex.codes.len() / g {
-                let dr = &d_rows[(base + prefix + t) * d..(base + prefix + t + 1) * d];
-                let frame = &ex.codes[t * g..(t + 1) * g];
-                grads.add_codec(frame[0], dr);
-                for (k, &code) in frame.iter().enumerate().skip(1) {
-                    grads.add_residual(k - 1, code, dr);
-                }
-            }
+    /// The sum of squares of every accumulated gradient, measured on the device, once per set of gradients.
+    fn grad_sum_sq(&self) -> f64 {
+        if let Some(v) = self.grad_sum_sq.get() {
+            return v;
         }
-        // The code predictor's input rows: position 1 is the Talker's cb0 row, position p its own table p - 2.
-        for f in 0..nf {
-            let at = f * g * d;
-            grads.add_codec(Self::code(l, f, 0, g), &d_raw[at + d..at + 2 * d]);
-            for p in 2..g {
-                grads.add_residual(p - 2, Self::code(l, f, p - 1, g), &d_raw[at + p * d..at + (p + 1) * d]);
-            }
-        }
+        let aux_items: Vec<NormItem<'_>> = self.aux.ps.opt_params().iter().map(|(n, numel)| NormItem { buf: self.aux.ps.g(n), numel: *numel, dtype: GradDtype::F32 }).collect();
+        let v = Self::device_sum_sq(&self.talker_norm, &self.talker) + Self::device_sum_sq(&self.cp_norm, &self.cp) + self.aux.norm.sum_sq(&self.aux.gpu, &aux_items);
+        self.grad_sum_sq.set(Some(v));
+        v
     }
 
     fn device_sum_sq(norm: &DeviceGradNorm, m: &Qwen) -> f64 {
@@ -867,11 +1062,66 @@ impl SpeechSftModel {
         let items: Vec<NormItem<'_>> = dg.tensors.iter().map(|(buf, numel, _)| NormItem { buf, numel: *numel as usize, dtype: GradDtype::F32 }).collect();
         norm.sum_sq(&dg.gpu, &items)
     }
-}
 
-fn add(a: &mut [f32], b: &[f32]) {
-    for (x, y) in a.iter_mut().zip(b) {
-        *x += y;
+    /// Codec table `i` (0 = the Talker's) within the trained tables: its first word and its length.
+    fn table_span(&self, i: usize) -> (usize, usize) {
+        let s = &self.shape;
+        let d = s.d();
+        match i {
+            0 => (0, s.talker.vocab as usize * d),
+            i => (s.residual_row0(i - 1) * d, s.mtp.vocab as usize * d),
+        }
+    }
+
+    /// Codec table `i` read out of `all` (the trained tables, their gradient or a moment), the Talker's with its new
+    /// rows taken from `new` (the same quantity of the new rows).
+    fn compose_table(&self, i: usize, all: &[f32], new: Option<&[f32]>) -> Vec<f32> {
+        let (at, n) = self.table_span(i);
+        self.with_new_rows(i, all[at..at + n].to_vec(), new)
+    }
+
+    /// Codec table `i` read off the device out of `tables` (the trained tables' weights or gradient; only its own
+    /// span is copied), the Talker's with its new rows read out of `new`.
+    fn read_table(&self, i: usize, tables: &DeviceBuffer, new: Option<&DeviceBuffer>) -> Vec<f32> {
+        let (at, n) = self.table_span(i);
+        let mut out = vec![0.0; n];
+        self.aux.gpu.read_into(tables, at as u64, &mut out);
+        let new = new.filter(|_| i == 0).map(|b| self.aux.gpu.read(b, self.aux.new_slot.len() * self.shape.d()));
+        self.with_new_rows(i, out, new.as_deref())
+    }
+
+    /// `out`, codec table `i`, with the new rows of `new` written over theirs when it is the Talker's.
+    fn with_new_rows(&self, i: usize, mut out: Vec<f32>, new: Option<&[f32]>) -> Vec<f32> {
+        if let (0, Some(new)) = (i, new) {
+            let d = self.shape.d();
+            for (&row, &slot) in &self.aux.new_slot {
+                out[row as usize * d..(row as usize + 1) * d].copy_from_slice(&new[slot as usize * d..(slot as usize + 1) * d]);
+            }
+        }
+        out
+    }
+
+    /// The new rows of Talker-table-shaped `data`, in their store's order.
+    fn new_rows_of(&self, data: &[f32]) -> Vec<f32> {
+        let d = self.shape.d();
+        let mut out = vec![0.0; self.aux.new_slot.len() * d];
+        for (&row, &slot) in &self.aux.new_slot {
+            out[slot as usize * d..(slot as usize + 1) * d].copy_from_slice(&data[row as usize * d..(row as usize + 1) * d]);
+        }
+        out
+    }
+
+    /// Residual head `i` within the code predictor's stacked head, in words.
+    fn head_span(&self, i: usize) -> std::ops::Range<usize> {
+        let n = self.shape.mtp.vocab as usize * self.shape.mtp.d_model as usize;
+        i * n..(i + 1) * n
+    }
+
+    /// The input rows the Talker read in the latest forward, `[sequences * run, d]`, and the run (tests).
+    #[cfg(test)]
+    pub(crate) fn talker_input_rows(&self) -> (Vec<f32>, usize) {
+        let rows = self.loaded.borrow().as_ref().expect("a loaded batch").talker_rows as usize;
+        (self.talker.gpu().read(self.talker.input_rows_buffer(), rows * self.shape.d()), self.talker.run_len() as usize)
     }
 }
 
@@ -915,42 +1165,35 @@ impl model::Model for SpeechSftModel {
     }
 
     fn backward(&self) {
+        self.grad_sum_sq.set(None);
         self.backward_all();
     }
 
     fn zero_grads(&self) {
+        self.grad_sum_sq.set(None);
         self.talker.zero_grads();
         self.cp.zero_grads();
         self.aux.ps.zero_grads(&self.aux.gpu);
-        self.grads.borrow_mut().clear();
     }
 
-    /// One update of every group with one global gradient norm: the decoders'
-    /// and the heads' measured on their devices, the tables' on the host, and
-    /// the multiplier it gives (`extra_scale`, clipped) applied to all.
+    /// One update of every group with one global gradient norm, measured on the
+    /// device, and the multiplier it gives (`extra_scale`, clipped) applied to all.
     fn adamw_step(&self, t: u32, lr: f32, wd: f32, adam: model::Adam, clip: Option<f32>, extra_scale: f32) {
         let _opt = gpu_core::markers::range(c"speech_sft.optimizer");
-        let aux_items: Vec<NormItem<'_>> = self.aux.ps.opt_params().iter().map(|(n, numel)| NormItem { buf: self.aux.ps.g(n), numel: *numel, dtype: GradDtype::F32 }).collect();
-        let sum_sq = Self::device_sum_sq(&self.talker_norm, &self.talker) + Self::device_sum_sq(&self.cp_norm, &self.cp) + self.aux.norm.sum_sq(&self.aux.gpu, &aux_items) + self.grads.borrow().sum_sq();
+        let sum_sq = self.grad_sum_sq();
+        self.grad_sum_sq.set(None);
         self.last_norm.set(Some((sum_sq.sqrt() as f32) * extra_scale));
         let mult = model::grad_multiplier(sum_sq, clip, extra_scale);
         let m = self.shape.lr;
         self.talker.adamw_step(t, lr * m.talker, wd, adam, None, mult);
         self.cp.adamw_step(t, lr * m.code_predictor, wd, adam, None, mult);
         self.aux.opt.step(&self.aux.gpu, &self.aux.ps, t, lr, wd, adam, None, mult);
-        let mut opt = self.host_opt.borrow_mut();
-        let args = model::resident_ft::StepArgs { step: t, lr, wd, adam, clip: None, extra_scale: mult };
-        let mult = opt.begin_step(&args, 0.0);
-        let mut tables = self.tables.borrow_mut();
-        let grads = self.grads.borrow();
-        for (ti, &(table, at, n, new)) in self.segments.iter().enumerate() {
-            let (value, grad) = match table {
-                0 => (&mut tables.codec[at..at + n], &grads.codec[at..at + n]),
-                i => (&mut tables.residual[i - 1][at..at + n], &grads.residual[i - 1][at..at + n]),
-            };
-            let group = if new { m.new_rows } else { m.codec_tables };
-            opt.update_tensor(ti, value, grad, lr * group, mult).unwrap_or_else(|e| panic!("speech sft: host update: {e}"));
-        }
+    }
+
+    /// Every gradient is finite exactly when their sum of squares is, measured on the device (a host scan reads
+    /// back every gradient each step); the update reuses the measurement.
+    fn gradients_finite(&self) -> Option<bool> {
+        Some(self.grad_sum_sq().is_finite())
     }
 
     fn last_grad_norm(&self) -> Option<f32> {
@@ -967,7 +1210,6 @@ impl model::Model for SpeechSftModel {
         model::Model::pin_rounding_seed(&self.talker, seed);
         model::Model::pin_rounding_seed(&self.cp, seed);
         self.aux.opt.set_rounding_seed(seed ^ 0x5eed_0000_1234_9876);
-        self.host_opt.borrow_mut().pin_seed(seed);
     }
 
     /// Each decoder rebuilds its layers from their inputs in the backward.
@@ -981,38 +1223,50 @@ impl model::Model for SpeechSftModel {
     }
 
     fn read_moments(&self, name: &str) -> Option<(Vec<f32>, Vec<f32>)> {
+        let aux = &self.aux;
         match self.shape.place(name)? {
             Place::Talker(b) => model::Model::read_moments(&self.talker, &b),
             Place::CodePredictor(b) => model::Model::read_moments(&self.cp, &b),
-            Place::Aux => optim::read_moments(&self.aux.gpu, &self.aux.ps, name),
+            Place::CpHead(i) => {
+                let (m, v) = model::Model::read_moments(&self.cp, "lm_head.weight")?;
+                Some((m[self.head_span(i)].to_vec(), v[self.head_span(i)].to_vec()))
+            }
+            Place::Projection => optim::read_moments(&aux.gpu, &aux.ps, name),
             Place::Table(i) => {
-                let mut opt = self.host_opt.borrow_mut();
-                let (mut m, mut v) = (Vec::new(), Vec::new());
-                for (ti, _) in self.segments.iter().enumerate().filter(|(_, s)| s.0 == i) {
-                    let (sm, sv) = opt.read_moments(ti).ok()?;
-                    m.extend(sm);
-                    v.extend(sv);
-                }
-                Some((m, v))
+                let (m, v) = optim::read_moments(&aux.gpu, &aux.ps, TABLES)?;
+                let new = aux.talker_new.as_ref().and_then(|_| optim::read_moments(&aux.gpu, &aux.ps, NEW_ROWS));
+                Some((self.compose_table(i, &m, new.as_ref().map(|n| n.0.as_slice())), self.compose_table(i, &v, new.as_ref().map(|n| n.1.as_slice()))))
             }
         }
     }
 
     fn write_moments(&self, name: &str, m: &[f32], v: &[f32]) -> Result<(), String> {
+        let aux = &self.aux;
         match self.shape.place(name).ok_or_else(|| format!("speech sft: no parameter {name}"))? {
             Place::Talker(b) => model::Model::write_moments(&self.talker, &b, m, v),
             Place::CodePredictor(b) => model::Model::write_moments(&self.cp, &b, m, v),
-            Place::Aux => optim::write_moments(&self.aux.gpu, &self.aux.ps, name, m, v),
-            Place::Table(i) => {
-                let mut opt = self.host_opt.borrow_mut();
-                let total: usize = self.segments.iter().filter(|s| s.0 == i).map(|s| s.2).sum();
-                if m.len() != total || v.len() != total {
-                    return Err(format!("speech sft: {name} holds {total} values, the moments {} and {}", m.len(), v.len()));
+            Place::CpHead(i) => {
+                let span = self.head_span(i);
+                if m.len() != span.len() || v.len() != span.len() {
+                    return Err(format!("speech sft: {name} holds {} values, the moments {} and {}", span.len(), m.len(), v.len()));
                 }
-                let mut at = 0;
-                for (ti, seg) in self.segments.iter().enumerate().filter(|(_, s)| s.0 == i) {
-                    opt.write_moments(ti, &m[at..at + seg.2], &v[at..at + seg.2]).map_err(|e| e.to_string())?;
-                    at += seg.2;
+                let (mut am, mut av) = model::Model::read_moments(&self.cp, "lm_head.weight").ok_or("speech sft: the code predictor's head has no moments")?;
+                am[span.clone()].copy_from_slice(m);
+                av[span].copy_from_slice(v);
+                model::Model::write_moments(&self.cp, "lm_head.weight", &am, &av)
+            }
+            Place::Projection => optim::write_moments(&aux.gpu, &aux.ps, name, m, v),
+            Place::Table(i) => {
+                let (at, n) = self.table_span(i);
+                if m.len() != n || v.len() != n {
+                    return Err(format!("speech sft: {name} holds {n} values, the moments {} and {}", m.len(), v.len()));
+                }
+                let (mut am, mut av) = optim::read_moments(&aux.gpu, &aux.ps, TABLES).ok_or("speech sft: the tables have no moments")?;
+                am[at..at + n].copy_from_slice(m);
+                av[at..at + n].copy_from_slice(v);
+                optim::write_moments(&aux.gpu, &aux.ps, TABLES, &am, &av)?;
+                if i == 0 && aux.talker_new.is_some() {
+                    optim::write_moments(&aux.gpu, &aux.ps, NEW_ROWS, &self.new_rows_of(m), &self.new_rows_of(v))?;
                 }
                 Ok(())
             }
@@ -1024,32 +1278,46 @@ impl model::Model for SpeechSftModel {
     }
 
     fn read_weight(&self, name: &str) -> Vec<f32> {
+        let aux = &self.aux;
         match self.shape.place(name).unwrap_or_else(|| panic!("speech sft: no parameter {name}")) {
             Place::Talker(b) => self.talker.read_weight(&b),
             Place::CodePredictor(b) => self.cp.read_weight(&b),
-            Place::Aux => self.aux.ps.read_weight(&self.aux.gpu, name),
-            Place::Table(0) => self.tables.borrow().codec.clone(),
-            Place::Table(i) => self.tables.borrow().residual[i - 1].clone(),
+            Place::CpHead(i) => self.cp.read_weight("lm_head.weight")[self.head_span(i)].to_vec(),
+            Place::Projection => aux.ps.read_weight(&aux.gpu, name),
+            Place::Table(i) => self.read_table(i, aux.ps.w(TABLES), aux.talker_new.as_ref().map(|_| aux.ps.w(NEW_ROWS))),
         }
     }
 
     fn write_weight(&self, name: &str, data: &[f32]) {
+        let aux = &self.aux;
         match self.shape.place(name).unwrap_or_else(|| panic!("speech sft: no parameter {name}")) {
             Place::Talker(b) => self.talker.write_weight(&b, data),
             Place::CodePredictor(b) => self.cp.write_weight(&b, data),
-            Place::Aux => self.aux.gpu.write_f32(self.aux.ps.w(name), data),
-            Place::Table(0) => self.tables.borrow_mut().codec.copy_from_slice(data),
-            Place::Table(i) => self.tables.borrow_mut().residual[i - 1].copy_from_slice(data),
+            Place::CpHead(i) => {
+                let mut all = self.cp.read_weight("lm_head.weight");
+                all[self.head_span(i)].copy_from_slice(data);
+                self.cp.write_weight("lm_head.weight", &all);
+            }
+            Place::Projection => aux.gpu.write_f32(aux.ps.w(name), data),
+            Place::Table(i) => {
+                let (at, n) = self.table_span(i);
+                assert_eq!(data.len(), n, "speech sft: {name} holds {n} values");
+                aux.gpu.write_f32_at(aux.ps.w(TABLES), at as u64, data);
+                if i == 0 && aux.talker_new.is_some() {
+                    aux.gpu.write_f32(aux.ps.w(NEW_ROWS), &self.new_rows_of(data));
+                }
+            }
         }
     }
 
     fn read_grad(&self, name: &str) -> Vec<f32> {
+        let aux = &self.aux;
         match self.shape.place(name).unwrap_or_else(|| panic!("speech sft: no parameter {name}")) {
             Place::Talker(b) => self.talker.read_grad(&b),
             Place::CodePredictor(b) => self.cp.read_grad(&b),
-            Place::Aux => self.aux.ps.read_grad(&self.aux.gpu, name),
-            Place::Table(0) => self.grads.borrow().codec.clone(),
-            Place::Table(i) => self.grads.borrow().residual[i - 1].clone(),
+            Place::CpHead(i) => self.cp.read_grad("lm_head.weight")[self.head_span(i)].to_vec(),
+            Place::Projection => aux.ps.read_grad(&aux.gpu, name),
+            Place::Table(i) => self.read_table(i, aux.ps.g(TABLES), aux.talker_new.as_ref().map(|_| aux.ps.g(NEW_ROWS))),
         }
     }
 

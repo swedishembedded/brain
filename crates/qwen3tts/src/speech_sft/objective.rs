@@ -238,12 +238,11 @@ impl Objective<SpeechSftModel> for SpeechObjective<'_> {
         let t3 = Instant::now();
         let stats = model.stats();
         self.step.add(&stats);
-        let shape = model.shape();
         self.work.prepare_secs += (t1 - t0).as_secs_f64();
         self.work.forward_secs += (t2 - t1).as_secs_f64();
         self.work.backward_secs += (t3 - t2).as_secs_f64();
         self.work.useful_tokens += u64::from(stats.frames);
-        self.work.computed_tokens += u64::from(shape.batch * shape.block + shape.frames * shape.mtp.num_code_groups);
+        self.work.computed_tokens += u64::from(model.computed_rows());
         self.work.supervised_positions += u64::from(stats.talker_count + stats.cp_count);
         loss
     }
