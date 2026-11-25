@@ -311,7 +311,7 @@ impl ResidencyManager {
         self.models.get(model).map(|m| m.manifest()).or_else(|| self.multi_models.get(model).map(|m| m.manifest()))
     }
 
-    /// A starved claim's second chance: offer `m` the bytes each device can give this server right now
+    /// A starved or too-large claim's second chance: offer `m` the bytes each device can give this server right now
     /// ([`ResidentModel::replan`]). `true` when the model re-sized its defaulted plan, which is logged as a warning
     /// naming every value that changed, and the claim is worth trying once more.
     fn replan_starved(&mut self, model: &str, m: &dyn ResidentModel, key: &InstanceKey) -> bool {
@@ -1027,14 +1027,16 @@ impl ResidencyManager {
         replica: usize,
         exclude: &HashSet<Device>,
     ) -> Result<(Claimed, Device, InstanceKey), ClaimError> {
+        // A plan that does not fit the memory there is now (taken since, or never there: a generous default on a
+        // small card) is the model's to re-size when it chose it itself.
         match self.claim_once(model, action, inv, replica, exclude) {
-            Err(ClaimError::Starved(why)) => {
-                let Some(m) = self.models.get(model).cloned() else { return Err(ClaimError::Starved(why)) };
+            Err(refused @ (ClaimError::Starved(_) | ClaimError::TooLarge(_))) => {
+                let Some(m) = self.models.get(model).cloned() else { return Err(refused) };
                 let key = m.instance_key(action, inv).replica(replica);
                 if self.replan_starved(model, &*m, &key) {
                     self.claim_once(model, action, inv, replica, exclude)
                 } else {
-                    Err(ClaimError::Starved(why))
+                    Err(refused)
                 }
             }
             other => other,
@@ -1267,14 +1269,16 @@ impl ResidencyManager {
         replica: usize,
         exclude: &HashSet<Device>,
     ) -> Result<(ClaimedMulti, Vec<Device>, InstanceKey), ClaimError> {
+        // A plan that does not fit the memory there is now (taken since, or never there: a generous default on a
+        // small card) is the model's to re-size when it chose it itself.
         match self.claim_multi_once(model, action, inv, replica, exclude) {
-            Err(ClaimError::Starved(why)) => {
-                let Some(m) = self.multi_models.get(model).cloned() else { return Err(ClaimError::Starved(why)) };
+            Err(refused @ (ClaimError::Starved(_) | ClaimError::TooLarge(_))) => {
+                let Some(m) = self.multi_models.get(model).cloned() else { return Err(refused) };
                 let key = m.instance_key(action, inv).replica(replica);
                 if self.replan_starved(model, &*m, &key) {
                     self.claim_multi_once(model, action, inv, replica, exclude)
                 } else {
-                    Err(ClaimError::Starved(why))
+                    Err(refused)
                 }
             }
             other => other,
@@ -3108,6 +3112,28 @@ mod tests {
         assert!(matches!(err, ClaimError::Starved(_)), "{err:?}");
         assert!(mgr.take_replanned().is_empty());
         assert_eq!(mgr.manifest_of("defaulted").and_then(|m| m.max_context_tokens), Some(14 * 1024));
+    }
+
+    /// A defaulted plan wider than any card the server has (a model that picks a generous default and narrows it on a
+    /// small card) is re-planned the same way instead of being refused as too large; a named one is still refused.
+    #[test]
+    fn a_defaulted_plan_larger_than_every_card_is_resized_and_a_named_one_is_refused() {
+        for named in [false, true] {
+            let live = Arc::new(AtomicU32::new(0));
+            let mut budgets = Budgets::new();
+            budgets.set(Device::Gpu(0), 16 * GB, 0);
+            let mut mgr = ResidencyManager::new(budgets);
+            mgr.register_multi(Arc::new(Defaulted { ctx: (14 * 1024).into(), named, live }));
+            let claimed = mgr.claim_multi("defaulted", "run", &Invocation::new(), 0, &HashSet::new());
+            if named {
+                assert!(matches!(claimed, Err(ClaimError::TooLarge(_))), "{:?}", claimed.err());
+                assert!(mgr.take_replanned().is_empty());
+            } else {
+                claimed.expect("re-planned to the card");
+                assert_eq!(mgr.take_replanned(), vec!["defaulted".to_string()]);
+                assert_eq!(mgr.manifest_of("defaulted").and_then(|m| m.max_context_tokens), Some(6 * 1024));
+            }
+        }
     }
 
     /// **The daemon adapts to VRAM it does not own.** Budgets used to be frozen

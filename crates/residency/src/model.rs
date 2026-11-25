@@ -146,9 +146,9 @@ pub trait ResidentModel: Send + Sync {
 
     /// Size again, to `usable` (each device this model may use and the bytes this server can use on it right now),
     /// whatever this model chose for itself when it was built because the operator named nothing: its context, its
-    /// KV pool, its batch. Called when [`Self::estimate`] (or a multi-device model's `estimate_multi`) no longer fits
-    /// those bytes even with nothing else resident, before the request is refused as starved: a card another
-    /// process took memory on after the server sized its models. A setting the operator named is never changed.
+    /// KV pool, its batch. Called when [`Self::estimate`] (or a multi-device model's `estimate_multi`) does not fit
+    /// those bytes even with nothing else resident, before the request is refused as starved or too large: a card
+    /// another process took memory on after the server sized its models, or a default wider than any card here. A setting the operator named is never changed.
     /// Returns what changed, which the manager logs and after which it reads the estimate and the manifest again
     /// (a new context is advertised); `None` when nothing was re-chosen (nothing was defaulted, or no smaller plan
     /// fits), and the claim is refused as before.
