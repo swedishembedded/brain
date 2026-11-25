@@ -22,7 +22,7 @@ brain-qwen3tts.workspace = true
 brain-model.workspace = true
 # The serving adapter bank a streaming job publishes each new policy version to.
 brain-llmserve.workspace = true
-brain = { workspace = true, features = ["study"] }
+brain = { workspace = true, features = ["study", "audio"] }
 blake3.workspace = true
 libc.workspace = true
 serde = { workspace = true }

@@ -256,6 +256,17 @@ pub use optimize::{DeployedLoss, ExcludedTier, ModelOptimizer, ModelOptimizerOut
 mod prune;
 #[cfg(feature = "study")]
 pub use prune::{ModelPruner, ModelPrunerOutcome};
+#[cfg(all(feature = "study", feature = "audio"))]
+mod speech_surgery;
+#[cfg(all(feature = "study", feature = "audio"))]
+pub use speech_surgery::{read_calibration, EditCost, MeasuredLoss, SpeechSurgery, SpeechSurgeryOutcome};
+/// The edits a [`SpeechSurgery`] plan is made of.
+#[cfg(all(feature = "study", feature = "audio"))]
+pub mod surgery {
+    pub use modelopt::surgery::plan::{Edit, LayerScore};
+    pub use modelopt::surgery::scores::Score;
+    pub use modelopt::surgery::BasisKind;
+}
 /// The model optimizer's report types, for a caller of [`ModelOptimizer`].
 #[cfg(feature = "study")]
 pub use modelopt::{Baseline as OptimizerBaseline, Progress as OptimizerSearchProgress, PruneReport, Report as OptimizerReport, SiteReport as OptimizerSiteReport};

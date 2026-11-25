@@ -25,6 +25,7 @@
 //!   reservations that hold the service to them.
 //! * [`timeline`]: `timeline_train`, a timeline model trained and published as a checkpoint.
 //! * [`speech`]: `speech_sft`, a Qwen3-TTS checkpoint trained on recorded speech and published in its upstream layout.
+//! * [`surgery`]: `speech_surgery`, a Qwen3-TTS checkpoint made physically smaller by a calibrated weight-surgery plan.
 //! * [`create`]: `init_model`, a model from nothing: vocabulary, chat template, random initialization.
 //! * [`dryrun`]: `check_dataset`, a dataset checked against a base without training.
 //! * [`consolidate`]: the jobs that produce a checkpoint, `full_train` and `merge`.
@@ -49,6 +50,7 @@ pub mod request;
 pub mod resident;
 pub mod runs;
 pub mod speech;
+pub mod surgery;
 pub mod store;
 pub mod stream;
 pub mod timeline;

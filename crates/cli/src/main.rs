@@ -41,6 +41,7 @@ mod pull_cli;
 mod finetune_cli;
 mod optimize_cli;
 mod prune_cli;
+mod surgery_cli;
 mod quantize_cli;
 mod adapter_directory;
 mod continuous_train;
@@ -412,6 +413,11 @@ OPTIMIZE (the weight format of every linear, searched within a byte budget)
       Remove the least important channels of every prunable dimension,
       ranked on the dataset, and write the narrower model as a checkpoint
       directory; `brain prune --help` for every option.
+  brain speech-surgery BASE --calibration SHARD --plan FILE --out DIR
+      Calibrate a Qwen3-TTS checkpoint on speech, apply a surgery plan
+      (layers, channels, KV groups, residual width, text path, vocabulary)
+      and write the narrower checkpoint in its upstream layout;
+      `brain speech-surgery --help` for every option.
 
 OTHER
   brain help

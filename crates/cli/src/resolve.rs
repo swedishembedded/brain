@@ -25,7 +25,7 @@
 //! ([`serving::gguf_import`]), which picks the architecture from the file's own
 //! `general.architecture` header instead of from the command line.
 
-use crate::{caps_cli, optimize_cli, prune_cli, quantize_cli};
+use crate::{caps_cli, optimize_cli, prune_cli, quantize_cli, surgery_cli};
 
 /// Architectures reached generically through their
 /// [`capability::Provider`]: `<arch id>, <canonical model id>`.
@@ -155,6 +155,8 @@ enum Resolved {
     Finetune { rest: Vec<String> },
     /// `brain prune <BASE> --dataset … --out …` -- structured pruning.
     Prune { rest: Vec<String> },
+    /// `brain speech-surgery <BASE> --calibration … --plan … --out …` -- weight surgery of a speech synthesizer.
+    SpeechSurgery { rest: Vec<String> },
     /// `brain lsa distill|eval|prefill …` -- latent sparse attention for any engine that captures its attention; the
     /// architecture is read from the checkpoint, not a token.
     Lsa { rest: Vec<String> },
@@ -212,6 +214,9 @@ fn resolve(argv: &[String]) -> Resolved {
     if first == "prune" {
         return Resolved::Prune { rest: argv[1..].to_vec() };
     }
+    if first == "speech-surgery" {
+        return Resolved::SpeechSurgery { rest: argv[1..].to_vec() };
+    }
     if first == "lsa" {
         return Resolved::Lsa { rest: argv[1..].to_vec() };
     }
@@ -230,6 +235,7 @@ pub fn dispatch(argv: &[String], help: &str) {
         Resolved::Optimize { rest } => optimize_cli::run_optimize(&rest),
         Resolved::Finetune { rest } => crate::finetune_cli::run_finetune(&rest),
         Resolved::Prune { rest } => prune_cli::run_prune(&rest),
+        Resolved::SpeechSurgery { rest } => surgery_cli::run_speech_surgery(&rest),
         Resolved::Lsa { rest } => crate::lsa_cli::run_lsa(&rest),
         Resolved::Unknown(tok) => {
             eprintln!("brain: unknown command '{tok}'\n");

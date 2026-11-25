@@ -52,6 +52,7 @@ use crate::create;
 use crate::pretrain;
 use crate::dryrun;
 use crate::speech;
+use crate::surgery;
 use crate::timeline;
 use crate::job::{self, FootprintCache, JobEnv};
 use crate::quota::{self, FreeSpace, Quotas};
@@ -110,6 +111,7 @@ impl TrainResident {
             dryrun::ACTION => self.admit_check(inv),
             timeline::ACTION => self.admit_timeline(inv),
             speech::ACTION => self.admit_speech(inv),
+            surgery::ACTION => self.admit_surgery(inv),
             other => Err(format!("{} has no action '{other}'", request::MODEL)),
         }
     }
@@ -252,6 +254,22 @@ impl TrainResident {
         Ok(Reservation::Card(bytes, request.spread.cards))
     }
 
+    fn admit_surgery(&self, inv: &Invocation) -> Result<Reservation, String> {
+        let request = surgery::Request::from_invocation(inv)?;
+        let p = &request.params;
+        if self.env.store.is_none() && p.install_as.is_none() && !p.profile {
+            return Err(format!("{}: this server has no artifact store (--artifact-store) to publish the checkpoint to: set install_as to keep it in the model store", surgery::ACTION));
+        }
+        if self.env.store.is_none() && !request.digests().is_empty() {
+            return Err(format!("{}: this server has no artifact store (--artifact-store), so a shard cannot be named by digest", surgery::ACTION));
+        }
+        self.check_digests(&request.digests())?;
+        let base_dir = surgery::resolve_base(&self.env, &request)?;
+        let bytes = surgery::device_bytes(&base_dir);
+        self.fits_a_card(surgery::ACTION, bytes, "the calibration build's f32 weights, gradients and moments", "use a card that holds them")?;
+        Ok(Reservation::Card(bytes, 1))
+    }
+
     fn admit_check(&self, inv: &Invocation) -> Result<Reservation, String> {
         let request = dryrun::Request::from_invocation(inv)?;
         match (&self.env.store, &request.dataset) {
@@ -320,7 +338,7 @@ fn card_key(config: &str) -> Option<(u64, usize)> {
 
 impl ResidentModel for TrainResident {
     fn manifest(&self) -> Manifest {
-        Manifest::new(request::MODEL, "fine-tune a chat model on the devices serving shares: a LoRA adapter (supervised, policy gradient or preference), every weight (`full_train`), or fold an adapter into its base (`merge`); create a model from nothing (`init_model`) and pretrain it on raw text (`pretrain`); datasets and results by blob or artifact digest, scheduled with the serving residents (see the trainjob crate)", vec![request::action_spec(), consolidate::full_spec(), consolidate::merge_spec(), create::spec(), pretrain::spec(), dryrun::spec(), timeline::spec(), speech::spec()])
+        Manifest::new(request::MODEL, "fine-tune a chat model on the devices serving shares: a LoRA adapter (supervised, policy gradient or preference), every weight (`full_train`), or fold an adapter into its base (`merge`); create a model from nothing (`init_model`) and pretrain it on raw text (`pretrain`); datasets and results by blob or artifact digest, scheduled with the serving residents (see the trainjob crate)", vec![request::action_spec(), consolidate::full_spec(), consolidate::merge_spec(), create::spec(), pretrain::spec(), dryrun::spec(), timeline::spec(), speech::spec(), surgery::spec()])
     }
 
     fn instance_key(&self, action: &str, inv: &Invocation) -> InstanceKey {
@@ -397,11 +415,12 @@ impl Instance for TrainInstance {
             dryrun::ACTION => &mut || dryrun::run(env, inv, progress),
             timeline::ACTION => &mut || timeline::run(env, inv, progress),
             speech::ACTION => &mut || speech::run(env, inv, &self.devices, progress),
+            surgery::ACTION => &mut || surgery::run(env, inv, progress),
             other => return Err(format!("{} has no action '{other}'", request::MODEL)),
         };
         // A `full_train` that only checks its settings trains nothing: host work, never refused for a CPU placement.
         let checks_only = inv.params.get("validate_only").and_then(serde_json::Value::as_bool).unwrap_or(false);
-        let trains = matches!(action, request::ACTION | consolidate::FULL_ACTION | pretrain::ACTION | speech::ACTION) && !checks_only;
+        let trains = matches!(action, request::ACTION | consolidate::FULL_ACTION | pretrain::ACTION | speech::ACTION | surgery::ACTION) && !checks_only;
         let allow_cpu = inv.params.get("allow_cpu").and_then(serde_json::Value::as_bool).unwrap_or(false);
         // The trainer reports a device failure (an allocation the card cannot hold) as a panic. One run's failure is
         // that run's error, not the server's.

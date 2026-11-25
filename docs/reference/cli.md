@@ -95,6 +95,7 @@ way.
 | `brain optimize BASE` | the weight format of every linear of a chat model, searched within a byte budget and accepted only on held-out measurements - see [Optimizing a model](../guides/serving/optimizing.md) |
 | `brain lsa distill\|eval\|prefill` | latent sparse attention for any architecture whose engine captures its attention (qwen3, ricursive): distil an indexer against the model's own attention, evaluate indexers (attention retained, held-out loss), time dense against sparse prefill; replaces the `qwen_lsa` binary - see the [Qwen3 page](models/qwen3.md) |
 | `brain prune BASE` | remove the least important channels of a chat model's prunable dimensions and write the narrower checkpoint - see [Optimizing a model](../guides/serving/optimizing.md#removing-channels---brain-prune) |
+| `brain speech-surgery BASE` | calibrate a Qwen3-TTS checkpoint on speech shards, apply a weight-surgery plan and write the narrower checkpoint in its upstream layout (`--profile` measures each edit alone); `--help` lists the plan's edits and options |
 
 `models`, `flops`, `perf`, `bench`, `devices` and `roofline` sound similar but
 answer different questions, and none of them subsumes another: `models` is
