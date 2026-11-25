@@ -1489,6 +1489,7 @@ name = "brain-ecapatdnn"
 version = "6.0.0"
 dependencies = [
  "brain-audio",
+ "brain-backend-cpu",
  "brain-checkpoint",
  "brain-gpu-core",
  "brain-kernels",

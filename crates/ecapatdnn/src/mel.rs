@@ -114,28 +114,25 @@ pub fn log_mel(samples: &[f32]) -> (Vec<f32>, usize) {
     let padded = if samples.is_empty() { Vec::new() } else { reflect_pad_signal(samples, pad) };
     let n_frames = if padded.len() >= N_FFT { 1 + (padded.len() - N_FFT) / HOP } else { 0 };
 
-    let mut out = vec![0.0f32; n_frames * N_MELS];
-    let mut re = vec![0.0f32; N_FFT];
-    let mut im = vec![0.0f32; N_FFT];
-    for fr in 0..n_frames {
+    // Every frame is its own FFT and filterbank product, so the frames run across the CPU pool: the same arithmetic,
+    // frame by frame, as one core did.
+    let frames: Vec<Vec<f32>> = backend_cpu::par::map(n_frames, |fr| {
         let start = fr * HOP;
-        for v in im.iter_mut() {
-            *v = 0.0;
-        }
-        for i in 0..N_FFT {
-            re[i] = if i < WIN { padded[start + i] * window[i] } else { 0.0 };
-        }
+        let mut re: Vec<f32> = (0..N_FFT).map(|i| if i < WIN { padded[start + i] * window[i] } else { 0.0 }).collect();
+        let mut im = vec![0.0f32; N_FFT];
         fft(&mut re, &mut im);
         let mag: Vec<f32> = (0..bins).map(|b| (re[b] * re[b] + im[b] * im[b] + 1e-9).sqrt()).collect();
-        for m in 0..N_MELS {
-            let mut acc = 0.0f32;
-            for b in 0..bins {
-                acc += fb[m * bins + b] * mag[b];
-            }
-            out[fr * N_MELS + m] = acc.max(1e-5).ln();
-        }
-    }
-    (out, n_frames)
+        (0..N_MELS)
+            .map(|m| {
+                let mut acc = 0.0f32;
+                for b in 0..bins {
+                    acc += fb[m * bins + b] * mag[b];
+                }
+                acc.max(1e-5).ln()
+            })
+            .collect()
+    });
+    (frames.into_iter().flatten().collect(), n_frames)
 }
 
 #[cfg(test)]

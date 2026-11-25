@@ -13,6 +13,7 @@ name = "ecapatdnn"
 path = "src/lib.rs"
 
 [dependencies]
+brain-backend-cpu.workspace = true
 brain-gpu-core.workspace = true
 brain-kernels.workspace = true
 brain-audio.workspace = true

@@ -59,3 +59,24 @@ fn codec_encode_timing_on_the_device() {
         eprintln!("codec encode {:.1} s of audio: cold {cold:?}, warm {warm:?} ({:.1}x real time warm), codes checksum {sum:016x}", wav.len() as f64 / 24_000.0, wav.len() as f64 / 24_000.0 / warm.as_secs_f64());
     }
 }
+
+/// Wall time of the speaker encoder's x-vector (`ecapatdnn::SpeakerEncoder::embed_wav`) on the device and on the host
+/// for 8 s and 48 s of audio, warm: the other half of building a training set from recordings.
+#[test]
+#[ignore = "timing measurement, not a gate"]
+fn speaker_embedding_timing() {
+    let Some(paths) = crate::store::store_paths() else { return };
+    let codec = mimi::Codec::load_inference_on(gpu_core::Gpu::new(mimi::PIPELINES), &paths.codec);
+    let encoders = [("host", ecapatdnn::SpeakerEncoder::load_inference(&paths.speaker)), ("device", ecapatdnn::SpeakerEncoder::load_inference_on(gpu_core::Gpu::new(ecapatdnn::model::PIPELINES), &paths.speaker))];
+    for frames in [100usize, 600] {
+        let wav = codec.decode(&random_codes(frames));
+        for (place, encoder) in &encoders {
+            let _ = encoder.embed_wav(&wav, 24_000);
+            let warm = Instant::now();
+            let x = encoder.embed_wav(&wav, 24_000);
+            let warm = warm.elapsed();
+            let sum = x.iter().fold(0u64, |h, v| h.wrapping_mul(0x100_0000_01b3).wrapping_add(u64::from(v.to_bits())));
+            eprintln!("speaker embedding on the {place} of {:.1} s of audio: warm {warm:?} ({:.1}x real time), checksum {sum:016x}", wav.len() as f64 / 24_000.0, wav.len() as f64 / 24_000.0 / warm.as_secs_f64());
+        }
+    }
+}
