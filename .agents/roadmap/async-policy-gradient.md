@@ -125,13 +125,22 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       setting) and EC-2 (`rl::objective::pg_loss::PgLoss` in both configs); the `estimator` setting (wire `clipped` |
       `score-centred`, `PgLoss::estimator`) and its band (`centring_low` / `centring_high`, 0.5 / 5.0) are three
       `WhenNotDefault` rows, so the identity pins of runs at the default estimator stay green.
-- [ ] **Model-free oracles** (A05-A06). Done: `it::pg_estimator_oracle::sampled_group_estimates_converge_to_their_exact_expectations`
+- [x] **Model-free oracles** (A05-A06). Done: `it::pg_estimator_oracle::sampled_group_estimates_converge_to_their_exact_expectations`
       (four actions, groups of three with z-scored advantages, both estimators' means over 4000 sampled groups within
       5 standard errors of their exact expectations over all 64 groups; under a constant advantage the score-centred
       expectation is zero and the clipped surrogate's is not); invariant 3,
       `it::external_policy_gradient_scale::a_token_sum_steps_gradient_does_not_depend_on_how_its_records_are_split_into_micro_batches`
-      (four records of 1-5 tokens as 4x1, 2x2, 1x4 micro-batches: one gradient to 1e-4 of the largest). Open: golden
-      fixtures from the pinned TRL code for advantages, masks and centring coefficients (an isolated tool, CPU only).
+      (four records of 1-5 tokens as 4x1, 2x2, 1x4 micro-batches: one gradient to 1e-4 of the largest). TRL goldens
+      (lane agrpo-conf, 2026-11-25): `tools/goldens/trl_score_centring_reference.py` runs TRL's own
+      `AsyncGRPOTrainer.compute_loss` (score_centering, locals read at a stop after the per-token loss) and
+      `AsyncRolloutLoop.compute_advantages` from the pinned tree (commit 6267b72, trainer SHA-256 in the fixture; torch
+      2.14.1+cpu in the isolated venv `~/project/shared/venvs/trl-golden`), writing
+      `crates/rl/tests/fixtures/trl_score_centring.json`; `it::trl_goldens` holds `centred_term` (mask, weight,
+      `-A residual`, tail, per-token loss) to it within 2e-6 relative on six tokens, and the z-score advantages up to the
+      one named difference (epsilon 1e-4 here, 1e-8 there, asserted as exactly that; NaN reward = a masked rollout; a
+      group of one scored rollout refused here, trained at advantage 0 there). It found knowledge #583 (a whole listed
+      sampler distribution left a rounding-noise tail; fixed). Exactly at a head edge the float32/float64 decisions can
+      still differ by one ulp; the cases stay a hair inside and outside.
 - [x] **Score-centred policy-gradient objective** (`rl::objective`): the estimator is a variant of the shared
       path (`pg_batch::PgEstimator::{ClippedSurrogate, ScoreCentred(CentringBand)}`, the term in
       `score_centring::centred_term`: `f(r) = r 1[low <= r <= high]`, head over the sampler's top-K, tail bucket,
