@@ -18,7 +18,11 @@ brain-gpu-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 brain-data.workspace = true
+brain-checkpoint.workspace = true
 
 [dev-dependencies]
 # `tests/autoquant.rs` trains a tiny `qwen3::Qwen` as the model under search.
 brain-qwen3.workspace = true
+# `tests/it/surgery.rs` edits tiny Qwen3-TTS checkpoints and compares their predictions.
+brain-qwen3tts.workspace = true
+brain-testutil.workspace = true

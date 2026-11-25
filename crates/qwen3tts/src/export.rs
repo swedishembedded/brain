@@ -105,19 +105,27 @@ pub fn export(base: &Path, out: &Path, id: &str, trained: &Trained<'_>, keep_goi
     }
     check_tensors(&base.join("model.safetensors"), trained.tensors)?;
 
+    let leave_out = |n: &str| leaves_out(&kind, n);
+    let mut model = |dst: &Path, keep_going: &mut dyn FnMut() -> bool| checkpoint::rewrite::rewrite_safetensors(&base.join("model.safetensors"), dst, trained.tensors, &leave_out, keep_going).map_err(|e| format!("export: {e}"));
+    place(out, |tmp| write_release(base, tmp, id, &config, &mut model, &[], keep_going))?;
+    let left_out = checkpoint::mmap::MmapSafetensors::open(base.join("model.safetensors"))?.names().iter().filter(|n| leaves_out(&kind, n)).count();
+    Ok(Exported { kind, left_out })
+}
+
+/// Write a release with `write` into a temporary sibling of `out`, then
+/// rename it into place; nothing is left behind on failure or cancellation.
+fn place(out: &Path, write: impl FnOnce(&Path) -> Result<bool, String>) -> Result<(), String> {
     let name = out.file_name().and_then(|n| n.to_str()).ok_or_else(|| format!("export: {} names no directory", out.display()))?;
     let tmp = out.with_file_name(format!(".{name}.export-{}.tmp", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
-    let result = write_release(base, &tmp, id, &config, &kind, trained.tensors, keep_going);
-    match result {
+    match write(&tmp) {
         Ok(true) => {
             std::fs::rename(&tmp, out).map_err(|e| {
                 let _ = std::fs::remove_dir_all(&tmp);
                 format!("export: rename into {}: {e}", out.display())
             })?;
             sync_dir(out.parent().unwrap_or(Path::new(".")));
-            let left_out = checkpoint::mmap::MmapSafetensors::open(base.join("model.safetensors"))?.names().iter().filter(|n| leaves_out(&kind, n)).count();
-            Ok(Exported { kind, left_out })
+            Ok(())
         }
         Ok(false) => {
             let _ = std::fs::remove_dir_all(&tmp);
@@ -128,6 +136,52 @@ pub fn export(base: &Path, out: &Path, id: &str, trained: &Trained<'_>, keep_goi
             Err(e)
         }
     }
+}
+
+/// A checkpoint edited into other shapes (narrower layers, fewer of them, a
+/// trimmed vocabulary), in the base's tensor names.
+pub struct Edited<'a> {
+    /// The whole `config.json`, stating every new width.
+    pub config: &'a Value,
+    /// Every tensor of the edited checkpoint under its upstream name, f32;
+    /// each is stored in the dtype the base stores that name in.
+    pub tensors: &'a [(String, Vec<u64>, Vec<f32>)],
+    /// Tokenizer files rewritten for a trimmed vocabulary, written in place
+    /// of the base's: only [`TOKENIZER_FILES`].
+    pub files: &'a [(String, Vec<u8>)],
+}
+
+/// The tokenizer files an edited export may rewrite.
+pub const TOKENIZER_FILES: &[&str] = &["vocab.json", "merges.txt", "tokenizer_config.json"];
+
+/// Export the edited checkpoint `edited` of the base at `base` into the new
+/// directory `out`, in the base's layout: `model.safetensors` holding exactly
+/// the edited tensors in the base's dtypes, the edited `config.json`, the
+/// rewritten tokenizer files, every other file of the base carried over and
+/// the manifest under `id`. The result is then opened through brain's own
+/// readers ([`crate::import::talker_view`], [`crate::import::mtp_view`]),
+/// which check every tensor against the config, and refused (nothing left
+/// behind) if they do not accept it.
+pub fn export_edited(base: &Path, out: &Path, id: &str, edited: &Edited<'_>, keep_going: &mut dyn FnMut() -> bool) -> Result<(), String> {
+    if out.exists() {
+        return Err(format!("export: {} exists; an export never overwrites a directory", out.display()));
+    }
+    if let Some((f, _)) = edited.files.iter().find(|(f, _)| !TOKENIZER_FILES.contains(&f.as_str())) {
+        return Err(format!("export: {f} is not a tokenizer file an edit rewrites"));
+    }
+    for f in REQUIRED_FILES {
+        if !base.join(f).is_file() {
+            return Err(format!("export: the base has no {f}"));
+        }
+    }
+    let mut model = |dst: &Path, keep_going: &mut dyn FnMut() -> bool| checkpoint::rewrite::write_safetensors_like(&base.join("model.safetensors"), dst, edited.tensors, keep_going).map_err(|e| format!("export: {e}"));
+    place(out, |tmp| {
+        if !write_release(base, tmp, id, edited.config, &mut model, edited.files, keep_going)? {
+            return Ok(false);
+        }
+        crate::import::talker_view(tmp).and_then(|_| crate::import::mtp_view(tmp)).map_err(|e| format!("export: brain does not read the edited checkpoint back: {e}"))?;
+        Ok(true)
+    })
 }
 
 /// Every trained tensor is one the base holds, at the base's shape. The dtype
@@ -226,17 +280,20 @@ fn table<'a>(talker: &'a mut serde_json::Map<String, Value>, key: &str) -> Resul
     talker.entry(key).or_insert_with(|| Value::Object(Default::default())).as_object_mut().ok_or_else(|| format!("export: talker_config.{key} is not an object"))
 }
 
-/// Write the whole release into `dir` (created here), every file synced.
-/// `Ok(false)` once `keep_going` said no.
-fn write_release(base: &Path, dir: &Path, id: &str, config: &Value, kind: &CheckpointKind, tensors: &[(String, Vec<u64>, Vec<f32>)], keep_going: &mut dyn FnMut() -> bool) -> Result<bool, String> {
+/// Writes `model.safetensors` at the given path; `Ok(false)` once `keep_going` said no.
+type ModelWriter<'a> = dyn FnMut(&Path, &mut dyn FnMut() -> bool) -> Result<bool, String> + 'a;
+
+/// Write the whole release into `dir` (created here), every file synced:
+/// the model through `model`, `files` in place of the base's files of their
+/// names, every other file carried over. `Ok(false)` once `keep_going` said no.
+fn write_release(base: &Path, dir: &Path, id: &str, config: &Value, model: &mut ModelWriter<'_>, files: &[(String, Vec<u8>)], keep_going: &mut dyn FnMut() -> bool) -> Result<bool, String> {
     let io = |what: &Path, e: std::io::Error| format!("export: {}: {e}", what.display());
     std::fs::create_dir_all(dir.join(CODEC_DIR)).map_err(|e| io(dir, e))?;
-    let leave_out = |n: &str| leaves_out(kind, n);
-    let model = dir.join("model.safetensors");
-    if !checkpoint::rewrite::rewrite_safetensors(&base.join("model.safetensors"), &model, tensors, &leave_out, keep_going).map_err(|e| format!("export: {e}"))? {
+    if !model(&dir.join("model.safetensors"), keep_going)? {
         return Ok(false);
     }
-    let mut carried: Vec<PathBuf> = REQUIRED_FILES.iter().chain(OPTIONAL_FILES).map(PathBuf::from).filter(|f| base.join(f).is_file()).collect();
+    let rewritten = |f: &Path| files.iter().any(|(n, _)| Path::new(n) == f);
+    let mut carried: Vec<PathBuf> = REQUIRED_FILES.iter().chain(OPTIONAL_FILES).map(PathBuf::from).filter(|f| base.join(f).is_file() && !rewritten(f)).collect();
     for entry in std::fs::read_dir(base.join(CODEC_DIR)).map_err(|e| io(&base.join(CODEC_DIR), e))? {
         let entry = entry.map_err(|e| io(&base.join(CODEC_DIR), e))?;
         let file = entry.file_name();
@@ -252,6 +309,9 @@ fn write_release(base: &Path, dir: &Path, id: &str, config: &Value, kind: &Check
         }
         std::fs::copy(base.join(f), dir.join(f)).map_err(|e| io(&base.join(f), e))?;
         sync_file(&dir.join(f))?;
+    }
+    for (name, bytes) in files {
+        write_synced(&dir.join(name), bytes)?;
     }
     write_synced(&dir.join("config.json"), &serde_json::to_vec_pretty(config).map_err(|e| format!("export: config: {e}"))?)?;
     let (family, roles) = brain_modelstore::recipe::files_recipe_roles("qwen3tts").ok_or("export: the model store has no qwen3tts recipe")?;

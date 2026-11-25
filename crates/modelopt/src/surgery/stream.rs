@@ -58,6 +58,16 @@ pub struct Basis {
     pub energy: Vec<f64>,
 }
 
+impl Basis {
+    /// A stream vector `v` (`d` values) in the basis's first `k` directions:
+    /// what an input written into the rotated stream from outside the
+    /// checkpoint (a speaker embedding computed elsewhere) becomes.
+    pub fn project(&self, v: &[f32], k: usize) -> Vec<f32> {
+        assert_eq!(v.len(), self.d, "Basis::project: a vector of {} values for a basis {} wide", v.len(), self.d);
+        linear_rows(v, &self.rows[..k * self.d], 1, self.d, k)
+    }
+}
+
 /// The basis of a stream whose second-moment matrix is `cov` (`[d, d]`,
 /// symmetric, f64).
 pub fn basis_from_covariance(cov: &[f64], d: usize, kind: BasisKind) -> Result<Basis, String> {

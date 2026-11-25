@@ -182,6 +182,77 @@ pub fn rewrite_safetensors(src: &Path, dst: &Path, replace: &[(String, Vec<u64>,
     }
 }
 
+/// Write `dst` holding exactly `tensors` (name, shape, f32 values), in their
+/// order, each stored in the dtype `src` stores that name in (BF16 and F16
+/// rounding to nearest even) and with `src`'s `__metadata__`: a checkpoint in
+/// the source's own layout whose shapes changed, as an edit that narrows a
+/// model writes it. A shape is not checked against the source's.
+///
+/// Refused before anything is written: a name the source does not hold, one
+/// the source stores as anything but F32/BF16/F16, a value count the shape
+/// does not have, a name given twice. The write goes to a temporary beside
+/// `dst`, synced and renamed into place; `keep_going` is asked before each
+/// tensor, and once it says no the temporary is removed and the answer is
+/// `Ok(false)`.
+pub fn write_safetensors_like(src: &Path, dst: &Path, tensors: &[(String, Vec<u64>, Vec<f32>)], keep_going: &mut dyn FnMut() -> bool) -> io::Result<bool> {
+    let source = File::open(src).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", src.display())))?;
+    let (entries, meta, _) = read_entries(&source, src)?;
+    let dtypes: HashMap<&str, &str> = entries.iter().map(|e| (e.name.as_str(), e.dtype.as_str())).collect();
+    let mut header: BTreeMap<String, Value> = BTreeMap::new();
+    let mut plan = Vec::with_capacity(tensors.len());
+    let mut offset = 0u64;
+    for (name, shape, values) in tensors {
+        let dtype = *dtypes.get(name.as_str()).ok_or_else(|| inval(format!("{name}: the source checkpoint has no such tensor")))?;
+        let width = match dtype {
+            "F32" => 4,
+            "BF16" | "F16" => 2,
+            other => return Err(inval(format!("{name}: stored as {other}, which an edited value cannot be written in"))),
+        };
+        let numel: u64 = shape.iter().product();
+        if values.len() as u64 != numel {
+            return Err(inval(format!("{name}: {} values for shape {shape:?} ({numel})", values.len())));
+        }
+        let n = numel * width;
+        if header.insert(name.clone(), serde_json::json!({ "dtype": dtype, "shape": shape, "data_offsets": [offset, offset + n] })).is_some() {
+            return Err(inval(format!("{name}: given twice")));
+        }
+        plan.push((dtype, values, offset));
+        offset += n;
+    }
+    if let Some(m) = meta {
+        header.insert("__metadata__".to_string(), m);
+    }
+    let mut hbytes = serde_json::to_vec(&header)?;
+    while hbytes.len() % 8 != 0 {
+        hbytes.push(b' ');
+    }
+    let mut tmp = dst.as_os_str().to_owned();
+    tmp.push(format!(".{}.tmp", std::process::id()));
+    let tmp = std::path::PathBuf::from(tmp);
+    let out = File::create(&tmp)?;
+    let written = (|| -> io::Result<bool> {
+        out.write_all_at(&(hbytes.len() as u64).to_le_bytes(), 0)?;
+        out.write_all_at(&hbytes, 8)?;
+        let blob = 8 + hbytes.len() as u64;
+        for (dtype, values, at) in &plan {
+            if !keep_going() {
+                return Ok(false);
+            }
+            out.write_all_at(&encode(dtype, values).expect("dtype checked above"), blob + at)?;
+        }
+        out.sync_all()?;
+        Ok(true)
+    })();
+    drop(out);
+    match written {
+        Ok(true) => crate::st::durable_rename(&tmp, dst).map(|()| true),
+        other => {
+            let _ = std::fs::remove_file(&tmp);
+            other
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +291,24 @@ mod tests {
 
     fn none(_: &str) -> bool {
         false
+    }
+
+    #[test]
+    fn a_reshaped_write_stores_each_tensor_in_the_source_dtype_and_refuses_unknown_names() {
+        let dir = scratch();
+        let src = base(dir.path());
+        let dst = dir.path().join("narrow.safetensors");
+        let tensors = vec![("a.weight".to_string(), vec![2, 2], vec![1.0, -2.0, 3.0, 0.5]), ("b.bias".to_string(), vec![1], vec![0.1])];
+        assert!(write_safetensors_like(&src, &dst, &tensors, &mut || true).unwrap());
+        let (dtype, shape, _) = raw(&dst, "a.weight");
+        assert_eq!((dtype.as_str(), shape), ("BF16", vec![2, 2]));
+        let r = WeightReader::open(dst.to_str().unwrap()).unwrap();
+        assert_eq!(r.tensor("a.weight").unwrap(), vec![1.0, -2.0, 3.0, 0.5]);
+        assert_eq!(r.tensor("b.bias").unwrap(), vec![0.1]);
+        assert!(r.shape("spk.w").is_none(), "only the given tensors are written");
+        let bad = vec![("nope".to_string(), vec![1], vec![0.0])];
+        assert!(write_safetensors_like(&src, &dir.path().join("x"), &bad, &mut || true).is_err());
+        assert!(!dir.path().join("x").exists());
     }
 
     #[test]

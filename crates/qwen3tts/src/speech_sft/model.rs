@@ -67,6 +67,9 @@ use crate::import::{mtp_brain_to_hf, mtp_hf_to_brain, talker_brain_to_hf, talker
 use crate::prompt::{Part, PromptPlan, TtsSpecials};
 use crate::talker::TextProjection;
 
+mod probe;
+pub use probe::{DecoderStack, Logits};
+
 /// The Talker's input table, under its upstream name.
 pub const TALKER_TABLE: &str = "talker.model.codec_embedding.weight";
 /// The Talker's head.
@@ -380,6 +383,12 @@ struct Loaded {
     frames: u32,
     /// End-of-speech labels, one per complete utterance.
     eos: u32,
+    /// The Talker rows (in its computed layout) with a target, in row order, and each one's target.
+    talker_targets: Vec<(u32, u32)>,
+    /// The Talker rows that hold an utterance's prompt or frames (the rest is padding), in row order.
+    talker_valid: Vec<u32>,
+    /// Every frame's codes, `[frames, num_code_groups]`: the code predictor's positions `1..` predict them.
+    cp_codes: Vec<u32>,
 }
 
 /// The latest forward's measurements.
@@ -926,7 +935,20 @@ impl SpeechSftModel {
             aux.gpu.write(&aux.eos_plan, &pairs);
         }
         *aux.eos_labels.borrow_mut() = vec![s.specials.codec_eos; eos_rows.len()];
-        *self.loaded.borrow_mut() = Some(Loaded { talker_count, talker_rows: (seqs * run) as u32, cp_rows: (cp_seqs * g) as u32, frames: frames as u32, eos: eos_rows.len() as u32 });
+        let mut talker_targets = Vec::with_capacity(talker_count as usize);
+        let mut talker_valid = Vec::new();
+        for (slot, ex) in examples.iter().enumerate() {
+            let (prefix, n) = (ex.plan.len(), ex.codes.len() / g);
+            let rows = Self::rows_needed(prefix, n);
+            talker_valid.extend((slot * run..slot * run + rows.min(run)).map(|r| r as u32));
+            for p in 0..rows.min(run) {
+                let y = targets[slot * t + p];
+                if y != IGNORE {
+                    talker_targets.push(((slot * run + p) as u32, y));
+                }
+            }
+        }
+        *self.loaded.borrow_mut() = Some(Loaded { talker_count, talker_rows: (seqs * run) as u32, cp_rows: (cp_seqs * g) as u32, frames: frames as u32, eos: eos_rows.len() as u32, talker_targets, talker_valid, cp_codes: examples.iter().flat_map(|ex| ex.codes.iter().copied()).collect() });
         Ok(())
     }
 

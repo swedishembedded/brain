@@ -95,6 +95,28 @@ impl Checkpoint {
         self.tensors.get_mut(name).ok_or_else(|| format!("the checkpoint has no tensor {name}"))
     }
 
+    /// The checkpoint at `dir`: its `config.json` and every tensor of its
+    /// `model.safetensors`, as f32.
+    pub fn read(dir: &std::path::Path) -> Result<Checkpoint, String> {
+        let at = |what: &str, e: &dyn std::fmt::Display| format!("{}: {what}: {e}", dir.display());
+        let config: Value = serde_json::from_slice(&std::fs::read(dir.join("config.json")).map_err(|e| at("config.json", &e))?).map_err(|e| at("config.json", &e))?;
+        let path = dir.join("model.safetensors");
+        let reader = checkpoint::weightio::WeightReader::open(path.to_str().ok_or_else(|| at("path", &"not UTF-8"))?).map_err(|e| at("model.safetensors", &e))?;
+        let mut tensors = BTreeMap::new();
+        let names: Vec<String> = reader.names().map(str::to_string).collect();
+        for name in names {
+            let shape: Vec<usize> = reader.shape(&name).unwrap_or_default().iter().map(|&d| d as usize).collect();
+            let data = reader.tensor(&name).ok_or_else(|| at("model.safetensors", &format!("{name} does not read as real numbers")))?;
+            tensors.insert(name, Tensor::new(shape, data).map_err(|e| at("model.safetensors", &e))?);
+        }
+        Ok(Checkpoint { config, tensors })
+    }
+
+    /// Every tensor as `(name, shape, values)`, the form a checkpoint writer takes.
+    pub fn to_list(&self) -> Vec<(String, Vec<u64>, Vec<f32>)> {
+        self.tensors.iter().map(|(n, t)| (n.clone(), t.shape.iter().map(|&d| d as u64).collect(), t.data.clone())).collect()
+    }
+
     /// Every parameter, counted.
     pub fn params(&self) -> u64 {
         self.tensors.values().map(|t| t.data.len() as u64).sum()

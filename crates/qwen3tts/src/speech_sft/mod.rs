@@ -39,7 +39,7 @@ mod tables;
 #[cfg(test)]
 mod tests;
 
-pub use model::{Example, ForwardStats, LrMultipliers, SftShape, SpeechSftModel};
+pub use model::{DecoderStack, Example, ForwardStats, Logits, LrMultipliers, SftShape, SpeechSftModel};
 pub use objective::{RowMap, SpeechObjective};
 pub use rows::{RowSource, Rows, RowsConfig};
 
@@ -296,22 +296,31 @@ impl Base {
         let at = |what: &str, e: &dyn std::fmt::Display| format!("{}: {what}: {e}", dir.display());
         let text = std::fs::read_to_string(dir.join("config.json")).map_err(|e| at("config.json", &e))?;
         let root: serde_json::Value = serde_json::from_str(&text).map_err(|e| at("config.json", &e))?;
-        let talker = TalkerConfig::from_json(&root);
-        let mtp = MtpConfig::from_json(&root);
-        let specials = TtsSpecials::from_config_dir(dir.to_str().ok_or_else(|| at("path", &"not UTF-8"))?)?;
         let path = dir.join("model.safetensors");
         let reader = checkpoint::weightio::WeightReader::open(path.to_str().ok_or_else(|| at("path", &"not UTF-8"))?).map_err(|e| at("model.safetensors", &e))?;
+        let shape = |name: &str| reader.shape(name).map(<[u64]>::to_vec);
+        let read = |name: &str| reader.tensor(name);
+        Self::from_parts(&root, &shape, &read).map_err(|e| at("model.safetensors", &e))
+    }
+
+    /// A release whose `config.json` is `root` and whose tensors `shape` and
+    /// `read` answer for by upstream name: what [`Self::open`] reads, for a
+    /// checkpoint held in memory (an edited one).
+    pub fn from_parts(root: &serde_json::Value, shape: &dyn Fn(&str) -> Option<Vec<u64>>, read: &dyn Fn(&str) -> Option<Vec<f32>>) -> Result<Base, String> {
+        let talker = TalkerConfig::from_json(root);
+        let mtp = MtpConfig::from_json(root);
+        let specials = TtsSpecials::from_config(root)?;
         let fc1_bias = model::TEXT_PROJECTION[1];
-        let text_inter = reader.shape(fc1_bias).and_then(|s| s.first().copied()).ok_or_else(|| at("model.safetensors", &format!("no {fc1_bias}")))? as u32;
-        let shape = SftShape { talker: talker.clone(), mtp: mtp.clone(), specials: specials.clone(), batch: 1, block: 1, frames: 1, mtp_weight: 0.0, lr: LrMultipliers::default(), new_rows: Vec::new(), text_inter, gemm: GemmPrecision::Fp32Reference };
+        let text_inter = shape(fc1_bias).and_then(|s| s.first().copied()).ok_or_else(|| format!("no {fc1_bias}"))? as u32;
+        let shape_of = SftShape { talker: talker.clone(), mtp: mtp.clone(), specials: specials.clone(), batch: 1, block: 1, frames: 1, mtp_weight: 0.0, lr: LrMultipliers::default(), new_rows: Vec::new(), text_inter, gemm: GemmPrecision::Fp32Reference };
         let mut tensors = HashMap::new();
         let mut shapes = HashMap::new();
-        for (name, numel) in ::model::ModelConfig::param_list(&shape).into_iter().chain(shape.frozen_params()) {
-            let values = reader.tensor(&name).ok_or_else(|| at("model.safetensors", &format!("no tensor {name}")))?;
+        for (name, numel) in ::model::ModelConfig::param_list(&shape_of).into_iter().chain(shape_of.frozen_params()) {
+            let values = read(&name).ok_or_else(|| format!("no tensor {name}"))?;
             if values.len() != numel {
-                return Err(at("model.safetensors", &format!("{name} holds {} values, the configuration needs {numel}", values.len())));
+                return Err(format!("{name} holds {} values, the configuration needs {numel}", values.len()));
             }
-            shapes.insert(name.clone(), reader.shape(&name).expect("read above").to_vec());
+            shapes.insert(name.clone(), shape(&name).expect("read above"));
             tensors.insert(name, values);
         }
         Ok(Base { talker, mtp, specials, text_inter, tensors, shapes })

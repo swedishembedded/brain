@@ -39,6 +39,7 @@ pub mod shard;
 pub mod speech_sft;
 pub mod train;
 pub mod spec;
+pub mod surgery;
 pub mod talker;
 #[cfg(test)]
 mod testsupport;

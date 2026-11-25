@@ -141,6 +141,11 @@ impl TtsSpecials {
             .map_err(|e| format!("read config.json: {e}"))?;
         let v: serde_json::Value =
             serde_json::from_str(&s).map_err(|e| format!("parse config.json: {e}"))?;
+        Self::from_config(&v)
+    }
+
+    /// [`Self::from_config_dir`] on a `config.json` already parsed.
+    pub fn from_config(v: &serde_json::Value) -> Result<TtsSpecials, String> {
         let t = &v["talker_config"];
         let gu = |o: &serde_json::Value, k: &str, d: u32| {
             o[k].as_u64().map(|x| x as u32).unwrap_or(d)
@@ -162,9 +167,9 @@ impl TtsSpecials {
             }
         }
         Ok(TtsSpecials {
-            tts_bos: gu(&v, "tts_bos_token_id", 151672),
-            tts_eos: gu(&v, "tts_eos_token_id", 151673),
-            tts_pad: gu(&v, "tts_pad_token_id", 151671),
+            tts_bos: gu(v, "tts_bos_token_id", 151672),
+            tts_eos: gu(v, "tts_eos_token_id", 151673),
+            tts_pad: gu(v, "tts_pad_token_id", 151671),
             codec_nothink: gu(t, "codec_nothink_id", 2155),
             codec_think: gu(t, "codec_think_id", 2154),
             codec_think_bos: gu(t, "codec_think_bos_id", 2156),
@@ -174,7 +179,7 @@ impl TtsSpecials {
             codec_eos: gu(t, "codec_eos_token_id", 2150),
             lang,
             spk_id,
-            checkpoint: Checkpoint::from_config(&v)?,
+            checkpoint: Checkpoint::from_config(v)?,
         })
     }
 

@@ -2348,10 +2348,13 @@ dependencies = [
 name = "brain-modelopt"
 version = "6.0.0"
 dependencies = [
+ "brain-checkpoint",
  "brain-data",
  "brain-gpu-core",
  "brain-model",
  "brain-qwen3",
+ "brain-qwen3tts",
+ "brain-testutil",
  "serde",
  "serde_json",
 ]
