@@ -222,3 +222,47 @@ async fn a_full_fine_tune_the_trainer_would_refuse_is_refused_at_submission() {
     assert_eq!(json_of(&checked)["outputs"]["status"], "valid");
     assert!(work_is_clean(&rig.work_root));
 }
+
+/// `speech_sft` over HTTP: the shard moves by digest, the job streams its stages and ends with the checkpoint's
+/// manifest digest; a param that names a path, an unknown key and a digest the store does not hold are 400s that start
+/// nothing and name no path of this machine.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_speech_fine_tune_over_http_moves_its_shard_by_digest_and_refuses_what_it_does_not_define() {
+    use crate::speech::{shard, write_tts_base, LANGUAGES, TTS_BASE, VOICES};
+    let rig = rig("http-speech", 16 << 30, true);
+    write_tts_base(&rig.dir.join("models"));
+    let app = router(AppState::new(rig.exec.clone(), KEY, Provider::OpenAI).with_training(true));
+    let digest = data_digest(&rig, &shard());
+    let body = |params: Value| json!({"model": trainjob::MODEL, "action": trainjob::speech::ACTION, "params": params});
+    let good = json!({"base": TTS_BASE, "languages": LANGUAGES, "voices": VOICES, "dataset_digest": digest.hex(), "steps": 1, "allow_cpu": true});
+
+    let mut refusals = Vec::new();
+    for extra in ["out", "weights_dir", "ckpt", "path", "dataset"] {
+        let mut p = good.clone();
+        p[extra] = json!("/etc/passwd");
+        refusals.push((format!("param {extra}"), p));
+    }
+    let mut p = good.clone();
+    p["dataset_digest"] = json!(trainjob::store::digest_of(b"absent").hex());
+    refusals.push(("an absent digest".into(), p));
+    let mut p = good.clone();
+    p["languages"] = json!("x".repeat(trainjob::speech::MAX_NAMES_DOC + 1));
+    refusals.push(("an oversized languages document".into(), p));
+    for (why, p) in refusals {
+        let (status, response) = call(&app, Method::POST, "/v1/jobs", Some(KEY), Some(body(p))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{why}: {}", String::from_utf8_lossy(&response));
+        assert!(!String::from_utf8_lossy(&response).contains(rig.dir.to_str().unwrap()), "{why}: the refusal names a path of this machine");
+    }
+
+    let (status, created) = call(&app, Method::POST, "/v1/jobs", Some(KEY), Some(body(good))).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{}", String::from_utf8_lossy(&created));
+    let id = json_of(&created)["id"].as_str().unwrap().to_string();
+    let (_, stream) = call(&app, Method::GET, &format!("/v1/jobs/{id}/events"), Some(KEY), None).await;
+    let text = String::from_utf8(stream).unwrap();
+    assert!(text.contains("\"stage\"") && text.contains("event: done"), "{text}");
+    let (status, result) = call(&app, Method::GET, &format!("/v1/jobs/{id}/result"), Some(KEY), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let result = json_of(&result);
+    assert!(trainjob::Digest::parse(result["outputs"]["checkpoint_digest"].as_str().unwrap_or_default()).is_ok(), "{result}");
+    assert!(!result.to_string().contains(rig.dir.to_str().unwrap()), "the result names no path of this machine: {result}");
+}

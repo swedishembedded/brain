@@ -188,3 +188,56 @@ fn check_dataset_lists_per_record_counts_over_the_bus_and_refuses_an_unbounded_p
         assert!(refused.to_string().contains("limit"), "{refused}");
     });
 }
+
+/// `speech_sft` over the bus: the shard is a descriptor of `Subscribe`, the stages stream, the result is the
+/// checkpoint's manifest digest, and a param naming a path is a bus error before any job exists.
+#[test]
+fn a_speech_fine_tune_over_the_bus_takes_its_shard_as_a_descriptor() {
+    if !session_bus_reachable() {
+        brain_testutil::skip_unavailable("no reachable session bus (run under `dbus-run-session -- cargo test ...`)");
+        return;
+    }
+    use crate::speech::{shard, write_tts_base, LANGUAGES, TTS_BASE, VOICES};
+    let rig = rig("dbus-speech", 16 << 30, true);
+    write_tts_base(&rig.dir.join("models"));
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    rt.block_on(async {
+        let manager = brain_dbus::service::Manager::new(rig.exec.clone()).with_training(true);
+        let name = format!("com.swedishembedded.Brain1.speechtest{}", std::process::id());
+        let _conn = zbus::connection::Builder::session().name(name.as_str()).serve_at(brain_dbus::OBJECT_PATH, manager).build().await.unwrap();
+        let client = zbus::Connection::session().await.unwrap();
+        let proxy = zbus::Proxy::new(&client, name.as_str(), brain_dbus::OBJECT_PATH, "com.swedishembedded.Brain1.Manager").await.unwrap();
+        let params = json!({"base": TTS_BASE, "languages": LANGUAGES, "voices": VOICES, "steps": 1, "allow_cpu": true});
+
+        let mut bad = params.clone();
+        bad["out"] = json!("/etc");
+        let mut fds: HashMap<String, ZOwnedFd> = HashMap::new();
+        fds.insert("dataset".into(), memfd(&shard()));
+        let refused = proxy.call::<_, _, (u64, ZOwnedFd)>("Subscribe", &(trainjob::MODEL, trainjob::speech::ACTION, bad.to_string(), fds, r#"{"dataset":{"media":"bytes"}}"#)).await;
+        assert!(refused.is_err(), "a path param is refused before a job exists");
+
+        let mut fds: HashMap<String, ZOwnedFd> = HashMap::new();
+        fds.insert("dataset".into(), memfd(&shard()));
+        let (_job, stream): (u64, ZOwnedFd) = proxy.call("Subscribe", &(trainjob::MODEL, trainjob::speech::ACTION, params.to_string(), fds, r#"{"dataset":{"media":"bytes"}}"#)).await.unwrap();
+        let stream = std::sync::Arc::new(OwnedFd::from(stream));
+        let (mut stages, mut done) = (0, None);
+        loop {
+            let reader = stream.clone();
+            let Some((frame, _)) = tokio::task::spawn_blocking(move || next_frame(&reader)).await.unwrap() else { break };
+            match frame["type"].as_str().unwrap() {
+                "progress" if frame["event"]["type"] == "stage" => stages += 1,
+                "done" => {
+                    done = Some(frame["result"].clone());
+                    break;
+                }
+                "error" => panic!("the job failed: {frame}"),
+                _ => {}
+            }
+        }
+        let report = done.expect("a done frame");
+        assert!(stages > 0, "the stages stream");
+        assert_eq!(report["status"], "completed", "{report}");
+        assert!(trainjob::Digest::parse(report["checkpoint_digest"].as_str().unwrap_or_default()).is_ok(), "{report}");
+    });
+    assert!(work_is_clean(&rig.work_root));
+}

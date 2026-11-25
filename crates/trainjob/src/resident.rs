@@ -48,6 +48,7 @@ use crate::consolidate::{self, FullRequest, MergeRequest};
 use crate::create;
 use crate::pretrain;
 use crate::dryrun;
+use crate::speech;
 use crate::timeline;
 use crate::job::{self, FootprintCache, JobEnv};
 use crate::quota::{self, FreeSpace, Quotas};
@@ -103,6 +104,7 @@ impl TrainResident {
             pretrain::ACTION => self.admit_pretrain(inv),
             dryrun::ACTION => self.admit_check(inv),
             timeline::ACTION => self.admit_timeline(inv),
+            speech::ACTION => self.admit_speech(inv),
             other => Err(format!("{} has no action '{other}'", request::MODEL)),
         }
     }
@@ -127,7 +129,7 @@ impl TrainResident {
             job::resolve_model(self.env.models_dir.as_deref(), "distill_teacher", teacher)?;
         }
         let footprint = self.footprints.of(&base_dir, &request, self.env.largest_card_bytes)?;
-        self.fits_a_card("train", footprint.device_bytes, &format!("{}: {}", footprint.reason, footprint.breakdown), request.params.max_block)?;
+        self.fits_a_card("train", footprint.device_bytes, &format!("{}: {}; rows of up to {} tokens", footprint.reason, footprint.breakdown, request.params.max_block), "lower max_block or hold the base narrower")?;
         Ok(Reservation::Card(footprint.device_bytes, request.spread.cards))
     }
 
@@ -182,7 +184,7 @@ impl TrainResident {
         self.check_digests(&request.data.digests())?;
         let base_dir = job::resolve_base(self.env.models_dir.as_deref(), &p.base)?;
         let footprint = pretrain::footprint(&request, &base_dir)?;
-        self.fits_a_card(pretrain::ACTION, footprint.device_bytes, &footprint.reason, p.block)?;
+        self.fits_a_card(pretrain::ACTION, footprint.device_bytes, &format!("{}; rows of up to {} tokens", footprint.reason, p.block), "lower max_block or hold the base narrower")?;
         Ok(Reservation::Card(footprint.device_bytes, 1))
     }
 
@@ -214,6 +216,27 @@ impl TrainResident {
             return Err(format!("timeline_train: a run is budgeted {} bytes of device memory and the largest card has less", timeline::DEVICE_BUDGET));
         }
         Ok(Reservation::Card(timeline::DEVICE_BUDGET, 1))
+    }
+
+    fn admit_speech(&self, inv: &Invocation) -> Result<Reservation, String> {
+        let request = speech::Request::from_invocation(inv)?;
+        let p = &request.params;
+        self.resumable(speech::ACTION, p.resume_key.as_deref())?;
+        if self.env.store.is_none() && p.install_as.is_none() && !p.validate_only {
+            return Err(format!("{}: this server has no artifact store (--artifact-store) to publish the checkpoint to: set install_as to keep it in the model store", speech::ACTION));
+        }
+        if self.env.store.is_none() && !request.digests().is_empty() {
+            return Err(format!("{}: this server has no artifact store (--artifact-store), so a shard cannot be named by digest", speech::ACTION));
+        }
+        self.check_digests(&request.digests())?;
+        // The base, its languages and voices are checked here, before the run is queued.
+        let base_dir = speech::resolve_base(&self.env, &request)?;
+        if p.validate_only {
+            return Ok(Reservation::Host(64 << 20));
+        }
+        let bytes = speech::device_bytes(&base_dir);
+        self.fits_a_card(speech::ACTION, bytes, "four copies of the Talker's and the code predictor's f32 weights and a step's activations", "train a smaller base")?;
+        Ok(Reservation::Card(bytes, 1))
     }
 
     fn admit_check(&self, inv: &Invocation) -> Result<Reservation, String> {
@@ -255,16 +278,12 @@ impl TrainResident {
         Ok(())
     }
 
-    /// Refuses a run that needs more than the largest card holds.
-    fn fits_a_card(&self, action: &str, bytes: u64, reason: &str, max_block: u32) -> Result<(), String> {
+    /// Refuses a run that needs more than the largest card holds; `remedy` says what makes it smaller.
+    fn fits_a_card(&self, action: &str, bytes: u64, reason: &str, remedy: &str) -> Result<(), String> {
         let Some(card) = self.env.largest_card_bytes else { return Ok(()) };
         if bytes > card {
             let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
-            return Err(format!(
-                "{action}: this run needs about {:.0} GiB ({reason}; rows of up to {max_block} tokens) and the largest card has {:.0} GiB; lower max_block or hold the base narrower",
-                gib(bytes),
-                gib(card)
-            ));
+            return Err(format!("{action}: this run needs about {:.0} GiB ({reason}) and the largest card has {:.0} GiB; {remedy}", gib(bytes), gib(card)));
         }
         Ok(())
     }
@@ -288,7 +307,7 @@ fn card_key(config: &str) -> Option<(u64, usize)> {
 
 impl ResidentModel for TrainResident {
     fn manifest(&self) -> Manifest {
-        Manifest::new(request::MODEL, "fine-tune a chat model on the devices serving shares: a LoRA adapter (supervised, policy gradient or preference), every weight (`full_train`), or fold an adapter into its base (`merge`); create a model from nothing (`init_model`) and pretrain it on raw text (`pretrain`); datasets and results by blob or artifact digest, scheduled with the serving residents (see the trainjob crate)", vec![request::action_spec(), consolidate::full_spec(), consolidate::merge_spec(), create::spec(), pretrain::spec(), dryrun::spec(), timeline::spec()])
+        Manifest::new(request::MODEL, "fine-tune a chat model on the devices serving shares: a LoRA adapter (supervised, policy gradient or preference), every weight (`full_train`), or fold an adapter into its base (`merge`); create a model from nothing (`init_model`) and pretrain it on raw text (`pretrain`); datasets and results by blob or artifact digest, scheduled with the serving residents (see the trainjob crate)", vec![request::action_spec(), consolidate::full_spec(), consolidate::merge_spec(), create::spec(), pretrain::spec(), dryrun::spec(), timeline::spec(), speech::spec()])
     }
 
     fn instance_key(&self, action: &str, inv: &Invocation) -> InstanceKey {
@@ -364,11 +383,12 @@ impl Instance for TrainInstance {
             pretrain::ACTION => &mut || pretrain::run(env, inv, progress),
             dryrun::ACTION => &mut || dryrun::run(env, inv, progress),
             timeline::ACTION => &mut || timeline::run(env, inv, progress),
+            speech::ACTION => &mut || speech::run(env, inv, progress),
             other => return Err(format!("{} has no action '{other}'", request::MODEL)),
         };
         // A `full_train` that only checks its settings trains nothing: host work, never refused for a CPU placement.
         let checks_only = inv.params.get("validate_only").and_then(serde_json::Value::as_bool).unwrap_or(false);
-        let trains = matches!(action, request::ACTION | consolidate::FULL_ACTION | pretrain::ACTION) && !checks_only;
+        let trains = matches!(action, request::ACTION | consolidate::FULL_ACTION | pretrain::ACTION | speech::ACTION) && !checks_only;
         let allow_cpu = inv.params.get("allow_cpu").and_then(serde_json::Value::as_bool).unwrap_or(false);
         // The trainer reports a device failure (an allocation the card cannot hold) as a panic. One run's failure is
         // that run's error, not the server's.

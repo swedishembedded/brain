@@ -18,6 +18,8 @@ brain-residency.workspace = true
 brain-modelref.workspace = true
 brain-modelstore.workspace = true
 brain-horizon.workspace = true
+brain-qwen3tts.workspace = true
+brain-model.workspace = true
 brain = { workspace = true, features = ["study"] }
 blake3.workspace = true
 libc.workspace = true
@@ -25,6 +27,10 @@ serde = { workspace = true }
 serde_json.workspace = true
 
 [dev-dependencies]
+# The served Qwen3-TTS checkpoints an installed speech fine-tune is listed beside, and the base's upstream file.
+brain-loader.workspace = true
+safetensors.workspace = true
+brain-audio.workspace = true
 # The served timeline model a consolidated job hands over to.
 brain-catalog.workspace = true
 brain-modelref.workspace = true

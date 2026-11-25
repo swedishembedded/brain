@@ -133,6 +133,16 @@ ledger is the engine work it needs.
       under the old rule keeps its `family: "qwen3asr"` manifest until it is
       pulled again.
 
+- [ ] Served speech training: `brain/train` `speech_sft` (`crates/trainjob/src/speech.rs`) stages shards by blob or
+      digest, checks them and the languages/voices against the base at the door, runs under the `resume_key`
+      contract, exports over the base, publishes the manifest and installs; every installed release is served under
+      its own id (`TtsResident::all_from_store`) with its voices as preset voices and `language` on
+      `/v1/audio/speech`. Gated on a toy upstream-layout base (in-process, HTTP, D-Bus) and on the real 0.6B (served
+      with its new voice and language). Open: the objective is a stand-in (`speech::objective`, the base's tensors
+      unchanged, new rows taken from the top of the codec vocabulary, no steps) until `qwen3tts::speech_sft` lands;
+      swapping it in is the module's one call. A release installed by a running server is served from the server's
+      next start (no job registers a model live).
+
 Gates: tiny random configs for the objective's gradients (finite differences
 through Talker, code predictor and the routed tables); teacher-forced rows equal
 inference rows on the real checkpoint; overfit of one real utterance; held-out

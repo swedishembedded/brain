@@ -102,6 +102,15 @@ impl TtsPaths {
         bytes(crate::import::open_talker(&self.talker)) + bytes(crate::import::open_mtp(&self.mtp)) + self.encoder_weight_bytes()
     }
 
+    /// The parameters of the Talker and the code predictor (the components a
+    /// speech fine-tune trains), counted from the checkpoint's headers; 0 when
+    /// they cannot be read.
+    pub fn talker_and_mtp_params(&self) -> u64 {
+        use checkpoint::weightio::WeightReader;
+        let count = |r: Result<WeightReader, String>| r.map(|r| r.names().map(|n| r.shape(n).unwrap_or_default().iter().product::<u64>()).sum()).unwrap_or(0);
+        count(crate::import::open_talker(&self.talker)) + count(crate::import::open_mtp(&self.mtp))
+    }
+
     /// The bytes the codec's and the speaker encoder's weights occupy as f32:
     /// what one [`crate::encode::Encoder`] holds.
     pub fn encoder_weight_bytes(&self) -> u64 {

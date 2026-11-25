@@ -26,4 +26,5 @@ mod pretrain;
 mod resume;
 mod run;
 mod schedule;
+mod speech;
 mod support;

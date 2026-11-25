@@ -131,9 +131,44 @@ is refused for an architecture without exit gates. The report carries the weight
 an evaluating step carries `eval_loss`; the report adds `evaluations` (`[{step, train_loss, eval_loss}]`),
 `documents`, `tokens`, `held_out_documents`, `held_out_tokens`, `separator` and `separator_id`.
 
+## Speech fine-tuning
+
+**`speech_sft`** fine-tunes a Qwen3-TTS checkpoint (Talker and code predictor) on recorded speech, with new languages
+and named voices, and exports it in the upstream layout of its base: the base's `model.safetensors` names and dtypes
+(BF16 for the released checkpoints), its tokenizer, `generation_config.json` and `speech_tokenizer/`, and a
+`config.json` that names the trained languages and voices, so brain and the upstream `qwen-tts` package load it
+unchanged. A checkpoint with named voices is a `custom_voice` checkpoint (see
+[Qwen3-TTS](../../reference/models/qwen3tts.md#trained-checkpoints)).
+
+The datasets are training shards (`brain-tts-shard-v1`, one file of tokenised transcripts, `[frames, 16]` codec codes,
+x-vectors, voice and language per utterance; the `encode` action of a Qwen3-TTS model produces each utterance's
+arrays). Params:
+
+| param | meaning |
+|---|---|
+| `base` | the Qwen3-TTS base, `<vendor>/<repo>` in the model store (required) |
+| `dataset_digest` or the blob `dataset` | the training shard (exactly one of the two) |
+| `held_out_digest` or the blob `held_out` | a held-out shard (at most one), scored every `eval_every` steps |
+| `languages` | JSON object naming every language the shards hold (required): `{"<name>": {"new": true, "init_from": ["english", ...]}}` for one the base lacks, its codec row initialised from the mix of those, or `{"<name>": {"new": false}}` for one of the base's. Names are 1 to 64 lowercase `[a-z0-9_-]`; at most 256, the document at most 64 KiB |
+| `voices` | JSON object naming every voice the shards train (default `{}`): `{"<name>": {"new": true}}`, its row initialised from its speaker's x-vectors, or `{"new": false}` for one of the base's |
+| `steps`, `lr`, `grad_accum`, `seed`, `eval_every`, `residual_weight` | the optimiser's settings; `residual_weight` (default 0.3, upstream's) weighs the code predictor's loss beside the Talker's |
+| `cards` | 1: a speech fine-tune trains on one card |
+| `install_as`, `resume_key`, `checkpoint_every`, `allow_cpu` | as for `full_train` |
+| `validate_only` | stage and check the shards (format, codebooks and x-vector width against the base, every language and voice named) and the names against the base, and answer `{"status": "valid", "records", "held_out_records", "languages", "voices", "device_bytes"}` without training: host work |
+
+A language or voice the request calls new that the base already names, one it calls the base's that the base lacks,
+an `init_from` that is not a base language, a shard language or voice the request does not name, and a shard of
+another codebook count or x-vector width are refused by name. The run is charged four copies of the Talker's and the
+code predictor's f32 weights and a step's activations on its card. Step frames carry `step`, `steps`, `loss`, `lr`,
+`grad_norm`, `seconds`, `eval_loss` on an evaluating step, and the objective's own metrics. The result is the report
+(`objective: "speech_sft"`, `base`, `seed`, `languages` and `voices` with the codec row of each, `tts_model_type`,
+`trained_tensors`), `checkpoint_digest` and `files`, and with `install_as` the installed id. Installed as
+`local/<name>`, the checkpoint is served (from the server's next start) as a model of its own under that id:
+`POST /v1/audio/speech` with `"model": "local/<name>"`, `"voice": "<voice>"` and `"language": "<language>"`.
+
 ## Resuming a job
 
-`train` (every objective: `sft`, `policy_gradient`, `preference`, `feedback`, `distill`), `init_model`, `pretrain` and `full_train` take a
+`train` (every objective: `sft`, `policy_gradient`, `preference`, `feedback`, `distill`), `init_model`, `pretrain`, `full_train` and `speech_sft` take a
 `resume_key` (1 to 128 letters, digits, `.`, `_`, `-`, not starting with a dot; needs an artifact store), and every
 one but `init_model` a `checkpoint_every`. The key names one run:
 

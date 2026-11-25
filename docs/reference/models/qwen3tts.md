@@ -218,7 +218,8 @@ refused by name before the first step. Cancelling stops at a step boundary.
 
 ## Trained checkpoints
 
-A checkpoint trained in brain is exported in the upstream layout of the base it
+The served training job `speech_sft` of `brain/train` trains one (see
+[Training as a served job](../../guides/training/served-training.md#speech-fine-tuning)). A checkpoint trained in brain is exported in the upstream layout of the base it
 was trained from (`qwen3tts::export`), so it loads unchanged in brain and in
 the upstream `qwen-tts` package:
 

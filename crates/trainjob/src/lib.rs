@@ -24,6 +24,7 @@
 //! * [`quota`]: the storage limits (per artifact, whole store, per job, free-disk floor) and the
 //!   reservations that hold the service to them.
 //! * [`timeline`]: `timeline_train`, a timeline model trained and published as a checkpoint.
+//! * [`speech`]: `speech_sft`, a Qwen3-TTS checkpoint trained on recorded speech and published in its upstream layout.
 //! * [`create`]: `init_model`, a model from nothing: vocabulary, chat template, random initialization.
 //! * [`dryrun`]: `check_dataset`, a dataset checked against a base without training.
 //! * [`consolidate`]: the jobs that produce a checkpoint, `full_train` and `merge`.
@@ -44,6 +45,7 @@ pub mod quota;
 pub mod request;
 pub mod resident;
 pub mod runs;
+pub mod speech;
 pub mod store;
 pub mod timeline;
 

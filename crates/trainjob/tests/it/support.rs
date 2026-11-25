@@ -82,8 +82,21 @@ fn rig_over(tag: &str, memory: u64, store: bool, card: Option<u64>, extra: Vec<A
     rig_budgeted(tag, budgets, store, card, extra, made, None)
 }
 
+/// [`rig`] (16 GiB of host memory, an artifact store) holding its jobs to `quotas`.
+pub fn rig_with_quotas(tag: &str, quotas: trainjob::Quotas) -> Rig {
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 16 << 30, 0);
+    rig_quoted(tag, budgets, true, None, Vec::new(), qwen35_model_dir(&format!("{tag}-base")), None, quotas)
+}
+
 /// [`rig_over`] with the server's device budgets given.
 fn rig_budgeted(tag: &str, budgets: Budgets, store: bool, card: Option<u64>, extra: Vec<Arc<dyn residency::ResidentModel>>, made: TempDir, job_access: Option<trainjob::job::JobAccess>) -> Rig {
+    rig_quoted(tag, budgets, store, card, extra, made, job_access, trainjob::Quotas::default())
+}
+
+/// [`rig_budgeted`] holding its jobs to `quotas`.
+#[allow(clippy::too_many_arguments)]
+fn rig_quoted(tag: &str, budgets: Budgets, store: bool, card: Option<u64>, extra: Vec<Arc<dyn residency::ResidentModel>>, made: TempDir, job_access: Option<trainjob::job::JobAccess>, quotas: trainjob::Quotas) -> Rig {
     let dir = TempDir::new(tag);
     let models = dir.join("models");
     let base = models.join("local").join("toy");
@@ -98,7 +111,7 @@ fn rig_budgeted(tag: &str, budgets: Budgets, store: bool, card: Option<u64>, ext
     let work_root = dir.join("work");
     // As a server counts them: one run in flight per card, and at least one.
     let devices = budgets.gpus().len().max(1);
-    let config = TrainConfig { models_dir: Some(models.clone()), store: store.then(|| store_handle.clone()), work_root: work_root.clone(), largest_card_bytes: card, devices, quotas: trainjob::Quotas::default(), free_space: Arc::new(trainjob::DiskFree), job_access };
+    let config = TrainConfig { models_dir: Some(models.clone()), store: store.then(|| store_handle.clone()), work_root: work_root.clone(), largest_card_bytes: card, devices, quotas, free_space: Arc::new(trainjob::DiskFree), job_access };
     let mut served = vec![trainjob::resident(config)];
     served.extend(extra);
     let exec = Executor::start(served, budgets, Policy::default());
