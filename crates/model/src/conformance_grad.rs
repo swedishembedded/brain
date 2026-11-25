@@ -17,7 +17,7 @@
 use data::rng::Rng;
 
 use crate::adapter::device::is_adapter_param;
-use crate::conformance::{batch, build, trained_rank, Subject, BATCH};
+use crate::conformance::{batch, build, build_exact, trained_rank, Subject, BATCH};
 use crate::training::require_token_objectives;
 use crate::{Batch, Model, ModelConfig};
 
@@ -166,10 +166,11 @@ pub fn weighted_loss_gradient_matches_finite_differences<M: Model>(subject: &Sub
 /// weighted-loss backwards: the labels at their weights, and each slot's ids as labels at its coefficients, all over
 /// one denominator. The read-back log-probability at a slot is the one a batch with that slot's ids as labels reads.
 /// At the unit logit scale and at `1/2`. These are identities between two paths of the model, exact up to rounding,
-/// so they hold however small a tensor's gradient is at a random initialisation.
+/// so they hold however small a tensor's gradient is at a random initialisation; the model is built at the exact fp32
+/// arithmetic ([`build_exact`]) on every device.
 pub fn sparse_targets_match_their_label_equivalents<M: Model>(subject: &Subject<M>, seed: u64) -> Result<(), String> {
     const K: usize = 3;
-    let (mut m, _) = build(subject, trained_rank(subject), BATCH, seed);
+    let (mut m, _) = build_exact(subject, trained_rank(subject), BATCH, seed);
     randomize_adapters(&m, seed);
     let vocab = subject_vocab(subject);
     let (tokens, targets) = batch(vocab);

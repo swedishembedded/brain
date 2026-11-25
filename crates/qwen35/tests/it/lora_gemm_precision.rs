@@ -48,3 +48,16 @@ fn the_tensor_core_tier_trains_like_the_fp32_reference_and_reports_its_path() {
         assert_same_training_signal(loss_and_grads(&auto), loss_and_grads(&reference), loss_tol, min_cos);
     }
 }
+
+/// A run's GEMM arithmetic (`FitOpts::gemm_precision`, which the shared trainer hands to `Model::new_with_gemm`) is the
+/// build's on every device: a pinned reference tier runs the fp32 kernels, the tier a derivative or an identity check
+/// is stated against, and is never the device's default in its place.
+#[test]
+fn a_runs_gemm_precision_reaches_the_training_build() {
+    let init = weights(&lora_config(), 0.3);
+    let m = <Qwen35 as model::Model>::new_with_gemm(lora_config(), 1, T as u32, &init, GemmPrecision::Fp32Reference);
+    match m.gemm_path() {
+        GemmPath::Fp32Kernels { reason } => assert_eq!(reason, "the fp32 reference tier was requested"),
+        other => panic!("a run that pinned the fp32 reference tier was built on {other:?}"),
+    }
+}

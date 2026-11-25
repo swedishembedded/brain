@@ -156,6 +156,20 @@ pub fn build<M: Model>(subject: &Subject<M>, rank: Option<u32>, rows: u32, seed:
     (M::new(cfg, rows, SEQ, &init), init)
 }
 
+/// [`build`] with every product the model's GEMM arithmetic decides pinned to the fp32 kernels
+/// ([`GemmPrecision::Fp32Reference`] through [`Model::new_with_gemm`]): for a check that holds two paths of the model to
+/// an identity that is exact in real arithmetic, such as one backward against the sum of the backwards it is
+/// linear in. A tensor-core product rounds its operands (TF32 keeps a 10-bit mantissa), so the sum of rounded operands
+/// is not the rounded sum and such an identity holds only to the operands' rounding, about 5e-4 of every gradient
+/// (knowledge #587); in binary32 it holds to about 5e-7, which is what lets the check's bound see a missing term.
+///
+/// [`GemmPrecision::Fp32Reference`]: gpu_core::provider::library::GemmPrecision::Fp32Reference
+pub fn build_exact<M: Model>(subject: &Subject<M>, rank: Option<u32>, rows: u32, seed: u64) -> (M, std::collections::HashMap<String, Vec<f32>>) {
+    let cfg = (subject.config)(rank);
+    let init = M::init_weights(&cfg, seed);
+    (M::new_with_gemm(cfg, rows, SEQ, &init, gpu_core::provider::library::GemmPrecision::Fp32Reference), init)
+}
+
 /// The rank the suite trains with: the adapter rank when the model declares
 /// adapters, else the plain model.
 pub(crate) fn trained_rank<M: Model>(subject: &Subject<M>) -> Option<u32> {

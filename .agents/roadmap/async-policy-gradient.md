@@ -260,6 +260,15 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       between steps (they need not wait on their own server; lending in the fit loop would be the same call).
 - [ ] **Run-level policy identity** (A16): training run, committed update, base and adapter digests beside the serving
       version, in every reply and every `published` event.
+- [x] **The campaign's suites on CUDA** (lane agrpo-cuda, GH200, `BRAIN_BACKEND=cuda`): two failures that passed on the
+      CPU were TF32 rounding read as defects, not wrong gradients (knowledge 587). `qwen35`/`qwen35moe` implement
+      `Model::new_with_gemm`, so a run's `FitOpts::gemm_precision` reaches them; the extra-target and score-centring
+      identity checks build with `model::conformance::build_exact` (the fp32 reference tier); the `rl` policy-gradient
+      tests' model is built at that tier. Tests: `qwen35` `lora_gemm_precision::a_runs_gemm_precision_reaches_the_training_build`,
+      `qwen35moe` `lora_freezes_base::a_runs_gemm_precision_reaches_the_training_build`; `rl` `--test conformance` 15/15
+      and `--test it` 111/111 on CUDA. Open: `ricursive`, `ouro` and `inkling2` build at one fixed tier
+      and ignore a run's `gemm_precision` (`Auto` there trains on the fp32 kernels); implementing `new_with_gemm`
+      changes the arithmetic of their default runs on CUDA, so it lands with a step-parity check per model.
 - [ ] End-to-end on Qwen3-4B (one card): serving and the streaming job in one process, rollouts from an orchestrator;
       profile (nsys) before optimising anything.
 - [ ] **Support replay for truncated samplers**: the sampler's support per position in the trace, the trainer's

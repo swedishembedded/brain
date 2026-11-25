@@ -7887,6 +7887,10 @@ impl model::Model for Qwen35 {
     fn new(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
         Qwen35::new_train_on(Gpu::new(pipelines()), cfg, b, t, init)
     }
+    /// The training build of [`Self::new`] with its GEMMs at `gemm` (the run's `FitOpts::gemm_precision`).
+    fn new_with_gemm(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, gemm: library::GemmPrecision) -> Self {
+        Qwen35::new_train_opts_on(Gpu::new(pipelines()), cfg, b, t, init, &TrainOpts { gemm_precision: gemm, ..TrainOpts::default() })
+    }
     fn new_inference(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
         Qwen35::new_on(Gpu::new(pipelines()), cfg, b, t, init)
     }

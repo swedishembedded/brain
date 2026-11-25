@@ -25,7 +25,7 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use model::conformance::{build, Subject, BATCH, RANK, SEQ};
+use model::conformance::{build, build_exact, Subject, BATCH, RANK, SEQ};
 use model::training::require_token_objectives;
 use model::{AdapterPublish, AdapterSnapshots, Batch, FitControl, FitOpts, Model, ModelConfig, StepReport, IGNORE};
 use serde_json::Value;
@@ -205,11 +205,12 @@ fn gradients<M: Model>(m: &M) -> Vec<(String, Vec<f32>)> {
 }
 
 /// The score-centred estimator's weights, as one backward with extra targets, against the sum of their label
-/// equivalents.
+/// equivalents: an identity exact in real arithmetic, so both models are built at the exact fp32 arithmetic
+/// ([`build_exact`]) on every device.
 fn score_centring<M: Model>(subject: &Subject<M>, seed: u64) -> Result<Verdict, String> {
     const K: usize = 2;
     let name = subject.name;
-    let (mut m, _) = build(subject, Some(RANK), BATCH, seed);
+    let (mut m, _) = build_exact(subject, Some(RANK), BATCH, seed);
     model::conformance_grad::randomize_adapters(&m, seed);
     let objectives = require_token_objectives(&mut m).map_err(|e| e.to_string())?;
     objectives.enable_weighted_loss();
@@ -256,7 +257,7 @@ fn score_centring<M: Model>(subject: &Subject<M>, seed: u64) -> Result<Verdict, 
     let got = with_extra(&m)?;
     // The label equivalents on a model that takes no extra targets: the labels at their weights, then each slot's ids as
     // labels at its coefficients.
-    let (mut plain, _) = build(subject, Some(RANK), BATCH, seed);
+    let (mut plain, _) = build_exact(subject, Some(RANK), BATCH, seed);
     model::conformance_grad::randomize_adapters(&plain, seed);
     require_token_objectives(&mut plain).map_err(|e| e.to_string())?.enable_weighted_loss();
     let weighted = |labels: &[u32], w: &[f32]| {

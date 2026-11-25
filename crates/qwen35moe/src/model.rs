@@ -3874,6 +3874,12 @@ impl Qwen35 {
         self.ops.set_gemm_precision(precision);
     }
 
+    /// Which arithmetic the fp32-weight products of this build run: the vendor library's TF32 tensor cores, or the
+    /// fp32 kernels (and why). Decided from the device and [`Self::set_gemm_precision`].
+    pub fn gemm_path(&self) -> &gpu_core::provider::library::GemmPath {
+        self.ops.gemm_path()
+    }
+
     /// Let both of this model's handles (its own and the `Ops` one) keep up to `bytes` of freed device blocks: what
     /// the placement keeps free for a prefill round's and a decode step's activations. Under the backend's default
     /// bound a long round's scratch goes back to the driver at every synchronisation and the next layer waits for it
@@ -4454,6 +4460,14 @@ impl model::Model for Qwen35 {
     /// adapters when `cfg.lora` is set).
     fn new(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
         Qwen35::new_train_on(Gpu::new(pipelines()), cfg, b, t, init)
+    }
+    /// The training build of [`Self::new`] with its fp32-weight products at `gemm` (the run's
+    /// `FitOpts::gemm_precision`). A training pass dispatches its products when it runs, so the choice made on the
+    /// built model is the one every step takes.
+    fn new_with_gemm(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, gemm: gpu_core::provider::library::GemmPrecision) -> Self {
+        let mut m = Qwen35::new_train_on(Gpu::new(pipelines()), cfg, b, t, init);
+        m.set_gemm_precision(gemm);
+        m
     }
     fn new_resident(cfg: Qwen35Config, b: u32, t: u32, init: &HashMap<String, Vec<f32>>, resident: &model::resident_ft::ResidentFtConfig) -> Result<Self, String> {
         Qwen35::new_resident_on(Gpu::new(pipelines()), cfg, b, t, init, resident)

@@ -17,7 +17,7 @@ use data::rng::Rng;
 use model::training;
 use model::{fit_controlled, Batch, FitControl, FitOpts, Model, Objective, StepVerdict};
 use qwen35::config::{lora_cfg, Qwen35Config};
-use qwen35::model::{pipelines, Qwen35};
+use qwen35::model::Qwen35;
 use rl::objective::external::{BehaviourSource, ExternalPolicyGradient, PolicyGradientConfig, ReferencePolicy};
 use rl::objective::grpo::LossAgg;
 use rl::objective::grpo_term::k3_kl;
@@ -121,11 +121,14 @@ pub(crate) fn lora_model(seed: u64) -> Qwen35 {
     lora_model_rows(seed, 1)
 }
 
-/// [`lora_model`] training batches of `rows` rows: the same weights for every `rows`.
+/// [`lora_model`] training batches of `rows` rows: the same weights for every `rows`. The products run the exact fp32
+/// kernels on every device: these tests hold a step's gradient to a derivative and to the same records split
+/// otherwise, and a TF32 forward's rounding divided by a finite difference's step is larger than the derivative
+/// (knowledge #587).
 pub(crate) fn lora_model_rows(seed: u64, rows: u32) -> Qwen35 {
     let cfg = Qwen35Config { lora: Some(lora_cfg(3, 6.0)), ..Qwen35Config::tiny() };
     let init = qwen35::init::init_weights(&cfg, seed);
-    let m = Qwen35::new_train_on(gpu_core::Gpu::new(pipelines()), cfg, rows, T as u32, &init);
+    let m = <Qwen35 as Model>::new_with_gemm(cfg, rows, T as u32, &init, gpu_core::provider::library::GemmPrecision::Fp32Reference);
     // Factors large enough that the adapter moves the tiny model's distribution measurably off its base.
     let mut rng = Rng::new(seed);
     for name in m.param_names().into_iter().filter(|n| n.contains(".lora_")) {

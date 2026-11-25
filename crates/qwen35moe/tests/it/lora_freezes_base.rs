@@ -83,3 +83,19 @@ fn lora_training_only_updates_adapters_cpu() {
 fn lora_training_only_updates_adapters_default_backend() {
     run(Gpu::new(pipelines()));
 }
+
+/// A run's GEMM arithmetic (`FitOpts::gemm_precision`, which the shared trainer hands to `Model::new_with_gemm`) is the
+/// build's on every device: a pinned reference tier runs the fp32 kernels, the tier a derivative or an identity check
+/// is stated against, and is never the device's default in its place.
+#[test]
+fn a_runs_gemm_precision_reaches_the_training_build() {
+    use gpu_core::provider::library::{GemmPath, GemmPrecision};
+    let cfg = Qwen35Config { lora: Some(lora_cfg(2, 4.0)), ..Qwen35Config::tiny() };
+    let init = qwen35moe::init::init_weights(&cfg, 7);
+    let t = cfg.block_size;
+    let m = <Qwen35 as model::Model>::new_with_gemm(cfg, 1, t, &init, GemmPrecision::Fp32Reference);
+    match m.gemm_path() {
+        GemmPath::Fp32Kernels { reason } => assert_eq!(reason, "the fp32 reference tier was requested"),
+        other => panic!("a run that pinned the fp32 reference tier was built on {other:?}"),
+    }
+}
