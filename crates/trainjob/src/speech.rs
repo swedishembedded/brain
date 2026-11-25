@@ -83,6 +83,7 @@ fn training_params() -> Vec<ParamSpec> {
         int("batch_utterances", "utterances per micro-batch", MAX_BATCH).implied_default(json!(d.batch)),
         int("grad_accum", "micro-batches per optimiser step", 4096.0).implied_default(json!(d.grad_accum)),
         int("max_frames", "the most codec frames a record may hold; a longer one is refused by name, never cut (it sizes the build)", MAX_FRAMES).implied_default(json!(d.max_frames)),
+        int("length_bucket_steps", "micro-batches whose utterances are regrouped by length, so each micro-batch pads little; 1 draws them unsorted", 4096.0).implied_default(json!(d.length_bucket_steps)),
         float("grad_clip", "the global gradient-norm clip", 1_000.0, d.grad_clip),
         float("residual_weight", "the weight of the code predictor's residual-codebook loss beside the Talker's (upstream trains with 0.3)", 10.0, d.mtp_weight),
         float("streaming_fraction", "the share of drawn records trained in the streaming text layout; the rest train non-streaming", 1.0, d.streaming_fraction),
@@ -155,6 +156,7 @@ pub struct Params {
     pub batch_utterances: Option<u32>,
     pub grad_accum: Option<u32>,
     pub max_frames: Option<u32>,
+    pub length_bucket_steps: Option<u32>,
     pub grad_clip: Option<f32>,
     pub residual_weight: Option<f32>,
     pub streaming_fraction: Option<f32>,
@@ -382,6 +384,7 @@ pub(crate) fn sft_config(request: &Request, base_dir: &Path, seed: Option<u64>) 
         ("batch", p.batch_utterances.map(|v| json!(v))),
         ("grad_accum", p.grad_accum.map(|v| json!(v))),
         ("max_frames", p.max_frames.map(|v| json!(v))),
+        ("length_bucket_steps", p.length_bucket_steps.map(|v| json!(v))),
         ("grad_clip", p.grad_clip.map(|v| json!(v))),
         ("mtp_weight", p.residual_weight.map(|v| json!(v))),
         ("streaming_fraction", p.streaming_fraction.map(|v| json!(v))),
@@ -535,9 +538,9 @@ mod tests {
         let cfg = sft_config(&ok, Path::new("base"), None).unwrap();
         assert_eq!((cfg.steps, cfg.batch, cfg.mtp_weight, cfg.rows.voices["astrid"]), (Some(3), objective_defaults().batch, 0.3, qwen3tts::speech_sft::RowSource::New));
         assert_eq!(cfg.rows.language_init, Some(BTreeMap::from([("english".to_string(), 0.5), ("german".to_string(), 0.5)])));
-        let named = validated(json!({"base": "a/b", "languages": SV, "batch_utterances": 2, "residual_weight": 0.5, "new_row_lr_multiplier": 10.0, "streaming_fraction": 1.0, "warmup": 4, "schedule": "constant", "lr": 1e-4, "eval_batches": 2, "seed": 9}), &["dataset"]).unwrap();
+        let named = validated(json!({"base": "a/b", "languages": SV, "batch_utterances": 2, "residual_weight": 0.5, "new_row_lr_multiplier": 10.0, "streaming_fraction": 1.0, "warmup": 4, "schedule": "constant", "lr": 1e-4, "eval_batches": 2, "seed": 9, "length_bucket_steps": 16}), &["dataset"]).unwrap();
         let cfg = sft_config(&named, Path::new("base"), None).unwrap();
-        assert_eq!((cfg.batch, cfg.mtp_weight, cfg.lr_multipliers.new_rows, cfg.streaming_fraction, cfg.warmup, cfg.seed), (2, 0.5, 10.0, 1.0, 4, Some(9)));
+        assert_eq!((cfg.batch, cfg.mtp_weight, cfg.lr_multipliers.new_rows, cfg.streaming_fraction, cfg.warmup, cfg.seed, cfg.length_bucket_steps), (2, 0.5, 10.0, 1.0, 4, Some(9), 16));
         assert_eq!(ok.dataset, Source::Blob("dataset".into()));
         assert_eq!(ok.languages["swedish"], LanguageInit { new: true, init_from: vec!["english".into(), "german".into()] });
         assert_eq!((ok.voices["astrid"], ok.params.steps, ok.params.residual_weight), (true, Some(3), None));

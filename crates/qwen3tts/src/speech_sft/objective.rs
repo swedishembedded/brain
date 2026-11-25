@@ -88,6 +88,28 @@ fn batch_positions(first: u64, batch: usize, (rank, world): (usize, usize)) -> i
     (0..batch as u64).map(move |i| first + i * world as u64 + rank as u64)
 }
 
+/// The stream positions of one rank's share of global micro-batch `micro_batch` (`batch x world` records), with the
+/// records of every `window` consecutive global micro-batches regrouped by length, a record at position `p` holding
+/// `frames(p)` frames. A micro-batch's rows are computed to its longest record, so a batch of random lengths is mostly
+/// padding; sorting a window's records by length and cutting it into micro-batches makes each one about one length.
+/// The window's groups are taken in an order drawn from `seed` and the window's index, so a run does not train its
+/// shortest records first, and each group is dealt to the ranks in turn, so every rank's share is about as long as the
+/// others' and no rank waits long at the step's reduction. The window's positions are still exactly the stream's,
+/// each once; a window of 1 is [`batch_positions`]'s plain stream.
+fn bucketed_positions(micro_batch: u64, batch: usize, (rank, world): (usize, usize), window: usize, seed: u64, frames: impl Fn(u64) -> usize) -> Vec<u64> {
+    let global = batch * world;
+    if window <= 1 {
+        return batch_positions(micro_batch * global as u64, batch, (rank, world)).collect();
+    }
+    let index = micro_batch / window as u64;
+    let first = index * (window * global) as u64;
+    let mut records: Vec<(usize, u64)> = (first..first + (window * global) as u64).map(|pos| (frames(pos), pos)).collect();
+    // By length, equal lengths in stream order: every rank computes the same groups.
+    records.sort_unstable();
+    let group = model::train::epoch_order(seed, window, index)[(micro_batch % window as u64) as usize];
+    records[group * global..(group + 1) * global].iter().skip(rank).step_by(world).map(|&(_, pos)| pos).collect()
+}
+
 pub struct SpeechObjective<'a> {
     train: &'a Shard,
     held_out: Option<&'a Shard>,
@@ -99,9 +121,13 @@ pub struct SpeechObjective<'a> {
     seed: u64,
     /// Records drawn so far in the whole run: the position of the next one in the stream.
     drawn: u64,
-    /// `(rank, world)`: this rank trains the stream's records `n` with `n % world == rank` ([`Objective::shard`]).
+    /// `(rank, world)`: this rank trains its share of each global micro-batch of the stream ([`Objective::shard`]).
     shard: (usize, usize),
+    /// Global micro-batches whose records are regrouped by length ([`bucketed_positions`]); 1 draws the plain stream.
+    bucket: usize,
     order: Option<(u64, Vec<usize>)>,
+    /// The records of the bucketing window being drawn: its index and its records in stream order.
+    window: Option<(u64, Vec<usize>)>,
     /// What the current step's micro-steps measured.
     step: ForwardStats,
     held: Option<ForwardStats>,
@@ -119,7 +145,14 @@ impl<'a> SpeechObjective<'a> {
         if !(0.0..=1.0).contains(&streaming_fraction) {
             return Err(format!("speech sft: streaming_fraction must be in [0, 1], got {streaming_fraction}"));
         }
-        Ok(SpeechObjective { train, held_out, rows, sp, batch, streaming_fraction, mtp_weight, seed: data::rng::random_seed(), drawn: 0, shard: (0, 1), order: None, step: ForwardStats::default(), held: None, work: StepWork::default() })
+        Ok(SpeechObjective { train, held_out, rows, sp, batch, streaming_fraction, mtp_weight, seed: data::rng::random_seed(), drawn: 0, shard: (0, 1), bucket: 1, order: None, window: None, step: ForwardStats::default(), held: None, work: StepWork::default() })
+    }
+
+    /// Regroup the records of every `steps` consecutive micro-batches by length ([`bucketed_positions`]); 1 (the
+    /// default) draws the plain stream.
+    pub fn with_length_buckets(mut self, steps: usize) -> Self {
+        self.bucket = steps.max(1);
+        self
     }
 
     /// The record at position `pos` of the training stream.
@@ -135,13 +168,23 @@ impl<'a> SpeechObjective<'a> {
     /// The next micro-batch of the training stream: this rank's `batch` records of the next `batch x world` (every rank
     /// walks the whole stream, so their epoch orders stay one order, and each keeps its own records of it).
     fn next_batch(&mut self) -> Vec<Example> {
-        let first = self.drawn;
-        self.drawn += self.batch as u64 * self.shard.1 as u64;
-        batch_positions(first, self.batch, self.shard)
+        let global = (self.batch * self.shard.1) as u64;
+        let micro_batch = self.drawn / global;
+        self.drawn += global;
+        // The window's records, looked up once in stream order (a window may cross an epoch's end).
+        let span = global * self.bucket as u64;
+        let index = micro_batch / self.bucket as u64;
+        if self.window.as_ref().is_none_or(|(i, _)| *i != index) {
+            let records = (index * span..(index + 1) * span).map(|pos| self.record_at(pos)).collect();
+            self.window = Some((index, records));
+        }
+        let (train, first) = (self.train, index * span);
+        let records = &self.window.as_ref().expect("just set").1;
+        bucketed_positions(micro_batch, self.batch, self.shard, self.bucket, self.seed, |pos| train.frames(records[(pos - first) as usize]))
+            .into_iter()
             .map(|pos| {
-                let r = self.record_at(pos);
                 let layout = draw_layout(self.seed, pos, self.streaming_fraction);
-                example(&self.sp, &self.rows, self.train, r, layout).unwrap_or_else(|e| panic!("speech sft: {e}"))
+                example(&self.sp, &self.rows, train, records[(pos - first) as usize], layout).unwrap_or_else(|e| panic!("speech sft: {e}"))
             })
             .collect()
     }
@@ -233,15 +276,17 @@ impl Objective<SpeechSftModel> for SpeechObjective<'_> {
         self.seed = seed;
         self.drawn = draws_done * self.shard.1 as u64;
         self.order = None;
+        self.window = None;
     }
 
-    /// Split the training records across `world` ranks as the trait says: rank `r` trains record `n` of the stream
-    /// exactly when `n % world == r`. The held-out shard is not split.
+    /// Split the training records across `world` ranks as the trait says: every global micro-batch of the stream is
+    /// dealt to the ranks, each record to one ([`bucketed_positions`]). The held-out shard is not split.
     fn shard(&mut self, rank: usize, world: usize) -> Result<(), std::io::Error> {
         if world == 0 || rank >= world {
             return Err(std::io::Error::other(format!("rank {rank} is not one of a world of {world}")));
         }
         self.shard = (rank, world);
+        self.window = None;
         Ok(())
     }
 
@@ -316,10 +361,15 @@ impl Objective<SpeechSftModel> for SpeechObjective<'_> {
 
 #[cfg(test)]
 mod shard_tests {
-    use super::batch_positions;
+    use super::{batch_positions, bucketed_positions};
+
+    /// Record lengths as a corpus has them: spread over 1.5-30 s, with ties.
+    fn frames(pos: u64) -> usize {
+        (pos.wrapping_mul(2_654_435_761) % 360) as usize + 19
+    }
 
     /// Over several micro-steps, the ranks of a world draw disjoint positions that together are the whole stream:
-    /// nothing is trained twice and nothing is skipped.
+    /// nothing is trained twice and nothing is skipped, bucketed or not.
     #[test]
     fn the_ranks_of_a_world_partition_the_stream() {
         for world in 1..=4usize {
@@ -337,5 +387,71 @@ mod shard_tests {
             seen.sort_unstable();
             assert_eq!(seen, (0..first).collect::<Vec<_>>(), "world {world}");
         }
+        for (world, window) in [(1usize, 4usize), (2, 3), (3, 5), (4, 2)] {
+            let batch = 5;
+            let micro_batches = 3 * window as u64;
+            let mut seen = Vec::new();
+            for m in 0..micro_batches {
+                for rank in 0..world {
+                    let mine = bucketed_positions(m, batch, (rank, world), window, 7, frames);
+                    assert_eq!(mine.len(), batch, "world {world} window {window} micro-batch {m} rank {rank}");
+                    seen.extend(mine);
+                }
+            }
+            seen.sort_unstable();
+            assert_eq!(seen, (0..micro_batches * (batch * world) as u64).collect::<Vec<_>>(), "world {world} window {window}");
+        }
+    }
+
+    /// A window of one micro-batch is the unbucketed stream, position for position.
+    #[test]
+    fn a_window_of_one_is_the_plain_stream() {
+        for m in 0..4u64 {
+            for rank in 0..3 {
+                let plain: Vec<u64> = batch_positions(m * 12, 4, (rank, 3)).collect();
+                assert_eq!(bucketed_positions(m, 4, (rank, 3), 1, 7, frames), plain);
+            }
+        }
+    }
+
+    /// The point of bucketing: a micro-batch's rows are padded to its longest record, and a bucketed micro-batch's
+    /// records are of about one length, so far fewer of the rows it computes are padding; and every rank's share of a
+    /// step is about as long as the others', so no rank waits long for another at the step's reduction.
+    #[test]
+    fn bucketed_batches_pad_far_less_and_their_ranks_cost_alike() {
+        let (batch, world) = (32usize, 2usize);
+        // Computed over useful rows, summed over every rank's micro-batch of the first 64 global micro-batches.
+        let padding = |window: usize| {
+            let (mut computed, mut useful) = (0usize, 0usize);
+            for m in 0..64u64 {
+                for rank in 0..world {
+                    let lens: Vec<usize> = bucketed_positions(m, batch, (rank, world), window, 7, frames).iter().map(|&p| frames(p)).collect();
+                    computed += lens.len() * lens.iter().max().unwrap();
+                    useful += lens.iter().sum::<usize>();
+                }
+            }
+            computed as f64 / useful as f64
+        };
+        let (plain, bucketed) = (padding(1), padding(16));
+        assert!(plain > 1.6, "random batches of this spread pad to their longest record: {plain:.2}");
+        assert!(bucketed < 1.15, "a window of 16 micro-batches cuts the padding to a few percent: {bucketed:.2} (plain {plain:.2})");
+        for m in 0..64u64 {
+            let longest: Vec<usize> = (0..world).map(|rank| bucketed_positions(m, batch, (rank, world), 16, 7, frames).iter().map(|&p| frames(p)).max().unwrap()).collect();
+            let (lo, hi) = (*longest.iter().min().unwrap(), *longest.iter().max().unwrap());
+            assert!(hi as f64 <= lo as f64 * 1.1 + 2.0, "micro-batch {m}: the ranks' longest records {longest:?}");
+        }
+    }
+
+    /// The window's groups are taken in a seeded order, not shortest first: a run does not train its first steps on
+    /// its shortest records and its last on its longest.
+    #[test]
+    fn the_groups_of_a_window_come_in_a_seeded_order() {
+        let longest = |seed: u64| (0..16u64).map(|m| bucketed_positions(m, 8, (0, 1), 16, seed, frames).iter().map(|&p| frames(p)).max().unwrap()).collect::<Vec<_>>();
+        let a = longest(7);
+        assert_eq!(a, longest(7), "the same seed draws the same order");
+        assert_ne!(a, longest(8), "another seed draws another order");
+        let mut sorted = a.clone();
+        sorted.sort_unstable();
+        assert_ne!(a, sorted, "the groups are not taken in length order");
     }
 }

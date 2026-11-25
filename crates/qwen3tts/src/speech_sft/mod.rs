@@ -104,6 +104,12 @@ pub struct SpeechSftConfig {
     /// Utterances per micro-batch.
     #[serde(default = "defaults::batch")]
     pub batch: u32,
+    /// Micro-batches whose records are regrouped by length, so each micro-batch holds records of about one length
+    /// and computes few padding rows (and the ranks of a data-parallel run get steps of about one cost). 1 (the
+    /// default) draws records in the shuffled epoch order alone. Every record still trains once an epoch; the steps
+    /// then differ in their records' lengths rather than each mixing them.
+    #[serde(default = "defaults::one")]
+    pub length_bucket_steps: u32,
     /// The most frames a record may hold (a longer one is refused, naming
     /// it): with the longest prompt it sizes the build.
     #[serde(default = "defaults::max_frames")]
@@ -186,7 +192,7 @@ impl SpeechSftConfig {
         if !(0.0..=1.0).contains(&self.streaming_fraction) {
             return Err(format!("streaming_fraction must be in [0, 1], got {}", self.streaming_fraction));
         }
-        for (name, v) in [("batch", self.batch), ("max_frames", self.max_frames), ("grad_accum", self.grad_accum)] {
+        for (name, v) in [("batch", self.batch), ("max_frames", self.max_frames), ("grad_accum", self.grad_accum), ("length_bucket_steps", self.length_bucket_steps)] {
             if v == 0 {
                 return Err(format!("{name} must be at least 1"));
             }
@@ -338,7 +344,7 @@ pub fn speech_sft(cfg: &SpeechSftConfig, train: &Shard, held_out: Option<&Shard>
         (None, None) => unreachable!("validated: exactly one of steps and epochs"),
     };
     let model = SpeechSftModel::build(shape, tensors, seed)?;
-    let objective = SpeechObjective::new(train, held_out, rows.map.clone(), specials, cfg.batch as usize, cfg.streaming_fraction, cfg.mtp_weight)?;
+    let objective = SpeechObjective::new(train, held_out, rows.map.clone(), specials, cfg.batch as usize, cfg.streaming_fraction, cfg.mtp_weight)?.with_length_buckets(cfg.length_bucket_steps as usize);
     let (min_lr, decay_iters) = match cfg.schedule {
         Schedule::Cosine => (cfg.lr / 10.0, steps),
         Schedule::Constant => (cfg.lr, 0),
