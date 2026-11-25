@@ -67,9 +67,11 @@ Measured training (`speech_sft_bench run`, the 0.6B Base, a synthetic shard of 4
 spread, one GH200, 2026-11-25): 3,195 frames a second at the default 8 utterances a step (nsys: kernels 72 % of the
 steady window; per-tensor `gradnorm_part` and `adamw` 12 % of kernel time; the batch load 0.45 s of 4 s), 3,892 at 16,
 4,410 at 32 and 4,404 at 48 (device peak 21.5 GB at 32, 69 GB at 48): the step saturates at about 32 utterances, where
-300 h of audio is about 51 minutes an epoch on one card. Open: a multi-process NCCL run (`speech_sft` passes
-`FitControl::grad_sync` through, no launcher starts ranks), a multi-tensor optimizer step, and prefetching the next
-batch. The default batch is a training choice (learning rate, small corpora), so it stays with `speech_sft`'s ledger.
+300 h of audio is about 51 minutes an epoch on one card. Data parallel over NCCL on the cards (`speech_sft_bench ranks`,
+32 utterances a rank a step): 1 rank 4,535 frames a second, 2 ranks 6,400, 3 ranks 10,168, about 80 % of a lone card a
+rank; 300 h is about 22 minutes an epoch on three cards (a fourth card was another tenant's). Open: the remaining 20 % a
+rank (bucketed reduction with `JobCollective::with_bucket_bytes` stalled at 0 % GPU and was dropped), a multi-tensor
+optimizer step, prefetching the next batch, and a launched multi-process (not in-process) run. The default batch is a training choice (learning rate, small corpora), so it stays with `speech_sft`'s ledger.
 
 Measured serving (HTTP, in-context clones of 8 s of speech, one GH200, 2026-11-25): solo 1.2 s
 (RTF 0.15); 32 concurrent 52 s of speech a second. Started at RTF 1.2 solo with requests serialised.
