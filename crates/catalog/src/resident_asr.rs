@@ -67,15 +67,16 @@ impl ResidentModel for NemotronResident {
         InstanceKey::new(nemotronasr::caps::MODEL, "default")
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
-        // 0.6B f32 weights (~2.4 GB) + activation scratch, held in RAM. On the NPU
-        // path the raw weights are also held for the ONNX export, so advertise more
-        // RAM there; `with_npu` lets the scheduler place the FastConformer encoder
-        // on the Intel NPU (host RNN-T decode stays on the device backend).
-        MemCost::new(0, 6u64 << 30).with_npu(2u64 << 30)
+        // 0.6B f32 weights (~2.4 GB) + activation scratch, on whichever device holds
+        // it (a card when one is placed). `with_npu` lets the scheduler place the
+        // FastConformer encoder on the Intel NPU (host RNN-T decode stays on the
+        // device backend), which also holds the raw weights for the ONNX export.
+        MemCost::new(6u64 << 30, 0).with_npu(2u64 << 30)
     }
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         let cfg = nemotronasr::NemotronConfig::nemotron_3_5_asr_0_6b();
-        let model = nemotronasr::model::NemotronAsr::from_hf(&self.dir, cfg)?;
+        let load = || nemotronasr::model::NemotronAsr::from_hf(&self.dir, cfg);
+        let model = if let Device::Npu(_) = device { load()? } else { residency::on_device(device, load)?? };
         let detok = nemotronasr::tokenizer::Detokenizer::from_hf(&self.dir)?;
         if let Device::Npu(_) = device {
             return Ok(Box::new(NemotronNpuInstance::new(&self.dir, cfg, model, detok)?));
@@ -321,15 +322,19 @@ impl ResidentModel for QwenAsrResident {
         InstanceKey::new(qwen3asr::caps::MODEL, qwen_asr_config(qwen3asr::caps::tuning(inv)))
     }
     fn estimate(&self, _key: &InstanceKey) -> MemCost {
-        // 1.7B decoder (~7 GB f32) + audio tower (~2 GB), held in RAM. `with_npu`
-        // lets the scheduler place the audio-encoder head on the NPU (the conv stem
-        // + the Qwen decoder stay on the device backend).
-        MemCost::new(0, 10u64 << 30).with_npu(2u64 << 30)
+        // 1.7B decoder (~7 GB f32) + audio tower (~2 GB), on whichever device holds
+        // it: a card when one is placed (declaring them host bytes only kept the
+        // recogniser off every card, and refused it outright under `--device gpuN`).
+        // `with_npu` lets the scheduler place the audio-encoder head on the NPU
+        // (the conv stem + the Qwen decoder stay on the device backend).
+        MemCost::new(10u64 << 30, 0).with_npu(2u64 << 30)
     }
     fn activate(&self, key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
         let cfg = qwen3asr::config::QwenAsrConfig::qwen3_asr_1_7b();
         let (window_secs, max_new) = qwen_asr_tuning_of(key)?;
-        let provider = qwen3asr::caps::QwenAsrProvider::load(&self.dir, cfg.clone(), window_secs, max_new)?;
+        let load = || qwen3asr::caps::QwenAsrProvider::load(&self.dir, cfg.clone(), window_secs, max_new);
+        // The NPU path builds the decoder on the ambient device and the head on the NPU.
+        let provider = if let Device::Npu(_) = device { load()? } else { residency::on_device(device, load)?? };
         if let Device::Npu(_) = device {
             return Ok(Box::new(QwenAsrNpuInstance::new(&self.dir, cfg, provider)?));
         }
