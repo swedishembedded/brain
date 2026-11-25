@@ -129,11 +129,28 @@ __device__ __forceinline__ BrainQ4W brain_q4g_unpack(const uint4& w) {
     return u;
 }
 
+// Four-way signed 8-bit dot product with a 32-bit accumulator: native
+// `__dp4a` at compute capability 6.1+, else the identical (exact) integer sum
+// written out - see `matmul_i8_gemv.cu`'s copy for why the sources inlined
+// this per file and why the result is bit-identical below the floor.
+__device__ __forceinline__ int brain_dp4a(unsigned int a, unsigned int b, int c) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 610
+    return __dp4a(static_cast<int>(a), static_cast<int>(b), c);
+#else
+    int acc = c;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        acc += static_cast<int>(static_cast<signed char>(a >> (8 * i))) * static_cast<int>(static_cast<signed char>(b >> (8 * i)));
+    }
+    return acc;
+#endif
+}
+
 // One weight word against its two words of x, added to a virtual lane's
 // accumulator: `f32(dot4(x0, lo) + dot4(x1, hi)) * s`, the integer sum exact
 // and each float operation rounded as the reference does.
 __device__ __forceinline__ float brain_q4g_term(float acc, unsigned int x0, unsigned int x1, unsigned int lo, unsigned int hi, float s) {
-    const int d = __dp4a(static_cast<int>(x1), static_cast<int>(hi), __dp4a(static_cast<int>(x0), static_cast<int>(lo), 0));
+    const int d = brain_dp4a(x1, hi, brain_dp4a(x0, lo, 0));
     return __fadd_rn(acc, __fmul_rn(__int2float_rn(d), s));
 }
 

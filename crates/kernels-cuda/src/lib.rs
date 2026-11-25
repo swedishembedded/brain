@@ -1640,7 +1640,7 @@ pub const ALL: &[CudaKernel] = &[
         by_name: false,
         source: ImplSource::Tuned,
         // `__dp4a` is the only instruction above the toolchain baseline.
-        min_cc: DP4A_MIN_CC,
+        min_cc: BASELINE_MIN_CC,
         entry: "brain_matmul_i8_gemv",
         what: "packed-int8 skinny-M GEMV (up to 8 rows of x per weight pass); 16 B weight loads and dp4a, bit-identical to matmul_i8_gemv_reg below 5 rows (and everywhere without int8 tensor cores), int8 tensor cores (mma.sync m16n8k32) from 5 rows on compute capability 8.0+",
         reported: "native:matmul_i8_gemv",
@@ -2149,7 +2149,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::I8,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: DP4A_MIN_CC,
+        min_cc: BASELINE_MIN_CC,
         entry: "brain_matmul_i8_gemv_multi",
         what: "up to four int8 projections of one activation in one launch (blocks of every matrix fill the card together); runs the single GEMV's own block function, bit-identical to separate launches",
         reported: "native:matmul_i8_gemv_multi",
@@ -2166,7 +2166,7 @@ pub const ALL: &[CudaKernel] = &[
         by_name: false,
         source: ImplSource::Tuned,
         // `__dp4a` is the only instruction above the toolchain baseline.
-        min_cc: DP4A_MIN_CC,
+        min_cc: BASELINE_MIN_CC,
         entry: "brain_matmul_q4_gemv",
         what: "packed-int4 (W4A8) skinny-M GEMV (up to 8 rows of x per weight pass); 16 B weight loads, nibbles unpacked to dp4a operands, bit-identical to matmul_q4_gemv_reg",
         reported: "native:matmul_q4_gemv",
@@ -2188,7 +2188,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::Q4,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: DP4A_MIN_CC,
+        min_cc: BASELINE_MIN_CC,
         entry: "brain_matmul_q4_gemv_multi",
         what: "up to four q4 projections of one activation in one launch; runs the single q4 GEMV's own block function, bit-identical to separate launches",
         reported: "native:matmul_q4_gemv_multi",
@@ -2204,7 +2204,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::Q4K,
         by_name: false,
         source: ImplSource::Tuned,
-        min_cc: DP4A_MIN_CC,
+        min_cc: BASELINE_MIN_CC,
         entry: "brain_matmul_kq4_gemv",
         what: "affine K-quant (Q4_K) skinny-M GEMV (up to 8 rows of x per weight pass); one 32-element group per 8 B vector load, exact int32 group dot and activation sum, two roundings a group",
         reported: "native:matmul_kq4_gemv",
@@ -2222,7 +2222,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::Q8K,
         by_name: false,
         source: ImplSource::Tuned,
-        min_cc: DP4A_MIN_CC,
+        min_cc: BASELINE_MIN_CC,
         entry: "brain_matmul_kq8_gemv",
         what: "affine K-quant (Q5_K) skinny-M GEMV (up to 8 rows of x per weight pass); one 32-element group per 16 B vector load, exact int32 group dot and activation sum, two roundings a group",
         reported: "native:matmul_kq8_gemv",
@@ -2242,7 +2242,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::Q4K,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: DP4A_MIN_CC,
+        min_cc: BASELINE_MIN_CC,
         entry: "brain_matmul_kq4_gemv_wide",
         what: "affine K-quant (Q4_K) GEMV for batched decode (9 to 32 rows of x): four weight rows a thread, so each staged activation vector and its sum serve four weight rows",
         reported: "native:matmul_kq4_gemv_wide",
@@ -2262,7 +2262,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::Q8K,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: DP4A_MIN_CC,
+        min_cc: BASELINE_MIN_CC,
         entry: "brain_matmul_kq8_gemv_wide",
         what: "affine K-quant (Q5_K) GEMV for batched decode (9 to 32 rows of x): four weight rows a thread, so each staged activation vector and its sum serve four weight rows",
         reported: "native:matmul_kq8_gemv_wide",
@@ -2680,7 +2680,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::I8,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: DP4A_MIN_CC,
+        min_cc: BASELINE_MIN_CC,
         entry: "brain_matmul_i8_dp4a",
         what: "packed-int8 GEMM (dp4a), group-32 activation and weight scales folded per group in ascending order; 128x128 tile, 8x8 per thread, bit-identical to matmul_i8_dyn",
         reported: "native:matmul_i8_dp4a",
@@ -2701,7 +2701,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::Q4K,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: DP4A_MIN_CC,
+        min_cc: BASELINE_MIN_CC,
         entry: "brain_matmul_kq4_dp4a",
         what: "affine K-quant (Q4_K) GEMM: the int8 GEMM's 128x128 dp4a block with codes unpacked while staging, exact group sums of the staged activations, ds*A - dm*S folded per group with two fmas",
         reported: "native:matmul_kq4_dp4a",
@@ -2720,7 +2720,7 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::Q8K,
         by_name: true,
         source: ImplSource::Tuned,
-        min_cc: DP4A_MIN_CC,
+        min_cc: BASELINE_MIN_CC,
         entry: "brain_matmul_kq8_dp4a",
         what: "affine K-quant (Q5_K) GEMM: the int8 GEMM's 128x128 dp4a block with codes unpacked while staging, exact group sums of the staged activations, ds*A - dm*S folded per group with two fmas",
         reported: "native:matmul_kq8_dp4a",
@@ -5726,7 +5726,11 @@ pub fn check_table(table: &[CudaKernel]) -> Vec<String> {
         if !k.src.contains(k.entry) {
             errs.push(format!("{}: declared entry point {:?} does not appear in its source", k.name, k.entry));
         }
-        if code.contains("__dp4a") && k.min_cc < DP4A_MIN_CC {
+        // A kernel may run on older parts too if it gates the instruction behind the capability itself
+        // (`__CUDA_ARCH__ >= 610`) and carries a body for the rest - the same rule the tensor-core pair
+        // below is held to.
+        let gates_dp4a_itself = code.contains("__CUDA_ARCH__ >= 610");
+        if code.contains("__dp4a") && k.min_cc < DP4A_MIN_CC && !gates_dp4a_itself {
             errs.push(format!(
                 "{}: uses __dp4a but declares min_cc {}.{}, below the capability that introduced it ({}.{})",
                 k.name, k.min_cc.0, k.min_cc.1, DP4A_MIN_CC.0, DP4A_MIN_CC.1
@@ -6077,17 +6081,23 @@ mod tests {
         let i8_k = find(Op::MatMul, Dtype::I8, (9, 0)).expect("int8 gemv ships");
         assert_eq!(f32_k.name, "matmul_f32_tiled");
         assert_eq!(i8_k.name, "matmul_i8_gemv");
-        // Below the packed dot product's floor the int8 kernel is not offered
-        // at all, while fp32 still is.
-        assert!(find(Op::MatMul, Dtype::I8, (6, 0)).is_none());
-        assert!(find(Op::MatMul, Dtype::F32, (6, 0)).is_some());
+        // The packed-int8 GEMV now serves from the TOOLCHAIN baseline too: its
+        // body gates `__dp4a` behind `__CUDA_ARCH__ >= 610` and carries an
+        // exact emulation below that, so a Maxwell card is served by the same
+        // streaming kernel rather than falling back to the WGSL tier. The
+        // capability axis is still live where it belongs - the tensor-core
+        // int8 siblings keep their own, higher floors.
+        assert_eq!(find(Op::MatMul, Dtype::I8, (5, 0)).map(|k| k.name), Some("matmul_i8_gemv"));
+        assert_eq!(get("matmul_i8_mma").map(|k| k.min_cc), Some(MMA_S8_MIN_CC));
+        assert_eq!(get("matmul_i8_gemv_wide").map(|k| k.min_cc), Some(MMA_S8_MIN_CC));
         // The q4 GEMV is its own entry, never the int8 one.
         assert_eq!(find(Op::MatMul, Dtype::Q4, (9, 0)).map(|k| k.name), Some("matmul_q4_gemv"));
         // A tier nothing ships resolves to nothing.
         assert!(find(Op::MatMul, Dtype::NF4, (9, 0)).is_none());
-        // The tier-blind lookup the policy ledger uses sees the higher floor
-        // (which of the packed-dot GEMVs sharing it answers is table order).
-        assert_eq!(best_for_any_tier(ALL, Op::MatMul, (9, 0)).map(|k| k.min_cc), Some(DP4A_MIN_CC));
+        // The tier-blind lookup the policy ledger uses sees the highest floor
+        // among the directly-resolvable (non-`by_name`) matmuls: the streaming
+        // family's baseline, now that it emulates below 6.1.
+        assert_eq!(best_for_any_tier(ALL, Op::MatMul, (9, 0)).map(|k| k.min_cc), Some(BASELINE_MIN_CC));
     }
 
     /// A kernel's header explaining which instructions it avoids is PROSE,
@@ -6143,6 +6153,36 @@ mod tests {
         };
         let joined = check_table(&[kernel(UNGATED)]).join("\n");
         assert!(joined.contains("issues mma.sync/cp.async but declares min_cc"), "{joined}");
+        assert!(check_table(&[kernel(GATED)]).is_empty(), "{:?}", check_table(&[kernel(GATED)]));
+    }
+
+    /// The same self-gating rule for `__dp4a`: a kernel whose body issues the
+    /// instruction only above compute capability 6.1 (and carries an emulated
+    /// body for the rest) may declare the toolchain baseline - which is what
+    /// lets the streaming int8 GEMV/GEMM family serve a Maxwell card instead
+    /// of vanishing there.
+    #[test]
+    fn a_kernel_may_declare_an_older_floor_only_if_it_gates_its_dp4a_itself() {
+        const UNGATED: &str = "extern \"C\" __global__ void bk_dot(const int* a) { __dp4a(a[0], a[1], 0); }";
+        const GATED: &str = "__device__ int bk_dot4(unsigned a, unsigned b, int c) {\n#if __CUDA_ARCH__ >= 610\n    return __dp4a((int)a, (int)b, c);\n#else\n    return c;\n#endif\n}\nextern \"C\" __global__ void bk_dot(const unsigned* a) { bk_dot4(a[0], a[1], 0); }";
+        let kernel = |src: &'static str| CudaKernel {
+            name: "dp4a_probe",
+            op: Op::MatMul,
+            weight: Dtype::I8,
+            by_name: false,
+            source: ImplSource::Tuned,
+            min_cc: BASELINE_MIN_CC,
+            entry: "bk_dot",
+            what: "probe",
+            reported: "native:dp4a_probe",
+            block_dim: 64,
+            tile: (1, 64),
+            shared_bytes: 0,
+            programmatic: false,
+            src,
+        };
+        let joined = check_table(&[kernel(UNGATED)]).join("\n");
+        assert!(joined.contains("uses __dp4a but declares min_cc"), "{joined}");
         assert!(check_table(&[kernel(GATED)]).is_empty(), "{:?}", check_table(&[kernel(GATED)]));
     }
 
