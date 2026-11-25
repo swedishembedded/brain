@@ -121,8 +121,9 @@ pub fn tiny_specials() -> TtsSpecials {
     }
 }
 
-/// The smallest complete Qwen3-TTS checkpoint in the model store, for the
-/// tests that need real weights; `None` (the test then skips) when it holds none.
+/// The smallest Qwen3-TTS checkpoint in the model store that clones a voice (its
+/// speaker encoder included), for the tests that need real weights; `None` (the
+/// test then skips) when it holds none.
 pub fn store_paths() -> Option<crate::TtsPaths> {
-    crate::spec::store_checkpoints(&brain_modelstore::default_root()?).into_iter().next()
+    crate::spec::store_checkpoints(&brain_modelstore::default_root()?).into_iter().find(|p| p.require(true).is_ok())
 }
