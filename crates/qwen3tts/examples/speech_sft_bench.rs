@@ -15,7 +15,7 @@
 //! ```text
 //! speech_sft_bench synth OUT.bttshrd --records N [--seed S] [--d 2048]
 //! speech_sft_bench run --base DIR --shard PATH [--config '{"steps": 20, ...}'] [--card N]
-//! speech_sft_bench ranks --ranks N --base DIR --shard PATH [--config '{...}']
+//! speech_sft_bench ranks --ranks N --base DIR --shard PATH [--config '{...}'] [--cards A,B,..]
 //! ```
 //!
 //! `synth` draws utterances of 1.5-30 s (log-normal, mean about 6.4 s, 12.5
@@ -23,8 +23,8 @@
 //! in one language (`english`). `run` trains with the given
 //! `SpeechSftConfig` fields over defaults (20 steps, the base's `english` row)
 //! and prints each step's frames per second and the mean past the first
-//! steps, and the peak of the memory the run takes on card `N` (default 0, as
-//! the driver reports it).
+//! steps, and the peak of the memory the run takes on card `N` (brain's
+//! canonical index, default 0), which it trains on, as the driver reports it.
 
 use std::path::Path;
 
@@ -87,11 +87,11 @@ fn run(args: &[String]) -> Result<(), String> {
         true
     };
     let control = model::train::FitControl { on_step: Some(&mut on_step), ..model::train::FitControl::default() };
-    // The card's memory peak, sampled from the driver while the run lasts (the card the run is placed on).
+    // The run is placed on the card, and the card's memory peak is sampled from the driver while it lasts.
     let card: u32 = arg(args, "--card").map_or(Ok(0), |s| s.parse().map_err(|e| format!("--card: {e}")))?;
     let baseline = gpu_core::capacity::free_on(card).unwrap_or(0);
-    let (r, peak) = gpu_core::capacity::peak_taken_while(card, baseline, || qwen3tts::speech_sft::speech_sft(&cfg, &shard, None, control));
-    let r = r?;
+    let (r, peak) = gpu_core::capacity::peak_taken_while(card, baseline, || gpu_core::devices::with_gpu(card, || qwen3tts::speech_sft::speech_sft(&cfg, &shard, None, control)));
+    let r = r.map_err(|e| format!("card {card}: {e}"))??;
     let steps = &r.report.steps;
     let skip = (steps.len() / 5).max(1).min(steps.len().saturating_sub(1));
     let tail = &steps[skip..];
@@ -101,7 +101,8 @@ fn run(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-/// `run` as `ranks` data-parallel ranks of one process, rank `r` on card `r`: every rank trains its shard of the records
+/// `run` as `ranks` data-parallel ranks of one process, rank `r` on the `r`-th of `--cards` (brain's canonical card
+/// indices, as `--card` names them; default `0..ranks`): every rank trains its shard of the records
 /// with the same seed, and each step's gradients are summed over the group (on the cards over NCCL where every rank
 /// can, through the host otherwise, as the run says) before the optimizer step. Prints each rank's mean and the
 /// group's frames a second (every rank's frames over the slowest rank's wall clock).
@@ -111,6 +112,13 @@ fn ranks(args: &[String]) -> Result<(), String> {
     let world: usize = arg(args, "--ranks").ok_or("ranks: --ranks N")?.parse().map_err(|e| format!("--ranks: {e}"))?;
     let base = arg(args, "--base").ok_or("ranks: --base DIR")?;
     let shard_path = arg(args, "--shard").ok_or("ranks: --shard PATH")?;
+    let cards: Vec<u32> = match arg(args, "--cards") {
+        Some(list) => list.split(',').map(|c| c.trim().parse().map_err(|e| format!("--cards {list}: {e}"))).collect::<Result<_, _>>()?,
+        None => (0..world as u32).collect(),
+    };
+    if cards.len() != world {
+        return Err(format!("ranks: --cards names {} card(s) for {world} rank(s)", cards.len()));
+    }
     let mut cfg = serde_json::json!({ "base": base, "steps": 20, "rows": {"languages": {"english": "base"}} });
     if let Some(over) = arg(args, "--config") {
         let over: serde_json::Value = serde_json::from_str(&over).map_err(|e| format!("--config: {e}"))?;
@@ -133,7 +141,7 @@ fn ranks(args: &[String]) -> Result<(), String> {
             .iter()
             .enumerate()
             .map(|(rank, collective)| {
-                let (cfg, shard_path) = (&cfg, &shard_path);
+                let (cfg, shard_path, card) = (&cfg, &shard_path, cards[rank]);
                 scope.spawn(move || -> Result<(f64, f64, f64), String> {
                     let shard = Shard::open(Path::new(shard_path)).map_err(|e| format!("{shard_path}: {e}"))?;
                     let (mut frames, mut first) = (0f64, None);
@@ -146,7 +154,7 @@ fn ranks(args: &[String]) -> Result<(), String> {
                     };
                     let sync = model::GradSync { collective: &**collective, rank, checkpoint: None, observer: None };
                     let control = model::train::FitControl { on_step: Some(&mut on_step), grad_sync: Some(sync), ..model::train::FitControl::default() };
-                    let r = gpu_core::devices::with_gpu(rank as u32, || qwen3tts::speech_sft::speech_sft(cfg, &shard, None, control)).map_err(|e| format!("rank {rank}: {e}"))??;
+                    let r = gpu_core::devices::with_gpu(card, || qwen3tts::speech_sft::speech_sft(cfg, &shard, None, control)).map_err(|e| format!("rank {rank} (card {card}): {e}"))??;
                     let steps = &r.report.steps;
                     let tail = &steps[steps.len().min(4)..];
                     let mean = tail.iter().map(|s| s.frames_per_s).sum::<f64>() / tail.len().max(1) as f64;
@@ -175,7 +183,7 @@ fn main() {
         Some("synth") => synth(&args[1..]),
         Some("run") => run(&args[1..]),
         Some("ranks") => ranks(&args[1..]),
-        _ => Err("usage: speech_sft_bench synth OUT --records N [--seed S] [--d D] | run --base DIR --shard PATH [--config JSON]".into()),
+        _ => Err("usage: speech_sft_bench synth OUT --records N [--seed S] [--d D] | run --base DIR --shard PATH [--config JSON] [--card N] | ranks --ranks N --base DIR --shard PATH [--config JSON] [--cards A,B,..]".into()),
     };
     if let Err(e) = result {
         eprintln!("speech_sft_bench: {e}");
