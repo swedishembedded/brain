@@ -243,9 +243,11 @@ impl SpeakerEncoder {
         self.embed_batch(&mels.iter().map(Vec::as_slice).collect::<Vec<_>>())
     }
 
-    /// The reference log-mel of a clip at `sr`, padded up to
-    /// [`SpeakerConfig::min_samples`] at 24 kHz.
-    fn log_mel(&self, samples: &[f32], sr: u32) -> Vec<f32> {
+    /// The front end [`Self::embed_wav`] runs on the host: the reference
+    /// log-mel `[T, mel_dim]` of a clip at `sr`, padded up to
+    /// [`SpeakerConfig::min_samples`] at 24 kHz. Public so a caller can run it
+    /// beside other device work and hand the mels to [`Self::embed_batch`].
+    pub fn log_mel(&self, samples: &[f32], sr: u32) -> Vec<f32> {
         let mut wav = audio::resample::rational(samples, 24000, sr);
         wav.resize(wav.len().max(self.cfg.min_samples()), 0.0);
         crate::mel::log_mel(&wav).0

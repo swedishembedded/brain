@@ -179,13 +179,20 @@ impl Encoder {
     /// Encode validated recordings together: each resampled to the codec's
     /// rate on the host (in parallel), the codec and the speaker encoder each
     /// one batched device pass (`mimi::Codec::encode_batch`,
-    /// `ecapatdnn::SpeakerEncoder::embed_wav_batch`), reading back only the
-    /// codes and the x-vectors. Each recording encodes as it does alone.
+    /// `ecapatdnn::SpeakerEncoder::embed_batch`, its log-mel front end on the
+    /// host during the codec's pass), reading back only the codes and the
+    /// x-vectors. Each recording encodes as it does alone.
     pub fn encode_batch(&self, reqs: &[&Request]) -> Vec<Encoded> {
         let rate = self.codec.cfg.input_sample_rate;
         let at_codec_rate: Vec<Vec<f32>> = backend_cpu::par::map(reqs.len(), |i| audio::resample::rational(&reqs[i].wav.samples, rate, reqs[i].wav.sample_rate));
-        let codes = self.codec.encode_batch(&at_codec_rate.iter().map(Vec::as_slice).collect::<Vec<_>>());
-        let xvectors = self.speaker.embed_wav_batch(&reqs.iter().map(|r| (r.wav.samples.as_slice(), r.wav.sample_rate)).collect::<Vec<_>>());
+        // The speaker encoder's host front end runs while the codec's pass
+        // occupies the device.
+        let (codes, mels) = std::thread::scope(|s| {
+            let mels = s.spawn(|| backend_cpu::par::map(reqs.len(), |i| self.speaker.log_mel(&reqs[i].wav.samples, reqs[i].wav.sample_rate)));
+            let codes = self.codec.encode_batch(&at_codec_rate.iter().map(Vec::as_slice).collect::<Vec<_>>());
+            (codes, mels.join().expect("the log-mel front end panicked"))
+        });
+        let xvectors = self.speaker.embed_batch(&mels.iter().map(Vec::as_slice).collect::<Vec<_>>());
         let nq = self.codebooks() as usize;
         reqs.iter()
             .zip(codes.into_iter().zip(xvectors))
