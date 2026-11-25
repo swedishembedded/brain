@@ -393,6 +393,8 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         model::ops::extend_kernel_list(&mut v, &[("rmsnorm_dw_part", kernels::RMSNORM_DW_PART), ("rmsnorm_dw_sum", kernels::RMSNORM_DW_SUM)]);
         // Rows of another model's hidden state copied into the residual stream (`Qwen::enable_row_injection`).
         model::ops::extend_kernel_list(&mut v, &[("anchor_rows_copy", kernels::ANCHOR_ROWS_COPY)]);
+        // Another model's gradient of a residual stream point added into this one's (`Qwen::enable_residual_grad`).
+        model::ops::extend_kernel_list(&mut v, &[("add_inplace", kernels::ADD_INPLACE)]);
         v
     })
 }
@@ -811,6 +813,9 @@ pub struct Qwen {
     // A gradient another model adds to this one's final-norm hidden states (`Qwen::enable_hidden_grad`), cleared once
     // consumed.
     hidden_grad: Option<DeviceBuffer>,
+    // Gradients another model adds to this one's residual stream entering a layer (`Qwen::enable_residual_grad`), by
+    // layer, with the `add_inplace` kernel; each is cleared once consumed.
+    residual_grads: Vec<(usize, DeviceBuffer)>,
     /// `[1]`: `1/count` for the current batch, the CE gradient's scale.
     inv_count: DeviceBuffer,
     /// Rows of logits the head holds at once (`model::head_ce::rows_for_budget`).
@@ -1240,6 +1245,15 @@ impl Qwen {
             return Ok(Qwen::new_impl(cfg, b, t, init, true, shard, &TierPolicy::uniform(Dtype::F32), false, gemm, SavedPolicy::Recompute, &FullFtBuild::ambient(), parent));
         }
         Qwen::new_full_on(parent, cfg, b, t, init, gemm, full)
+    }
+
+    /// A forward-only build on `parent`'s device (as [`Self::new_training_on`] places one), its per-layer linears at the
+    /// `dt` tier (a request, as [`Self::new_shard_dt`] takes it), for a frozen model that runs teacher-forced beside a
+    /// trained one: no gradient, no optimizer state, no backward. With [`Self::enable_input_rows`] it trims each batch
+    /// to its supervised rows as a training build does, so the two compute the same rows in the same layout.
+    pub fn new_frozen_on(parent: Option<&Gpu>, cfg: QwenConfig, b: u32, t: u32, init: &dyn checkpoint::TensorSource, dt: Dtype, gemm: GemmPrecision) -> Qwen {
+        let shard = Shard::whole(cfg.n_layers as usize);
+        Qwen::new_impl(cfg, b, t, init, false, shard, &TierPolicy::uniform(dt), false, gemm, SavedPolicy::Recompute, &FullFtBuild::ambient(), parent)
     }
 
     /// A resident low-precision full fine-tune build (see [`ResidentPlan`]): whole model, fp32 norms, the per-layer
@@ -1799,6 +1813,7 @@ impl Qwen {
             trim_batch: false,
             trim_step: None,
             hidden_grad: None,
+            residual_grads: Vec::new(),
             inv_count: bwd(1),
             head_rows: head_rows as u32,
             flash,
@@ -1877,7 +1892,7 @@ impl Qwen {
     /// are laid out at the run length as the targets are ([`Self::write_weights`]), and a trimmed position carries no
     /// target, so its weight multiplies a zero gradient.
     fn needed_len(&self, targets: &[u32]) -> u32 {
-        let trimmable = !self.bwd_steps.steps.is_empty()
+        let trimmable = self.trains_or_reads_rows()
             && self.res_saved.is_none()
             && self.shard.embed
             && self.shard.head
@@ -1898,6 +1913,12 @@ impl Qwen {
         // An eighth of the length's power of two, at least the trim quantum: at most 12.5 % past the record, eight
         // lengths an octave.
         trimmed_len(last, self.trim_step, self.t)
+    }
+
+    /// Whether a batch may be trimmed at all: a training build, or a forward-only one fed input rows
+    /// ([`Self::new_frozen_on`]), whose rows past the last target change nothing it is read for.
+    fn trains_or_reads_rows(&self) -> bool {
+        !self.bwd_steps.steps.is_empty() || self.input_rows
     }
 
     /// Tokens per row the current batch computes ([`Self::needed_len`]).
@@ -1930,7 +1951,7 @@ impl Qwen {
     /// The rows a batch of `targets` computes ([`Self::enable_batch_trimming`]).
     fn needed_rows(&self, targets: &[u32]) -> u32 {
         let trimmable = self.trim_batch
-            && !self.bwd_steps.steps.is_empty()
+            && self.trains_or_reads_rows()
             && self.weighted_ce.is_none()
             && self.sparse_targets.is_none()
             && self.res_saved.is_none()
@@ -1962,7 +1983,9 @@ impl Qwen {
             if tapes.len() == RUN_TAPES {
                 tapes.remove(0);
             }
-            tapes.push(((rows, run), std::sync::Arc::new((self.forward_steps(rows, run), self.build_backward_steps_at(rows, run)))));
+            // A forward-only build records no backward.
+            let backward = if self.bwd_steps.steps.is_empty() { Tape::default() } else { self.build_backward_steps_at(rows, run) };
+            tapes.push(((rows, run), std::sync::Arc::new((self.forward_steps(rows, run), backward))));
         }
         tapes.last().expect("just pushed").1.clone()
     }
@@ -2934,6 +2957,7 @@ impl Qwen {
                 None => &self.d_xn,
             };
             self.rmsnorm_bwd(&mut s, &self.res[last], "norm.weight", d_hidden, &self.dres[last], d, n);
+            self.residual_grad_steps(&mut s, last, n);
         }
 
         let mut ends = Vec::new();
@@ -3006,6 +3030,7 @@ impl Qwen {
             // ln1 backward -> d_tmp ; dres[l] = dxmid + d_tmp
             self.rmsnorm_bwd(&mut s, &self.res[l], &p("ln1.weight"), &self.d_xn, &self.d_tmp, d, n);
             s.push(self.gpu.step(ADD2, &[&self.dxmid, &self.d_tmp, &self.dres[l]], &[n * d], n * d));
+            self.residual_grad_steps(&mut s, l, n);
         }
 
         // Vision-language splice backward: move the image rows' residual grad into
@@ -3543,6 +3568,43 @@ impl Qwen {
         self.run_tapes.get_mut().clear();
         if !self.decode_only && !self.bwd_steps.steps.is_empty() {
             self.bwd_steps = self.build_backward_steps();
+        }
+    }
+
+    /// The residual stream entering layer `layer` after the latest forward (`n_layers`: the stream leaving the last
+    /// layer, before the final norm), on the device: `[rows·run, d_model]` at the batch's computed rows and run length,
+    /// as [`Self::final_hidden_buffer`]. For a second model that reads an intermediate state without a host round trip.
+    pub fn residual_buffer(&self, layer: usize) -> &DeviceBuffer {
+        assert!(self.shard.start == 0 && layer <= self.shard.end, "Qwen::residual_buffer: layer {layer} is outside this build's layers");
+        assert!(self.res_saved.is_none(), "Qwen::residual_buffer: this build keeps its boundaries in a narrow format");
+        &self.res[layer]
+    }
+
+    /// Add `grad` (a buffer of at least `b·t` `d_model`-wide rows on this device, in [`Self::residual_buffer`]'s
+    /// layout) to the gradient of the residual stream entering `layer` in every backward, then clear it: the gradient
+    /// of a loss a second model computed from that state ([`Self::residual_buffer`]). Rebuilds the recorded backward.
+    pub fn enable_residual_grad(&mut self, layer: usize, grad: &DeviceBuffer) -> Result<(), String> {
+        if self.bwd_steps.steps.is_empty() || !self.shard.is_whole(self.cfg.n_layers as usize) || self.res_saved.is_some() {
+            return Err("Qwen::enable_residual_grad: needs a whole-model training build with fp32 boundaries".into());
+        }
+        if layer > self.cfg.n_layers as usize || self.residual_grads.iter().any(|(l, _)| *l == layer) {
+            return Err(format!("Qwen::enable_residual_grad: layer {layer} is past the {} layers or already has a gradient", self.cfg.n_layers));
+        }
+        self.gpu.kernel_index("add_inplace").ok_or("Qwen::enable_residual_grad: kernel 'add_inplace' is not registered")?;
+        self.residual_grads.push((layer, grad.clone()));
+        self.run_tapes.get_mut().clear();
+        self.bwd_steps = self.build_backward_steps();
+        Ok(())
+    }
+
+    /// Steps adding the gradient another model sent for the residual stream entering `layer` into `dres[layer]`, and
+    /// clearing it for the next batch ([`Self::enable_residual_grad`]).
+    fn residual_grad_steps(&self, s: &mut Vec<Step>, layer: usize, n: u32) {
+        let d = self.cfg.d_model;
+        for (_, grad) in self.residual_grads.iter().filter(|(l, _)| *l == layer) {
+            let add = self.gpu.kernel_index("add_inplace").expect("checked by enable_residual_grad");
+            s.push(self.gpu.step(add, &[&self.dres[layer], grad], &[n * d], n * d));
+            s.push(self.gpu.step(GRAD_SCALE, &[grad], &[n * d, 0f32.to_bits()], n * d));
         }
     }
 

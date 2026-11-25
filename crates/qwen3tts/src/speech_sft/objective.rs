@@ -24,7 +24,8 @@ use data::rng::Rng;
 use model::objective::Objective;
 use model::train::StepWork;
 
-use super::model::{Example, ForwardStats, SpeechSftModel};
+use super::distill::SpeechTeacher;
+use super::model::{Example, ForwardStats, LossWeights, SpeechSftModel};
 use crate::prompt::{PromptPlan, PromptSpec, SpeakerSlot, TextLayout, TtsSpecials};
 use crate::shard::Shard;
 
@@ -117,7 +118,9 @@ pub struct SpeechObjective<'a> {
     sp: TtsSpecials,
     batch: usize,
     streaming_fraction: f32,
-    mtp_weight: f32,
+    weights: LossWeights,
+    /// The frozen teacher a distilling run's every batch is taught by ([`Self::with_teacher`]).
+    teacher: Option<SpeechTeacher>,
     seed: u64,
     /// Records drawn so far in the whole run: the position of the next one in the stream.
     drawn: u64,
@@ -145,7 +148,7 @@ impl<'a> SpeechObjective<'a> {
         if !(0.0..=1.0).contains(&streaming_fraction) {
             return Err(format!("speech sft: streaming_fraction must be in [0, 1], got {streaming_fraction}"));
         }
-        Ok(SpeechObjective { train, held_out, rows, sp, batch, streaming_fraction, mtp_weight, seed: data::rng::random_seed(), drawn: 0, shard: (0, 1), bucket: 1, order: None, window: None, step: ForwardStats::default(), held: None, work: StepWork::default() })
+        Ok(SpeechObjective { train, held_out, rows, sp, batch, streaming_fraction, weights: LossWeights::sft(mtp_weight), teacher: None, seed: data::rng::random_seed(), drawn: 0, shard: (0, 1), bucket: 1, order: None, window: None, step: ForwardStats::default(), held: None, work: StepWork::default() })
     }
 
     /// Regroup the records of every `steps` consecutive micro-batches by length ([`bucketed_positions`]); 1 (the
@@ -153,6 +156,31 @@ impl<'a> SpeechObjective<'a> {
     pub fn with_length_buckets(mut self, steps: usize) -> Self {
         self.bucket = steps.max(1);
         self
+    }
+
+    /// Weigh the loss's terms by `weights` instead of the ground-truth objective alone (the model's own,
+    /// [`SpeechSftModel::loss_weights`]).
+    pub fn with_weights(mut self, weights: LossWeights) -> Self {
+        self.weights = weights;
+        self
+    }
+
+    /// Have `teacher` teach every batch the model loads, training and held out: the run distils
+    /// ([`super::distill`]), and the held-out score is the distillation's terms (what a kept best selects on).
+    pub fn with_teacher(mut self, teacher: SpeechTeacher) -> Self {
+        self.teacher = Some(teacher);
+        self
+    }
+
+    /// Load `examples` into `model`, and have the teacher teach them when the run distils.
+    fn load(&self, model: &SpeechSftModel, examples: Vec<Example>) -> Result<(), String> {
+        match &self.teacher {
+            Some(teacher) => {
+                model.load(examples.clone())?;
+                teacher.teach(model, &examples)
+            }
+            None => model.load(examples),
+        }
     }
 
     /// The record at position `pos` of the training stream.
@@ -199,7 +227,7 @@ impl<'a> SpeechObjective<'a> {
                 break;
             }
             let examples = chunk.iter().map(|&r| example(&self.sp, &self.rows, shard, r, draw_layout(HELD_OUT_KEY, r as u64, self.streaming_fraction)).unwrap_or_else(|e| panic!("speech sft: held out: {e}"))).collect();
-            model.load(examples).unwrap_or_else(|e| panic!("speech sft: held out: {e}"));
+            self.load(model, examples).unwrap_or_else(|e| panic!("speech sft: held out: {e}"));
             total.add(&model.score());
         }
         total
@@ -245,7 +273,10 @@ impl Objective<SpeechSftModel> for SpeechObjective<'_> {
         for (what, shard) in std::iter::once(("train", self.train)).chain(self.held_out.map(|h| ("held out", h))) {
             let meta = &shard.meta;
             let refuse = |why: String| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("speech sft: {what} shard: {why}"));
-            if meta.codebooks as usize != g || meta.codebook_size != shape.mtp.vocab || meta.xvector_dim as usize != shape.d() {
+            // The x-vector is read only by a record in the x-vector slot (a named voice is its codec row): a shard of
+            // named voices may carry another width's x-vectors (a student narrower than the speaker encoder).
+            let reads_xvectors = (0..shard.len()).any(|r| shard.record(r).voice.is_none());
+            if meta.codebooks as usize != g || meta.codebook_size != shape.mtp.vocab || (reads_xvectors && meta.xvector_dim as usize != shape.d()) {
                 return Err(refuse(format!(
                     "{} codebooks of {} codes and {}-wide x-vectors; the checkpoint takes {g} codebooks of {} codes and {}-wide x-vectors",
                     meta.codebooks,
@@ -294,7 +325,7 @@ impl Objective<SpeechSftModel> for SpeechObjective<'_> {
         let t0 = Instant::now();
         let load = gpu_core::markers::range(c"speech_sft.load");
         let examples = self.next_batch();
-        model.load(examples).unwrap_or_else(|e| panic!("speech sft: {e}"));
+        self.load(model, examples).unwrap_or_else(|e| panic!("speech sft: {e}"));
         drop(load);
         let t1 = Instant::now();
         let loss = model::Model::forward(model);
@@ -324,15 +355,19 @@ impl Objective<SpeechSftModel> for SpeechObjective<'_> {
 
     fn loss_probe(&mut self, model: &SpeechSftModel, _rng: &mut Rng) -> f32 {
         let examples = self.next_batch();
-        model.load(examples).unwrap_or_else(|e| panic!("speech sft: {e}"));
-        model.score().loss(self.mtp_weight)
+        self.load(model, examples).unwrap_or_else(|e| panic!("speech sft: {e}"));
+        model.score().loss(&self.weights)
     }
 
     fn eval(&mut self, model: &SpeechSftModel, _rng: &mut Rng, batches: u32) -> Option<f32> {
         let held = self.held_out?;
         let stats = self.score(model, held, batches);
         self.held = Some(stats);
-        Some(stats.loss(self.mtp_weight))
+        // A distilling run selects on how close it came to the teacher.
+        Some(match &self.weights.kd {
+            Some(kd) => stats.kd.loss(kd) as f32,
+            None => stats.loss(&self.weights),
+        })
     }
 
     /// The step's Talker and code-predictor cross-entropy, end-of-speech
@@ -345,17 +380,28 @@ impl Objective<SpeechSftModel> for SpeechObjective<'_> {
             ("eos_accuracy", ratio(s.eos_hits, s.eos_count)),
             ("frames", s.frames as f32),
         ];
+        let kd = self.weights.kd.is_some();
+        if kd {
+            out.extend([("talker_kl", s.kd.talker_kl() as f32), ("code_predictor_kl", s.kd.code_predictor_kl() as f32), ("hidden_mse", s.kd.hidden_mse() as f32)]);
+        }
         if let Some(h) = &self.held {
             out.push(("held_out_talker_ce", mean(h.talker_sum, h.talker_count)));
             out.push(("held_out_code_predictor_ce", mean(h.cp_sum, h.cp_count)));
             out.push(("held_out_eos_accuracy", ratio(h.eos_hits, h.eos_count)));
+            if kd {
+                out.extend([("held_out_talker_kl", h.kd.talker_kl() as f32), ("held_out_code_predictor_kl", h.kd.code_predictor_kl() as f32), ("held_out_hidden_mse", h.kd.hidden_mse() as f32)]);
+            }
         }
         out
     }
 
     fn step_log(&self) -> Option<String> {
         let s = &self.step;
-        Some(format!("talker_ce {:.4} code_predictor_ce {:.4} eos_acc {:.3} frames {}", mean(s.talker_sum, s.talker_count), mean(s.cp_sum, s.cp_count), ratio(s.eos_hits, s.eos_count), s.frames))
+        let base = format!("talker_ce {:.4} code_predictor_ce {:.4} eos_acc {:.3} frames {}", mean(s.talker_sum, s.talker_count), mean(s.cp_sum, s.cp_count), ratio(s.eos_hits, s.eos_count), s.frames);
+        Some(match self.weights.kd {
+            Some(_) => format!("{base} talker_kl {:.4} code_predictor_kl {:.4} hidden_mse {:.4}", s.kd.talker_kl(), s.kd.code_predictor_kl(), s.kd.hidden_mse()),
+            None => base,
+        })
     }
 }
 

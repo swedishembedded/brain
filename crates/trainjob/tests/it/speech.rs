@@ -37,7 +37,7 @@ pub fn write_tts_base(models: &Path) {
     let mtp = qwen3tts::MtpConfig { vocab: CODEBOOK, embedding_dim: D, num_code_groups: GROUPS, ..qwen3tts::MtpConfig::tiny() };
     let mut specials = qwen3tts_specials();
     specials.lang.insert("english".into(), ENGLISH);
-    let shape = SftShape { talker: talker.clone(), mtp: mtp.clone(), specials, batch: 1, block: 1, frames: 1, mtp_weight: 0.3, lr: Default::default(), new_rows: Vec::new(), text_inter: 20, gemm: qwen3tts::speech_sft::GemmPrecision::Fp32Reference };
+    let shape = SftShape { talker: talker.clone(), mtp: mtp.clone(), specials, batch: 1, block: 1, frames: 1, mtp_weight: 0.3, lr: Default::default(), new_rows: Vec::new(), text_inter: 20, gemm: qwen3tts::speech_sft::GemmPrecision::Fp32Reference, gt_weight: 1.0, kd: None };
     let mut tensors = SpeechSftModel::init_weights(&shape, 0x7a6); // seed: a fixed fixture
     let table = tensors.get_mut(qwen3tts::speech_sft::model::TALKER_TABLE).unwrap();
     let named: Vec<u32> = SPECIALS.iter().map(|(_, id)| *id).chain([ENGLISH]).collect();

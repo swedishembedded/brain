@@ -86,7 +86,7 @@ fn tiny(config: Value, seed: u64) -> Checkpoint {
     let talker = qwen3tts::config::TalkerConfig::from_json(&config);
     let mtp = qwen3tts::config::MtpConfig::from_json(&config);
     let specials = qwen3tts::prompt::TtsSpecials::from_config(&config).unwrap();
-    let shape = SftShape { talker, mtp, specials, batch: 1, block: 1, frames: 1, mtp_weight: 0.3, lr: Default::default(), new_rows: Vec::new(), text_inter: 20, gemm: gpu_core::provider::library::GemmPrecision::Fp32Reference };
+    let shape = SftShape { talker, mtp, specials, batch: 1, block: 1, frames: 1, mtp_weight: 0.3, lr: Default::default(), new_rows: Vec::new(), text_inter: 20, gemm: gpu_core::provider::library::GemmPrecision::Fp32Reference, gt_weight: 1.0, kd: None };
     let init = SpeechSftModel::init_weights(&shape, seed);
     assert_eq!(init.contains_key("talker.code_predictor.small_to_mtp_projection.weight"), has_projection);
     let tensors = init
@@ -134,11 +134,11 @@ fn predict(ck: &Checkpoint, examples: &[Example]) -> (Logits, f32) {
     let g = base.mtp.num_code_groups as usize;
     let block = examples.iter().map(|e| e.plan.len() + e.codes.len() / g).max().unwrap() as u32;
     let frames = examples.iter().map(|e| e.codes.len() / g).sum::<usize>() as u32;
-    let shape = SftShape { talker: base.talker, mtp: base.mtp, specials: base.specials, batch: examples.len() as u32, block, frames, mtp_weight: 0.3, lr: Default::default(), new_rows: Vec::new(), text_inter: base.text_inter, gemm: gpu_core::provider::library::GemmPrecision::Fp32Reference };
+    let shape = SftShape { talker: base.talker, mtp: base.mtp, specials: base.specials, batch: examples.len() as u32, block, frames, mtp_weight: 0.3, lr: Default::default(), new_rows: Vec::new(), text_inter: base.text_inter, gemm: gpu_core::provider::library::GemmPrecision::Fp32Reference, gt_weight: 1.0, kd: None };
     let m = SpeechSftModel::build(shape, base.tensors, 1).unwrap(); // seed: the unread token tables only
     m.load(examples.to_vec()).unwrap();
     let stats = m.score();
-    (m.logits(), stats.loss(0.3))
+    (m.logits(), stats.loss(&qwen3tts::speech_sft::LossWeights::sft(0.3)))
 }
 
 fn max_diff(a: &[f32], b: &[f32]) -> f32 {

@@ -31,15 +31,19 @@ use std::path::Path;
 pub use gpu_core::provider::library::GemmPrecision;
 use serde::{Deserialize, Serialize};
 
+pub mod distill;
 pub mod model;
 pub mod objective;
 pub mod rows;
 #[cfg(test)]
 mod tables;
 #[cfg(test)]
+mod distill_tests;
+#[cfg(test)]
 mod tests;
 
-pub use model::{DecoderStack, Example, ForwardStats, Logits, LrMultipliers, SftShape, SpeechSftModel};
+pub use distill::{KdShape, KdStats, SpeechTeacher, TeacherMap, TextVocabMap};
+pub use model::{DecoderStack, Example, ForwardStats, Logits, LossWeights, LrMultipliers, SftShape, SpeechSftModel};
 pub use objective::{RowMap, SpeechObjective};
 pub use rows::{RowSource, Rows, RowsConfig};
 
@@ -152,6 +156,31 @@ pub struct SpeechSftConfig {
     pub keep_best: bool,
     #[serde(default)]
     pub arithmetic: Arithmetic,
+    /// The weight of the ground-truth objective (`CE_talker + mtp_weight * CE_code_predictor`) in the loss.
+    #[serde(default = "defaults::unit")]
+    pub gt_weight: f32,
+    /// The frozen teacher of a distillation ([`distill`]): a Qwen3-TTS release directory of the same upstream layout
+    /// on the machine that runs, held at bf16 beside the student on its card. Omitted, the run trains on the ground
+    /// truth alone, and no `*_kd_*` setting may be named.
+    #[serde(default)]
+    pub teacher: Option<String>,
+    /// The weight of the Talker's codebook-0 KL to the teacher (default 1).
+    #[serde(default)]
+    pub talker_kd_weight: Option<f32>,
+    /// The weight of the code predictor's residual-codebook KLs to the teacher, summed over the codebooks (default
+    /// 0.02: `mtp_weight`'s 0.3 spread over 15 codebooks).
+    #[serde(default)]
+    pub mtp_kd_weight: Option<f32>,
+    /// The weight of the hidden-state matching (default 0: off); needs `hidden_kd_layers`.
+    #[serde(default)]
+    pub hidden_kd_weight: Option<f32>,
+    /// `[student layer, teacher layer]` pairs whose residual streams are matched (the stream entering the layer; the
+    /// layer count names the stream after the last layer).
+    #[serde(default)]
+    pub hidden_kd_layers: Vec<(u32, u32)>,
+    /// The softmax temperature of the KLs (default 1); each KL is scaled by its square.
+    #[serde(default)]
+    pub kd_temperature: Option<f32>,
 }
 
 mod defaults {
@@ -186,7 +215,17 @@ mod defaults {
     pub fn streaming_fraction() -> f32 {
         0.5
     }
+    pub fn unit() -> f32 {
+        1.0
+    }
 }
+
+/// `talker_kd_weight` when a teacher is named and the weight is not.
+pub const DEFAULT_TALKER_KD_WEIGHT: f32 = 1.0;
+/// `mtp_kd_weight` when a teacher is named and the weight is not: `mtp_weight`'s 0.3 spread over 15 codebooks.
+pub const DEFAULT_MTP_KD_WEIGHT: f32 = 0.02;
+/// `kd_temperature` when a teacher is named and the temperature is not.
+pub const DEFAULT_KD_TEMPERATURE: f32 = 1.0;
 
 impl SpeechSftConfig {
     /// Refuse a configuration no run can honour, naming the field.
@@ -212,7 +251,31 @@ impl SpeechSftConfig {
         if (self.patience > 0 || self.keep_best) && self.eval_interval == 0 {
             return Err("patience and keep_best select on the held-out loss: they need an eval_interval (and a held-out shard)".into());
         }
+        if !(self.gt_weight.is_finite() && self.gt_weight >= 0.0) {
+            return Err(format!("gt_weight must be finite and not negative, got {}", self.gt_weight));
+        }
+        match self.kd_shape(1) {
+            None if self.talker_kd_weight.is_some() || self.mtp_kd_weight.is_some() || self.hidden_kd_weight.is_some() || self.kd_temperature.is_some() || !self.hidden_kd_layers.is_empty() => {
+                return Err("the kd settings weigh a distillation: name a teacher".into());
+            }
+            None if self.gt_weight == 0.0 => return Err("gt_weight 0 without a teacher leaves nothing to learn".into()),
+            Some(kd) if self.gt_weight == 0.0 && kd.talker == 0.0 && kd.mtp == 0.0 && kd.hidden == 0.0 => return Err("every weight of the loss is 0".into()),
+            _ => {}
+        }
         self.lr_multipliers.validate()
+    }
+
+    /// The distillation this run trains with, its teacher `teacher_d` wide; `None` without a teacher.
+    pub fn kd_shape(&self, teacher_d: u32) -> Option<KdShape> {
+        self.teacher.as_ref()?;
+        Some(KdShape {
+            talker: self.talker_kd_weight.unwrap_or(DEFAULT_TALKER_KD_WEIGHT),
+            mtp: self.mtp_kd_weight.unwrap_or(DEFAULT_MTP_KD_WEIGHT),
+            hidden: self.hidden_kd_weight.unwrap_or(0.0),
+            temperature: self.kd_temperature.unwrap_or(DEFAULT_KD_TEMPERATURE),
+            layers: self.hidden_kd_layers.clone(),
+            teacher_d,
+        })
     }
 
     /// The shared loop's patience for this run: the run's own, or one it never reaches when it keeps its best
@@ -225,14 +288,28 @@ impl SpeechSftConfig {
     }
 }
 
+/// The distillation's measurements of a step or an evaluation ([`KdStats`]'s means).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Distilled {
+    /// The Talker's mean codebook-0 KL to the teacher.
+    pub talker_kl: f32,
+    /// The residual codebooks' KLs, each a mean over the frames, summed.
+    pub code_predictor_kl: f32,
+    /// The mapped pairs' hidden-state mean squared errors, summed.
+    pub hidden_mse: f32,
+}
+
 /// One optimizer step, as the run reports it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpeechStep {
     pub step: u32,
-    /// `talker_ce + mtp_weight * code_predictor_ce`, averaged over the step's micro-batches.
+    /// `gt_weight * (talker_ce + mtp_weight * code_predictor_ce)` plus the distillation's terms, averaged over the
+    /// step's micro-batches.
     pub loss: f32,
     pub talker_ce: f32,
     pub code_predictor_ce: f32,
+    /// What a distilling run measured against its teacher.
+    pub distilled: Option<Distilled>,
     /// End-of-speech targets the Talker's greedy pick got right.
     pub eos_accuracy: f32,
     pub grad_norm: Option<f32>,
@@ -246,10 +323,12 @@ pub struct SpeechStep {
 /// Teacher-forced losses on the held-out shard.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HeldOut {
+    /// The selection metric: the loss, or the distillation's terms alone when the run distils.
     pub loss: f32,
     pub talker_ce: f32,
     pub code_predictor_ce: f32,
     pub eos_accuracy: f32,
+    pub distilled: Option<Distilled>,
 }
 
 /// How the run went.
@@ -266,7 +345,8 @@ pub struct SpeechSftReport {
 /// What a run produces.
 #[derive(Clone, Debug)]
 pub struct SpeechSftResult {
-    /// Every trained tensor under its upstream name (`talker.model.layers.0...`,
+    /// Every trained tensor under its upstream name (`talker.model.layers.0...`, the run's own parameters such as a
+    /// distillation's projections left out,
     /// `talker.codec_head.weight`, `talker.code_predictor.*`,
     /// `talker.model.codec_embedding.weight`), f32, in its upstream shape. Empty on a rank other than 0 of a
     /// data-parallel group: every rank trains the same parameters, and rank 0 hands them back.
@@ -312,7 +392,7 @@ impl Base {
         let specials = TtsSpecials::from_config(root)?;
         let fc1_bias = model::TEXT_PROJECTION[1];
         let text_inter = shape(fc1_bias).and_then(|s| s.first().copied()).ok_or_else(|| format!("no {fc1_bias}"))? as u32;
-        let shape_of = SftShape { talker: talker.clone(), mtp: mtp.clone(), specials: specials.clone(), batch: 1, block: 1, frames: 1, mtp_weight: 0.0, lr: LrMultipliers::default(), new_rows: Vec::new(), text_inter, gemm: GemmPrecision::Fp32Reference };
+        let shape_of = SftShape { talker: talker.clone(), mtp: mtp.clone(), specials: specials.clone(), batch: 1, block: 1, frames: 1, mtp_weight: 0.0, lr: LrMultipliers::default(), new_rows: Vec::new(), text_inter, gemm: GemmPrecision::Fp32Reference, gt_weight: 1.0, kd: None };
         let mut tensors = HashMap::new();
         let mut shapes = HashMap::new();
         for (name, numel) in ::model::ModelConfig::param_list(&shape_of).into_iter().chain(shape_of.frozen_params()) {
@@ -352,6 +432,7 @@ fn longest(shards: &[&Shard], max_frames: u32) -> Result<usize, String> {
 pub fn speech_sft(cfg: &SpeechSftConfig, train: &Shard, held_out: Option<&Shard>, control: ::model::train::FitControl<'_>) -> Result<SpeechSftResult, String> {
     cfg.validate()?;
     let Base { talker, mtp, specials, text_inter, mut tensors, shapes } = Base::open(Path::new(&cfg.base))?;
+    let teacher = cfg.teacher.as_ref().map(|dir| Base::open(Path::new(dir)).map_err(|e| format!("teacher: {e}"))).transpose()?;
     if let Some(h) = held_out {
         if (&h.meta.languages, &h.meta.voices) != (&train.meta.languages, &train.meta.voices) {
             return Err("the held-out shard names other languages or voices than the training shard".to_string());
@@ -366,7 +447,13 @@ pub fn speech_sft(cfg: &SpeechSftConfig, train: &Shard, held_out: Option<&Shard>
     for s in &shards {
         block = block.max(objective::rows_needed(&specials, &rows.map, s)?);
     }
-    let shape = SftShape { talker, mtp, specials: specials.clone(), batch: cfg.batch, block: block as u32, frames: cfg.batch * frames as u32, mtp_weight: cfg.mtp_weight, lr: cfg.lr_multipliers, new_rows: rows.new_rows.clone(), text_inter, gemm: cfg.arithmetic.gemm() };
+    let kd = teacher.as_ref().and_then(|t| cfg.kd_shape(t.talker.d_model));
+    let shape = SftShape { talker, mtp, specials: specials.clone(), batch: cfg.batch, block: block as u32, frames: cfg.batch * frames as u32, mtp_weight: cfg.mtp_weight, lr: cfg.lr_multipliers, new_rows: rows.new_rows.clone(), text_inter, gemm: cfg.arithmetic.gemm(), gt_weight: cfg.gt_weight, kd };
+    // The teacher is checked against the student and the shards before anything is built.
+    let teaching = match (&teacher, &cfg.teacher) {
+        (Some(t), Some(dir)) => Some(check_teacher(cfg, &shape, t, Path::new(dir), &rows, &shards)?),
+        _ => None,
+    };
     let seed = match (cfg.seed, control.state) {
         (Some(s), _) => s,
         (None, Some(state)) => ::model::train::saved_seed(state).map_err(|e| e.to_string())?.unwrap_or_else(data::rng::random_seed),
@@ -378,7 +465,12 @@ pub fn speech_sft(cfg: &SpeechSftConfig, train: &Shard, held_out: Option<&Shard>
         (None, None) => unreachable!("validated: exactly one of steps and epochs"),
     };
     let model = SpeechSftModel::build(shape, tensors, seed)?;
-    let objective = SpeechObjective::new(train, held_out, rows.map.clone(), specials, cfg.batch as usize, cfg.streaming_fraction, cfg.mtp_weight)?.with_length_buckets(cfg.length_bucket_steps as usize);
+    let mut objective = SpeechObjective::new(train, held_out, rows.map.clone(), specials, cfg.batch as usize, cfg.streaming_fraction, cfg.mtp_weight)?.with_length_buckets(cfg.length_bucket_steps as usize).with_weights(model.loss_weights());
+    if let (Some(map), Some(t)) = (teaching, teacher) {
+        let s = model.shape();
+        let tshape = SftShape { talker: t.talker, mtp: t.mtp, specials: t.specials, batch: s.batch, block: s.block, frames: s.frames, mtp_weight: 1.0, lr: LrMultipliers::default(), new_rows: Vec::new(), text_inter: t.text_inter, gemm: s.gemm, gt_weight: 1.0, kd: None };
+        objective = objective.with_teacher(SpeechTeacher::new(&model, tshape, t.tensors, map)?);
+    }
     let (min_lr, decay_iters) = match cfg.schedule {
         Schedule::Cosine => (cfg.lr / 10.0, steps),
         Schedule::Constant => (cfg.lr, 0),
@@ -427,7 +519,7 @@ pub fn speech_sft(cfg: &SpeechSftConfig, train: &Shard, held_out: Option<&Shard>
 
     let tensors = ::model::Model::param_names(&model)
         .into_iter()
-        .filter(|_| writer)
+        .filter(|name| writer && !name.starts_with(distill::PRIVATE_PREFIX))
         .map(|name| {
             let values = ::model::Model::read_weight(&model, &name);
             (name.clone(), shapes[&name].clone(), values)
@@ -436,18 +528,59 @@ pub fn speech_sft(cfg: &SpeechSftConfig, train: &Shard, held_out: Option<&Shard>
     Ok(SpeechSftResult { tensors, languages: rows.languages, voices: rows.voices, report: SpeechSftReport { fit, steps: history, seed } })
 }
 
+/// The teacher of `cfg` (its release `t` at `dir`) checked against the student `shape`, the shards' languages and voices
+/// (the teacher must have each, at whatever row) and every text token of the shards: how the teacher reads the
+/// student's batches.
+fn check_teacher(cfg: &SpeechSftConfig, shape: &SftShape, t: &Base, dir: &Path, rows: &Rows, shards: &[&Shard]) -> Result<TeacherMap, String> {
+    let text = TextVocabMap::from_dirs(Path::new(&cfg.base), dir, shape.talker.text_vocab_size, t.talker.text_vocab_size).map_err(|e| format!("teacher: {e}"))?;
+    text.check_specials(&shape.specials, &t.specials).map_err(|e| format!("teacher: {e}"))?;
+    let meta = &shards[0].meta;
+    let mut codec_rows = HashMap::new();
+    for (i, name) in meta.languages.iter().enumerate() {
+        if let Some(row) = rows.map.languages[i] {
+            let theirs = *t.specials.lang.get(name).ok_or_else(|| format!("teacher: the teacher has no language {name:?} to teach"))?;
+            codec_rows.insert(row, theirs);
+        }
+    }
+    for (i, name) in meta.voices.iter().enumerate() {
+        let theirs = *t.specials.spk_id.get(name).ok_or_else(|| format!("teacher: the teacher has no voice {name:?} to teach"))?;
+        codec_rows.insert(rows.map.voices[i], theirs);
+    }
+    for shard in shards {
+        for r in 0..shard.len() {
+            let rec = shard.record(r);
+            // The teacher reads the student's x-vector in the speaker slot: only a teacher of the student's width can.
+            if rec.voice.is_none() && t.talker.d_model != shape.talker.d_model {
+                return Err(format!(
+                    "teacher: record {r} ({}) speaks in the x-vector slot, and the teacher ({} wide) cannot read the student's {}-wide x-vector; a distillation across widths trains named voices",
+                    rec.id.id, t.talker.d_model, shape.talker.d_model
+                ));
+            }
+            if let Some(Err(e)) = rec.text_ids.iter().map(|&id| text.get(id)).find(Result::is_err) {
+                return Err(format!("teacher: record {r} ({}): {e}", rec.id.id));
+            }
+        }
+    }
+    Ok(TeacherMap { text, codec_rows })
+}
+
 /// A step report in this objective's terms.
 fn step_of(r: &::model::train::StepReport) -> SpeechStep {
     let metric = |name: &str| r.metrics.iter().find(|(n, _)| *n == name).map_or(f32::NAN, |(_, v)| *v);
+    let distilled = |prefix: &str| {
+        let m = |name: &str| r.metrics.iter().find(|(n, _)| *n == format!("{prefix}{name}")).map(|(_, v)| *v);
+        Some(Distilled { talker_kl: m("talker_kl")?, code_predictor_kl: m("code_predictor_kl")?, hidden_mse: m("hidden_mse")? })
+    };
     SpeechStep {
         step: r.step,
         loss: r.loss,
         talker_ce: metric("talker_ce"),
         code_predictor_ce: metric("code_predictor_ce"),
+        distilled: distilled(""),
         eos_accuracy: metric("eos_accuracy"),
         grad_norm: r.grad_norm,
         lr: r.lr,
         frames_per_s: r.work.useful_tokens_per_s(),
-        held_out: r.eval_loss.map(|loss| HeldOut { loss, talker_ce: metric("held_out_talker_ce"), code_predictor_ce: metric("held_out_code_predictor_ce"), eos_accuracy: metric("held_out_eos_accuracy") }),
+        held_out: r.eval_loss.map(|loss| HeldOut { loss, talker_ce: metric("held_out_talker_ce"), code_predictor_ce: metric("held_out_code_predictor_ce"), eos_accuracy: metric("held_out_eos_accuracy"), distilled: distilled("held_out_") }),
     }
 }

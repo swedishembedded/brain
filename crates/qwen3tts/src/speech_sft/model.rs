@@ -67,6 +67,8 @@ use crate::import::{mtp_brain_to_hf, mtp_hf_to_brain, talker_brain_to_hf, talker
 use crate::prompt::{Part, PromptPlan, TtsSpecials};
 use crate::talker::TextProjection;
 
+use super::distill::{self, Kd, KdHeads, KdShape, KdStats};
+
 mod probe;
 pub use probe::{DecoderStack, Logits};
 
@@ -159,6 +161,10 @@ pub struct SftShape {
     /// ([`GemmPrecision::Auto`], TF32 products of the fp32 weights), or the exact fp32 kernels a derivative check
     /// states its claim against. A build input, not model data: never saved with the configuration.
     pub gemm: GemmPrecision,
+    /// The weight of the ground-truth objective (`CE_talker + mtp_weight * CE_code_predictor`) in the loss.
+    pub gt_weight: f32,
+    /// Distillation from a teacher ([`super::distill`]); `None` trains on the ground truth alone.
+    pub kd: Option<KdShape>,
 }
 
 impl SftShape {
@@ -186,7 +192,7 @@ impl SftShape {
     }
 
     /// The code predictor's batch: whole groups of 64 sequences (its grouped head's binding windows).
-    fn cp_batch(&self) -> u32 {
+    pub(super) fn cp_batch(&self) -> u32 {
         self.frames.next_multiple_of(64)
     }
 
@@ -260,7 +266,10 @@ impl SftShape {
             return Some(Place::CpHead(i));
         }
         if self.projected() && PROJECTION.contains(&name) {
-            return Some(Place::Projection);
+            return Some(Place::Store);
+        }
+        if self.kd.as_ref().is_some_and(|kd| (0..kd.layers.len()).any(|j| distill::projection(j) == name)) {
+            return Some(Place::Store);
         }
         if name.starts_with("talker.model.layers.") || name == "talker.model.norm.weight" {
             return talker_hf_to_brain(name).map(Place::Talker);
@@ -274,6 +283,7 @@ impl model::ModelConfig for SftShape {
         let mut out: Vec<(String, usize)> = self.decoder_params().into_iter().map(|(n, s, _)| (n, s)).collect();
         out.extend(self.aux_params());
         out.extend(self.table_params());
+        out.extend(self.kd.iter().flat_map(|kd| kd.params(self.d())));
         out
     }
 
@@ -289,6 +299,8 @@ impl model::ModelConfig for SftShape {
             "mtp_weight_bits": self.mtp_weight.to_bits(),
             "lr": self.lr,
             "new_rows": self.new_rows,
+            "gt_weight_bits": self.gt_weight.to_bits(),
+            "kd": self.kd,
         })
     }
 
@@ -328,6 +340,8 @@ impl model::ModelConfig for SftShape {
             new_rows: serde_json::from_value(v["new_rows"].clone()).unwrap_or_default(),
             text_inter: u(tt, "text_inter"),
             gemm: GemmPrecision::default(),
+            gt_weight: v["gt_weight_bits"].as_u64().map_or(1.0, |b| f32::from_bits(b as u32)),
+            kd: serde_json::from_value(v["kd"].clone()).unwrap_or_else(|e| panic!("speech sft config: kd: {e}")),
         }
     }
 
@@ -358,7 +372,8 @@ enum Place {
     Talker(String),
     CodePredictor(String),
     CpHead(usize),
-    Projection,
+    /// A tensor of the auxiliary store under its own name: the projection, a distillation's hidden projections.
+    Store,
     Table(usize),
 }
 
@@ -405,13 +420,39 @@ pub struct ForwardStats {
     pub eos_count: u32,
     /// Frames the batch trained on.
     pub frames: u32,
+    /// The distillation terms, when the run distils.
+    pub kd: KdStats,
+}
+
+/// The weights of a loss's terms.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LossWeights {
+    /// The ground-truth objective's.
+    pub gt: f32,
+    /// The code predictor's cross-entropy's within it.
+    pub mtp: f32,
+    /// The distillation's, when the run distils.
+    pub kd: Option<KdShape>,
+}
+
+impl LossWeights {
+    /// The ground-truth objective alone, the code predictor weighted `mtp`.
+    pub fn sft(mtp: f32) -> LossWeights {
+        LossWeights { gt: 1.0, mtp, kd: None }
+    }
 }
 
 impl ForwardStats {
-    /// `CE_talker + mtp_weight * CE_code_predictor`.
-    pub fn loss(&self, mtp_weight: f32) -> f32 {
+    /// `gt * (CE_talker + mtp * CE_code_predictor)`, plus the distillation terms when there are any.
+    pub fn loss(&self, w: &LossWeights) -> f32 {
         let mean = |s: f64, n: u32| if n == 0 { 0.0 } else { s / f64::from(n) };
-        (mean(self.talker_sum, self.talker_count) + f64::from(mtp_weight) * mean(self.cp_sum, self.cp_count)) as f32
+        let gt = mean(self.talker_sum, self.talker_count) + f64::from(w.mtp) * mean(self.cp_sum, self.cp_count);
+        // A weight of one and no distillation is the plain objective, bit for bit.
+        let gt = if w.gt == 1.0 { gt } else { f64::from(w.gt) * gt };
+        match &w.kd {
+            None => gt as f32,
+            Some(kd) => (gt + self.kd.loss(kd)) as f32,
+        }
     }
 
     /// The sum of two measurements (a step's micro-batches, an evaluation's batches).
@@ -423,25 +464,26 @@ impl ForwardStats {
         self.eos_hits += o.eos_hits;
         self.eos_count += o.eos_count;
         self.frames += o.frames;
+        self.kd.add(&o.kd);
     }
 }
 
 /// A gather's transpose for one trained table, uploaded per batch: for table row
 /// `i`, the edges `ptr[i] .. ptr[i + 1]` name the gathered rows that read it.
-struct Csr {
+pub(super) struct Csr {
     rows: u32,
     ptr: DeviceBuffer,
     edge_row: DeviceBuffer,
 }
 
 impl Csr {
-    fn new(gpu: &Gpu, rows: usize, edges: usize) -> Csr {
+    pub(super) fn new(gpu: &Gpu, rows: usize, edges: usize) -> Csr {
         Csr { rows: rows as u32, ptr: gpu.storage(rows as u64 + 1), edge_row: gpu.storage(edges.max(1) as u64) }
     }
 
     /// Upload the transpose of `(gathered row, table row)` reads, listed in gathered-row order: each table row's
     /// edges keep that order, so its gradient is summed in a fixed one.
-    fn upload(&self, gpu: &Gpu, reads: &[(u32, u32)]) {
+    pub(super) fn upload(&self, gpu: &Gpu, reads: &[(u32, u32)]) {
         let mut ptr = vec![0u32; self.rows as usize + 1];
         for &(_, t) in reads {
             ptr[t as usize + 1] += 1;
@@ -462,7 +504,7 @@ impl Csr {
     }
 
     /// `dtable += transpose * dout` for `width`-wide rows.
-    fn grad_step(&self, gpu: &Gpu, kernel: usize, ones: &DeviceBuffer, dout: &DeviceBuffer, dtable: &DeviceBuffer, width: u32) -> Step {
+    pub(super) fn grad_step(&self, gpu: &Gpu, kernel: usize, ones: &DeviceBuffer, dout: &DeviceBuffer, dtable: &DeviceBuffer, width: u32) -> Step {
         gpu.step(kernel, &[&self.ptr, &self.edge_row, ones, dout, dtable], &[self.rows, width], self.rows * width)
     }
 }
@@ -502,17 +544,19 @@ struct Aux {
     cp_tables: Csr,
     /// Unit edge weights for [`Csr::grad_step`].
     ones: DeviceBuffer,
-    /// The code predictor's rows before the projection and their gradient (the decoder's own buffers when unprojected).
-    raw: Option<(DeviceBuffer, DeviceBuffer)>,
+    /// The code predictor's rows before the projection and, on a trained build, their gradient (the decoder's own
+    /// buffers when unprojected).
+    raw: Option<(DeviceBuffer, Option<DeviceBuffer>)>,
     /// `(talker row, code-predictor row)` of every frame's hidden state, and the same reversed for its gradient.
     hidden_plan: DeviceBuffer,
     hidden_back: DeviceBuffer,
-    /// The code predictor's gradient of the Talker's hidden states ([`Qwen::enable_hidden_grad`]).
-    hidden_grad: DeviceBuffer,
+    /// The code predictor's gradient of the Talker's hidden states ([`Qwen::enable_hidden_grad`]); none on a frozen build.
+    hidden_grad: Option<DeviceBuffer>,
     /// The end-of-speech rows' hidden states, gathered for the greedy pick, and their plan.
     eos_plan: DeviceBuffer,
     eos_h: DeviceBuffer,
-    eos_head: HeadCe,
+    /// The greedy end-of-speech pick; none on a frozen build, which measures nothing.
+    eos_head: Option<HeadCe>,
     eos_labels: RefCell<Vec<u32>>,
 }
 
@@ -541,7 +585,21 @@ pub(crate) fn aux_kernels() -> Vec<(&'static str, &'static str)> {
         ],
     );
     model::ops::extend_kernel_list(&mut list, optim::MOMENT_KERNELS);
+    model::ops::extend_kernel_list(&mut list, &distill::kernels());
     list
+}
+
+/// How a composite model is built: trained (its decoders' unread token tables filled from `seed`), or frozen on
+/// another model's card, its linears at the `dt` tier, holding no gradient and no optimizer state.
+enum Build<'a> {
+    Train { seed: u64 },
+    Frozen { parent: &'a Gpu, dt: gpu_core::select::Dtype },
+}
+
+impl Build<'_> {
+    fn frozen(&self) -> bool {
+        matches!(self, Build::Frozen { .. })
+    }
 }
 
 /// The composite trainable model. See the module documentation.
@@ -558,6 +616,10 @@ pub struct SpeechSftModel {
     /// The sum of squares of every accumulated gradient, once measured for the current gradients (the update gate
     /// asks for their finiteness, the update for their norm: one reduction serves both).
     grad_sum_sq: Cell<Option<f64>>,
+    /// The student's side of a distillation ([`SftShape::kd`]).
+    kd: Option<Kd>,
+    /// A frozen build ([`Self::build_frozen`]): forward only, a teacher.
+    frozen: bool,
 }
 
 /// Move tensor `name` (of `numel` values) out of `init`.
@@ -604,8 +666,25 @@ impl SpeechSftModel {
     /// entry and every [`SftShape::frozen_params`] one, each moved into the
     /// part that holds it (a release's tensors are never held twice). `seed`
     /// fills the decoders' unread token tables.
-    pub fn build(shape: SftShape, mut init: HashMap<String, Vec<f32>>, seed: u64) -> Result<SpeechSftModel, String> {
+    pub fn build(shape: SftShape, init: HashMap<String, Vec<f32>>, seed: u64) -> Result<SpeechSftModel, String> {
+        Self::build_with(shape, init, Build::Train { seed })
+    }
+
+    /// A frozen build of `shape` on `parent`'s card (another model's [`Self::device`]): its decoders' linears at bf16
+    /// (a request: a device without the tier holds fp32), no gradient and no optimizer state anywhere, only the
+    /// forward ([`Self::run_decoders`]). A teacher ([`super::distill::SpeechTeacher`]).
+    pub(super) fn build_frozen(shape: SftShape, init: HashMap<String, Vec<f32>>, parent: &Gpu) -> Result<SpeechSftModel, String> {
+        if shape.kd.is_some() || !shape.new_rows.is_empty() {
+            return Err("speech sft: a frozen build neither distils nor trains new rows".into());
+        }
+        Self::build_with(shape, init, Build::Frozen { parent, dt: gpu_core::select::Dtype::BF16 })
+    }
+
+    fn build_with(shape: SftShape, mut init: HashMap<String, Vec<f32>>, how: Build<'_>) -> Result<SpeechSftModel, String> {
         shape.lr.validate()?;
+        if let Some(kd) = &shape.kd {
+            kd.validate(&shape)?;
+        }
         let d = shape.d();
         if shape.mtp.embedding_dim as usize != d {
             return Err(format!("speech sft: the code predictor embeds into {} columns, the Talker is {d} wide", shape.mtp.embedding_dim));
@@ -624,6 +703,10 @@ impl SpeechSftModel {
             cp_head.extend(take(&mut init, &residual_head(i), cv * dc)?);
         }
         let mut heads = [Some(talker_head), Some(cp_head)];
+        let seed = match how {
+            Build::Train { seed } => seed,
+            Build::Frozen { .. } => 0,
+        };
         let mut decoder = |cfg: &QwenConfig, which: Decoder, parent: Option<&Gpu>| -> Result<Qwen, String> {
             let mut weights = qwen3::init_weights(cfg, seed);
             for (hf, numel, owner) in shape.decoder_params() {
@@ -643,9 +726,15 @@ impl SpeechSftModel {
                 Decoder::CodePredictor => (shape.cp_batch(), shape.mtp.num_code_groups),
             };
             // One device for the run: the code predictor is built on the Talker's handle.
-            let mut q = Qwen::new_training_on(parent, cfg.clone(), b, t, &weights, shape.gemm, &qwen3::model::FullFtBuild::ambient())?;
-            // Every row is an input row: the token table is never read and takes no gradient.
-            q.freeze_params(|n| n == "tok.weight");
+            let mut q = match how {
+                Build::Train { .. } => {
+                    let mut q = Qwen::new_training_on(parent, cfg.clone(), b, t, &weights, shape.gemm, &qwen3::model::FullFtBuild::ambient())?;
+                    // Every row is an input row: the token table is never read and takes no gradient.
+                    q.freeze_params(|n| n == "tok.weight");
+                    q
+                }
+                Build::Frozen { parent: card, dt } => Qwen::new_frozen_on(Some(parent.unwrap_or(card)), cfg.clone(), b, t, &weights, dt, shape.gemm),
+            };
             q.enable_input_rows();
             q.enable_batch_trimming();
             Ok(q)
@@ -653,14 +742,31 @@ impl SpeechSftModel {
         let mut talker = decoder(&shape.talker_qwen(), Decoder::Talker, None)?;
         let mut cp = decoder(&shape.cp_qwen(), Decoder::CodePredictor, Some(talker.gpu()))?;
         cp.set_head_groups(HeadGroups { period: shape.mtp.num_code_groups, offset: 1, width: shape.mtp.vocab, heads: shape.residuals() as u32, capacity: shape.cp_batch() })?;
-        let aux = Self::build_aux(&shape, &talker, &mut init)?;
-        talker.enable_hidden_grad(&aux.hidden_grad);
+        let aux = Self::build_aux(&shape, &talker, &mut init, how.frozen())?;
+        if let Some(grad) = &aux.hidden_grad {
+            talker.enable_hidden_grad(grad);
+        }
+        let kd = match &shape.kd {
+            Some(k) => {
+                let kd = Kd::new(&shape, k, &aux.gpu)?;
+                // A term weighted out adds nothing anywhere: the decoders' passes stay the plain objective's.
+                if k.mtp > 0.0 {
+                    cp.enable_hidden_grad(&kd.cp_hidden_grad);
+                }
+                for (layer, grad) in kd.residual_grads() {
+                    talker.enable_residual_grad(layer, grad)?;
+                }
+                Some(kd)
+            }
+            None => None,
+        };
         let talker_norm = DeviceGradNorm::new(talker.gpu())?;
         let cp_norm = DeviceGradNorm::new(cp.gpu())?;
-        Ok(SpeechSftModel { shape, talker, cp, talker_norm, cp_norm, aux, loaded: RefCell::new(None), stats: Cell::new(ForwardStats::default()), last_norm: Cell::new(None), grad_sum_sq: Cell::new(None) })
+        let frozen = how.frozen();
+        Ok(SpeechSftModel { shape, talker, cp, talker_norm, cp_norm, aux, loaded: RefCell::new(None), stats: Cell::new(ForwardStats::default()), last_norm: Cell::new(None), grad_sum_sq: Cell::new(None), kd, frozen })
     }
 
-    fn build_aux(shape: &SftShape, talker: &Qwen, init: &mut HashMap<String, Vec<f32>>) -> Result<Aux, String> {
+    fn build_aux(shape: &SftShape, talker: &Qwen, init: &mut HashMap<String, Vec<f32>>, is_frozen: bool) -> Result<Aux, String> {
         let gpu = talker.gpu().new_like(&aux_kernels());
         let mut ops = Ops::new(gpu.share())?;
         ops.set_gemm_precision(shape.gemm);
@@ -689,7 +795,20 @@ impl SpeechSftModel {
                 weights.insert(n.to_string(), take(init, n, s)?);
             }
         }
-        let mut ps = ParamStore::new(&gpu, params, &weights);
+        // A distillation's hidden projections: the run's own parameters, at the identity where a checkpoint holds none
+        // (a resumed run's state carries the trained ones).
+        if let Some(kd) = &shape.kd {
+            for (n, s) in kd.params(d) {
+                let w = init.remove(&n).unwrap_or_else(|| kd.initial_projection(d));
+                if w.len() != s {
+                    return Err(format!("speech sft: {n} holds {} values, the configuration needs {s}", w.len()));
+                }
+                params.push((n.clone(), s));
+                weights.insert(n, w);
+            }
+        }
+        let role = if is_frozen { paramstore::Role::Frozen } else { paramstore::Role::Trainable };
+        let mut ps = ParamStore::new_with_roles(&gpu, params.into_iter().map(|(n, s)| (n, s, role)).collect(), &weights);
         drop(weights);
         ps.set_lr_mult(TABLES, shape.lr.codec_tables);
         if !new_ids.is_empty() {
@@ -699,6 +818,10 @@ impl SpeechSftModel {
             for n in PROJECTION {
                 ps.set_lr_mult(n, shape.lr.code_predictor);
             }
+        }
+        // The hidden projections step at the Talker's rate: they read its states.
+        for (n, _) in shape.kd.iter().flat_map(|kd| kd.params(d)) {
+            ps.set_lr_mult(&n, shape.lr.talker);
         }
         let k = |name: &str| gpu.kernel_index(name).ok_or_else(|| format!("speech sft: kernel {name} is not registered"));
         let opt = Optim::new(k("adamw")?, k("gradnorm_sq")?, k("grad_scale")?, k("clip_coef")?, k("grad_scale_buf")?);
@@ -715,10 +838,14 @@ impl SpeechSftModel {
         let st = |n: usize| gpu.storage(n.max(1) as u64);
         let talker_edges = talker_cap * frame_taps(g);
         let ones = gpu.storage_init("speech_sft.ones", &vec![1.0f32; talker_edges.max(cp_cap)]);
-        let raw = shape.projected().then(|| (st(cp_cap * d), st(cp_cap * d)));
-        let head = model::Model::optimizer_parts(talker).ok_or("speech sft: the Talker exposes no parameter store")?.store.w("lm_head.weight").clone();
-        let head_w = Weight::dense_f32(head, shape.talker.vocab, d as u32);
-        let eos_head = HeadCe::new(&ops, d as u32, shape.talker.vocab, &head_w, HeadCeConfig { rows_per_chunk: shape.batch.clamp(1, 256), tile_budget_words: None }, HeadKernels::from_gpu(&gpu)?)?;
+        let raw = shape.projected().then(|| (st(cp_cap * d), (!is_frozen).then(|| st(cp_cap * d))));
+        let eos_head = if is_frozen {
+            None
+        } else {
+            let head = model::Model::optimizer_parts(talker).ok_or("speech sft: the Talker exposes no parameter store")?.store.w("lm_head.weight").clone();
+            let head_w = Weight::dense_f32(head, shape.talker.vocab, d as u32);
+            Some(HeadCe::new(&ops, d as u32, shape.talker.vocab, &head_w, HeadCeConfig { rows_per_chunk: shape.batch.clamp(1, 256), tile_budget_words: None }, HeadKernels::from_gpu(&gpu)?)?)
+        };
         Ok(Aux {
             frozen,
             text_ready: RefCell::new(vec![false; text_vocab]),
@@ -734,7 +861,7 @@ impl SpeechSftModel {
             raw,
             hidden_plan: st(shape.frames as usize * 2),
             hidden_back: st(shape.frames as usize * 2),
-            hidden_grad: talker.gpu().storage((talker_cap * d) as u64),
+            hidden_grad: (!is_frozen).then(|| talker.gpu().storage((talker_cap * d) as u64)),
             eos_plan: st(batch * 2),
             eos_h: st(batch * d),
             eos_head,
@@ -901,9 +1028,12 @@ impl SpeechSftModel {
             }
         }
         aux.gpu.write(&aux.talker_idx, &idx);
-        aux.talker_tables.upload(&aux.gpu, &table_reads);
-        if let Some(csr) = &aux.talker_new {
-            csr.upload(&aux.gpu, &new_reads);
+        // A frozen build has no backward to plan.
+        if !self.frozen {
+            aux.talker_tables.upload(&aux.gpu, &table_reads);
+            if let Some(csr) = &aux.talker_new {
+                csr.upload(&aux.gpu, &new_reads);
+            }
         }
 
         // The code predictor: frame f's rows are f * g + p; position 0 is the Talker's hidden state, copied in.
@@ -925,7 +1055,9 @@ impl SpeechSftModel {
             }
         }
         aux.gpu.write(&aux.cp_idx, &cp_idx);
-        aux.cp_tables.upload(&aux.gpu, &cp_reads);
+        if !self.frozen {
+            aux.cp_tables.upload(&aux.gpu, &cp_reads);
+        }
         let plan: Vec<u32> = hidden.iter().flat_map(|&(trow, crow)| [trow, crow]).collect();
         let back: Vec<u32> = hidden.iter().flat_map(|&(trow, crow)| [crow, trow]).collect();
         aux.gpu.write(&aux.hidden_plan, &plan);
@@ -948,6 +1080,11 @@ impl SpeechSftModel {
                 }
             }
         }
+        if let Some(kd) = &self.kd {
+            // Every supervised Talker row, in the computed layout, sequence by sequence: what each term reads.
+            let supervised: Vec<u32> = talker_targets.iter().map(|&(row, _)| row).collect();
+            kd.load(&aux.gpu, &supervised, frames as u32, g as u32);
+        }
         *self.loaded.borrow_mut() = Some(Loaded { talker_count, talker_rows: (seqs * run) as u32, cp_rows: (cp_seqs * g) as u32, frames: frames as u32, eos: eos_rows.len() as u32, talker_targets, talker_valid, cp_codes: examples.iter().flat_map(|ex| ex.codes.iter().copied()).collect() });
         Ok(())
     }
@@ -962,29 +1099,52 @@ impl SpeechSftModel {
 
     /// The code predictor's rows before the projection and their gradient: the raw buffers, or the decoder's own
     /// input rows when there is no projection.
-    fn cp_raw(&self) -> (&DeviceBuffer, &DeviceBuffer) {
+    fn cp_raw(&self) -> &DeviceBuffer {
         match &self.aux.raw {
-            Some((raw, d_raw)) => (raw, d_raw),
-            None => (self.cp.input_rows_buffer(), self.cp.input_rows_grad_buffer()),
+            Some((raw, _)) => raw,
+            None => self.cp.input_rows_buffer(),
         }
     }
 
-    fn forward_loss(&self) -> f32 {
+    /// The gradient of [`Self::cp_raw`]'s rows (a trained build's).
+    fn cp_raw_grad(&self) -> &DeviceBuffer {
+        match &self.aux.raw {
+            Some((_, d_raw)) => d_raw.as_ref().expect("a trained build holds the rows' gradient"),
+            None => self.cp.input_rows_grad_buffer(),
+        }
+    }
+
+    /// The forward of `q` over its loaded batch of `count` supervised positions, its loss weighted `w` in the
+    /// gradient, and its unweighted mean cross-entropy: the gradient's mean is taken over `count / w` positions, and at
+    /// a weight of zero over none (no gradient), the mean then read from the positions' log-probabilities.
+    fn weighted_forward(q: &Qwen, count: u32, w: f32) -> f32 {
+        if w == 1.0 {
+            return q.forward();
+        }
+        if w > 0.0 {
+            q.set_loss_denominator(count as f32 / w);
+            return q.forward() / w;
+        }
+        q.set_loss_denominator(f32::INFINITY);
+        q.forward();
+        (-q.batch_token_logprobs().iter().map(|&lp| f64::from(lp)).sum::<f64>() / f64::from(count.max(1))) as f32
+    }
+
+    /// The decoders over the loaded batch: the Talker's rows assembled, the Talker, the code predictor's rows, the
+    /// code predictor. Their mean cross-entropies, the Talker's and the code predictor's.
+    fn decoders_forward(&self, l: &Loaded) -> (f32, f32) {
         let s = &self.shape;
         let (d, g) = (s.d() as u32, s.mtp.num_code_groups);
-        let loaded = self.loaded.borrow();
-        let l = loaded.as_ref().expect("speech sft: load a batch before the forward");
         let aux = &self.aux;
-
         let rows = gpu_core::markers::range(c"speech_sft.rows");
         aux.gpu.submit(&[], &[self.gather_step(&aux.talker_idx, l.talker_rows, frame_taps(g as usize) as u32, self.talker.input_rows_buffer())]);
         drop(rows);
         let talker_range = gpu_core::markers::range(c"speech_sft.talker_fwd");
-        let talker_mean = self.talker.forward();
+        let talker_mean = Self::weighted_forward(&self.talker, l.talker_count, s.gt_weight);
         drop(talker_range);
 
         let cp_rows_range = gpu_core::markers::range(c"speech_sft.cp_rows");
-        let (raw, _) = self.cp_raw();
+        let raw = self.cp_raw();
         let mut steps = vec![self.gather_step(&aux.cp_idx, l.cp_rows, 1, raw), aux.gpu.step(aux.k.copy, &[&aux.hidden_plan, self.talker.final_hidden_buffer(), raw], &[l.frames, d], l.frames * d)];
         if aux.raw.is_some() {
             let dc = s.mtp.d_model;
@@ -996,26 +1156,45 @@ impl SpeechSftModel {
         aux.gpu.submit(&[], &steps);
         drop(cp_rows_range);
         let cp_range = gpu_core::markers::range(c"speech_sft.cp_fwd");
-        let cp_count = l.frames * (g - 1);
-        // The code predictor's gradient carries its weight in the loss: its mean is taken over `count / mtp_weight`.
-        let weighted = s.mtp_weight > 0.0;
-        if weighted {
-            self.cp.set_loss_denominator(cp_count as f32 / s.mtp_weight);
-        }
-        let cp_out = self.cp.forward();
-        let cp_mean = if weighted { cp_out / s.mtp_weight } else { cp_out };
+        // The code predictor's gradient carries its weight in the loss.
+        let cp_mean = Self::weighted_forward(&self.cp, l.frames * (g - 1), s.gt_weight * s.mtp_weight);
         drop(cp_range);
+        (talker_mean, cp_mean)
+    }
+
+    /// The weights of this build's loss.
+    pub fn loss_weights(&self) -> LossWeights {
+        LossWeights { gt: self.shape.gt_weight, mtp: self.shape.mtp_weight, kd: self.shape.kd.clone() }
+    }
+
+    fn forward_loss(&self) -> f32 {
+        assert!(!self.frozen, "speech sft: a frozen build measures no loss");
+        let s = &self.shape;
+        let (d, g) = (s.d() as u32, s.mtp.num_code_groups);
+        let loaded = self.loaded.borrow();
+        let l = loaded.as_ref().expect("speech sft: load a batch before the forward");
+        let aux = &self.aux;
+        let (talker_mean, cp_mean) = self.decoders_forward(l);
+        let cp_count = l.frames * (g - 1);
 
         let eos_range = gpu_core::markers::range(c"speech_sft.eos");
         let eos_hits = if l.eos > 0 {
             aux.gpu.submit(&[], &[aux.gpu.step(aux.k.copy, &[&aux.eos_plan, self.talker.final_hidden_buffer(), &aux.eos_h], &[l.eos, d], l.eos * d)]);
             let labels = aux.eos_labels.borrow();
-            let (_, picks) = aux.eos_head.forward_argmax(&aux.ops, &aux.eos_h, l.eos, &labels, 1.0).unwrap_or_else(|e| panic!("speech sft: {e}"));
+            let head = aux.eos_head.as_ref().expect("a trained build picks the end of speech");
+            let (_, picks) = head.forward_argmax(&aux.ops, &aux.eos_h, l.eos, &labels, 1.0).unwrap_or_else(|e| panic!("speech sft: {e}"));
             picks.iter().filter(|&&p| p == s.specials.codec_eos).count() as u32
         } else {
             0
         };
         drop(eos_range);
+        let kd = match &self.kd {
+            Some(kd) => {
+                let _range = gpu_core::markers::range(c"speech_sft.kd_fwd");
+                kd.forward(&aux.ops, &self.kd_heads(), self.talker.final_hidden_buffer(), self.cp.final_hidden_buffer(), &|layer| self.talker.residual_buffer(layer).clone(), &aux.ps)
+            }
+            None => KdStats::default(),
+        };
         let stats = ForwardStats {
             talker_sum: f64::from(talker_mean) * f64::from(l.talker_count),
             talker_count: l.talker_count,
@@ -1024,9 +1203,78 @@ impl SpeechSftModel {
             eos_hits,
             eos_count: l.eos,
             frames: l.frames,
+            kd,
         };
         self.stats.set(stats);
-        stats.loss(s.mtp_weight)
+        stats.loss(&self.loss_weights())
+    }
+
+    /// The heads as a distillation reads them, with their gradients on a trained build.
+    pub(super) fn kd_heads<'a>(&'a self) -> KdHeads<'a> {
+        let s = &self.shape;
+        fn parts(q: &Qwen) -> &ParamStore {
+            model::Model::optimizer_parts(q).expect("a decoder exposes its parameter store").store
+        }
+        let (tp, cp) = (parts(&self.talker), parts(&self.cp));
+        let frozen = self.frozen;
+        let grad = |store: &'a ParamStore| -> Option<&'a DeviceBuffer> { (!frozen).then(|| store.g("lm_head.weight")) };
+        KdHeads {
+            talker: Weight::dense_f32(tp.w("lm_head.weight").clone(), s.talker.vocab, s.d() as u32),
+            talker_grad: grad(tp),
+            cp: Weight::dense_f32(cp.w("lm_head.weight").clone(), s.residuals() as u32 * s.mtp.vocab, s.mtp.d_model),
+            cp_grad: grad(cp),
+            d: s.d() as u32,
+            vocab: s.talker.vocab,
+            cp_d: s.mtp.d_model,
+            cp_vocab: s.mtp.vocab,
+            residuals: s.residuals() as u32,
+        }
+    }
+
+    /// The card the model runs on, for another model to share it.
+    pub fn device(&self) -> &Gpu {
+        self.talker.gpu()
+    }
+
+    pub(super) fn aux_gpu(&self) -> &Gpu {
+        &self.aux.gpu
+    }
+
+    pub(super) fn aux_ops(&self) -> &Ops {
+        &self.aux.ops
+    }
+
+    pub(super) fn kd(&self) -> Option<&Kd> {
+        self.kd.as_ref()
+    }
+
+    pub(super) fn talker_hidden(&self) -> &DeviceBuffer {
+        self.talker.final_hidden_buffer()
+    }
+
+    pub(super) fn cp_hidden(&self) -> &DeviceBuffer {
+        self.cp.final_hidden_buffer()
+    }
+
+    pub(super) fn talker_residual(&self, layer: usize) -> DeviceBuffer {
+        self.talker.residual_buffer(layer).clone()
+    }
+
+    /// The rows the loaded batch computes: the Talker's sequences and run, the code predictor's sequences and run.
+    pub(super) fn computed_layout(&self) -> [u32; 4] {
+        [self.talker.batch_run(), self.talker.run_len(), self.cp.batch_run(), self.cp.run_len()]
+    }
+
+    /// The forward of a frozen build over its loaded batch: the hidden states a teacher reads.
+    pub(super) fn run_decoders(&self) {
+        let loaded = self.loaded.borrow();
+        self.decoders_forward(loaded.as_ref().expect("speech sft: load a batch before the forward"));
+    }
+
+    /// The parameters any optimizer of this build steps, over every store.
+    pub(super) fn trained_param_count(&self) -> usize {
+        let parts = |q: &Qwen| model::Model::optimizer_parts(q).map_or(0, |p| p.store.opt_params().len());
+        parts(&self.talker) + parts(&self.cp) + self.aux.ps.opt_params().len()
     }
 
     fn backward_all(&self) {
@@ -1036,13 +1284,19 @@ impl SpeechSftModel {
         let l = loaded.as_ref().expect("speech sft: load a batch before the backward");
         let aux = &self.aux;
 
-        // A code predictor weighted out of the loss sends no gradient anywhere.
-        if s.mtp_weight > 0.0 {
+        let heads = self.kd.as_ref().map(|_| self.kd_heads());
+        if let (Some(kd), Some(heads)) = (&self.kd, &heads) {
+            let _range = gpu_core::markers::range(c"speech_sft.kd_cp_bwd");
+            kd.backward_code_predictor(&aux.ops, heads);
+        }
+        let hidden_grad = aux.hidden_grad.as_ref().expect("a trained build routes the hidden states' gradient");
+        // A code predictor weighted out of the loss (its cross-entropy and its distillation) sends no gradient anywhere.
+        if s.gt_weight * s.mtp_weight > 0.0 || self.kd.as_ref().is_some_and(|kd| kd.shape.mtp > 0.0) {
             let cp_range = gpu_core::markers::range(c"speech_sft.cp_bwd");
             self.cp.backward();
             drop(cp_range);
             let _route = gpu_core::markers::range(c"speech_sft.cp_route");
-            let (raw, d_raw) = self.cp_raw();
+            let (raw, d_raw) = (self.cp_raw(), self.cp_raw_grad());
             let mut steps = Vec::new();
             if aux.raw.is_some() {
                 let dy = self.cp.input_rows_grad_buffer();
@@ -1052,9 +1306,14 @@ impl SpeechSftModel {
                 aux.ops.matmul_dx(&mut steps, &w, dy, l.cp_rows, d_raw, false);
             }
             // Position 0 back to the Talker's hidden state of its frame, positions 1.. into the table rows they read.
-            steps.push(aux.gpu.step(aux.k.copy, &[&aux.hidden_back, d_raw, &aux.hidden_grad], &[l.frames, d], l.frames * d));
+            steps.push(aux.gpu.step(aux.k.copy, &[&aux.hidden_back, d_raw, hidden_grad], &[l.frames, d], l.frames * d));
             steps.push(aux.cp_tables.grad_step(&aux.gpu, aux.k.gather_bwd, &aux.ones, d_raw, aux.ps.g(TABLES), d));
             aux.gpu.submit(&[], &steps);
+        }
+        // The distillation's gradient of the Talker's hidden states joins the code predictor's route (added, after it).
+        if let (Some(kd), Some(heads)) = (&self.kd, &heads) {
+            let _range = gpu_core::markers::range(c"speech_sft.kd_talker_bwd");
+            kd.backward_talker(&aux.ops, heads, hidden_grad, &aux.ps);
         }
         let talker_range = gpu_core::markers::range(c"speech_sft.talker_bwd");
         self.talker.backward();
@@ -1253,7 +1512,7 @@ impl model::Model for SpeechSftModel {
                 let (m, v) = model::Model::read_moments(&self.cp, "lm_head.weight")?;
                 Some((m[self.head_span(i)].to_vec(), v[self.head_span(i)].to_vec()))
             }
-            Place::Projection => optim::read_moments(&aux.gpu, &aux.ps, name),
+            Place::Store => optim::read_moments(&aux.gpu, &aux.ps, name),
             Place::Table(i) => {
                 let (m, v) = optim::read_moments(&aux.gpu, &aux.ps, TABLES)?;
                 let new = aux.talker_new.as_ref().and_then(|_| optim::read_moments(&aux.gpu, &aux.ps, NEW_ROWS));
@@ -1277,7 +1536,7 @@ impl model::Model for SpeechSftModel {
                 av[span].copy_from_slice(v);
                 model::Model::write_moments(&self.cp, "lm_head.weight", &am, &av)
             }
-            Place::Projection => optim::write_moments(&aux.gpu, &aux.ps, name, m, v),
+            Place::Store => optim::write_moments(&aux.gpu, &aux.ps, name, m, v),
             Place::Table(i) => {
                 let (at, n) = self.table_span(i);
                 if m.len() != n || v.len() != n {
@@ -1317,7 +1576,7 @@ impl model::Model for SpeechSftModel {
             Place::Talker(b) => self.talker.read_weight(&b),
             Place::CodePredictor(b) => self.cp.read_weight(&b),
             Place::CpHead(i) => self.cp.read_weight("lm_head.weight")[self.head_span(i)].to_vec(),
-            Place::Projection => aux.ps.read_weight(&aux.gpu, name),
+            Place::Store => aux.ps.read_weight(&aux.gpu, name),
             Place::Table(i) => self.read_table(i, aux.ps.w(TABLES), aux.talker_new.as_ref().map(|_| aux.ps.w(NEW_ROWS))),
         }
     }
@@ -1332,7 +1591,7 @@ impl model::Model for SpeechSftModel {
                 all[self.head_span(i)].copy_from_slice(data);
                 self.cp.write_weight("lm_head.weight", &all);
             }
-            Place::Projection => aux.gpu.write_f32(aux.ps.w(name), data),
+            Place::Store => aux.gpu.write_f32(aux.ps.w(name), data),
             Place::Table(i) => {
                 let (at, n) = self.table_span(i);
                 assert_eq!(data.len(), n, "speech sft: {name} holds {n} values");
@@ -1350,7 +1609,7 @@ impl model::Model for SpeechSftModel {
             Place::Talker(b) => self.talker.read_grad(&b),
             Place::CodePredictor(b) => self.cp.read_grad(&b),
             Place::CpHead(i) => self.cp.read_grad("lm_head.weight")[self.head_span(i)].to_vec(),
-            Place::Projection => aux.ps.read_grad(&aux.gpu, name),
+            Place::Store => aux.ps.read_grad(&aux.gpu, name),
             Place::Table(i) => self.read_table(i, aux.ps.g(TABLES), aux.talker_new.as_ref().map(|_| aux.ps.g(NEW_ROWS))),
         }
     }
@@ -1371,7 +1630,7 @@ impl model::Model for SpeechSftModel {
                 all[span].copy_from_slice(data);
                 model::Model::write_grad(&self.cp, "lm_head.weight", &all)?;
             }
-            Place::Projection => {
+            Place::Store => {
                 expect(aux.ps.read_grad(&aux.gpu, name).len())?;
                 aux.gpu.write_f32(aux.ps.g(name), data);
             }

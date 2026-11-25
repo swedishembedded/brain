@@ -1320,6 +1320,32 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
             let (h, nq, nk) = (p(0)?, p(1)?, p(2)?);
             f(2 * h * nq * nk, 4 * (2 * h * nq * nk + nq + nk))
         }
+        // params [rows, taps, width]: every output element sums its row's taps (padding taps counted: a bound).
+        "rows_gather_sum3" => {
+            let (rows, taps, width) = (p(0)?, p(1)?, p(2)?);
+            f(rows * taps * width, 4 * (rows * taps * (width + 1) + rows * width))
+        }
+        // params [table_rows, width]: every table element read, added to and written once; the edges it sums are not
+        // in its params, so their reads are left out (a lower bound).
+        "rows_gather_weighted_bwd" => {
+            let (rows, width) = (p(0)?, p(1)?);
+            f(rows * width, 4 * (2 * rows * width + rows))
+        }
+        // params [rows, cols, inv_t, coef]: three passes over both rows (max, normaliser, KL and gradient), the
+        // student's logits overwritten by their gradient, one KL per row.
+        "kd_kl_rows" => {
+            let (rows, cols) = (p(0)?, p(1)?);
+            f(rows * cols * 16, 4 * (rows * cols * 7 + rows))
+        }
+        // params [n, m]: weighted squared error per row, and its gradient over [total, m, scale].
+        "mse_value_w" => {
+            let (n, m) = (p(0)?, p(1)?);
+            f(3 * n * m + n, 4 * (2 * n * m + 2 * n))
+        }
+        "mse_grad_w" => {
+            let (total, m) = (p(0)?, p(1)?.max(1));
+            f(5 * total, 4 * (3 * total + total / m))
+        }
         "softmax_rows" => {
             let (rows, cols) = (p(0)?, p(1)?);
             f(rows * (6 * cols + 1), 8 * rows * cols)
@@ -1440,7 +1466,7 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         }
 
         // ---- elementwise (params [total] == threads) ------------------------
-        "add" | "add2" | "mul" | "pos_add" | "grad_scale" | "grad_scale_buf" => f(n0(), 12 * n0()),
+        "add" | "add2" | "mul" | "pos_add" | "grad_scale" | "grad_scale_buf" | "add_inplace" => f(n0(), 12 * n0()),
         "axpy" => f(2 * n0(), 12 * n0()),
         "silu_mul" | "silu_bwd_db" => f(5 * n0(), 12 * n0()),
         "silu_bwd_da" => f(8 * n0(), 16 * n0()),
