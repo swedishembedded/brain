@@ -156,26 +156,32 @@ pub fn free_on(card: u32) -> Option<u64> {
     probe_gpus().into_iter().find(|g| g.index == card).map(|g| g.free)
 }
 
+/// How often [`peak_taken_while`] reads the driver. Each read runs `nvidia-smi`, which queries every card on the node
+/// and takes its driver locks: read back to back, the probe slowed the very run it measured (a training step's own
+/// driver calls waited 10-25 ms behind it) and every other process on the node.
+pub const PEAK_SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// Run `f` while a sampler records the lowest free figure the driver reports
-/// on `card`; returns `f`'s result and the peak bytes taken past
-/// `baseline_free`. Take the baseline once the card's context exists, so the
-/// driver context (which the placement headroom covers, not a part's
-/// estimate) is not charged to the part.
+/// on `card`, every [`PEAK_SAMPLE_INTERVAL`] and once more when `f` returns; returns `f`'s result and the peak bytes
+/// taken past `baseline_free`. A peak shorter than the interval can be missed. Take the baseline once the card's
+/// context exists, so the driver context (which the placement headroom covers, not a part's estimate) is not charged
+/// to the part.
 pub fn peak_taken_while<R>(card: u32, baseline_free: u64, f: impl FnOnce() -> R) -> (R, u64) {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    let done = std::sync::Arc::new(AtomicBool::new(false));
-    let sampler = {
-        let done = done.clone();
-        std::thread::spawn(move || {
-            let mut low = u64::MAX;
-            while !done.load(Ordering::SeqCst) {
-                low = low.min(free_on(card).unwrap_or(u64::MAX));
+    let (done, stop) = std::sync::mpsc::channel::<()>();
+    let sampler = std::thread::spawn(move || {
+        let mut low = u64::MAX;
+        loop {
+            low = low.min(free_on(card).unwrap_or(u64::MAX));
+            match stop.recv_timeout(PEAK_SAMPLE_INTERVAL) {
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                _ => break,
             }
-            low.min(free_on(card).unwrap_or(u64::MAX))
-        })
-    };
+        }
+        low.min(free_on(card).unwrap_or(u64::MAX))
+    });
     let r = f();
-    done.store(true, Ordering::SeqCst);
+    // The sampler ends on the message or on the sender's drop alike.
+    let _ = done.send(());
     let low = sampler.join().expect("sampler");
     (r, baseline_free.saturating_sub(low))
 }
