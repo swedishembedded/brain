@@ -111,7 +111,7 @@ ledger is the engine work it needs.
       ignored, refused on the CPU backend): on one GH200, the 0.6B Base, one 60-frame utterance a step, 40
       steps, the loss falls more than threefold at 711 frames/s (45 before the device-resident build). The
       host side is index plans only (the throughput item).
-- [ ] Throughput on one card: the full 1.7B fine-tune (3 epochs of 100 h, about 13.5M acoustic frames)
+- [x] Throughput on one card: the full 1.7B fine-tune (3 epochs of 100 h, about 13.5M acoustic frames)
       in under 4 hours needs at least 1000 frames/s sustained (prompt rows not counted) through the served job,
       the real objective. Bench: `crates/qwen3tts/examples/speech_sft_bench.rs` (`synth` writes a shard with a
       corpus's length distribution, 1.5-30 s, mean 6.4 s, four text tokens a second; `run` trains through
@@ -138,6 +138,25 @@ ledger is the engine work it needs.
       (the builds are sized by the longest record: block 505, 6016 code-predictor frames). The largest
       single cost removed was not in the objective at all: the update gate read every gradient back to the
       host each step (knowledge 581; 1.9 s of a 2.3-2.8 s step).
+
+      Through the served job (2026-11-25): `brain serve --device gpu0 --backend cuda --training`, `POST /v1/jobs`
+      `brain/train` `speech_sft`, the 1.7B Base, a 2000-record synthetic shard (81.5 frames a record) as a blob,
+      batch 16, 300 steps: 2657 frames/s by the wall clock over steps 21-300 (median step 2711), 181 s for the
+      whole job including 35 s of build and first step, loss 17.8 -> 9.84 (random codes). At that rate the
+      13.5M frames of three epochs of 100 h take about 1.4 h. Batch 32: 2630 frames/s, device peak 90.4 GB, so
+      batch 16 is the operating point until batches are bucketed by length.
+
+      Tensor cores against the exact fp32 kernels on the real 0.6B Base and a real 67-record shard (one new
+      language and two new voices, batch 8, lr 1e-4, 60 steps, seed 20261125, `speech_sft_bench --config
+      '{"arithmetic": ...}'`): step 1 loss 3.5555 vs 3.5552; ten-step window means 4.115/4.087, 2.306/2.150,
+      1.211/1.215, 0.628/0.599, 0.325/0.320, 0.167/0.173 (within 7.3 %, both falling 25-fold); 3318 against
+      731 frames/s. The two trajectories separate after the first steps as two runs of different rounding do,
+      not by a drift of one of them.
+
+      Open: bucketing records by length (a batch pays its longest record's rows and the build is sized by
+      the longest record of the shard: block 505 for 30 s), packed rows with block-diagonal attention, bf16
+      weights and activations (the tier is TF32 products of fp32 weights), and a device charge
+      (`trainjob::speech::device_bytes`) that does not grow with the batch.
 
       `nsys` of that build (4 steps): 79 % of the kernel time in brain's fp32 CUDA-core GEMMs
       (`matmul_f32_tiled` 39 %, `matmul_f32_dw_reg` 21 %, `matmul_f32_dx_reg` 19 %), the portable fp32 flash
