@@ -83,7 +83,7 @@ layer's gradient completes) or halve it with a bf16 gradient wire (a lower-preci
 handles' stores and was dropped; a launched multi-process run and a fourth card. The default batch is a training choice (learning rate, small corpora), so it stays with `speech_sft`'s ledger.
 
 Measured serving (HTTP, in-context clones of 8 s of speech, one GH200, 2026-11-25): solo 1.2 s
-(RTF 0.15); 32 concurrent 52 s of speech a second. Started at RTF 1.2 solo with requests serialised.
+(RTF 0.15); 32 concurrent 52 s of speech a second. Started at RTF 1.2 solo with requests serialised. Later the same day on card 2 (paired, alternated): 32 concurrent 60 to 74 s of speech a second from the waveform clamp leaving the shared worker pool (nsys osrt: each served codec decode waited about 14 ms a clip in a futex for the pool), then about 69 to 75 from a shared-memory sort for the codebook-wide top-k (76 to 21 us a call, 15 calls a frame). The frame loop then spends about 8 of its 13 ms waiting for the device; its kernels (about 1,700 a frame, nsys with `--cuda-graph-trace=node`) are mostly products of 32 rows near their launch floor (4-5 us each), the paged decode attention and its split merge (a code-predictor context is about 16 keys, so its merge is pure overhead) and the keyed candidate draw (one thread a row, 34 us a call).
 
 Gates: teacher-forced cb0/residual KL against the fp32 reference, codec PCM SNR, and end to end
 speaker similarity and recogniser WER on held-out text with matched seeds.
