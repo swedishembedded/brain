@@ -212,6 +212,22 @@ pub(crate) const UPGRADES: &[Upgrade] = &[
         gpu_only: true,
     },
     Upgrade {
+        // Vector-quantization assignment (a residual quantizer's per-stage argmin, e.g. the speech codec's encoder):
+        // `vq_argmin` gives one thread a query and walks the whole codebook (2048 x 256 for the codec, half a
+        // million dependent loads per thread, one thread per audio frame). The twin splits the codebook rows over a
+        // workgroup and folds the minima exactly, so its bits are the reference's (`tests/it/vq_argmin_upgrade.rs`).
+        slow: "vq_argmin",
+        fast: "vq_argmin_rows",
+        src: kernels::VQ_ARGMIN_ROWS,
+        thread_mul: 64,
+        op: select::Op::VqAssign,
+        probe: ANY_SHAPE,
+        knob: None,
+        buckets: &[],
+        extra: &[],
+        gpu_only: true,
+    },
+    Upgrade {
         // The decode-regime GEMM every LM, DiT and depth decoder in this tree
         // dispatches for `m <= 32` (`model::block::gemm_variant`).
         // `matmul_gemv` accumulates in workgroup memory sized for the WORST

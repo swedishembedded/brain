@@ -28,7 +28,8 @@
 //! fused (`audio::conv::conv1d_bias_fwd` / `convtr1d_bias_fwd`), ConvNeXt's
 //! `LayerNorm` (eps 1e-6) and exact-erf `GELU` are device kernels, and the
 //! only host transfer is the final waveform read (plus the clamp to [-1, 1]
-//! on it). The encoder's argmin/residual quantization loop stays on the host.
+//! on it). The encoder ([`Codec::encode_batch`]) is a device pass over a batch
+//! of clips the same way, reading back only the codes.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -73,7 +74,13 @@ const NLC_NCHW: usize = 24;
 const LAYERNORM: usize = 25;
 const GELU_ERF: usize = 26;
 // 27 is `nchw_nlc_at`, resolved by name by `audio::conv`.
+// The batched encoder pass: ELU, the per-clip length mask and replicate pad,
+// and the residual quantizer on the device.
 const ELU: usize = 28;
+const NCL_LEN_MASK: usize = 29;
+const PAD1D_EDGE_LENS: usize = 30;
+const VQ_ARGMIN: usize = 31;
+const VQ_RESIDUAL: usize = 32;
 
 /// The kernel set this decoder dispatches. `pub` so a caller building the
 /// codec on its own device handle (`Codec::load_inference_on`) can construct
@@ -109,28 +116,27 @@ pub const PIPELINES: &[(&str, &str)] = &[
     ("gelu_erf", kernels::GELU_ERF),
     // The tap-sum conv lowering places its input channels-last behind its padding (`audio::conv`).
     ("nchw_nlc_at", kernels::NCHW_NLC_AT),
-    // The encoder's activations on the device.
+    // The batched encoder pass.
     ("elu", kernels::ELU),
+    ("ncl_len_mask", kernels::NCL_LEN_MASK),
+    ("pad1d_edge_lens", kernels::PAD1D_EDGE_LENS),
+    ("vq_argmin", kernels::VQ_ARGMIN),
+    ("vq_residual", kernels::VQ_RESIDUAL),
 ];
 
 /// SnakeBeta's `no_div_by_zero` (the reference's fixed epsilon).
 const SNAKE_EPS: f32 = 1e-9;
 /// ConvNeXt LayerNorm epsilon.
 const LN_EPS: f32 = 1e-6;
-/// Element-count threshold below which host loops stay single-threaded (rayon
-/// fan-out costs more than it saves on tiny buffers). The host loops that
-/// remain (the final clamp) cross this once
-/// the sequence grows, so they spread across all cores.
+/// Element-count threshold below which the host clamp of the waveform stays
+/// single-threaded (rayon fan-out costs more than it saves on tiny buffers).
 const PAR_MIN: usize = 1 << 14;
 
-/// The codec model: frozen weights on the device, the quantizer's codebooks cached on the host for the
-/// encoder's nearest-row search.
+/// The codec model: frozen weights on the device.
 pub struct Codec {
     pub gpu: Gpu,
     pub cfg: CodecConfig,
     ps: ParamStore,
-    /// [`Self::rvq_tables`], read on the first encode.
-    rvq_tables: std::sync::OnceLock<Vec<Vec<f32>>>,
     /// The vendor GEMM the decode's products take where it is active, in binary32 (the codec is stored and gated in
     /// fp32); the encoder keeps the kernels until its codes are pinned against them.
     gemm: gpu_core::provider::library::LibraryGemmProvider,
@@ -176,32 +182,7 @@ impl Codec {
             init.iter().map(|(n, v)| (n.clone(), v.len(), Role::Frozen)).collect();
         let ps = ParamStore::new_with_roles(&gpu, roles, &init);
         let gemm = gpu_core::provider::library::LibraryGemmProvider::for_gpu(&gpu, gpu_core::provider::library::GemmPrecision::Auto);
-        Codec { gpu, cfg, ps, rvq_tables: std::sync::OnceLock::new(), gemm }
-    }
-
-    /// The quantizer's codebooks on the host, semantic then acoustic (`[codebook_size, codebook_dim]` each), read from
-    /// the device once: every encode's nearest-row search reads all of them.
-    fn rvq_tables(&self) -> &[Vec<f32>] {
-        self.rvq_tables.get_or_init(|| {
-            let e = &self.cfg.enc;
-            let (cs, cd) = (e.codebook_size as usize, e.codebook_dim as usize);
-            let n_sem = e.num_semantic_quantizers as usize;
-            let n_aco = self.cfg.num_quantizers as usize - n_sem;
-            let group = |name: &str, q: usize| self.gpu.read(self.ps.w(&format!("encoder.quantizer.{name}_residual_vector_quantizer.layers.{q}.table")), cs * cd);
-            (0..n_sem).map(|q| group("semantic", q)).chain((0..n_aco).map(|q| group("acoustic", q))).collect()
-        })
-    }
-
-    /// A pass that records its steps and submits them in a few batches: what
-    /// [`Self::decode`] and [`Self::decode_omni`] run on.
-    fn recorded(&self) -> Pass<'_> {
-        Pass::new(self, true)
-    }
-
-    /// A pass that submits every step as it is built, for code that reads
-    /// intermediate results back to the host between steps (the encoder).
-    fn eager(&self) -> Pass<'_> {
-        Pass::new(self, false)
+        Codec { gpu, cfg, ps, gemm }
     }
 
     // ------------------------------------------------------------------
@@ -215,7 +196,7 @@ impl Codec {
         assert_eq!(codes.len() % nq, 0, "codes length not a multiple of {nq}");
         let t = (codes.len() / nq) as u32;
         assert!(t > 0, "empty codes");
-        let p = self.recorded();
+        let p = Pass::new(self, true);
         let dim = self.cfg.codebook_dim / 2; // per-codebook dim (256)
         let lat = self.cfg.codebook_dim; // 512 (quantizer output)
         let hidden = self.cfg.hidden_size; // 512
@@ -244,11 +225,11 @@ impl Codec {
         }
         let rest = p.matmul(&acc, "quantizer.rvq_rest.output_proj.weight", t, dim, lat);
         let quant_tm = p.add2(&first, &rest, t * lat); // [T, 512] token-major
-        let quant = p.to_channel_major(&quant_tm, t, lat); // [512, T] NCL
+        let quant = p.to_channel_major(&quant_tm, 1, t, lat); // [512, T] NCL
 
         // --- 2. pre_conv (512 -> 1024, k3 causal) ---
         let pre = p.causal_conv(&quant, "pre_conv", lat, latent, t, 3, 1, 1); // [1024, T]
-        let mut x = p.to_token_major(&pre, latent, t); // [T, 1024] token-major
+        let mut x = p.to_token_major(&pre, 1, latent, t); // [T, 1024] token-major
 
         // --- 3. pre_transformer ---
         x = p.matmul(&x, "pre_transformer.input_proj.weight", t, latent, hidden);
@@ -256,7 +237,7 @@ impl Codec {
         x = p.transformer(&x, t);
         x = p.matmul(&x, "pre_transformer.output_proj.weight", t, hidden, latent);
         p.bias_add(&x, "pre_transformer.output_proj.bias", t, latent);
-        let mut h = p.to_channel_major(&x, t, latent); // [1024, L] NCL
+        let mut h = p.to_channel_major(&x, 1, t, latent); // [1024, L] NCL
         let mut l = t;
 
         // --- 4. upsample stages ---
@@ -339,7 +320,7 @@ impl Codec {
         assert_eq!(codes.len() % nq, 0, "codes length not a multiple of {nq}");
         let t = (codes.len() / nq) as u32;
         assert!(t > 0, "empty codes");
-        let p = self.recorded();
+        let p = Pass::new(self, true);
         let hidden = self.cfg.hidden_size; // 1024
 
         // --- 1. code_embedding(codes + code_offset).mean(1) ---
@@ -348,7 +329,7 @@ impl Codec {
         // --- 2. pre_transformer (no input_proj/output_proj: hidden_size IS the
         //        working width already) ---
         let x = p.transformer(&x, t);
-        let mut h = p.to_channel_major(&x, t, hidden); // [hidden, T] NCL
+        let mut h = p.to_channel_major(&x, 1, t, hidden); // [hidden, T] NCL
         let mut l = t;
 
         // --- 3. upsample stages (K == stride here, so the crop conventions
@@ -427,7 +408,7 @@ impl Codec {
         assert_eq!(codes.len() % nq, 0, "codes length not a multiple of {nq}");
         let t = (codes.len() / nq) as u32;
         assert!(t > 0, "empty codes");
-        let p = self.recorded();
+        let p = Pass::new(self, true);
         let hidden = self.cfg.hidden_size;
 
         // --- front: identical to decode_omni's own (correctly
@@ -436,7 +417,7 @@ impl Codec {
         // cost. ---
         let x = p.code_embedding_mean(codes, t, nq, hidden);
         let x = p.transformer(&x, t);
-        let h = p.to_channel_major(&x, t, hidden); // [hidden, T] NCL
+        let h = p.to_channel_major(&x, 1, t, hidden); // [hidden, T] NCL
         let latent: Vec<f32> = p.read(&h, (hidden * t) as usize);
 
         // --- back: streamed, chunk_frames code-frames at a time. ---
@@ -477,11 +458,6 @@ impl Codec {
             .collect()
     }
 
-    /// Encode a mono 24 kHz `wav` into `[T,16]` codec codes (row-major, q0
-    /// semantic + q1..15 acoustic) - the inverse of [`Codec::decode`].
-    pub fn encode(&self, wav: &[f32]) -> Vec<u32> {
-        self.eager().encode(wav)
-    }
 }
 
 // ======================================================================
@@ -506,14 +482,15 @@ const FLUSH_BYTES: u64 = 1 << 30;
 const RETAIN_BYTES: u64 = 4 << 30;
 
 /// The device ops of one decode (or encode) call: every helper that builds a
-/// graph step goes through [`Pass::run`], which either submits it at once
-/// (`eager`) or records it for a later batched submit (`recorded`).
+/// graph step goes through [`Pass::run`], which records it for a later batched
+/// submit.
 ///
 /// Dereferences to the [`Codec`] it runs on, so the weights, config and device
 /// handle read the same as on the codec itself.
 struct Pass<'a> {
     codec: &'a Codec,
-    recorded: bool,
+    /// Whether the pass's products take the vendor GEMM (see [`Pass::new`]).
+    vendor_gemm: bool,
     steps: RefCell<Vec<Step>>,
     /// Bytes allocated for activations since the last submit.
     pending_bytes: Cell<u64>,
@@ -546,14 +523,13 @@ fn conv_kernels(direct_fwd: usize) -> ConvGemmKernels {
 }
 
 impl<'a> Pass<'a> {
-    fn new(codec: &'a Codec, recorded: bool) -> Pass<'a> {
-        if recorded {
-            codec.gpu.hold_freed_blocks(true);
-            codec.gpu.retain_freed_blocks(RETAIN_BYTES);
-        }
-        // The recorded pass is the decode: its products take the vendor GEMM; the eager one (the encoder) does not.
-        let scratch = if recorded { ConvScratch::new().with_gemm(codec.gemm.clone()) } else { ConvScratch::new() };
-        Pass { codec, recorded, steps: RefCell::new(Vec::new()), pending_bytes: Cell::new(0), scratch: RefCell::new(scratch) }
+    /// A pass over `codec`; its lowered products take the vendor GEMM when `vendor_gemm` (the decode) and the
+    /// kernels otherwise (the encoder).
+    fn new(codec: &'a Codec, vendor_gemm: bool) -> Pass<'a> {
+        codec.gpu.hold_freed_blocks(true);
+        codec.gpu.retain_freed_blocks(RETAIN_BYTES);
+        let scratch = if vendor_gemm { ConvScratch::new().with_gemm(codec.gemm.clone()) } else { ConvScratch::new() };
+        Pass { codec, vendor_gemm, steps: RefCell::new(Vec::new()), pending_bytes: Cell::new(0), scratch: RefCell::new(scratch) }
     }
 
     fn w(&self, name: &str) -> &DeviceBuffer {
@@ -565,10 +541,6 @@ impl<'a> Pass<'a> {
         self.gpu.storage(n as u64)
     }
     fn run(&self, step: Step) {
-        if !self.recorded {
-            self.gpu.submit(&[], &[step]);
-            return;
-        }
         self.steps.borrow_mut().push(step);
         if self.pending_bytes.get() >= FLUSH_BYTES {
             self.flush();
@@ -601,7 +573,7 @@ impl<'a> Pass<'a> {
         use gpu_core::provider::library::Operand;
         let out = self.st((m * n) as usize);
         let mut steps = Vec::new();
-        let on_library = self.recorded && self.codec.gemm.forward_f32(&self.gpu, &mut steps, &Operand { buf: x, range: (0, 0) }, &Operand { buf: self.w(wname), range: (0, 0) }, &Operand { buf: &out, range: (0, 0) }, m, n, k);
+        let on_library = self.vendor_gemm && self.codec.gemm.forward_f32(&self.gpu, &mut steps, &Operand { buf: x, range: (0, 0) }, &Operand { buf: self.w(wname), range: (0, 0) }, &Operand { buf: &out, range: (0, 0) }, m, n, k);
         if on_library {
             self.run_all(steps);
         } else {
@@ -634,16 +606,16 @@ impl<'a> Pass<'a> {
         self.run(self.gpu.step(SCALE_CHAN, &[x, self.w(scale_name), &out], &[total, c, inner], total));
         out
     }
-    /// Channel-major `[c, l]` (NCL) to token-major `[l, c]`, on the device.
-    fn to_token_major(&self, x: &DeviceBuffer, c: u32, l: u32) -> DeviceBuffer {
-        let out = self.st((c * l) as usize);
-        self.run(self.gpu.step(NCHW_NLC, &[x, &out], &[c * l, c, l], c * l));
+    /// Channel-major `[n, c, l]` (NCL) to token-major `[n, l, c]`, on the device.
+    fn to_token_major(&self, x: &DeviceBuffer, n: u32, c: u32, l: u32) -> DeviceBuffer {
+        let out = self.st((n * c * l) as usize);
+        self.run(self.gpu.step(NCHW_NLC, &[x, &out], &[n * c * l, c, l], n * c * l));
         out
     }
-    /// Token-major `[l, c]` to channel-major `[c, l]` (NCL), on the device.
-    fn to_channel_major(&self, x: &DeviceBuffer, l: u32, c: u32) -> DeviceBuffer {
-        let out = self.st((c * l) as usize);
-        self.run(self.gpu.step(NLC_NCHW, &[x, &out], &[c * l, c, l], c * l));
+    /// Token-major `[n, l, c]` to channel-major `[n, c, l]` (NCL), on the device.
+    fn to_channel_major(&self, x: &DeviceBuffer, n: u32, l: u32, c: u32) -> DeviceBuffer {
+        let out = self.st((n * c * l) as usize);
+        self.run(self.gpu.step(NLC_NCHW, &[x, &out], &[n * c * l, c, l], n * c * l));
         out
     }
     /// `nn.LayerNorm` (affine, `eps`) over the last axis of a token-major
@@ -672,10 +644,10 @@ impl<'a> Pass<'a> {
     }
 
     /// `conv1d` of `x` by `{prefix}.conv.{weight,bias}` into a fresh
-    /// `[Cout, Lo]` buffer: the GEMM lowering where the device selector picks
+    /// `[N, Cout, Lo]` buffer: the GEMM lowering where the device selector picks
     /// it, the direct kernel otherwise, the bias fused either way.
     fn conv(&self, c: &audio::conv::Conv1d, x: &DeviceBuffer, prefix: &str) -> DeviceBuffer {
-        let out = self.st((c.cout * c.lo) as usize);
+        let out = self.st((c.n * c.cout * c.lo) as usize);
         let steps = audio::conv::conv1d_bias_fwd(
             &self.gpu,
             &conv_kernels(CONV1D),
@@ -769,7 +741,7 @@ impl<'a> Pass<'a> {
     fn convnext(&self, x: &DeviceBuffer, prefix: &str, c: u32, l: u32) -> DeviceBuffer {
         // depthwise causal conv (groups = C, k7)
         let dw = self.causal_conv(x, &format!("{prefix}.dwconv"), c, c, l, 7, 1, c); // [C, L]
-        let tm = self.to_token_major(&dw, c, l); // [L, C]
+        let tm = self.to_token_major(&dw, 1, c, l); // [L, C]
         let normed = self.layernorm(&tm, &format!("{prefix}.norm"), l, c, LN_EPS);
         // pwconv1 (C -> 4C) + bias, GELU
         let hid = c * 4;
@@ -781,7 +753,7 @@ impl<'a> Pass<'a> {
         self.bias_add(&o, &format!("{prefix}.pwconv2.bias"), l, c);
         // γ per-channel scale over token-major [L,C]: channel = idx % C (inner=1).
         let o = self.scale_chan(&o, &format!("{prefix}.gamma"), l * c, c, 1);
-        let o_ncl = self.to_channel_major(&o, l, c); // [C, L]
+        let o_ncl = self.to_channel_major(&o, 1, l, c); // [C, L]
         self.add2(x, &o_ncl, c * l)
     }
 
@@ -852,29 +824,102 @@ impl<'a> Pass<'a> {
 // ENCODE: wav -> codes [T,16]  (HuggingFace Mimi encoder, forward only)
 // ======================================================================
 //
-// Mirror of `MimiModel._encode_frame`:
-//   1. SEANet conv encoder (`encoder.encoder.layers.*`) -> [512, L']
+// Mirror of `MimiModel._encode_frame`, over a BATCH of clips in one recorded
+// device pass:
+//   1. SEANet conv encoder (`encoder.encoder.layers.*`) -> [n, 512, L']
 //   2. encoder transformer (`encoder.encoder_transformer.layers.*`, pre-LN,
-//      LayerNorm+bias, gelu MLP, LayerScale) -> [512, L']
+//      LayerNorm+bias, gelu MLP, LayerScale), plain causal -> [n, 512, L']
 //   3. frame-rate-match downsample (replicate-padded causal conv, stride 2)
-//      -> [512, T]
+//      -> [n, 512, T]
 //   4. split-RVQ encode: project 512->256 (`input_proj`), then nearest-codebook
-//      argmin + residual subtraction across 1 semantic + 15 acoustic codebooks.
+//      argmin + residual subtraction across 1 semantic + 15 acoustic codebooks,
+//      on the device (`vq_argmin` + `vq_residual`); only the codes read back.
 //
 // Causal MimiConv1d uses LEFT pad = `effective_kernel - stride` with output
 // length `ceil(L / stride)` (zero pad on the right for `pad_mode="constant"`,
-// replicate for the downsample). The argmin/residual loop runs on the HOST (no
-// kernel exists; same policy as the speaker-pooling host code).
+// replicate for the downsample).
+//
+// The clips are padded to one length, a multiple of the encoder's total stride
+// (one code frame of samples), and carry their own lengths through every
+// stage. Every conv is causal, so a padded position never reaches an earlier
+// valid one, except where a strided conv's last window reads past the clip's
+// end: the input of each strided conv is zeroed past the clip's own length
+// first (`ncl_len_mask`), which is the zero padding the unbatched conv reads,
+// and the downsample replicates each clip's own last frame (`pad1d_edge_lens`).
+// So each clip's codes are the codes it encodes to alone.
+
+/// Padded input samples one encode pass takes at most; a larger batch is
+/// split into several passes (clips grouped by length, so little is padded).
+///
+/// The SEANet head runs `num_filters` (64) channels at the input rate, so a
+/// pass's first activations are `64 x` this many floats (2 GiB at 2^23) with a
+/// few of them alive at once: a bound on device memory, and it keeps every
+/// dispatch's element count far inside `u32`.
+pub const ENCODE_PASS_SAMPLES: usize = 1 << 23;
+
+impl Codec {
+    /// Encode a mono 24 kHz `wav` into `[T,16]` codec codes (row-major, q0
+    /// semantic + q1..15 acoustic) - the inverse of [`Codec::decode`].
+    pub fn encode(&self, wav: &[f32]) -> Vec<u32> {
+        self.encode_batch(&[wav]).pop().expect("one clip in, one code sequence out")
+    }
+
+    /// [`Self::encode`] of every clip, as few recorded device passes as
+    /// [`ENCODE_PASS_SAMPLES`] allows: each clip's codes equal its own
+    /// [`Self::encode`]. Returns the codes in input order.
+    pub fn encode_batch(&self, wavs: &[&[f32]]) -> Vec<Vec<u32>> {
+        assert!(wavs.iter().all(|w| !w.is_empty()), "empty wav");
+        let hop = self.encode_hop() as usize;
+        let mut order: Vec<usize> = (0..wavs.len()).collect();
+        order.sort_by_key(|&i| wavs[i].len());
+        let mut out: Vec<Vec<u32>> = vec![Vec::new(); wavs.len()];
+        let mut group: Vec<usize> = Vec::new();
+        let flush = |group: &mut Vec<usize>, out: &mut Vec<Vec<u32>>| {
+            if group.is_empty() {
+                return;
+            }
+            let clips: Vec<&[f32]> = group.iter().map(|&i| wavs[i]).collect();
+            for (i, codes) in group.drain(..).zip(Pass::new(self, false).encode(&clips)) {
+                out[i] = codes;
+            }
+        };
+        for i in order {
+            // Sorted ascending, so this clip sets the group's padded length.
+            let padded = wavs[i].len().div_ceil(hop) * hop;
+            if !group.is_empty() && (group.len() + 1) * padded > ENCODE_PASS_SAMPLES {
+                flush(&mut group, &mut out);
+            }
+            group.push(i);
+        }
+        flush(&mut group, &mut out);
+        out
+    }
+
+    /// Input samples per code frame: the SEANet strides times the
+    /// frame-rate-match downsample.
+    fn encode_hop(&self) -> u32 {
+        let e = &self.cfg.enc;
+        e.upsampling_ratios.iter().product::<u32>() * e.downsample_stride
+    }
+}
+
 impl Pass<'_> {
-    fn encode(&self, wav: &[f32]) -> Vec<u32> {
-        assert!(!wav.is_empty(), "empty wav");
+    /// One device pass over `wavs` (non-empty clips): their codes, each
+    /// `[T_b, 16]` row-major for clip `b`'s own `T_b`.
+    fn encode(&self, wavs: &[&[f32]]) -> Vec<Vec<u32>> {
         let e = self.cfg.enc.clone();
-        let l0 = wav.len() as u32;
+        let n = wavs.len() as u32;
+        let hop = self.encode_hop();
+        let lmax = (wavs.iter().map(|w| w.len()).max().unwrap_or(0) as u32).div_ceil(hop) * hop;
+        let mut lens: Vec<u32> = wavs.iter().map(|w| w.len() as u32).collect();
 
         // --- 1. SEANet conv encoder ---
-        // head conv: 1 -> num_filters, k=kernel_size, stride 1.
-        let x = self.upload(wav); // [1, L0] NCL (cin = 1)
-        let (mut h, mut l) = self.enc_conv(&x, "encoder.encoder.layers.0", 1, e.num_filters, l0, e.kernel_size, 1, 1, 1);
+        let mut padded = vec![0.0f32; (n * lmax) as usize];
+        for (b, w) in wavs.iter().enumerate() {
+            padded[b * lmax as usize..b * lmax as usize + w.len()].copy_from_slice(w);
+        }
+        let x = self.upload(&padded); // [n, 1, L0] NCL (cin = 1)
+        let (mut h, mut l) = self.enc_conv(&x, "encoder.encoder.layers.0", n, 1, e.num_filters, lmax, e.kernel_size, 1);
         let mut dim = e.num_filters;
         // downsample stages: reversed(upsampling_ratios).
         let ratios: Vec<u32> = e.upsampling_ratios.iter().rev().copied().collect();
@@ -883,98 +928,105 @@ impl Pass<'_> {
             // residual block: ELU, conv(dim->dim/compress,k=res_k), ELU, conv(->dim,k1).
             let hidden = dim / e.compress;
             let base = format!("encoder.encoder.layers.{li}");
-            let y = self.elu(&h, dim * l);
-            let (y, _) = self.enc_conv(&y, &format!("{base}.block.1"), dim, hidden, l, e.residual_kernel_size, 1, 1, 1);
-            let y = self.elu(&y, hidden * l);
-            let (y, _) = self.enc_conv(&y, &format!("{base}.block.3"), hidden, dim, l, 1, 1, 1, 1);
-            h = self.add2(&h, &y, dim * l);
+            let y = self.elu(&h, n * dim * l);
+            let (y, _) = self.enc_conv(&y, &format!("{base}.block.1"), n, dim, hidden, l, e.residual_kernel_size, 1);
+            let y = self.elu(&y, n * hidden * l);
+            let (y, _) = self.enc_conv(&y, &format!("{base}.block.3"), n, hidden, dim, l, 1, 1);
+            h = self.add2(&h, &y, n * dim * l);
             li += 1; // resnet
             li += 1; // ELU (no params)
-            // downsample conv: dim -> 2*dim, k=2r, stride=r.
-            let y = self.elu(&h, dim * l);
-            let (hd, lo) = self.enc_conv(&y, &format!("encoder.encoder.layers.{li}"), dim, dim * 2, l, 2 * r, r, 1, 1);
+            // downsample conv: dim -> 2*dim, k=2r, stride=r. Its last window
+            // reads past a clip's end: zero there, as the unpadded conv reads.
+            let y = self.elu(&h, n * dim * l);
+            self.mask_past(&y, n, dim, l, &lens);
+            let (hd, lo) = self.enc_conv(&y, &format!("encoder.encoder.layers.{li}"), n, dim, dim * 2, l, 2 * r, r);
             h = hd;
             l = lo;
+            lens.iter_mut().for_each(|v| *v = v.div_ceil(r));
             dim *= 2;
             li += 1; // downsample conv
         }
         // final: ELU, conv(dim -> hidden_size, k=last_kernel_size, stride 1).
         li += 1; // final ELU (no params)
-        let y = self.elu(&h, dim * l);
-        let (hd, lo) = self.enc_conv(&y, &format!("encoder.encoder.layers.{li}"), dim, e.hidden_size, l, e.last_kernel_size, 1, 1, 1);
+        let y = self.elu(&h, n * dim * l);
+        let (hd, lo) = self.enc_conv(&y, &format!("encoder.encoder.layers.{li}"), n, dim, e.hidden_size, l, e.last_kernel_size, 1);
         h = hd;
         l = lo;
 
-        // --- 2. encoder transformer (token-major [L, hidden]) ---
-        let mut tm = self.to_token_major(&h, e.hidden_size, l); // [L, 512]
-        tm = self.enc_transformer(&tm, l);
-        h = self.to_channel_major(&tm, l, e.hidden_size); // [512, L]
+        // --- 2. encoder transformer (token-major [n*L, hidden]) ---
+        let mut tm = self.to_token_major(&h, n, e.hidden_size, l); // [n*L, 512]
+        tm = self.enc_transformer(&tm, n, l);
+        h = self.to_channel_major(&tm, n, l, e.hidden_size); // [n, 512, L]
 
         // --- 3. frame-rate-match downsample ---
-        let (h, t) = self.enc_downsample(&h, e.hidden_size, l);
+        let (h, t) = self.enc_downsample(&h, n, e.hidden_size, l, &lens);
+        let frames: Vec<u32> = lens.iter().map(|v| v.div_ceil(e.downsample_stride)).collect();
 
         // --- 4. split-RVQ encode ---
-        self.rvq_encode(&h, t)
+        let nq = self.cfg.num_quantizers as usize;
+        let codes = self.rvq_encode(&h, n, t);
+        let rows = t as usize * nq;
+        frames.iter().enumerate().map(|(b, &tb)| codes[b * rows..b * rows + tb as usize * nq].iter().map(|&c| c as u32).collect()).collect()
     }
 
-    /// Causal Mimi `conv1d` (NCL): left pad `effective_kernel - stride`, output
-    /// length `ceil(L / stride)`, with the per-channel `{prefix}.conv.bias` fused.
-    /// Returns `([Cout, lo], lo)`.
-    fn enc_conv(&self, x: &DeviceBuffer, prefix: &str, cin: u32, cout: u32, l: u32, k: u32, stride: u32, dilation: u32, groups: u32) -> (DeviceBuffer, u32) {
-        let keff = (k - 1) * dilation + 1;
-        let pad = keff - stride;
+    /// Causal Mimi `conv1d` over a batch (NCL `[n, cin, l]`): left pad
+    /// `effective_kernel - stride`, output length `ceil(L / stride)`, the
+    /// per-channel `{prefix}.conv.bias` fused. Returns `([n, Cout, lo], lo)`.
+    #[allow(clippy::too_many_arguments)]
+    fn enc_conv(&self, x: &DeviceBuffer, prefix: &str, n: u32, cin: u32, cout: u32, l: u32, k: u32, stride: u32) -> (DeviceBuffer, u32) {
+        let pad = k - stride;
         let lo = l.div_ceil(stride);
-        let c = audio::conv::Conv1d { n: 1, cin, l, cout, k, stride, pad, dilation, groups, lo };
-        let out = self.conv(&c, x, prefix);
-        (out, lo)
+        let c = audio::conv::Conv1d { n, cin, l, cout, k, stride, pad, dilation: 1, groups: 1, lo };
+        (self.conv(&c, x, prefix), lo)
+    }
+
+    /// Clip lengths as a device `u32` buffer, for the length-aware kernels.
+    fn lens(&self, lens: &[u32]) -> DeviceBuffer {
+        let b = self.gpu.buffer("lens", (lens.len() * 4) as u64, BufUsage::STORAGE | BufUsage::COPY_DST);
+        self.gpu.write(&b, lens);
+        b
+    }
+
+    /// Zero every position of `[n, c, l]` at or past its clip's own length.
+    fn mask_past(&self, x: &DeviceBuffer, n: u32, c: u32, l: u32, lens: &[u32]) {
+        let lb = self.lens(lens);
+        self.run(self.gpu.step(NCL_LEN_MASK, &[x, &lb], &[n * c * l, c, l], n * c * l));
+    }
+
+    /// ELU (alpha 1) over `n` floats, on the device.
+    fn elu(&self, x: &DeviceBuffer, n: u32) -> DeviceBuffer {
+        let out = self.st(n as usize);
+        self.run(self.gpu.step(ELU, &[x, &out], &[n, f(1.0)], n));
+        out
     }
 
     /// The frame-rate-match downsample: a causal conv with **replicate** padding
     /// (`hidden -> hidden`, kernel `downsample_kernel`, stride `downsample_stride`,
-    /// no bias). Left pad `k - stride` and right pad `extra = ceil(L/s)*s - L` are
-    /// filled by edge replication on the host, then a `pad=0` conv. Returns
-    /// `([C, T], T)`.
-    fn enc_downsample(&self, x: &DeviceBuffer, c: u32, l: u32) -> (DeviceBuffer, u32) {
+    /// no bias). Left pad `k - stride`, and each clip's right edge replicated at
+    /// its own length `lens[b]` (`pad1d_edge_lens`), then a `pad=0` conv.
+    /// Returns `([n, C, T], T)` for the padded length.
+    fn enc_downsample(&self, x: &DeviceBuffer, n: u32, c: u32, l: u32, lens: &[u32]) -> (DeviceBuffer, u32) {
         let k = self.cfg.enc.downsample_kernel;
         let stride = self.cfg.enc.downsample_stride;
-        let pad_left = k - stride;
+        let left = k - stride;
         let lo = l.div_ceil(stride);
-        let pad_right = lo * stride - l;
-        let xv = self.read(x, (c * l) as usize);
-        let lp = (pad_left + l + pad_right) as usize;
-        let (lu, plu) = (l as usize, pad_left as usize);
-        let mut padded = vec![0.0f32; c as usize * lp];
-        for ch in 0..c as usize {
-            let src = &xv[ch * lu..(ch + 1) * lu];
-            let dst = &mut padded[ch * lp..(ch + 1) * lp];
-            for d in dst.iter_mut().take(plu) {
-                *d = src[0];
-            }
-            dst[plu..plu + lu].copy_from_slice(src);
-            for d in dst[plu + lu..].iter_mut() {
-                *d = src[lu - 1];
-            }
-        }
-        let pbuf = self.upload(&padded);
-        let conv = audio::conv::Conv1d { n: 1, cin: c, l: lp as u32, cout: c, k, stride, pad: 0, dilation: 1, groups: 1, lo };
-        let out = self.st((c * lo) as usize);
-        self.run(audio::conv::conv1d_fwd(
-            &self.gpu,
-            &audio::conv::ConvKernels { fwd: CONV1D, dx: 0, dw: 0 },
-            &conv,
-            &pbuf,
-            self.w("encoder.downsample.conv.weight"),
-            &out,
-        ));
+        let lp = left + lo * stride;
+        let padded = self.st((n * c * lp) as usize);
+        let lb = self.lens(lens);
+        self.run(self.gpu.step(PAD1D_EDGE_LENS, &[x, &padded, &lb], &[n * c * lp, c, l, left, lp], n * c * lp));
+        let conv = audio::conv::Conv1d { n, cin: c, l: lp, cout: c, k, stride, pad: 0, dilation: 1, groups: 1, lo };
+        let out = self.st((n * c * lo) as usize);
+        self.run(audio::conv::conv1d_fwd(&self.gpu, &audio::conv::ConvKernels { fwd: CONV1D, dx: 0, dw: 0 }, &conv, &padded, self.w("encoder.downsample.conv.weight"), &out));
         (out, lo)
     }
 
-    /// Mimi encoder transformer over token-major `[T, hidden]`: 8 pre-LN layers
-    /// (LayerNorm **with bias**, RoPE GQA attention with scaling `1/√head_dim`,
-    /// gelu MLP `fc2(gelu(fc1))`, per-channel LayerScale on each residual), with
-    /// sliding-window causal attention. No
-    /// input/output projection and no final norm (unlike the decoder).
-    fn enc_transformer(&self, x0: &DeviceBuffer, t: u32) -> DeviceBuffer {
+    /// Mimi encoder transformer over token-major `[n*T, hidden]` (`n` clips of
+    /// `T` frames): 8 pre-LN layers (LayerNorm **with bias**, RoPE GQA
+    /// attention with scaling `1/√head_dim`, exact-erf gelu MLP
+    /// `fc2(gelu(fc1))`, per-channel LayerScale on each residual), plain causal
+    /// attention. No input/output projection and no final norm (unlike the
+    /// decoder).
+    fn enc_transformer(&self, x0: &DeviceBuffer, n: u32, t: u32) -> DeviceBuffer {
         let e = self.cfg.enc.clone();
         let d = e.hidden_size;
         let hd = e.head_dim;
@@ -985,21 +1037,22 @@ impl Pass<'_> {
         let ff = e.intermediate_size;
         let theta = e.rope_theta;
         let ids = ids();
-        let ga = Gqa { b: 1, t, n_heads: nh, n_kv_heads: nkv, head_dim: hd };
+        let ga = Gqa { b: n, t, n_heads: nh, n_kv_heads: nkv, head_dim: hd };
+        let rows = n * t;
 
         let mut x = x0.clone();
         for layer in 0..e.num_hidden_layers as usize {
             let p = |leaf: &str| format!("encoder.encoder_transformer.layers.{layer}.{leaf}");
             // --- attention ---
-            let xn = self.layernorm(&x, &p("input_layernorm"), t, d, e.norm_eps);
-            let q = self.matmul(&xn, &p("self_attn.q_proj.weight"), t, d, hq);
-            let k = self.matmul(&xn, &p("self_attn.k_proj.weight"), t, d, hkv);
-            let v = self.matmul(&xn, &p("self_attn.v_proj.weight"), t, d, hkv);
-            self.run(block::rope_fwd(&self.gpu, &ids, &q, t, nh, hd, hq, t, theta));
-            self.run(block::rope_fwd(&self.gpu, &ids, &k, t, nkv, hd, hkv, t, theta));
-            let scores = self.st((nh * t * t) as usize);
-            let probs = self.st((nh * t * t) as usize);
-            let ctx = self.st((t * hq) as usize);
+            let xn = self.layernorm(&x, &p("input_layernorm"), rows, d, e.norm_eps);
+            let q = self.matmul(&xn, &p("self_attn.q_proj.weight"), rows, d, hq);
+            let k = self.matmul(&xn, &p("self_attn.k_proj.weight"), rows, d, hkv);
+            let v = self.matmul(&xn, &p("self_attn.v_proj.weight"), rows, d, hkv);
+            self.run(block::rope_fwd(&self.gpu, &ids, &q, rows, nh, hd, hq, t, theta));
+            self.run(block::rope_fwd(&self.gpu, &ids, &k, rows, nkv, hd, hkv, t, theta));
+            let scores = self.st((n * nh * t * t) as usize);
+            let probs = self.st((n * nh * t * t) as usize);
+            let ctx = self.st((rows * hq) as usize);
             // Plain causal attention over the whole clip. The released config
             // carries `encoder_config.sliding_window` (250), but the reference
             // encode (transformers' Mimi encoder, which `qwen-tts` runs) builds
@@ -1009,86 +1062,51 @@ impl Pass<'_> {
             // #582). A window of `t` is unbounded.
             let window = t;
             self.run_all(block::gqa_fwd_win(&self.gpu, GQA_SCORES_WIN, &ids, &ga, window, &q, &k, &v, &scores, &probs, &ctx));
-            let attn = self.matmul(&ctx, &p("self_attn.o_proj.weight"), t, hq, d);
-            let attn = self.scale_chan(&attn, &p("self_attn_layer_scale.scale"), t * d, d, 1);
-            x = self.add2(&x, &attn, t * d);
+            let attn = self.matmul(&ctx, &p("self_attn.o_proj.weight"), rows, hq, d);
+            let attn = self.scale_chan(&attn, &p("self_attn_layer_scale.scale"), rows * d, d, 1);
+            x = self.add2(&x, &attn, rows * d);
             // --- MLP: fc2(gelu(fc1(x))) ---
-            let xn = self.layernorm(&x, &p("post_attention_layernorm"), t, d, e.norm_eps);
-            let g = self.matmul(&xn, &p("mlp.fc1.weight"), t, d, ff);
-            let g = self.gelu(&g, t * ff);
-            let mlp = self.matmul(&g, &p("mlp.fc2.weight"), t, ff, d);
-            let mlp = self.scale_chan(&mlp, &p("mlp_layer_scale.scale"), t * d, d, 1);
-            x = self.add2(&x, &mlp, t * d);
+            let xn = self.layernorm(&x, &p("post_attention_layernorm"), rows, d, e.norm_eps);
+            let g = self.matmul(&xn, &p("mlp.fc1.weight"), rows, d, ff);
+            let g = self.gelu(&g, rows * ff);
+            let mlp = self.matmul(&g, &p("mlp.fc2.weight"), rows, ff, d);
+            let mlp = self.scale_chan(&mlp, &p("mlp_layer_scale.scale"), rows * d, d, 1);
+            x = self.add2(&x, &mlp, rows * d);
         }
         x
     }
 
-    /// ELU (α = 1) on the device: `x if x > 0 else exp(x) - 1`. `n` = element count.
-    fn elu(&self, x: &DeviceBuffer, n: u32) -> DeviceBuffer {
-        let out = self.st(n as usize);
-        self.run(self.gpu.step(ELU, &[x, &out], &[n, f(1.0)], n));
-        out
-    }
-
-    /// Split residual-vector-quantizer **encode**: project the `[hidden, T]`
-    /// embeddings to `codebook_dim` (semantic & acoustic `input_proj`), then run
-    /// the nearest-codebook argmin + residual loop on the host. Returns `[T,16]`
-    /// row-major codes (q0 semantic, q1..15 acoustic).
-    fn rvq_encode(&self, emb_ncl: &DeviceBuffer, t: u32) -> Vec<u32> {
+    /// Split residual-vector-quantizer **encode** over `n` clips of `t`
+    /// frames: project the `[n, hidden, t]` embeddings to `codebook_dim`
+    /// (semantic & acoustic `input_proj`), then per codebook the nearest-row
+    /// assignment (`vq_argmin`, squared Euclidean, lowest index on ties - the
+    /// host loop this replaced, bit for bit) and the residual subtraction
+    /// (`vq_residual`), all on the device. Returns `[n*t, 16]` row-major codes
+    /// (q0 semantic, q1..15 acoustic) as exact f32, the pass's one readback.
+    fn rvq_encode(&self, emb_ncl: &DeviceBuffer, n: u32, t: u32) -> Vec<f32> {
         let e = self.cfg.enc.clone();
         let (h, cd) = (e.hidden_size, e.codebook_dim);
-        let cs = e.codebook_size as usize;
-        let n_sem = e.num_semantic_quantizers as usize;
-        let nq = self.cfg.num_quantizers as usize;
-        let n_aco = nq - n_sem;
-        let emb_tm = self.to_token_major(emb_ncl, h, t); // [T, hidden]
+        let cs = e.codebook_size;
+        let n_sem = e.num_semantic_quantizers;
+        let nq = self.cfg.num_quantizers;
+        let m = n * t;
+        let emb_tm = self.to_token_major(emb_ncl, n, h, t); // [n*t, hidden]
 
-        let sem_p = self.matmul(&emb_tm, "encoder.quantizer.semantic_residual_vector_quantizer.input_proj.weight", t, h, cd);
-        let aco_p = self.matmul(&emb_tm, "encoder.quantizer.acoustic_residual_vector_quantizer.input_proj.weight", t, h, cd);
-        let sem = self.read(&sem_p, (t * cd) as usize);
-        let aco = self.read(&aco_p, (t * cd) as usize);
-
-        let (cd, tt) = (cd as usize, t as usize);
-        let tables = self.rvq_tables();
-        // Every frame is quantised on its own (its residual walks the codebooks in order), so the frames run across the
-        // CPU pool: the same arithmetic, frame by frame, as one core did.
-        let per_frame: Vec<Vec<u32>> = par::map(tt, |ti| {
-            let mut frame = Vec::with_capacity(nq);
-            for (residual, group) in [(&sem[ti * cd..(ti + 1) * cd], &tables[..n_sem]), (&aco[ti * cd..(ti + 1) * cd], &tables[n_sem..])] {
-                let mut v = residual.to_vec();
-                for table in group {
-                    let idx = nearest(&v, table, cs, cd);
-                    frame.push(idx as u32);
-                    for (x, r) in v.iter_mut().zip(&table[idx * cd..(idx + 1) * cd]) {
-                        *x -= r;
-                    }
-                }
+        let codes = self.st((m * nq) as usize);
+        let mut col = 0u32;
+        for (group, layers) in [("semantic", n_sem), ("acoustic", nq - n_sem)] {
+            let prefix = format!("encoder.quantizer.{group}_residual_vector_quantizer");
+            let residual = self.matmul(&emb_tm, &format!("{prefix}.input_proj.weight"), m, h, cd);
+            for q in 0..layers {
+                let table = self.w(&format!("{prefix}.layers.{q}.table"));
+                let assign = self.st(2 * m as usize);
+                self.run(self.gpu.step(VQ_ARGMIN, &[&residual, table, &assign], &[m, cs, cd], m));
+                self.run(self.gpu.step(VQ_RESIDUAL, &[&assign, table, &residual, &codes], &[m, cd, nq, col], m * cd));
+                col += 1;
             }
-            frame
-        });
-        debug_assert!(per_frame.iter().all(|f| f.len() == nq) && n_aco + n_sem == nq);
-        per_frame.into_iter().flatten().collect()
-    }
-}
-
-/// Nearest codebook row (argmin squared-Euclidean) to `v` over a `[bins, dim]`
-/// flat table — `MimiEuclideanCodebook.quantize` (cdist p=2 + argmin).
-fn nearest(v: &[f32], table: &[f32], bins: usize, dim: usize) -> usize {
-    let mut best = 0usize;
-    let mut best_d = f32::INFINITY;
-    for b in 0..bins {
-        let row = &table[b * dim..(b + 1) * dim];
-        let mut d = 0.0f32;
-        for c in 0..dim {
-            let diff = v[c] - row[c];
-            d += diff * diff;
         }
-        if d < best_d {
-            best_d = d;
-            best = b;
-        }
+        self.read(&codes, (m * nq) as usize)
     }
-    best
 }
 
 /// Kernel-id map for the shared `model::block` builders (only forward ids used).
@@ -1169,8 +1187,8 @@ mod tests {
     /// Encoder transformer output for `x` (`[t, hidden]` token-major).
     fn run_enc(codec: &Codec, x: &[f32], t: u32) -> Vec<f32> {
         let d = codec.cfg.enc.hidden_size as usize;
-        let pass = codec.eager();
-        let out = pass.enc_transformer(&pass.upload(x), t);
+        let pass = Pass::new(codec, false);
+        let out = pass.enc_transformer(&pass.upload(x), 1, t);
         pass.read(&out, t as usize * d)
     }
 

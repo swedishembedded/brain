@@ -26,6 +26,6 @@ pub mod model;
 pub mod recon;
 pub mod streaming;
 
-pub use config::CodecConfig;
+pub use config::{CodecConfig, EncoderConfig};
 pub use import::import;
 pub use model::{Codec, PIPELINES};

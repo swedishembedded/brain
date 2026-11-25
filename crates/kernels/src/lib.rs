@@ -1313,6 +1313,8 @@ pub const NA3D_ATTN: &str = include_str!("../wgsl/na3d_attn.wgsl");
 pub const NCHW_NLC: &str = include_str!("../wgsl/nchw_nlc.wgsl");
 /// `wgsl/nchw_nlc_at.wgsl`
 pub const NCHW_NLC_AT: &str = include_str!("../wgsl/nchw_nlc_at.wgsl");
+/// `wgsl/ncl_len_mask.wgsl`
+pub const NCL_LEN_MASK: &str = include_str!("../wgsl/ncl_len_mask.wgsl");
 /// `wgsl/neuro_elig.wgsl`
 pub const NEURO_ELIG: &str = include_str!("../wgsl/neuro_elig.wgsl");
 /// `wgsl/neuro_learn.wgsl`
@@ -1343,6 +1345,8 @@ pub const PACK_FP8_ROWS: &str = include_str!("../wgsl/pack_fp8_rows.wgsl");
 pub const PACK_QKV: &str = include_str!("../wgsl/pack_qkv.wgsl");
 /// `wgsl/pad1d_edge.wgsl`
 pub const PAD1D_EDGE: &str = include_str!("../wgsl/pad1d_edge.wgsl");
+/// `wgsl/pad1d_edge_lens.wgsl`
+pub const PAD1D_EDGE_LENS: &str = include_str!("../wgsl/pad1d_edge_lens.wgsl");
 /// `wgsl/pad2d.wgsl`
 pub const PAD2D: &str = include_str!("../wgsl/pad2d.wgsl");
 /// `wgsl/pad2d_reflect.wgsl`
@@ -1811,6 +1815,10 @@ pub const VALUE_LERP_DLAM: &str = include_str!("../wgsl/value_lerp_dlam.wgsl");
 pub const VQ_ARGMAX_DOT: &str = include_str!("../wgsl/vq_argmax_dot.wgsl");
 /// `wgsl/vq_argmin.wgsl`
 pub const VQ_ARGMIN: &str = include_str!("../wgsl/vq_argmin.wgsl");
+/// `wgsl/vq_argmin_rows.wgsl`
+pub const VQ_ARGMIN_ROWS: &str = include_str!("../wgsl/vq_argmin_rows.wgsl");
+/// `wgsl/vq_residual.wgsl`
+pub const VQ_RESIDUAL: &str = include_str!("../wgsl/vq_residual.wgsl");
 /// `wgsl/vsa_coarse.wgsl`
 pub const VSA_COARSE: &str = include_str!("../wgsl/vsa_coarse.wgsl");
 /// `wgsl/vsa_gate_add.wgsl`
@@ -2451,6 +2459,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("na3d_attn", NA3D_ATTN),
     ("nchw_nlc", NCHW_NLC),
     ("nchw_nlc_at", NCHW_NLC_AT),
+    ("ncl_len_mask", NCL_LEN_MASK),
     ("neuro_elig", NEURO_ELIG),
     ("neuro_learn", NEURO_LEARN),
     ("neuro_modulate", NEURO_MODULATE),
@@ -2466,6 +2475,7 @@ pub const ALL: &[(&str, &str)] = &[
     ("pack_fp8_rows", PACK_FP8_ROWS),
     ("pack_qkv", PACK_QKV),
     ("pad1d_edge", PAD1D_EDGE),
+    ("pad1d_edge_lens", PAD1D_EDGE_LENS),
     ("pad2d", PAD2D),
     ("pad2d_reflect", PAD2D_REFLECT),
     ("paged_decode_apply", PAGED_DECODE_APPLY),
@@ -2665,6 +2675,8 @@ pub const ALL: &[(&str, &str)] = &[
     ("value_lerp_dlam", VALUE_LERP_DLAM),
     ("vq_argmax_dot", VQ_ARGMAX_DOT),
     ("vq_argmin", VQ_ARGMIN),
+    ("vq_argmin_rows", VQ_ARGMIN_ROWS),
+    ("vq_residual", VQ_RESIDUAL),
     ("vsa_coarse", VSA_COARSE),
     ("vsa_gate_add", VSA_GATE_ADD),
     ("vsa_select", VSA_SELECT),

@@ -12,4 +12,5 @@ mod decode_device_parity;
 mod decode_omni_chunked;
 mod decode_stream_parity;
 mod encode;
+mod encode_batch;
 mod long_form_window;

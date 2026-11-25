@@ -100,6 +100,13 @@ pub enum Op {
     /// transparent upgrade with no shape gate; `workgroup_reductions` the
     /// correctness gate. `m` = rows, `n` = experts.
     RouterGate,
+    /// Vector-quantization nearest-codebook assignment (`vq_argmin` vs its
+    /// workgroup-per-query twin `vq_argmin_rows`): one thread walks a whole
+    /// `k x d` codebook for its query. `Op::MaxAbsRow`'s rule: the twin is
+    /// exact (the same per-row distance sums, a minimum with its lowest index),
+    /// so a transparent upgrade with no shape gate; `workgroup_reductions` the
+    /// correctness gate. `m` = queries, `n` = codebook rows, `k` = dimension.
+    VqAssign,
     /// The extended causal GQA attention (`flash_attn_gqa_ext`, window, sinks,
     /// distance bias, log-position scale; contiguous or paged) vs its
     /// workgroup-per-(row, head) twin `flash_attn_gqa_ext_rows` and its
@@ -1124,6 +1131,8 @@ pub fn candidates(op: Op, shape: OpShape, caps: &DeviceCaps) -> Vec<KernelVarian
         Op::DepthAttention => vec![WorkgroupPerOutput, Reference],
         // The sigmoid router: `Op::MaxAbsRow`'s rule (see the Op's doc).
         Op::RouterGate => vec![WorkgroupPerOutput, Reference],
+        // The VQ assignment: `Op::MaxAbsRow`'s rule (see the Op's doc).
+        Op::VqAssign => vec![WorkgroupPerOutput, Reference],
         // The extended attention: `Op::RmsNorm`'s rule (see the Op's doc), and from a full block of query rows a
         // sequence the query-tiled twin, where the device holds its workgroup memory.
         Op::FlashAttentionExt if shape.m >= FLASH_EXT_TILE_MIN_ROWS && caps.workgroup_mem_bytes >= FLASH_EXT_TILE_WORKGROUP_BYTES => vec![RowTiled, WorkgroupPerOutput, Reference],
@@ -2183,6 +2192,8 @@ mod tests {
             assert_eq!(s.select(Op::DepthAttention, sh, &cpu_caps()), KernelVariant::Reference, "m={m}");
             assert_eq!(s.select(Op::RouterGate, sh, &gpu_caps()), KernelVariant::WorkgroupPerOutput, "m={m}");
             assert_eq!(s.select(Op::RouterGate, sh, &cpu_caps()), KernelVariant::Reference, "m={m}");
+            assert_eq!(s.select(Op::VqAssign, sh, &gpu_caps()), KernelVariant::WorkgroupPerOutput, "m={m}");
+            assert_eq!(s.select(Op::VqAssign, sh, &cpu_caps()), KernelVariant::Reference, "m={m}");
             assert_eq!(s.select(Op::FlashAttentionExt, sh, &gpu_caps()), KernelVariant::WorkgroupPerOutput, "m={m}");
             assert_eq!(s.select(Op::FlashAttentionExt, sh, &cpu_caps()), KernelVariant::Reference, "m={m}");
         }
@@ -2402,6 +2413,7 @@ mod tests {
                 Op::AttnBwdDScores,
                 Op::DepthAttention,
                 Op::RouterGate,
+                Op::VqAssign,
                 Op::FlashAttentionExt,
                 Op::PagedAttention,
                 Op::MoeExpertLinear,

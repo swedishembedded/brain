@@ -83,6 +83,7 @@ mod i8_gemv_reg_upgrade;
 mod kernel_catalog_validation;
 mod kernel_upgrade;
 mod router_gate_upgrade;
+mod vq_argmin_upgrade;
 mod kq_gemv_reg_speed_bench;
 mod kq_gemv_reg_upgrade;
 mod kq_native;
