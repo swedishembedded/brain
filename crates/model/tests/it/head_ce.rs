@@ -549,3 +549,65 @@ fn an_invalid_declaration_is_an_error_naming_it() {
         assert!(err.contains(needle), "{t:?}: {err}");
     }
 }
+
+/// Head groups (`HeadGroups`): sequences of `period` rows whose position `offset + h` is scored by head `h` of a
+/// stacked head, a label in `[0, width)`. The per-row loss, the hidden gradient and the head's weight gradient equal
+/// an f64 per-head reference, for a batch below the capacity and for groups longer than one chunk; the rows no head
+/// reads get a zero loss and a zero gradient even over a gradient buffer holding garbage; and a label past the head
+/// width is caught by the reference's own bound.
+#[test]
+fn head_groups_score_each_position_with_its_own_head() {
+    use model::head_ce::HeadGroups;
+    let ops = ops();
+    let g = ops.gpu();
+    let (period, offset, width, heads, capacity) = (16u32, 1u32, 50u32, 15u32, 128u32);
+    for seqs in [128usize, 100] {
+        let n = seqs * period as usize;
+        let mut p = problem(n, 96, (width * heads) as usize + 20);
+        let mut rng = Lcg::random();
+        for (i, l) in p.labels.iter_mut().enumerate() {
+            let pos = i as u32 % period;
+            *l = if pos < offset || (i / period as usize) % 9 == 4 { IGNORE } else { (rng.next_u64() % u64::from(width)) as u32 };
+        }
+        let d_scale = 1.0 / 700.0;
+        // f64 reference: row i at position p >= offset reads columns of head p - offset.
+        let (d, v) = (p.d, p.v);
+        let (mut nll, mut d_hidden, mut d_w) = (vec![0f64; n], vec![0f64; n * d], vec![0f64; v * d]);
+        for i in 0..n {
+            if p.labels[i] == IGNORE {
+                continue;
+            }
+            let c0 = ((i as u32 % period - offset) * width) as usize;
+            let z: Vec<f64> = (0..width as usize).map(|j| (0..d).map(|c| f64::from(p.hidden[i * d + c]) * f64::from(p.raw[(c0 + j) * d + c])).sum::<f64>()).collect();
+            let mx = z.iter().cloned().fold(f64::MIN, f64::max);
+            let sum: f64 = z.iter().map(|&x| (x - mx).exp()).sum();
+            let y = p.labels[i] as usize;
+            nll[i] = mx + sum.ln() - z[y];
+            for (j, &zj) in z.iter().enumerate() {
+                let dz = ((zj - mx).exp() / sum - if j == y { 1.0 } else { 0.0 }) * f64::from(d_scale);
+                for c in 0..d {
+                    d_hidden[i * d + c] += dz * f64::from(p.raw[(c0 + j) * d + c]);
+                    d_w[(c0 + j) * d + c] += dz * f64::from(p.hidden[i * d + c]);
+                }
+            }
+        }
+        let w = head(&ops, &p, Dtype::F32);
+        let mut hc = build(&ops, &p, &w, 64, false);
+        hc.set_head_groups(g, HeadGroups { period, offset, width, heads, capacity }).expect("the groups fit the head");
+        let hidden = g.storage_init("hidden", &p.hidden);
+        let loss = hc.forward(&ops, &hidden, n as u32, &p.labels, None, 1.0);
+        assert_close(&loss.logprobs.iter().map(|l| -l).collect::<Vec<_>>(), &nll, 1e-4, &format!("{seqs} sequences: per-row loss"));
+        let dh = g.storage_init("d_hidden", &vec![7.0f32; n * d]);
+        let dw = g.storage((v * d) as u64);
+        hc.backward(&ops, &hidden, &dh, n as u32, &p.labels, None, d_scale, 1.0, Some(&dw));
+        assert_close(&g.read(&dh, n * d), &d_hidden, 1e-4, &format!("{seqs} sequences: d_hidden"));
+        assert_close(&g.read(&dw, v * d), &d_w, 1e-4, &format!("{seqs} sequences: d_w"));
+    }
+    let p = problem(64, 64, 300);
+    let w = head(&ops, &p, Dtype::F32);
+    let mut hc = build(&ops, &p, &w, 64, false);
+    let err = hc.set_head_groups(g, HeadGroups { period: 4, offset: 1, width: 100, heads: 4, capacity: 64 }).expect_err("heads past the period");
+    assert!(err.contains("fit"), "{err}");
+    let err = hc.set_head_groups(g, HeadGroups { period: 4, offset: 1, width: 100, heads: 3, capacity: 60 }).expect_err("an unaligned capacity");
+    assert!(err.contains("boundary"), "{err}");
+}

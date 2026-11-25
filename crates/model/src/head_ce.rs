@@ -63,6 +63,7 @@ pub fn kernels() -> &'static [(&'static str, &'static str)] {
         ("logit_cap_mask_bwd", kernels::LOGIT_CAP_MASK_BWD),
         ("ce_sparse_targets", kernels::CE_SPARSE_TARGETS),
         ("ce_gather_logprob", kernels::CE_GATHER_LOGPROB),
+        ("anchor_rows_copy", kernels::ANCHOR_ROWS_COPY),
     ]
 }
 
@@ -181,6 +182,33 @@ pub struct HeadGrad<'a> {
     pub dtype: GradDtype,
 }
 
+/// Rows grouped by their position in a sequence, each group read by its own head: the batch is `seqs` sequences of
+/// `period` rows, and the rows at position `offset + h` (`h < heads`) are scored by head `h`, the columns
+/// `[h * width, (h + 1) * width)` of a stacked head, against a label in `[0, width)`. Rows at the other positions carry
+/// no target. The shape of a multi-codebook predictor's per-position output heads: each head is one GEMM over exactly
+/// its rows (`[seqs, d] x [d, width]`), so no position pays for another's columns. Up to `capacity` sequences.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeadGroups {
+    pub period: u32,
+    pub offset: u32,
+    pub width: u32,
+    pub heads: u32,
+    pub capacity: u32,
+}
+
+/// The scratch of [`HeadGroups`]: the labels gathered position-major, the per-row loss in the same order, one chunk
+/// of a group's hidden rows and their gradient, and the plan that gathers the labels.
+struct Grouped {
+    g: HeadGroups,
+    plan: DeviceBuffer,
+    labels: DeviceBuffer,
+    nll: DeviceBuffer,
+    hidden: DeviceBuffer,
+    d_hidden: DeviceBuffer,
+    zeros: DeviceBuffer,
+    copy_u32: usize,
+}
+
 /// The chunked LM head. See the module documentation.
 pub struct HeadCe {
     d: u32,
@@ -212,6 +240,8 @@ pub struct HeadCe {
     /// The `(ce_sparse_targets, ce_gather_logprob)` kernels of extra targets, by their canonical names; `None` on a
     /// model that does not register them, where [`SparseTargets`] are refused.
     sparse: Option<(usize, usize)>,
+    /// Per-position heads ([`Self::set_head_groups`]); `None` scores every row against the whole head.
+    grouped: Option<Grouped>,
 }
 
 /// Up to `k` extra targets per position beside the label: an id (or [`IGNORE`] for an unused slot) and a coefficient
@@ -479,7 +509,142 @@ impl HeadCe {
             bf16_dw: std::cell::RefCell::new(None),
             transform: None,
             sparse: gpu.kernel_index("ce_sparse_targets").zip(gpu.kernel_index("ce_gather_logprob")),
+            grouped: None,
         })
+    }
+
+    /// Score the rows by position with their own heads ([`HeadGroups`]) instead of every row against the whole head.
+    /// Needs the identity transform, labels in `[0, width)` laid out as the rows are, and `capacity` a multiple of 64
+    /// (each group's labels start at a storage-binding boundary). Re-record any tape after this.
+    pub fn set_head_groups(&mut self, gpu: &Gpu, g: HeadGroups) -> Result<(), String> {
+        if g.heads == 0 || g.width == 0 || g.capacity == 0 {
+            return Err(format!("HeadCe: head groups need heads, a width and a capacity (got {g:?})"));
+        }
+        if g.offset + g.heads > g.period {
+            return Err(format!("HeadCe: {} heads from position {} do not fit a sequence of {}", g.heads, g.offset, g.period));
+        }
+        if u64::from(g.heads) * u64::from(g.width) > u64::from(self.vocab) {
+            return Err(format!("HeadCe: {} heads of {} columns exceed the head's {} rows", g.heads, g.width, self.vocab));
+        }
+        if !g.capacity.is_multiple_of(64) || (g.capacity > self.rows && !self.rows.is_multiple_of(64)) {
+            return Err(format!("HeadCe: a group capacity of {} sequences (in chunks of {}) does not keep each group's rows on a 64-row boundary", g.capacity, self.rows));
+        }
+        if !self.transform.map_or(HeadTransform::NONE, |(t, _, _)| t).is_identity() {
+            return Err("HeadCe: head groups take the identity transform".into());
+        }
+        let (per_word, _) = tier_layout(&self.head);
+        if g.heads > 1 && !(u64::from(g.width) * u64::from(self.d)).is_multiple_of(64 * per_word) {
+            return Err(format!("HeadCe: a head of {} rows of {} is not a whole number of 256-byte binding windows", g.width, self.d));
+        }
+        let copy_u32 = gpu.kernel_index("anchor_rows_copy").ok_or("HeadCe::set_head_groups: kernel 'anchor_rows_copy' is not registered on this Gpu (append model::head_ce::kernels())")?;
+        // Label `f * period + offset + h` goes to `h * capacity + f`, listed sequence by sequence so the first
+        // `seqs * heads` pairs serve a batch of `seqs` sequences.
+        let plan: Vec<u32> = (0..g.capacity).flat_map(|f| (0..g.heads).flat_map(move |h| [f * g.period + g.offset + h, h * g.capacity + f])).collect();
+        let rows = u64::from(self.rows.min(g.capacity));
+        let groups = u64::from(g.heads) * u64::from(g.capacity);
+        self.grouped = Some(Grouped {
+            g,
+            plan: {
+                let buf = gpu.storage(plan.len() as u64);
+                gpu.write(&buf, &plan);
+                buf
+            },
+            labels: gpu.storage(groups),
+            nll: gpu.storage(groups),
+            hidden: gpu.storage(rows * u64::from(self.d)),
+            d_hidden: gpu.storage(rows * u64::from(self.d)),
+            zeros: gpu.storage(u64::from(self.d)),
+            copy_u32,
+        });
+        Ok(())
+    }
+
+    /// The head groups ([`Self::set_head_groups`]), if any.
+    #[must_use]
+    pub fn head_groups(&self) -> Option<HeadGroups> {
+        self.grouped.as_ref().map(|g| g.g)
+    }
+
+    /// The `(first sequence, sequences)` chunks of a group of `seqs` sequences.
+    fn group_chunks(&self, seqs: u32) -> Vec<(u32, u32)> {
+        (0..seqs).step_by(self.rows as usize).map(|f0| (f0, self.rows.min(seqs - f0))).collect()
+    }
+
+    /// The sequences of `n` grouped rows, and the steps gathering their labels position-major.
+    fn grouped_labels(&self, gpu: &Gpu, s: &mut Vec<Step>, n: u32, labels: &DeviceBuffer) -> u32 {
+        let gr = self.grouped.as_ref().expect("grouped");
+        assert!(n.is_multiple_of(gr.g.period) && n / gr.g.period <= gr.g.capacity, "HeadCe: {n} rows are not whole sequences of {} within the groups' capacity of {}", gr.g.period, gr.g.capacity);
+        let seqs = n / gr.g.period;
+        let pairs = seqs * gr.g.heads;
+        s.push(gpu.step(gr.copy_u32, &[&gr.plan, labels, &gr.labels], &[pairs, 1], pairs));
+        seqs
+    }
+
+    /// Steps computing head `h`'s logits of sequences `f0..f0 + rows` into the chunk logits (`[rows, width]`), their
+    /// hidden rows gathered into the group scratch first.
+    fn grouped_logits(&self, ops: &Ops, s: &mut Vec<Step>, hidden: &DeviceBuffer, h: u32, f0: u32, rows: u32, logit_scale: f32) {
+        let gr = self.grouped.as_ref().expect("grouped");
+        let (g, d, gpu) = (gr.g, self.d, ops.gpu());
+        s.push(gpu.step(self.k.copy_cols, &[hidden, &gr.hidden], &[rows, d, g.period * d, (f0 * g.period + g.offset + h) * d, d, 0], rows * d));
+        let act = ops.act_f32(&gr.hidden, 0, rows, d);
+        ops.matmul_rows(s, &self.head, (h * g.width, g.width), &act, &self.logits, 0);
+        if logit_scale != 1.0 {
+            s.push(gpu.step(self.k.grad_scale, &[&self.logits], &[rows * g.width, logit_scale.to_bits()], rows * g.width));
+        }
+    }
+
+    /// [`Self::forward_steps_with`] over head groups: each row's loss in `nll` at its own index, `0` at the positions
+    /// no head reads.
+    fn grouped_forward_steps(&self, ops: &Ops, s: &mut Vec<Step>, hidden: &DeviceBuffer, n: u32, labels: &DeviceBuffer, nll: &DeviceBuffer, logit_scale: f32) {
+        let gpu = ops.gpu();
+        let seqs = self.grouped_labels(gpu, s, n, labels);
+        let gr = self.grouped.as_ref().expect("grouped");
+        let g = gr.g;
+        for p in (0..g.period).filter(|p| !(g.offset..g.offset + g.heads).contains(p)) {
+            s.push(gpu.step(self.k.copy_cols, &[&gr.zeros, nll], &[seqs, 1, 0, 0, g.period, p], seqs));
+        }
+        for h in 0..g.heads {
+            for (f0, rows) in self.group_chunks(seqs) {
+                self.grouped_logits(ops, s, hidden, h, f0, rows, logit_scale);
+                let at = (u64::from(h * g.capacity + f0), u64::from(rows));
+                s.push(gpu.step_sliced(self.k.ce_value, &[&self.logits, &gr.labels, &gr.nll], &[(0, 0), at, at], &[rows, g.width, IGNORE], rows));
+                s.push(gpu.step(self.k.copy_cols, &[&gr.nll, nll], &[rows, 1, 1, h * g.capacity + f0, g.period, f0 * g.period + g.offset + h], rows));
+            }
+        }
+    }
+
+    /// [`Self::backward_steps`] over head groups: the hidden gradient at every grouped row, `0` at the others.
+    fn grouped_backward_steps(&self, ops: &Ops, s: &mut Vec<Step>, b: &HeadBackward) {
+        assert!(b.row_weights.is_none() && b.sparse.is_none(), "HeadCe: head groups take neither row weights nor extra targets");
+        let gpu = ops.gpu();
+        let seqs = self.grouped_labels(gpu, s, b.n, b.labels);
+        let gr = self.grouped.as_ref().expect("grouped");
+        let (g, d) = (gr.g, self.d);
+        for p in (0..g.period).filter(|p| !(g.offset..g.offset + g.heads).contains(p)) {
+            s.push(gpu.step(self.k.copy_cols, &[&gr.zeros, b.d_hidden], &[seqs, d, 0, 0, g.period * d, p * d], seqs * d));
+        }
+        for h in 0..g.heads {
+            for (f0, rows) in self.group_chunks(seqs) {
+                self.grouped_logits(ops, s, b.hidden, h, f0, rows, b.logit_scale);
+                let at = (u64::from(h * g.capacity + f0), u64::from(rows));
+                let v = g.width;
+                s.push(gpu.step_sliced(self.k.ce_stats, &[&self.logits, &gr.labels, &self.stats], &[(0, 0), at, (0, 0)], &[rows, v, IGNORE], rows));
+                s.push(gpu.step_sliced(self.k.ce_grad_stats, &[&self.logits, &gr.labels, &self.stats, &self.d_logits], &[(0, 0), at, (0, 0), (0, 0)], &[rows, v, IGNORE, 1f32.to_bits()], rows * v));
+                let mut coef = if b.logit_scale == 1.0 { None } else { Some(b.logit_scale) };
+                match b.grad_scale {
+                    GradScale::Const(c) => coef = Some(coef.unwrap_or(1.0) * c).filter(|&c| c != 1.0),
+                    GradScale::Buf(buf) => s.push(gpu.step(self.k.grad_scale_buf, &[&self.d_logits, buf], &[rows * v], rows * v)),
+                }
+                if let Some(c) = coef {
+                    s.push(gpu.step(self.k.grad_scale, &[&self.d_logits], &[rows * v, c.to_bits()], rows * v));
+                }
+                if let Some(dw) = b.dw {
+                    self.dw_step(ops, s, &self.d_logits, &gr.hidden, dw, (0, u64::from(rows) * u64::from(d)), rows, v, h * v);
+                }
+                ops.matmul_dx_rows(s, &self.head, (h * v, v), &self.d_logits, rows, &gr.d_hidden, 0, false);
+                s.push(gpu.step(self.k.copy_cols, &[&gr.d_hidden, b.d_hidden], &[rows, d, d, 0, g.period * d, (f0 * g.period + g.offset + h) * d], rows * d));
+            }
+        }
     }
 
     /// Declare the transform between the head's raw logits and the logits the loss reads: a soft cap
@@ -492,6 +657,9 @@ impl HeadCe {
     ///
     /// Needs the `logit_cap_mask` kernels registered ([`kernels()`] lists them); an `Err` names what is missing or invalid.
     pub fn set_head_transform(&mut self, gpu: &Gpu, t: HeadTransform) -> Result<(), String> {
+        if self.grouped.is_some() && !t.is_identity() {
+            return Err("HeadCe: head groups take the identity transform".into());
+        }
         t.validate(self.vocab)?;
         if t.is_identity() {
             self.transform = None;
@@ -625,6 +793,11 @@ impl HeadCe {
     /// kernels ([`Self::sparse_targets_supported`]) or with fewer positions than `n`.
     #[allow(clippy::too_many_arguments)]
     pub fn forward_steps_with(&self, ops: &Ops, s: &mut Vec<Step>, hidden: &DeviceBuffer, n: u32, labels: &DeviceBuffer, nll: &DeviceBuffer, argmax: Option<ArgmaxOut<'_>>, sparse: Option<&SparseTargets>, logit_scale: f32) {
+        if self.grouped.is_some() {
+            assert!(argmax.is_none() && sparse.is_none(), "HeadCe: head groups have no argmax readout and take no extra targets");
+            self.grouped_forward_steps(ops, s, hidden, n, labels, nll, logit_scale);
+            return;
+        }
         for (r0, rows) in self.chunks(n) {
             self.logits_steps(ops, s, hidden, r0, rows, logit_scale);
             s.push(self.ce_value_step(ops.gpu(), labels, nll, r0, rows));
@@ -696,6 +869,10 @@ impl HeadCe {
     /// scaled and optionally weighted, then the head's input gradient into
     /// `d_hidden` and, where `dw` is given, its weight gradient.
     pub fn backward_steps(&self, ops: &Ops, s: &mut Vec<Step>, b: &HeadBackward) {
+        if self.grouped.is_some() {
+            self.grouped_backward_steps(ops, s, b);
+            return;
+        }
         let gpu = ops.gpu();
         let v = self.vocab;
         let chunks = self.chunks(b.n);
