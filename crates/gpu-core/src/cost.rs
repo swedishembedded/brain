@@ -933,6 +933,11 @@ pub fn kernel_cost(name: &str, params: Option<&[u32]>, threads: u32) -> Option<C
         }
         // params [rows * k, vocab, k, ignore]: one thread per extra target, reading its logit and the row's CE.
         "ce_gather_logprob" => f(2 * n0(), 20 * n0()),
+        // params [rows, stride]: one thread per word of each planned row (2 plan words read per row).
+        "anchor_rows_copy" => {
+            let n = p(0)? * p(1)?;
+            f(0, 8 * n + 8 * p(0)?)
+        }
         "logit_cap_mask" => {
             let n = p(0)? * p(1)?;
             f(4 * n, 8 * n)

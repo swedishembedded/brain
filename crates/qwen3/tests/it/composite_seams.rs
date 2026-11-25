@@ -127,3 +127,71 @@ fn input_rows_train_like_the_tokens_they_embed() {
     }
     assert!((rows.run_len() as usize) < T, "the second batch must be trimmed for the test to cover it");
 }
+
+/// Rows injected from another model's hidden states on the device (`Qwen::enable_row_injection`) give the loss and
+/// gradients of the same rows written from the host: a second model reads the first one's final-norm hidden state at
+/// planned positions with no host round trip. The table the injected rows replace must be frozen first.
+#[test]
+fn injected_rows_are_the_other_models_hidden_states() {
+    let first = build(None);
+    let mut injected = build(Some(first.gpu()));
+    assert!(injected.enable_row_injection(first.final_hidden_buffer(), 3, None).is_err(), "a trainable table under injected rows is refused");
+    injected.freeze_params(|n| n == "tok.weight");
+    injected.enable_row_injection(first.final_hidden_buffer(), 3, None).expect("a frozen table");
+    let mut host = build(None);
+    host.freeze_params(|n| n == "tok.weight");
+    host.enable_input_rows();
+
+    first.set_batch(&TOKENS, &TARGETS);
+    first.forward();
+    let hidden = first.final_hidden();
+    // Source rows of the first model's [2, 6] block, into destination rows 0, 6 and 9 of the second's.
+    let plan = [(5u32, 0u32), (0, 6), (7, 9)];
+    let d = config().d_model as usize;
+    let table = injected.read_weight("tok.weight");
+    let mut rows: Vec<f32> = TOKENS.iter().flat_map(|&t| table[t as usize * d..(t as usize + 1) * d].iter().copied()).collect();
+    for &(src, dst) in &plan {
+        rows[dst as usize * d..(dst as usize + 1) * d].copy_from_slice(&hidden[src as usize * d..(src as usize + 1) * d]);
+    }
+    injected.set_batch(&TOKENS, &TARGETS);
+    injected.write_injection(&plan, 3, 0);
+    host.set_batch(&[0; 12], &TARGETS);
+    host.write_input_rows(&rows);
+    for m in [&injected, &host] {
+        m.zero_grads();
+    }
+    let (want, got) = (host.forward(), injected.forward());
+    host.backward();
+    injected.backward();
+    assert_eq!(want.to_bits(), got.to_bits(), "loss {got} vs {want}");
+    for name in model::Model::param_names(&injected) {
+        assert_eq!(injected.read_grad(&name), host.read_grad(&name), "{name}");
+    }
+}
+
+/// A build that trims its batch (`Qwen::enable_batch_trimming`) computes only the leading sequences that carry a
+/// target, and its loss and gradients are those of the untrimmed build bit for bit.
+#[test]
+fn a_trimmed_batch_trains_like_the_whole_block() {
+    let cfg = config();
+    let init = qwen3::init_weights(&cfg, 11);
+    let make = || Qwen::new_training_on(None, cfg.clone(), 16, 6, &init, GemmPrecision::Fp32Reference, &FullFtBuild::ambient()).expect("a build");
+    let whole = make();
+    let mut trimmed = make();
+    trimmed.enable_batch_trimming();
+    let tokens: Vec<u32> = (0..96u32).map(|i| (i * 5 + 1) % cfg.vocab).collect();
+    // Targets in the first five sequences only: eight are computed.
+    let targets: Vec<u32> = (0..96u32).map(|i| if i < 30 { (i * 3 + 2) % cfg.vocab } else { qwen3::IGNORE }).collect();
+    for m in [&whole, &trimmed] {
+        m.set_batch(&tokens, &targets);
+        m.zero_grads();
+    }
+    assert_eq!((whole.batch_run(), trimmed.batch_run()), (16, 8));
+    let (want, got) = (whole.forward(), trimmed.forward());
+    whole.backward();
+    trimmed.backward();
+    assert_eq!(want.to_bits(), got.to_bits(), "loss {got} vs {want}");
+    for name in model::Model::param_names(&trimmed) {
+        assert_eq!(trimmed.read_grad(&name), whole.read_grad(&name), "{name}");
+    }
+}

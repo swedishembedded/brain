@@ -184,11 +184,20 @@ const DECODE_PREFILL_ROWS: u32 = 256;
 /// round to an eighth of their power of two, so a dataset meets few distinct lengths and each is recorded once.
 pub const TRIM_QUANTUM: u32 = 64;
 
+/// The run length a trimmed batch whose longest supervised row ends at `last` computes, for a build at trim quantum
+/// `quantum` ([`Qwen::set_trim_quantum`]): `last` rounded up by an eighth of its power of two, at least to a whole
+/// quantum, at most the block `t`. What a batch planner sizes its batches by.
+#[must_use]
+pub fn trimmed_len(last: u32, quantum: u32, t: u32) -> u32 {
+    let q = (last.max(1).next_power_of_two() / 8).max(quantum);
+    last.max(1).next_multiple_of(q).min(t)
+}
+
 /// The recorded forward and backward of one trimmed run length ([`Qwen::run_tape`]).
 type RunTapes = std::sync::Arc<(Tape, Tape)>;
 
 /// The recorded passes of trimmed run lengths a build keeps at once ([`Qwen::run_tape`]): two octaves of lengths.
-const RUN_TAPES: usize = 16;
+const RUN_TAPES: usize = 32;
 
 /// Rows every activation buffer of a [`Qwen::new_impl`] build holds: `b·t`
 /// for a batched forward, one prefill chunk for a decode-only build (whose
@@ -371,6 +380,8 @@ pub fn pipelines() -> &'static [(&'static str, &'static str)] {
         model::ops::extend_kernel_list(&mut v, &gpu_core::sort::KERNELS);
         // The declared head transform of the chunked loss (`Qwen::set_head_transform`).
         model::ops::extend_kernel_list(&mut v, &model::head_transform::KERNELS);
+        // Rows of another model's hidden state copied into the residual stream (`Qwen::enable_row_injection`).
+        model::ops::extend_kernel_list(&mut v, &[("anchor_rows_copy", kernels::ANCHOR_ROWS_COPY)]);
         v
     })
 }
@@ -659,6 +670,9 @@ pub struct Qwen {
     // Every row of every sequence is an input embedding row the caller writes (`Qwen::enable_input_rows`): no token
     // gather in the forward, no embedding scatter in the backward.
     input_rows: bool,
+    // Rows copied into the residual stream after the embedding from another model's buffer on this device
+    // (`Qwen::enable_row_injection`): the source, the `(source row, destination row)` plan and its length.
+    injection: Option<RowInjection>,
     /// The decoder stops at its final-norm hidden states and a caller's own
     /// head takes over the loss ([`Self::enable_external_head`]).
     external_head: Cell<bool>,
@@ -777,7 +791,15 @@ pub struct Qwen {
     t_run: Cell<u32>,
     /// The forward and backward recorded for each trimmed run length met lately, newest last (at most
     /// [`RUN_TAPES`]); cleared whenever the full-length tapes are rebuilt.
-    run_tapes: std::cell::RefCell<Vec<(u32, RunTapes)>>,
+    run_tapes: std::cell::RefCell<Vec<((u32, u32), RunTapes)>>,
+    // Sequences the current batch computes (`Qwen::enable_batch_trimming`): the block's `b` unless trimmed.
+    b_run: Cell<u32>,
+    trim_batch: bool,
+    // The smallest step of a trimmed run length (`Qwen::set_trim_quantum`).
+    trim_quantum: u32,
+    // A gradient another model adds to this one's final-norm hidden states (`Qwen::enable_hidden_grad`), cleared once
+    // consumed.
+    hidden_grad: Option<DeviceBuffer>,
     /// `[1]`: `1/count` for the current batch, the CE gradient's scale.
     inv_count: DeviceBuffer,
     /// Rows of logits the head holds at once (`model::head_ce::rows_for_budget`).
@@ -867,6 +889,17 @@ struct Tape {
     steps: Vec<Step>,
     /// Exclusive end indices of each segment but the last.
     ends: Vec<usize>,
+}
+
+/// The rows [`Qwen::enable_row_injection`] copies into the residual stream.
+struct RowInjection {
+    src: DeviceBuffer,
+    plan: DeviceBuffer,
+    rows: u32,
+    kernel: usize,
+    /// Where the injected rows' gradient goes (another model's [`Qwen::enable_hidden_grad`] buffer), with the reversed
+    /// plan; `None` passes no gradient back.
+    grad: Option<(DeviceBuffer, DeviceBuffer)>,
 }
 
 impl Tape {
@@ -1699,6 +1732,7 @@ impl Qwen {
             layers,
             splice: model::vlm::SpliceRuns::none(),
             input_rows: false,
+            injection: None,
             external_head: Cell::new(false),
             mrope: Cell::new(false),
             kv_roundtrip: Cell::new(None),
@@ -1750,6 +1784,10 @@ impl Qwen {
             argmax_out: std::sync::OnceLock::new(),
             t_run: Cell::new(t),
             run_tapes: Default::default(),
+            b_run: Cell::new(b),
+            trim_batch: false,
+            trim_quantum: TRIM_QUANTUM,
+            hidden_grad: None,
             inv_count: bwd(1),
             head_rows: head_rows as u32,
             flash,
@@ -1795,12 +1833,14 @@ impl Qwen {
         }
         let run = self.needed_len(y);
         self.t_run.set(run);
-        let (tokens, targets): (std::borrow::Cow<[u32]>, std::borrow::Cow<[u32]>) = if run == self.t {
+        let b_run = self.needed_rows(y);
+        self.b_run.set(b_run);
+        let (tokens, targets): (std::borrow::Cow<[u32]>, std::borrow::Cow<[u32]>) = if run == self.t && b_run == self.b {
             (x.into(), y.into())
         } else {
-            // Each row's first `run` tokens, row after row: what the trimmed forward and backward read.
+            // The first `b_run` rows' first `run` tokens, row after row: what the trimmed forward and backward read.
             let (t, run) = (self.t as usize, run as usize);
-            let rows = |v: &[u32]| v.chunks(t).flat_map(|row| row[..run].iter().copied()).collect::<Vec<u32>>();
+            let rows = |v: &[u32]| v.chunks(t).take(b_run as usize).flat_map(|row| row[..run].iter().copied()).collect::<Vec<u32>>();
             (rows(x).into(), rows(y).into())
         };
         self.gpu.write(&self.tokens, &tokens);
@@ -1832,6 +1872,7 @@ impl Qwen {
             && self.shard.head
             && !self.external_head.get()
             && self.splice.is_empty()
+            && self.injection.is_none()
             && self.deepstack.get().is_none()
             && !self.mrope.get()
             && self.nlsa.is_none()
@@ -1843,10 +1884,9 @@ impl Qwen {
             return self.t;
         }
         let last = targets.chunks(self.t as usize).map(|row| row.iter().rposition(|&v| v != IGNORE).map_or(0, |i| i + 1)).max().unwrap_or(0) as u32;
-        // An eighth of the length's power of two, at least TRIM_QUANTUM: at most 12.5 % past the record, eight
+        // An eighth of the length's power of two, at least the trim quantum: at most 12.5 % past the record, eight
         // lengths an octave.
-        let quantum = ((last.max(1).next_power_of_two()) / 8).max(TRIM_QUANTUM);
-        last.max(1).next_multiple_of(quantum).min(self.t)
+        trimmed_len(last, self.trim_quantum, self.t)
     }
 
     /// Tokens per row the current batch computes ([`Self::needed_len`]).
@@ -1854,19 +1894,72 @@ impl Qwen {
         self.t_run.get()
     }
 
-    /// The recorded forward and backward of a batch trimmed to `run` tokens a row, recorded on first use.
-    fn run_tape(&self, run: u32) -> RunTapes {
+    /// Rows (sequences) the current batch computes: the block's `b`, or fewer on a build that trims its batch
+    /// ([`Self::enable_batch_trimming`]).
+    pub fn batch_run(&self) -> u32 {
+        self.b_run.get()
+    }
+
+    /// Compute only the leading rows of a batch that carry a target (rounded up by at most an eighth, at least to 8
+    /// rows, so a run of batches needs few recorded passes), so a batch filled to a token budget rather than to the
+    /// block's row count costs what it holds. The rows past the last supervised one are not computed and their
+    /// input is ignored. Not with a weighted loss or extra targets, whose per-position buffers are laid out for every
+    /// row; a build that does not trim (see [`Self::needed_len`]) computes every row as before.
+    pub fn enable_batch_trimming(&mut self) {
+        self.trim_batch = true;
+    }
+
+    /// Trim a batch's rows to a multiple of `quantum` tokens (at least; [`trimmed_len`]) instead of [`TRIM_QUANTUM`]:
+    /// a planner that buckets its batches by length wastes less on rounding, at the price of more recorded passes.
+    pub fn set_trim_quantum(&mut self, quantum: u32) {
+        assert!(quantum > 0, "the trim quantum must be positive");
+        self.trim_quantum = quantum;
+    }
+
+    /// The rows a batch of `targets` computes ([`Self::enable_batch_trimming`]).
+    fn needed_rows(&self, targets: &[u32]) -> u32 {
+        let trimmable = self.trim_batch
+            && !self.bwd_steps.steps.is_empty()
+            && self.weighted_ce.is_none()
+            && self.sparse_targets.is_none()
+            && self.res_saved.is_none()
+            && self.shard.embed
+            && self.shard.head
+            && !self.external_head.get()
+            && self.splice.is_empty()
+            && self.deepstack.get().is_none()
+            && !self.mrope.get()
+            && self.nlsa.is_none()
+            && self.logit_scale.is_none()
+            && !self.kmask_on.get()
+            && self.resident.is_none()
+            && targets.len() == (self.b * self.t) as usize;
+        if !trimmable {
+            return self.b;
+        }
+        let last = targets.chunks(self.t as usize).rposition(|row| row.iter().any(|&v| v != IGNORE)).map_or(1, |i| i + 1) as u32;
+        let quantum = (last.next_power_of_two() / 8).max(8);
+        last.next_multiple_of(quantum).min(self.b)
+    }
+
+    /// The recorded forward and backward of a batch trimmed to `rows` rows of `run` tokens, recorded on first use.
+    fn run_tape(&self, rows: u32, run: u32) -> RunTapes {
         let mut tapes = self.run_tapes.borrow_mut();
-        if let Some(i) = tapes.iter().position(|(len, _)| *len == run) {
+        if let Some(i) = tapes.iter().position(|(shape, _)| *shape == (rows, run)) {
             let hit = tapes.remove(i);
             tapes.push(hit);
         } else {
             if tapes.len() == RUN_TAPES {
                 tapes.remove(0);
             }
-            tapes.push((run, std::sync::Arc::new((self.forward_steps(self.b, run), self.build_backward_steps_at(self.b, run)))));
+            tapes.push(((rows, run), std::sync::Arc::new((self.forward_steps(rows, run), self.build_backward_steps_at(rows, run)))));
         }
         tapes.last().expect("just pushed").1.clone()
+    }
+
+    /// Whether the current batch computes the whole block.
+    fn whole_block(&self) -> bool {
+        self.run_len() == self.t && self.batch_run() == self.b
     }
 
     /// Divides the current batch's loss and gradient by `tokens` rather than
@@ -1949,8 +2042,10 @@ impl Qwen {
     /// parameters (LoRA base, inference) have none, so their weight-gradient
     /// dispatches must be skipped - only the input-gradient (dX) path runs to
     /// keep backprop flowing to lower-layer adapters.
+    /// Whether `name` takes a gradient: it has a gradient buffer and is in the optimised set (a parameter
+    /// [`Self::freeze_params`] withdrew keeps its buffer but takes no gradient).
     fn trainable(&self, name: &str) -> bool {
-        self.ps.grad.contains_key(name)
+        self.ps.grad.contains_key(name) && self.ps.trained_params().any(|(n, _)| n == name)
     }
 
     /// Kernel-index map for the shared `model::block` Step-builders.
@@ -2480,6 +2575,10 @@ impl Qwen {
             // Vision-language splice: overwrite the image-placeholder rows of the
             // freshly-gathered residual stream with the projected image tokens.
             s.extend(self.splice.fwd(&self.gpu, SPLICE, &self.res[0], 0, n));
+            if let Some(inj) = &self.injection {
+                let d = self.cfg.d_model;
+                s.push(self.gpu.step(inj.kernel, &[&inj.plan, &inj.src, &self.res[0]], &[inj.rows, d], inj.rows * d));
+            }
         }
         let mut tape = Tape { steps: s, ends: Vec::new() };
         self.round_trip_boundary(&mut tape.steps, self.shard.start, n);
@@ -2665,12 +2764,12 @@ impl Qwen {
 
     pub fn forward(&self) -> f32 {
         assert!(!self.decode_only, "Qwen::forward: batched forward called on a decode-only-built model; use step/prefill/step_embed instead");
-        if self.run_len() == self.t {
+        if self.whole_block() {
             self.submit_forward();
         } else {
-            self.run_tape(self.run_len()).0.submit(&self.gpu);
+            self.run_tape(self.batch_run(), self.run_len()).0.submit(&self.gpu);
         }
-        let n = (self.b * self.run_len()) as usize;
+        let n = (self.batch_run() * self.run_len()) as usize;
         let losses = self.gpu.read(&self.ce_buf, n);
         match &self.weighted_ce {
             // Must return the SAME scalar `backward`'s (weighted) `d_logits`
@@ -2707,10 +2806,10 @@ impl Qwen {
             assert!(!self.backward_pending.replace(true), "qwen3 layer-streamed full fine-tune: a second backward before the update (gradient accumulation) is not supported; every micro-batch is its own step");
             return;
         }
-        if self.run_len() == self.t {
+        if self.whole_block() {
             self.bwd_steps.submit(&self.gpu);
         } else {
-            self.run_tape(self.run_len()).1.submit(&self.gpu);
+            self.run_tape(self.batch_run(), self.run_len()).1.submit(&self.gpu);
         }
     }
 
@@ -2809,7 +2908,16 @@ impl Qwen {
             if let Some(store) = &self.res_saved {
                 s.push(store.load_step(&self.gpu, last, &self.res[last]));
             }
-            self.rmsnorm_bwd(&mut s, &self.res[last], "norm.weight", &self.d_xn, &self.dres[last], d, n);
+            // A second model's gradient of these hidden states joins the head's, then is cleared for the next batch.
+            let d_hidden = match &self.hidden_grad {
+                Some(extra) => {
+                    s.push(self.gpu.step(ADD2, &[&self.d_xn, extra, &self.d_tmp], &[n * d], n * d));
+                    s.push(self.gpu.step(GRAD_SCALE, &[extra], &[n * d, 0f32.to_bits()], n * d));
+                    &self.d_tmp
+                }
+                None => &self.d_xn,
+            };
+            self.rmsnorm_bwd(&mut s, &self.res[last], "norm.weight", d_hidden, &self.dres[last], d, n);
         }
 
         let mut ends = Vec::new();
@@ -2889,6 +2997,9 @@ impl Qwen {
         // below never trains the placeholder token's embedding row.
         if self.shard.embed {
             s.extend(self.splice.bwd(&self.gpu, SPLICE_BWD, &self.dres[0]));
+            if let Some((inj, (grad, back))) = self.injection.as_ref().and_then(|i| i.grad.as_ref().map(|g| (i, g))) {
+                s.push(self.gpu.step(inj.kernel, &[back, &self.dres[0], grad], &[inj.rows, d], inj.rows * d));
+            }
         }
 
         // embedding backward (tied: accumulates onto the head grad in tok.weight);
@@ -3117,10 +3228,10 @@ impl Qwen {
         assert!(self.input_rows, "Qwen::write_input_rows: call enable_input_rows first");
         let (t, run, d) = (self.t as usize, self.run_len() as usize, self.cfg.d_model as usize);
         assert_eq!(rows.len(), self.b as usize * t * d, "Qwen::write_input_rows: one [d_model] row per position of the [b, t] batch");
-        if run == t {
+        if self.whole_block() {
             self.gpu.write_f32(&self.res[0], rows);
         } else {
-            let packed: Vec<f32> = rows.chunks(t * d).flat_map(|seq| seq[..run * d].iter().copied()).collect();
+            let packed: Vec<f32> = rows.chunks(t * d).take(self.batch_run() as usize).flat_map(|seq| seq[..run * d].iter().copied()).collect();
             self.gpu.write_f32(&self.res[0], &packed);
         }
     }
@@ -3338,15 +3449,109 @@ impl Qwen {
     /// gradient reduction skips it. For a table the forward never reads through its gradient path (an embedding every
     /// row of which is spliced in, [`Self::enable_mm_splices`]). Returns how many were withdrawn.
     pub fn freeze_params(&mut self, pred: impl Fn(&str) -> bool) -> usize {
-        self.ps.freeze_where(pred)
+        let frozen = self.ps.freeze_where(pred);
+        // A frozen table or head takes no gradient: the backward stops computing it.
+        if frozen > 0 && !self.decode_only && !self.bwd_steps.steps.is_empty() {
+            self.run_tapes.get_mut().clear();
+            self.bwd_steps = self.build_backward_steps();
+        }
+        frozen
+    }
+
+    /// Copy `rows` rows of `src` (a buffer of `d_model`-wide rows on this model's device: another model's
+    /// [`Self::final_hidden_buffer`]) into the residual stream right after the embedding, at the rows the plan
+    /// ([`Self::write_injection`]) names: a decoder conditioned on another one's hidden state at some of its
+    /// positions (a code predictor's first position reads the Talker's hidden state of its frame). With `grad`, the
+    /// backward copies the injected rows' gradient into `grad` at their source rows (the other model's
+    /// [`Self::enable_hidden_grad`] buffer); a pair whose destination carries no gradient may name any source, and
+    /// the reversed copy writes it to the sink row [`Self::write_injection`] is given. Without `grad`, none flows back.
+    /// The token an injected row replaces must take no gradient, so `tok.weight` must be frozen first
+    /// ([`Self::freeze_params`]). The batch is not trimmed along its rows (the plan names rows of the whole block),
+    /// only along its sequences ([`Self::enable_batch_trimming`]). Rebuilds the recorded passes; call once, before
+    /// the first forward.
+    pub fn enable_row_injection(&mut self, src: &DeviceBuffer, rows: u32, grad: Option<&DeviceBuffer>) -> Result<(), String> {
+        if self.trainable("tok.weight") {
+            return Err("Qwen::enable_row_injection: an injected row's gradient would train the token it replaces; freeze tok.weight first".into());
+        }
+        if !self.shard.embed || self.input_rows || self.decode_only {
+            return Err("Qwen::enable_row_injection: needs a batched build of the embedding stage that gathers tokens".into());
+        }
+        let kernel = self.gpu.kernel_index("anchor_rows_copy").ok_or("Qwen::enable_row_injection: kernel 'anchor_rows_copy' is not registered")?;
+        let plan = self.gpu.storage(u64::from(rows) * 2);
+        let grad = grad.map(|g| (g.clone(), self.gpu.storage(u64::from(rows) * 2)));
+        self.injection = Some(RowInjection { src: src.clone(), plan, rows, kernel, grad });
+        self.fwd_steps = self.forward_steps(self.b, self.t);
+        self.run_tapes.get_mut().clear();
+        if !self.bwd_steps.steps.is_empty() {
+            self.bwd_steps = self.build_backward_steps();
+        }
+        Ok(())
+    }
+
+    /// The `(source row, destination row)` pairs the next forward injects ([`Self::enable_row_injection`]): exactly
+    /// the `rows` it was enabled with, every destination a row of the `[b, t]` block.
+    /// `real` pairs are the injected rows whose gradient flows back ([`Self::enable_row_injection`] with a gradient);
+    /// the rest send theirs to row `sink` of the gradient buffer.
+    pub fn write_injection(&self, pairs: &[(u32, u32)], real: usize, sink: u32) {
+        let inj = self.injection.as_ref().expect("Qwen::write_injection: call enable_row_injection first");
+        assert_eq!(pairs.len(), inj.rows as usize, "Qwen::write_injection: one pair per injected row");
+        assert!(pairs.iter().all(|&(_, dst)| dst < self.b * self.t), "Qwen::write_injection: a destination row outside the [b, t] block");
+        let words: Vec<u32> = pairs.iter().flat_map(|&(src, dst)| [src, dst]).collect();
+        self.gpu.write(&inj.plan, &words);
+        if let Some((_, back)) = &inj.grad {
+            let words: Vec<u32> = pairs.iter().enumerate().flat_map(|(i, &(src, dst))| [dst, if i < real { src } else { sink }]).collect();
+            self.gpu.write(back, &words);
+        }
+    }
+
+    /// The device buffer [`Self::final_hidden`] reads, for a second model on this device that consumes the hidden
+    /// states without a host round trip ([`Self::enable_row_injection`]).
+    pub fn final_hidden_buffer(&self) -> &DeviceBuffer {
+        &self.xn_final
     }
 
     /// The final-norm hidden states of the batch the latest [`Self::forward`] ran (the input of the head): what a
-    /// second model conditioned on this one's hidden state reads. `[b·run, d_model]` row-major at the batch's run
-    /// length ([`Self::run_len`]): row `r` of sequence `s` at `s·run + r`.
+    /// second model conditioned on this one's hidden state reads. `[rows·run, d_model]` row-major at the batch's
+    /// computed rows and run length ([`Self::batch_run`], [`Self::run_len`]): row `r` of sequence `s` at `s·run + r`.
     pub fn final_hidden(&self) -> Vec<f32> {
         assert!(!self.decode_only, "Qwen::final_hidden: a decode-only build keeps no batched hidden states");
-        self.gpu.read(&self.xn_final, (self.b * self.run_len()) as usize * self.cfg.d_model as usize)
+        self.gpu.read(&self.xn_final, (self.batch_run() * self.run_len()) as usize * self.cfg.d_model as usize)
+    }
+
+    /// Add `grad` (a buffer of at least `b·t` `d_model`-wide rows on this device, at the batch's run layout as
+    /// [`Self::final_hidden`]) to the gradient of the final-norm hidden states in every backward, then clear it: the
+    /// gradient a second model that read those hidden states ([`Self::enable_row_injection`] with a gradient) sends
+    /// back, so both models train as one. Rebuilds the recorded backward.
+    pub fn enable_hidden_grad(&mut self, grad: &DeviceBuffer) {
+        assert!(self.shard.head && !self.external_head.get(), "Qwen::enable_hidden_grad: only the head stage of a build with its own head has a hidden gradient to add to");
+        self.hidden_grad = Some(grad.clone());
+        self.run_tapes.get_mut().clear();
+        if !self.decode_only && !self.bwd_steps.steps.is_empty() {
+            self.bwd_steps = self.build_backward_steps();
+        }
+    }
+
+    /// Score the rows of each sequence by position with their own heads of the stacked head
+    /// ([`model::head_ce::HeadGroups`]: position `offset + h` reads head `h`, a label in `[0, width)`), each head one
+    /// GEMM over exactly its rows. The block's rows per sequence must be the groups' period. Rebuilds the recorded
+    /// passes; call before the first forward.
+    pub fn set_head_groups(&mut self, groups: model::head_ce::HeadGroups) -> Result<(), String> {
+        if groups.period != self.t {
+            return Err(format!("qwen3: head groups of period {} over sequences of {}", groups.period, self.t));
+        }
+        if groups.capacity < self.b {
+            return Err(format!("qwen3: head groups for {} sequences under a batch of {}", groups.capacity, self.b));
+        }
+        let head = self.head_ce.as_mut().ok_or("qwen3: this build has no chunked LM head to group")?;
+        head.set_head_groups(&self.gpu, groups)?;
+        if !self.decode_only {
+            self.fwd_steps = self.forward_steps(self.b, self.t);
+            self.run_tapes.get_mut().clear();
+            if !self.bwd_steps.steps.is_empty() {
+                self.bwd_steps = self.build_backward_steps();
+            }
+        }
+        Ok(())
     }
 
     /// Multiply the head's logits by `scale` before the softmax of the loss,
@@ -4777,7 +4982,7 @@ impl model::Model for Qwen {
         Qwen::forward(self)
     }
     fn computed_tokens(&self) -> Option<u64> {
-        Some(u64::from(self.b) * u64::from(self.run_len()))
+        Some(u64::from(self.batch_run()) * u64::from(self.run_len()))
     }
     fn backward(&self) {
         Qwen::backward(self)
