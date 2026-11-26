@@ -622,7 +622,13 @@ impl Executor {
     /// [`ResidentModel::replicas`]. What a transport sizes its edge ceiling from
     /// ([`crate::admission::edge_concurrency`]).
     pub fn decode_slots(&self) -> usize {
-        self.models.read().unwrap().values().map(|m| m.batch_limit().unwrap_or(1).max(1) * m.replicas().max(1)).sum()
+        self.models.read().unwrap().values().map(|m| model_slots(m.as_ref())).sum()
+    }
+
+    /// The sequences the registered single-device model `model` carries at once: its share of
+    /// [`Self::decode_slots`]. `None` for a model not registered that way (unknown, or multi-device).
+    pub fn model_decode_slots(&self, model: &str) -> Option<usize> {
+        self.models.read().unwrap().get(model).map(|m| model_slots(m.as_ref()))
     }
 
     /// Whether the registered model `model` would accept the job `(action, inv)`
@@ -2368,6 +2374,11 @@ impl crate::model::JobFeed for GroupFeed {
     }
 }
 
+/// A model's decode slots: its batch (1 when it declares none) on each of its replicas.
+fn model_slots(model: &dyn ResidentModel) -> usize {
+    model.batch_limit().unwrap_or(1).max(1) * model.replicas().max(1)
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -2774,6 +2785,7 @@ mod tests {
         }
         let exec = Executor::start(vec![Arc::new(Slots("wide", Some(256), 1)), Arc::new(Slots("pair", Some(8), 2))], Budgets::new(), Policy::default());
         assert_eq!(exec.decode_slots(), 256 + 16);
+        assert_eq!((exec.model_decode_slots("wide"), exec.model_decode_slots("pair"), exec.model_decode_slots("none")), (Some(256), Some(16), None));
         exec.register(Arc::new(Slots("single", None, 1)));
         assert_eq!(exec.decode_slots(), 256 + 16 + 1, "a model registered later counts too");
         exec.unregister("wide");

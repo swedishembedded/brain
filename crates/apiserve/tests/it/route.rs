@@ -72,6 +72,8 @@ struct Mock {
     /// Its device hangs: a request is taken and never finished (a stream sends its first event first), while its
     /// health still answers.
     wedged: AtomicBool,
+    /// Fields its card for a model carries beyond the id (its decode slots for that model, whether it is resident).
+    card_extra: Mutex<std::collections::HashMap<String, Value>>,
 }
 
 impl Mock {
@@ -115,7 +117,18 @@ async fn mock_health(State(m): State<Arc<Mock>>, headers: HeaderMap) -> Response
 }
 
 async fn mock_models(State(m): State<Arc<Mock>>) -> Json<Value> {
-    let data: Vec<Value> = m.models.iter().map(|id| json!({"id": id, "object": "model", "owned_by": m.name})).collect();
+    let extra = m.card_extra.lock().unwrap().clone();
+    let data: Vec<Value> = m
+        .models
+        .iter()
+        .map(|id| {
+            let mut card = json!({"id": id, "object": "model", "owned_by": m.name});
+            if let Some(Value::Object(fields)) = extra.get(id) {
+                card.as_object_mut().unwrap().extend(fields.clone());
+            }
+            card
+        })
+        .collect();
     Json(json!({"object": "list", "data": data}))
 }
 
@@ -175,6 +188,7 @@ async fn mock(name: &str, slots: u64, edge: u64, models: &[&str]) -> (Arc<Mock>,
         queue_depth: AtomicUsize::new(0),
         answered: AtomicUsize::new(0),
         wedged: AtomicBool::new(false),
+        card_extra: Mutex::default(),
     });
     let app = Router::new()
         .route("/v1/health", get(mock_health))
@@ -977,3 +991,41 @@ fn overload_past_the_listeners_default_cap_is_answered_not_reset() {
     serving.join().unwrap().unwrap();
 }
 
+/// A server decodes a fixed number of sequences of each model it serves, and its health's `decode_slots` sums them
+/// over every model it could load: an upstream is sent at most a model's own slots of that model (its card's
+/// `decode_slots`), so a conversation whose prefix it holds goes elsewhere once that model is full there.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_upstream_takes_at_most_its_models_own_slots_of_that_model() {
+    let (a, ua) = mock("a", 100, 200, &["m", "other"]).await;
+    let (_b, ub) = mock("b", 100, 200, &["m", "other"]).await;
+    for mock in [&a, &_b] {
+        mock.card_extra.lock().unwrap().insert("m".into(), json!({"decode_slots": 1, "resident": true}));
+    }
+    let (addr, _fleet, _stop) = router(&[ua, ub]).await;
+    let system = "You are the agent. ".repeat(200);
+    let mut held = conversation("m", &system, 1);
+    held["hold"] = json!(true);
+    let first = tokio::spawn(chat(addr, held));
+    until("the held turn to reach a", || a.count() == 1).await;
+    // `a` holds this conversation's prefix and has 99 free slots in all, but none for `m`.
+    let (code, _, body) = chat(addr, conversation("m", &system, 2)).await;
+    assert_eq!((code, body["upstream"].as_str()), (StatusCode::OK, Some("b")));
+    a.release.add_permits(1);
+    assert_eq!(first.await.unwrap().2["upstream"], "a");
+}
+
+/// A server holds the models it serves on its cards by demand, and loading another one evicts what it held: a request
+/// goes to an upstream where its model is resident while one has a free slot for it, so two models sharing a fleet
+/// settle on cards of their own instead of each request swapping a card's model.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_goes_where_its_model_is_resident() {
+    let (a, ua) = mock("a", 8, 16, &["m1", "m2"]).await;
+    let (b, ub) = mock("b", 8, 16, &["m1", "m2"]).await;
+    a.card_extra.lock().unwrap().extend([("m1".to_string(), json!({"decode_slots": 4, "resident": true})), ("m2".to_string(), json!({"decode_slots": 4, "resident": false}))]);
+    b.card_extra.lock().unwrap().extend([("m1".to_string(), json!({"decode_slots": 4, "resident": false})), ("m2".to_string(), json!({"decode_slots": 4, "resident": true}))]);
+    let (addr, _fleet, _stop) = router(&[ua, ub]).await;
+    for turn in 1..=3 {
+        assert_eq!(chat(addr, conversation("m2", &format!("agent {turn}"), 1)).await.2["upstream"], "b", "m2, turn {turn}");
+        assert_eq!(chat(addr, conversation("m1", &format!("agent {turn}"), 1)).await.2["upstream"], "a", "m1, turn {turn}");
+    }
+}

@@ -216,6 +216,11 @@ Scope: Running one training job as ranks across machines, and serving one model 
       overload, the security boundary), `tests/e2e/route.bats` (two real
       `brain serve --mock` behind a real router), the unit tests in
       `crates/residency/src/affinity.rs` and `crates/apiserve/src/route/upstream.rs`.
+- [x] **A model goes where it is loaded, no more of it than its slots (2026-11-26).** Model cards (OpenAI,
+      OpenRouter) say `decode_slots` and `resident`; the router bounds a model's requests per upstream by the card's
+      slots and prefers upstreams where it is resident (knowledge #603: two workloads on 16 cards swapped the 27B
+      and the 4B on every card, 334 of 8208 conversations held a request stuck over 100 s). Tests:
+      `crates/apiserve/tests/it/route.rs`, `crates/apiserve/tests/it/api.rs`.
 - [x] **The router judges upstreams by progress, not by their health answer
       (2026-11-26, knowledge #602).** Seven upstreams hung on their device
       while `/v1/health` answered, and after their restart three reported a

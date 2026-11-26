@@ -39,10 +39,14 @@
 //!   not be opened, so no byte of it was sent. Once sent, a failure is the client's answer (502), because the
 //!   generation may have run.
 //! - **The fleet's edge is the sum of its decode slots.** An upstream is sent at most as many requests as it decodes at
-//!   once (`decode_slots` in its `/health`). Past that on every upstream serving the model a request waits in the
-//!   router, in arrival order per model, for at most [`FleetConfig::queue_deadline`] (then 429); a request whose client
-//!   goes away leaves the queue. Past [`FleetConfig::queue_bound`] waiting requests it is refused at once with 503. Both
-//!   carry `Retry-After`.
+//!   once (`decode_slots` in its `/health`), and at most as many requests for one model as it decodes of that model
+//!   (`decode_slots` on the model's card, when the card names it). Past that on every upstream serving the model a
+//!   request waits in the router, in arrival order per model, for at most [`FleetConfig::queue_deadline`] (then 429);
+//!   a request whose client goes away leaves the queue. Past [`FleetConfig::queue_bound`] waiting requests it is
+//!   refused at once with 503. Both carry `Retry-After`.
+//! - **A model goes where it is loaded.** An upstream whose card says the model is not `resident` there takes its
+//!   requests only while every upstream where it is has no free slot for it: loading it would evict what that card
+//!   holds, and two models sharing a fleet would otherwise swap cards back and forth.
 //! - **Conversations stay together.** Requests carrying the same `prompt_cache_key` (OpenAI's routing hint) go to
 //!   the same upstream while it has a free slot; without one, the prefix decides.
 //! - **Only what is known is forwarded.** The JSON body is forwarded byte for byte after its top level is checked; the
@@ -224,6 +228,12 @@ struct Advertised {
     ids: HashSet<String>,
     /// For each model served with an adapter, the adapter's digest: part of the affinity namespace.
     adapter_digests: HashMap<String, String>,
+    /// For each model whose card says so, the sequences of it the upstream decodes at once (`decode_slots`): the most
+    /// of that model's requests it is sent at once. `slots` sums every model it could load.
+    model_slots: HashMap<String, usize>,
+    /// For each model whose card says so, whether it is built on the upstream's device now (`resident`). One that is
+    /// not would have to be loaded there, evicting what the card holds.
+    resident: HashMap<String, bool>,
 }
 
 /// One upstream endpoint and what the router knows of it.
@@ -234,6 +244,8 @@ pub struct Member {
     probed: AtomicBool,
     draining: AtomicBool,
     in_flight: AtomicUsize,
+    /// Of `in_flight`, the requests for each model.
+    model_in_flight: Mutex<HashMap<String, usize>>,
     advertised: RwLock<Advertised>,
     /// The upstream's cumulative served counters at the last two good probes, for its recent rates.
     readings: Mutex<Readings>,
@@ -278,6 +290,7 @@ impl Member {
             probed: AtomicBool::new(false),
             draining: AtomicBool::new(false),
             in_flight: AtomicUsize::new(0),
+            model_in_flight: Mutex::default(),
             advertised: RwLock::default(),
             readings: Mutex::default(),
             pool: Arc::new(upstream::Pool::new(MAX_IDLE_PER_UPSTREAM)),
@@ -292,6 +305,11 @@ impl Member {
 
     fn advertised(&self) -> std::sync::RwLockReadGuard<'_, Advertised> {
         self.advertised.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The requests for `model` it holds.
+    fn model_load(&self, model: &str) -> usize {
+        self.model_in_flight.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(model).copied().unwrap_or(0)
     }
 
     /// Whether it takes new requests: it answers its probes, is not draining and has not stalled.
@@ -335,12 +353,28 @@ impl Cut {
     }
 }
 
-/// One request held by an upstream: its load, given back when the response ends or is dropped, which wakes the
-/// requests waiting for a slot.
-struct InFlight(Arc<Member>, Arc<tokio::sync::Notify>);
+/// One request for a model held by an upstream: its load, given back when the response ends or is dropped, which wakes
+/// the requests waiting for a slot.
+struct InFlight(Arc<Member>, Arc<tokio::sync::Notify>, String);
+
+impl InFlight {
+    fn take(member: Arc<Member>, changed: Arc<tokio::sync::Notify>, model: &str) -> InFlight {
+        *member.model_in_flight.lock().unwrap_or_else(std::sync::PoisonError::into_inner).entry(model.to_string()).or_default() += 1;
+        InFlight(member, changed, model.to_string())
+    }
+}
 
 impl Drop for InFlight {
     fn drop(&mut self) {
+        {
+            let mut held = self.0.model_in_flight.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(n) = held.get_mut(&self.2) {
+                *n -= 1;
+                if *n == 0 {
+                    held.remove(&self.2);
+                }
+            }
+        }
         self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
         self.1.notify_waiters();
     }
@@ -732,12 +766,20 @@ impl Fleet {
                 continue;
             }
             candidates += 1;
-            let load = m.in_flight.load(Ordering::SeqCst);
-            if load < adv.slots {
+            // Its slots for this model when its card names them (they bound the model's own requests there), else
+            // its slots for every model; either way never more than its slots in all.
+            let total = m.in_flight.load(Ordering::SeqCst);
+            let (load, slots) = match adv.model_slots.get(model) {
+                Some(&slots) => (m.model_load(model), slots),
+                None => (total, adv.slots),
+            };
+            if load < slots && total < adv.slots {
                 let namespace = format!("{model}\u{1f}{}", adv.adapter_digests.get(model).map_or("", String::as_str));
                 let chain = chains.entry(namespace.clone()).or_insert_with(|| key.chain(&namespace));
                 let kv_free = if key.in_tokens() { adv.kv_free_tokens } else { None };
-                let view = ReplicaView { load, slots: adv.slots, queued: adv.queue_depth, kv_free, active: true, can_run: true, matched: directories[i].matched(chain) };
+                // An upstream that says the model is not loaded there is chosen only when none where it is has room.
+                let active = adv.resident.get(model).copied().unwrap_or(true);
+                let view = ReplicaView { load, slots, queued: adv.queue_depth, kv_free, active, can_run: true, matched: directories[i].matched(chain) };
                 open.push((i, view, namespace));
             }
         }
@@ -772,7 +814,7 @@ impl Fleet {
             // Work starts on an idle upstream: its stall clock starts now, not at the last probe.
             member.progressed();
         }
-        Pick::Chosen(*index, InFlight(member, self.changed.clone()))
+        Pick::Chosen(*index, InFlight::take(member, self.changed.clone(), model))
     }
 
     /// An upstream for a request, waiting in the router's queue while every upstream that serves its model holds as
@@ -838,6 +880,12 @@ fn parse_advertised(health: &Value, listing: &Value) -> Result<(Advertised, Serv
             return Err("it lists a model whose id is not a plain string".into());
         };
         if adv.ids.insert(id.to_string()) {
+            if let Some(slots) = card.get("decode_slots").and_then(Value::as_u64).filter(|&n| (1..=MAX_ADVERTISED_SLOTS).contains(&n)) {
+                adv.model_slots.insert(id.to_string(), slots as usize);
+            }
+            if let Some(resident) = card.get("resident").and_then(Value::as_bool) {
+                adv.resident.insert(id.to_string(), resident);
+            }
             adv.cards.push(card.clone());
             if let Some(digest) = card.get("adapter").and_then(|a| a.get("digest")).and_then(Value::as_str).filter(|d| d.len() <= 128) {
                 adv.adapter_digests.insert(id.to_string(), digest.to_string());
@@ -969,14 +1017,22 @@ async fn one_model(State(state): State<RouteState>, Path(id): Path<String>) -> R
     merged_cards(&state.fleet).remove(&id).map(Json).ok_or_else(|| ApiError::model_not_found(PROVIDER, &id))
 }
 
-/// Every model an upstream in rotation lists, once, in id order; the first upstream's card for an id wins.
+/// Every model an upstream in rotation lists, once, in id order; the first upstream's card for an id wins, without what
+/// it says of serving that model on its own card (`decode_slots`, `resident`): the router's listing is the fleet's.
 fn merged_cards(fleet: &Fleet) -> std::collections::BTreeMap<String, Value> {
     let mut cards = std::collections::BTreeMap::new();
     for m in fleet.members.iter().filter(|m| m.routable()) {
         let adv = m.advertised();
         for card in &adv.cards {
             if let Some(id) = card.get("id").and_then(Value::as_str) {
-                cards.entry(id.to_string()).or_insert_with(|| card.clone());
+                cards.entry(id.to_string()).or_insert_with(|| {
+                    let mut card = card.clone();
+                    if let Some(fields) = card.as_object_mut() {
+                        fields.remove("decode_slots");
+                        fields.remove("resident");
+                    }
+                    card
+                });
             }
         }
     }

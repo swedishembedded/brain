@@ -10,7 +10,9 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
-use residency::AdapterIdentity;
+use std::collections::HashSet;
+
+use residency::{AdapterIdentity, Tier};
 
 use crate::catalog::{self, CapSet, ModelInfo};
 use crate::error::ApiError;
@@ -36,7 +38,8 @@ pub fn routes() -> Router<AppState> {
 /// `GET /models` — the provider-shaped list of exposed models.
 async fn list(State(state): State<AppState>) -> Json<Value> {
     let models = catalog::exposed(&state.exec, state.provider);
-    let cards: Vec<Value> = models.iter().filter(|info| state.lists(&info.name)).map(|info| card_of(&state, info)).collect();
+    let resident = resident_models(&state);
+    let cards: Vec<Value> = models.iter().filter(|info| state.lists(&info.name)).map(|info| card_of(&state, info, &resident)).collect();
     Json(envelope(state.provider, cards))
 }
 
@@ -44,15 +47,34 @@ async fn list(State(state): State<AppState>) -> Json<Value> {
 async fn get_one(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
     let found = catalog::exposed(&state.exec, state.provider).into_iter().find(|info| info.name == id && state.lists(&info.name));
     match found {
-        Some(info) => Ok(Json(card_of(&state, &info))),
+        Some(info) => Ok(Json(card_of(&state, &info, &resident_models(&state)))),
         None => Err(ApiError::model_not_found(state.provider, &id)),
     }
 }
 
 /// `info`'s card with the adapter currently attached to it, read at request time
-/// from the executor (a hot swap changes it without re-registering the model).
-fn card_of(state: &AppState, info: &ModelInfo) -> Value {
-    card(state.provider, info, state.exec.served_adapter(&info.name).as_ref())
+/// from the executor (a hot swap changes it without re-registering the model), and
+/// on the OpenAI and OpenRouter dialects what serving it takes here: the sequences
+/// it decodes at once (`decode_slots`, absent when unknown) and whether it is built
+/// on a device now (`resident`). A router in front of several
+/// servers places a model's requests by these; `/health` sums every model.
+fn card_of(state: &AppState, info: &ModelInfo, resident: &HashSet<String>) -> Value {
+    let mut card = card(state.provider, info, state.exec.served_adapter(&info.name).as_ref());
+    if state.provider != Provider::Anthropic {
+        if let Some(slots) = state.exec.model_decode_slots(&info.name) {
+            card["decode_slots"] = json!(slots);
+        }
+        card["resident"] = json!(resident.contains(&info.name));
+    }
+    card
+}
+
+/// The models with an instance built on a device now (one dispatcher round trip).
+fn resident_models(state: &AppState) -> HashSet<String> {
+    let report = state.exec.residency();
+    let hot = report.placements.iter().filter(|p| p.tier == Tier::Hot).map(|p| &p.key.model);
+    let hot_multi = report.multi_placements.iter().filter(|p| p.tier == Tier::Hot).map(|p| &p.key.model);
+    hot.chain(hot_multi).cloned().collect()
 }
 
 /// Wrap the model cards in the provider's list envelope.

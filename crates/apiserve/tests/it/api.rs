@@ -688,6 +688,29 @@ async fn model_card_names_the_sampling_parameters_the_model_honours_on_every_dia
     }
 }
 
+/// A card says how many sequences of the model this server decodes at once (its batch on each replica; one for a
+/// model that declares none) and whether it is resident on a device now, so a router in front of several servers
+/// sends a model's requests where it is loaded and no more of them than it decodes: the health's `decode_slots` sums
+/// every model the server could load, not the ones it holds.
+#[tokio::test]
+async fn model_card_says_how_many_sequences_the_model_decodes_and_whether_it_is_resident() {
+    for (provider, prefix) in [(Provider::OpenAI, "/v1/models"), (Provider::OpenRouter, "/models")] {
+        let (app, key) = chat_app(provider);
+        let card = get_json(&app, provider, &format!("{prefix}/brain-chat"), &key).await;
+        assert_eq!((card["decode_slots"].clone(), card["resident"].clone()), (json!(1), json!(false)), "{provider}: {card}");
+        if provider == Provider::OpenAI {
+            let body = json!({"model": "brain-chat", "messages": [{"role": "user", "content": "hi"}]});
+            assert_eq!(post_json(&app, provider, &key, "/v1/chat/completions", &body).await.0, StatusCode::OK);
+            let card = get_json(&app, provider, &format!("{prefix}/brain-chat"), &key).await;
+            assert_eq!(card["resident"], json!(true), "the model ran, so it is built: {card}");
+            assert_valid("openai.json", "Model", &card);
+            let listed = get_json(&app, provider, prefix, &key).await;
+            let embed = listed["data"].as_array().unwrap().iter().find(|c| c["id"] == "brain-embed").unwrap().clone();
+            assert_eq!(embed["resident"], json!(false), "{embed}");
+        }
+    }
+}
+
 /// brain keeps nothing of a request: no prompt, answer or upload is written
 /// anywhere or logged. Every card says so, so a client that routes by data
 /// retention can tell this server apart from one that does not say.
