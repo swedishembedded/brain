@@ -368,7 +368,7 @@ impl Host<'_> {
                 *self.adapters.lock().unwrap_or_else(|e| e.into_inner()) = adapters;
                 Ok(())
             }
-            Err(p) => Err(format!("{PANICKED} {}", panic_text(p.as_ref()))),
+            Err(p) => Err(format!("{PANICKED} {}", gpu_core::panic_payload::describe(p.as_ref()))),
         }
     }
 
@@ -402,7 +402,7 @@ impl Host<'_> {
             other => return Err(format!("demote {other:?}: the tier is warm or cold")),
         };
         let instance = self.instance.as_mut().ok_or("no instance is open; send `open` first")?;
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| instance.demote(tier))).unwrap_or_else(|p| Err(format!("{PANICKED} {}", panic_text(p.as_ref()))))
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| instance.demote(tier))).unwrap_or_else(|p| Err(format!("{PANICKED} {}", gpu_core::panic_payload::describe(p.as_ref()))))
     }
 
     /// `promote <device>`: the instance rebuilds what its demotion released, on the card this worker owns. Another
@@ -413,7 +413,7 @@ impl Host<'_> {
             return Err(format!("this worker owns {:?}; promoting onto {rest} needs a worker of its own", self.devices));
         }
         let instance = self.instance.as_mut().ok_or("no instance is open; send `open` first")?;
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| instance.promote(device))).unwrap_or_else(|p| Err(format!("{PANICKED} {}", panic_text(p.as_ref()))))
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| instance.promote(device))).unwrap_or_else(|p| Err(format!("{PANICKED} {}", gpu_core::panic_payload::describe(p.as_ref()))))
     }
 
     /// A job's progress as a frame; once the supervisor is gone nothing more is sent.
@@ -458,7 +458,7 @@ impl Host<'_> {
             }
             Err(p) => {
                 // The instance may be broken; its parent rebuilds it in a new worker.
-                let _ = self.answer(id, Err(format!("{PANICKED} {}", panic_text(p.as_ref()))));
+                let _ = self.answer(id, Err(format!("{PANICKED} {}", gpu_core::panic_payload::describe(p.as_ref()))));
                 Step::Exit(101)
             }
         }
@@ -502,7 +502,7 @@ impl Host<'_> {
                 self.answer(id, reply)
             }
             Err(p) => {
-                let _ = self.answer(id, Err(format!("{PANICKED} {}", panic_text(p.as_ref()))));
+                let _ = self.answer(id, Err(format!("{PANICKED} {}", gpu_core::panic_payload::describe(p.as_ref()))));
                 Step::Exit(101)
             }
         }
@@ -651,6 +651,3 @@ impl crate::JobFeed for WorkerFeed<'_, '_> {
     }
 }
 
-fn panic_text(p: &(dyn std::any::Any + Send)) -> String {
-    p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "a panic without a message".into())
-}

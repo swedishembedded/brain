@@ -1982,9 +1982,14 @@ fn park_reply(p: &mut Pending) -> ReplySlot {
     slot
 }
 
-/// Best-effort human-readable panic payload.
+/// A caught panic in words: its payload ([`gpu_core::panic_payload::describe`]) and, when the process records panic
+/// locations and the unwind went through the hook, where it was raised.
 fn panic_message(p: &(dyn std::any::Any + Send)) -> String {
-    p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "non-string panic payload".to_string())
+    let what = gpu_core::panic_payload::describe(p);
+    match gpu_core::panic_payload::take_location() {
+        Some(at) => format!("{what} (at {at})"),
+        None => what,
+    }
 }
 
 fn lane_loop(rx: Receiver<LaneMsg>, done: Sender<Msg>, supervision: Option<Supervision>) {
@@ -3695,6 +3700,56 @@ mod tests {
             // cleanly (fresh build each time) instead of being silently dead.
             assert!(exec.run_blocking("boom", "run", Invocation::new(), |_| {}).is_err());
             assert!(exec.run_blocking("good", "run", Invocation::new(), |_| {}).is_ok());
+        }
+    }
+
+    /// A model whose `run` unwinds with a payload that is not a string: a full
+    /// card's [`gpu_core::DeviceOutOfMemory`] escaping a step that does not catch
+    /// it, or a value thrown with `panic_any`.
+    type MakePayload = fn() -> Box<dyn std::any::Any + Send>;
+    struct ThrowsPayload {
+        payload: MakePayload,
+    }
+    struct ThrowsPayloadInst(MakePayload);
+    impl ResidentModel for ThrowsPayload {
+        fn manifest(&self) -> Manifest {
+            Manifest::new("thrower", "throws", vec![ActionSpec::new("run", "run")])
+        }
+        fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+            InstanceKey::new("thrower", "default")
+        }
+        fn estimate(&self, _k: &InstanceKey) -> MemCost {
+            MemCost::new(GB, 0)
+        }
+        fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+            Ok(Box::new(ThrowsPayloadInst(self.payload)))
+        }
+    }
+    impl Instance for ThrowsPayloadInst {
+        fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+            std::panic::resume_unwind((self.0)())
+        }
+    }
+
+    /// SPEC: a lane panic whose payload is not a string still says what it was.
+    /// On 2026-11-26 a 27B server logged `panicked while running: non-string
+    /// panic payload` four times and nothing else: the one fact the operator
+    /// needed (a full card? which value?) was thrown away at the catch site.
+    #[test]
+    fn a_lane_panic_with_a_non_string_payload_names_what_it_was() {
+        let cases: [(MakePayload, &str); 3] = [
+            (|| Box::new(gpu_core::DeviceOutOfMemory { bytes: 4096, what: "kv pool".into(), detail: "CUDA_ERROR_OUT_OF_MEMORY".into() }), "device out of memory allocating 4096 bytes for kv pool"),
+            // A payload caught from one thread and thrown again boxed once more.
+            (|| Box::new(Box::new("inner message") as Box<dyn std::any::Any + Send>), "inner message"),
+            (|| Box::new(7u32), "payload of a type"),
+        ];
+        for (payload, expected) in cases {
+            let mut budgets = Budgets::new();
+            budgets.set(Device::Gpu(0), 24 * GB, 0);
+            let exec = Executor::start(vec![Arc::new(ThrowsPayload { payload }) as Arc<dyn ResidentModel>], budgets, Policy::default());
+            let e = exec.run_blocking("thrower", "run", Invocation::new(), |_| {}).expect_err("a panicked run is an error");
+            assert!(e.contains("panicked while running") && e.contains(expected), "expected {expected:?} in: {e}");
+            assert!(!e.contains("non-string panic payload"), "the payload is described, not dropped: {e}");
         }
     }
 

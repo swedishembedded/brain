@@ -51,6 +51,9 @@ pub mod hardware;
 /// workspace and working set.
 pub mod memory;
 
+/// What a caught panic was, whatever its payload, and where a thread's last one was raised.
+pub mod panic_payload;
+
 /// Process-wide runtime options a backend honours when it opens a device (graph capture, the stream-ordered pool,
 /// the freed-block retention cap), set by the application from its flags.
 pub mod runtime;

@@ -1801,6 +1801,9 @@ fn main() {
             default_hook(info);
             drain_before_exit(101);
         }));
+    } else {
+        // A lane that catches a model's panic reports where it was raised beside what it was.
+        gpu_core::panic_payload::record_locations();
     }
     match argv.get(1).map(|s| s.as_str()) {
         Some("data") => data_cli::run_data(&argv[2..]),

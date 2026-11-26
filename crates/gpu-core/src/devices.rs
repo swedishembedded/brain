@@ -665,7 +665,7 @@ pub fn build_with_retry<T>(what: &str, mut f: impl FnMut() -> Result<T, String>)
             Ok(Ok(v)) => return Ok(v),
             Ok(Err(e)) => return Err(e), // a real error from the model, not a capacity fault
             Err(p) => {
-                last = panic_text(p.as_ref());
+                last = crate::panic_payload::describe(p.as_ref());
                 if attempt == BUILD_ATTEMPTS {
                     break;
                 }
@@ -680,12 +680,6 @@ pub fn build_with_retry<T>(what: &str, mut f: impl FnMut() -> Result<T, String>)
     Err(format!("{what}: gave up after {BUILD_ATTEMPTS} attempts; last failure: {last}"))
 }
 
-fn panic_text(p: &(dyn std::any::Any + Send)) -> String {
-    p.downcast_ref::<&str>()
-        .map(|s| (*s).to_string())
-        .or_else(|| p.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "panic".to_string())
-}
 
 fn placer() -> Option<std::sync::Arc<dyn Placer>> {
     PLACER.lock().unwrap_or_else(|e| e.into_inner()).clone()

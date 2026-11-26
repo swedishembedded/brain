@@ -28,6 +28,7 @@ pub use backend_api::{
     STORAGE_BINDING_OFFSET_ALIGN_BYTES,
 };
 pub use backend_api::hardware;
+pub use backend_api::panic_payload;
 pub use backend_api::runtime;
 pub use backend_api::select;
 

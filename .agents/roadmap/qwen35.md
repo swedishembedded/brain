@@ -2922,6 +2922,19 @@ place since 2026-10-21, so the accounting is the part that shows it per step.
   watchdog that would turn it into a failed job is in
   `gpu-supervisor.md`.
 
+- **Lane panic with a non-string payload (open, 2026-11-26).** On one node's
+  cards 0 and 1, Qwen3.8-27B-FP8 servers (`--max-batch 64 --speculative off
+  --training`, three cards of that node with 5.4 to 6.4 GB held by leaked
+  contexts of killed servers, knowledge #602) logged `panicked while running:
+  non-string panic payload` four times. The logs were overwritten by the
+  restart, so the payload is unknown; the only non-string payload a serving
+  step throws is a full card's `DeviceOutOfMemory` (`resume_unwind` from an
+  allocation outside `catch_device_oom`), which fits cards short of memory,
+  but that is unconfirmed. The catch site now names every payload brain
+  throws and where the panic was raised (`backend_api::panic_payload`). Next:
+  on a recurrence, read the lane line it now prints; if it is an out-of-memory
+  escaping a step, find the allocation that is not sized into the plan.
+
 - **M18 follow-up (closed): `stream_train_real.rs` checks the generation
   shift its name promises.** Beside the finite, decreasing loss, the test
   asserts the AFTER greedy generation differs from the BEFORE one (the
