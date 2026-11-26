@@ -31,6 +31,7 @@ navigation:
           - docs/guides/training/lora.md
           - docs/guides/training/optimizer-state.md
           - docs/guides/training/served-training.md
+          - docs/guides/training/weight-surgery.md
           - docs/guides/training/forecast-finetune.md
           - docs/guides/training/federated-experts.md
       - title: Hardware
