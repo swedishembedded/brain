@@ -80,6 +80,19 @@ const HELD_OUT_KEY: u64 = 0x4E1D_0007_5EED_0001;
 pub fn example(sp: &TtsSpecials, rows: &RowMap, shard: &Shard, r: usize, layout: TextLayout) -> Result<Example, String> {
     let rec = shard.record(r);
     let named = |what: &str| format!("record {r} ({}): {what}", rec.id.id);
+    let plan = prompt_plan(sp, rows, shard, r, layout)?;
+    let source = rec.xvector.to_vec();
+    let xvector = match &rows.xvector {
+        Some(p) => p.apply(&source).map_err(|e| named(&e))?,
+        None => source.clone(),
+    };
+    Ok(Example { plan, xvector, source_xvector: source, codes: rec.codes.iter().map(|&c| u32::from(c)).collect(), complete: rec.complete })
+}
+
+/// The prompt record `r` of `shard` makes in `layout`: everything of its [`example`] but the x-vector and codes.
+fn prompt_plan(sp: &TtsSpecials, rows: &RowMap, shard: &Shard, r: usize, layout: TextLayout) -> Result<PromptPlan, String> {
+    let rec = shard.record(r);
+    let named = |what: &str| format!("record {r} ({}): {what}", rec.id.id);
     let ids: std::borrow::Cow<'_, [u32]> = match &rows.text {
         None => std::borrow::Cow::Borrowed(rec.text_ids),
         Some(_) => std::borrow::Cow::Owned(rec.text_ids.iter().map(|&id| rows.text_id(id)).collect::<Result<_, _>>().map_err(|e| named(&e))?),
@@ -94,21 +107,17 @@ pub fn example(sp: &TtsSpecials, rows: &RowMap, shard: &Shard, r: usize, layout:
     if rec.codes.is_empty() {
         return Err(named("no frames"));
     }
-    let source = rec.xvector.to_vec();
-    let xvector = match &rows.xvector {
-        Some(p) => p.apply(&source).map_err(|e| named(&e))?,
-        None => source.clone(),
-    };
-    Ok(Example { plan, xvector, source_xvector: source, codes: rec.codes.iter().map(|&c| u32::from(c)).collect(), complete: rec.complete })
+    Ok(plan)
 }
 
-/// The most Talker rows any record of `shard` takes, in either layout.
+/// The most Talker rows any record of `shard` takes, in either layout. Only the prompts are built: a record's
+/// x-vector (projected for a narrowed cut) does not change how many rows it takes.
 pub fn rows_needed(sp: &TtsSpecials, rows: &RowMap, shard: &Shard) -> Result<usize, String> {
     let mut most = 0;
     for r in 0..shard.len() {
+        let frames = shard.record(r).codes.len() / shard.meta.codebooks as usize;
         for layout in [TextLayout::Streaming, TextLayout::NonStreaming] {
-            let ex = example(sp, rows, shard, r, layout)?;
-            most = most.max(SpeechSftModel::rows_needed(ex.plan.len(), ex.codes.len() / shard.meta.codebooks as usize));
+            most = most.max(SpeechSftModel::rows_needed(prompt_plan(sp, rows, shard, r, layout)?.len(), frames));
         }
     }
     Ok(most)
