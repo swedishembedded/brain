@@ -444,7 +444,8 @@ pub fn speech_sft(cfg: &SpeechSftConfig, train: &Shard, held_out: Option<&Shard>
 
     let shards: Vec<&Shard> = std::iter::once(train).chain(held_out).collect();
     let mut rows = rows;
-    rows.map.text = shard_text_ids(cfg, &shards, talker.text_vocab_size, teacher.as_ref().zip(cfg.teacher.as_deref()))?;
+    let writers: Vec<&Path> = cfg.teacher.iter().map(Path::new).collect();
+    rows.map.text = shard_text_map(Path::new(&cfg.base), talker.text_vocab_size, &shards, &writers)?;
     let frames = longest(&shards, cfg.max_frames)?;
     let mut block = 0;
     for s in &shards {
@@ -531,29 +532,38 @@ pub fn speech_sft(cfg: &SpeechSftConfig, train: &Shard, held_out: Option<&Shard>
     Ok(SpeechSftResult { tensors, languages: rows.languages, voices: rows.voices, report: SpeechSftReport { fit, steps: history, seed } })
 }
 
-/// How the shards' text ids read for the base `cfg.base`: unchanged when they were tokenised by its own tokenizer (or
-/// say nothing of theirs), and through the teacher's tokens when they were tokenised by the teacher's, as for a
-/// student whose vocabulary was trimmed from the teacher's. Shards of any other tokenizer are refused: their ids
-/// would silently name other tokens.
-fn shard_text_ids(cfg: &SpeechSftConfig, shards: &[&Shard], student_vocab: u32, teacher: Option<(&Base, &str)>) -> Result<Option<Vec<u32>>, String> {
+/// How the text ids of `shards` read for the checkpoint at `target` (`target_vocab` text rows): unchanged when its own
+/// tokenizer wrote them (or the shards name none), through the tokens of the checkpoint among `writers` whose tokenizer
+/// wrote them (a teacher, or the full model a cut came from; a trimmed vocabulary renumbers its tokens), and refused
+/// otherwise: their ids would silently name other tokens. The map is [`RowMap::text`]'s.
+pub fn shard_text_map(target: &Path, target_vocab: u32, shards: &[&Shard], writers: &[&Path]) -> Result<Option<Vec<u32>>, String> {
     let digests: std::collections::BTreeSet<&str> = shards.iter().filter_map(|s| s.meta.producers.get("tokenizer").map(String::as_str)).collect();
     let Some(&shard_tokenizer) = digests.iter().next() else { return Ok(None) };
     if digests.len() > 1 {
         return Err(format!("the shards were tokenised by different tokenizers ({digests:?})"));
     }
-    let base = crate::encode::tokenizer_digest(Path::new(&cfg.base))?;
-    if base == shard_tokenizer {
+    let own = crate::encode::tokenizer_digest(target)?;
+    if own == shard_tokenizer {
         return Ok(None);
     }
-    match teacher {
-        Some((t, dir)) if crate::encode::tokenizer_digest(Path::new(dir))? == shard_tokenizer => {
-            let map = TextVocabMap::from_dirs(Path::new(&cfg.base), Path::new(dir), student_vocab, t.talker.text_vocab_size).map_err(|e| format!("teacher: {e}"))?;
-            Ok(Some(map.to_student(t.talker.text_vocab_size)))
+    for dir in writers {
+        if crate::encode::tokenizer_digest(dir)? == shard_tokenizer {
+            let theirs = text_vocab_size(dir)?;
+            let map = TextVocabMap::from_dirs(target, dir, target_vocab, theirs).map_err(|e| format!("{}: {e}", dir.display()))?;
+            return Ok(Some(map.to_student(theirs)));
         }
-        _ => Err(format!(
-            "the shards' text ids are of another tokenizer ({shard_tokenizer}) than the base's ({base}); tokenise them with the base's, or distil from a teacher of their tokenizer"
-        )),
     }
+    Err(format!(
+        "the shards' text ids are of another tokenizer ({shard_tokenizer}) than {}'s ({own}); tokenise them with its tokenizer, or name the checkpoint whose tokenizer wrote them",
+        target.display()
+    ))
+}
+
+/// A release's text vocabulary size (`talker_config.text_vocab_size` of its `config.json`).
+fn text_vocab_size(dir: &Path) -> Result<u32, String> {
+    let text = std::fs::read_to_string(dir.join("config.json")).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let config: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{}/config.json: {e}", dir.display()))?;
+    config["talker_config"]["text_vocab_size"].as_u64().map(|v| v as u32).ok_or_else(|| format!("{}/config.json has no talker_config.text_vocab_size", dir.display()))
 }
 
 /// The teacher of `cfg` (its release `t` at `dir`) checked against the student `shape`, the shards' languages and voices

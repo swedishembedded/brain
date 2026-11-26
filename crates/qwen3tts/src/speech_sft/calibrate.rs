@@ -51,6 +51,8 @@ pub struct CalibrationOpts {
     /// Rows per stream point and batch the statistics take (spread over the batch's rows).
     pub sample_rows: usize,
     pub gemm: GemmPrecision,
+    /// The checkpoint's id of each shard text id, when another tokenizer wrote the shard ([`RowMap::text`]).
+    pub text: Option<Vec<u32>>,
 }
 
 /// A measured checkpoint: its loss and its divergence from the unedited one.
@@ -88,6 +90,8 @@ pub type XVectorMap<'a> = dyn Fn(&[f32]) -> Vec<f32> + 'a;
 /// The calibration batches and the unedited checkpoint's predictions on them.
 pub struct Evaluator {
     batches: Vec<Vec<Example>>,
+    /// The shard records the batches hold, in order (each in the layout its position draws).
+    records: Vec<usize>,
     teacher: Vec<Logits>,
     baseline: Measurement,
     mtp_weight: f32,
@@ -171,7 +175,8 @@ impl Evaluator {
         if opts.batch == 0 {
             return Err("calibration: a batch holds at least one record".into());
         }
-        let rows = row_map(&base.specials, shard)?;
+        let mut rows = row_map(&base.specials, shard)?;
+        rows.text = opts.text.clone();
         if records.is_empty() {
             return Err("calibration: no record to calibrate on".into());
         }
@@ -183,7 +188,7 @@ impl Evaluator {
         let block = examples.iter().map(|e| SpeechSftModel::rows_needed(e.plan.len(), e.codes.len() / g)).max().unwrap_or(1) as u32;
         let batches: Vec<Vec<Example>> = examples.chunks(opts.batch).map(<[Example]>::to_vec).collect();
         let frames = batches.iter().map(|b| b.iter().map(|e| e.codes.len() / g).sum::<usize>()).max().unwrap_or(1) as u32;
-        let mut ev = Evaluator { batches, teacher: Vec::new(), baseline: Measurement::default(), mtp_weight: opts.mtp_weight, gemm: opts.gemm, block, frames, batch: opts.batch as u32 };
+        let mut ev = Evaluator { batches, records: records.to_vec(), teacher: Vec::new(), baseline: Measurement::default(), mtp_weight: opts.mtp_weight, gemm: opts.gemm, block, frames, batch: opts.batch as u32 };
         let m = ev.build(base)?;
         let mut stats = ForwardStats::default();
         for i in 0..ev.batches.len() {
@@ -193,6 +198,31 @@ impl Evaluator {
         }
         ev.baseline = measurement(&stats, (0.0, 0.0), opts.mtp_weight);
         Ok((ev, m))
+    }
+
+    /// Measure against `reference` (another release, read through `reference_text` when another tokenizer wrote the
+    /// shard) instead of the unedited checkpoint: its predictions on the same records become the ones every
+    /// measurement's KL is taken to, and the baseline becomes the unedited checkpoint `model`'s distance to it. A cut of
+    /// a cut is then measured against the model both came from. The reference must supervise the same positions.
+    pub fn against(&mut self, model: &SpeechSftModel, reference: Base, reference_text: Option<Vec<u32>>, shard: &Shard) -> Result<(), String> {
+        let mut rows = row_map(&reference.specials, shard)?;
+        rows.text = reference_text;
+        let g = reference.mtp.num_code_groups as usize;
+        let examples: Vec<Example> = self.records.iter().enumerate().map(|(i, &r)| example(&reference.specials, &rows, shard, r, if i % 2 == 0 { TextLayout::NonStreaming } else { TextLayout::Streaming })).collect::<Result<_, _>>()?;
+        if let Some(e) = examples.iter().find(|e| SpeechSftModel::rows_needed(e.plan.len(), e.codes.len() / g) as u32 > self.block) {
+            return Err(format!("calibration: the reference reads a record in {} rows, more than the {} the checkpoint does", e.plan.len(), self.block));
+        }
+        let r = self.build(reference)?;
+        let mut teacher = Vec::with_capacity(self.batches.len());
+        for batch in examples.chunks(self.batch as usize) {
+            r.load(batch.to_vec())?;
+            r.score();
+            teacher.push(r.logits());
+        }
+        drop(r);
+        self.teacher = teacher;
+        self.baseline = self.measure_model(model, &Inputs::default())?;
+        Ok(())
     }
 
     /// The unedited checkpoint's measurement.

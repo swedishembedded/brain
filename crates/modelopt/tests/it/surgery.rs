@@ -101,7 +101,7 @@ fn tiny(config: Value, seed: u64) -> Checkpoint {
 }
 
 fn rows() -> RowMap {
-    RowMap { languages: vec![Some(30), Some(31)], voices: vec![40] }
+    RowMap { languages: vec![Some(30), Some(31)], voices: vec![40], text: None }
 }
 
 /// Three utterances of `texts` (text token ids between the chat framing), codes from `seed`.
@@ -388,7 +388,7 @@ fn a_calibrated_plan_edits_the_checkpoint_and_its_measurement_sees_the_cost() {
     let ck = tiny(config(24, 16, 3, 2), 0xca1); // seed: fixed fixture
     let texts: Vec<&[u32]> = (0..6).map(|i| TEXTS[i % 3]).collect();
     let s = shard(24, &texts, 0x5b); // seed: fixed fixture
-    let opts = CalibrationOpts { records: 0, batch: 2, mtp_weight: 0.3, layers: true, sample_rows: 64, gemm: gpu_core::provider::library::GemmPrecision::Fp32Reference };
+    let opts = CalibrationOpts { records: 0, batch: 2, mtp_weight: 0.3, layers: true, sample_rows: 64, gemm: gpu_core::provider::library::GemmPrecision::Fp32Reference, text: None };
     let (ev, cal) = calibrate(base_of(&ck), &s, "sha256:test", &opts, &mut |_| {}).unwrap();
     assert_eq!((cal.records, cal.layers["talker.layers"].len(), cal.layers["code_predictor.layers"].len()), (6, 3, 2));
     for a in cal.layers.values().flatten() {
@@ -461,4 +461,23 @@ fn a_pca_rotation_within_equal_gains_keeps_the_shared_norm_exact() {
     surgery::rotate_stream(&mut general, graph(&ck).stream("talker").unwrap(), &b, 24, &[]).unwrap();
     let got = predict(&general, &in_basis(&ex, &b, 24)).0;
     assert!(max_diff(&want.talker, &got.talker) <= 1e-4 && max_diff(&want.cp, &got.cp) > 1e-3, "a general rotation keeps the head exact and moves the code predictor's input");
+}
+
+/// Measured against a reference, a checkpoint's distance is to the reference's predictions on the same records: zero
+/// for the reference itself, and the unedited checkpoint's own distance becomes the baseline.
+#[test]
+fn an_evaluator_against_a_reference_measures_the_distance_to_it() {
+    use qwen3tts::speech_sft::calibrate::{CalibrationOpts, Evaluator, Inputs};
+    let (ck, other) = (tiny(config(24, 16, 3, 2), 0xca1), tiny(config(24, 16, 3, 2), 0xca2)); // seed: fixed fixtures
+    let texts: Vec<&[u32]> = (0..4).map(|i| TEXTS[i % 3]).collect();
+    let s = shard(24, &texts, 0x5b); // seed: fixed fixture
+    let opts = CalibrationOpts { records: 0, batch: 2, mtp_weight: 0.3, layers: false, sample_rows: 64, gemm: gpu_core::provider::library::GemmPrecision::Fp32Reference, text: None };
+    let (mut same, m) = Evaluator::new(base_of(&ck), &s, &opts).unwrap();
+    same.against(&m, base_of(&ck), None, &s).unwrap();
+    assert!(same.baseline().talker_kl < 1e-9 && same.baseline().code_predictor_kl < 1e-9, "{:?}", same.baseline());
+    let (mut ev, m) = Evaluator::new(base_of(&ck), &s, &opts).unwrap();
+    ev.against(&m, base_of(&other), None, &s).unwrap();
+    assert!(ev.baseline().talker_kl > 1e-3, "the unedited checkpoint is its distance from the reference: {:?}", ev.baseline());
+    let itself = ev.measure(base_of(&other), &Inputs::default()).unwrap();
+    assert!(itself.talker_kl < 1e-9 && itself.code_predictor_kl < 1e-9, "{itself:?}");
 }

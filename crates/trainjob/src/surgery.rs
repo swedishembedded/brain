@@ -56,6 +56,8 @@ pub fn spec() -> ActionSpec {
         .param(int("held_out_records", "held-out records measured on (0: all)", MAX_RECORDS).implied_default(json!(64)))
         .param(int("batch_utterances", "records per calibration batch", 1_024.0).min(1.0).implied_default(json!(8)))
         .param(int("sample_rows", "rows per residual point and batch the stream and activation statistics take", 1_000_000.0).min(1.0).implied_default(json!(512)))
+        .param(ParamSpec::new("shard_tokenizer", ParamType::Str, "the release whose tokenizer wrote the shards, `<vendor>/<repo>` in the server's model store, when the base was cut from it with a trimmed vocabulary: the shards' text ids are read through its tokens"))
+        .param(ParamSpec::new("reference", ParamType::Str, "measure every edit against this release, `<vendor>/<repo>` in the server's model store (the model the base was itself cut from), instead of the unedited base; the baseline is the base's own distance to it"))
         .param(ParamSpec::new("profile", ParamType::Bool, "measure every edit alone on the base and publish no checkpoint").default(json!(false)))
         .param(ParamSpec::new("exact", ParamType::Bool, "exact fp32 products instead of tensor cores").default(json!(false)))
         .param(ParamSpec::new("install_as", ParamType::Str, "also install the checkpoint in the server's model store as `local/<this name>` (letters, digits, `.`, `_`, `-`; it must not exist yet)"))
@@ -78,6 +80,8 @@ pub struct Params {
     pub held_out_records: Option<usize>,
     pub batch_utterances: Option<usize>,
     pub sample_rows: Option<usize>,
+    pub shard_tokenizer: Option<String>,
+    pub reference: Option<String>,
     pub profile: bool,
     pub exact: bool,
     pub install_as: Option<String>,
@@ -183,6 +187,12 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
     let mut surgery = brain::SpeechSurgery::new(&base_dir, &dataset).plan(request.plan.clone()).profile(p.profile).exact(p.exact).corpus(lines(inv, "corpus")?).probe(lines(inv, "probe")?).out_dir(work.path().join("surgery")).id(id);
     if let Some(h) = &held_out {
         surgery = surgery.held_out(h);
+    }
+    if let Some(id) = &p.shard_tokenizer {
+        surgery = surgery.shard_tokenizer(job::resolve_base(env.models_dir.as_deref(), id)?);
+    }
+    if let Some(id) = &p.reference {
+        surgery = surgery.reference(job::resolve_base(env.models_dir.as_deref(), id)?);
     }
     for (set, v) in [(brain::SpeechSurgery::records as fn(_, _) -> _, p.records), (brain::SpeechSurgery::held_out_records, p.held_out_records), (brain::SpeechSurgery::batch, p.batch_utterances), (brain::SpeechSurgery::sample_rows, p.sample_rows)] {
         if let Some(n) = v {

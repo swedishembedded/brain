@@ -83,6 +83,8 @@ pub struct SpeechSurgery {
     mtp_weight: f32,
     profile: bool,
     exact: bool,
+    shard_tokenizer: Option<PathBuf>,
+    reference: Option<PathBuf>,
 }
 
 /// One edit's measurement: what it was and what it cost.
@@ -124,6 +126,8 @@ pub struct MeasuredLoss {
     pub loss: f64,
     pub talker_ce: f64,
     pub code_predictor_ce: f64,
+    /// The unedited base's KL divergence from the reference ([`SpeechSurgery::reference`]); 0 without one.
+    pub kl: f64,
 }
 
 fn backend(e: impl std::fmt::Display) -> Error {
@@ -150,6 +154,8 @@ impl SpeechSurgery {
             mtp_weight: 0.3,
             profile: false,
             exact: false,
+            shard_tokenizer: None,
+            reference: None,
         }
     }
 
@@ -238,6 +244,20 @@ impl SpeechSurgery {
         self
     }
 
+    /// The release whose tokenizer wrote the shards, when it is not the base's (a base cut from that release with a
+    /// trimmed vocabulary): the shards' text ids are read through its tokens.
+    pub fn shard_tokenizer(mut self, release: impl Into<PathBuf>) -> Self {
+        self.shard_tokenizer = Some(release.into());
+        self
+    }
+
+    /// Measure every edit's loss and KL against `release` (the model the base was itself cut from) instead of the
+    /// unedited base; the baseline is then the base's own distance to it.
+    pub fn reference(mut self, release: impl Into<PathBuf>) -> Self {
+        self.reference = Some(release.into());
+        self
+    }
+
     /// Calibrate, edit, measure, export.
     pub fn run(&self) -> Result<SpeechSurgeryOutcome> {
         self.run_with(|_| {})
@@ -255,7 +275,19 @@ impl SpeechSurgery {
         let source = brain_modelstore::fetch::file_digest(&self.base.join("model.safetensors")).map_err(|e| backend(format!("{}: {e}", self.base.display())))?;
         let shard = qwen3tts::shard::Shard::open(&self.calibration).map_err(|e| backend(format!("{}: {e}", self.calibration.display())))?;
         let held_out = self.held_out.as_ref().map(|p| qwen3tts::shard::Shard::open(p).map_err(|e| backend(format!("{}: {e}", p.display())))).transpose()?;
-        let opts = |records: usize| CalibrationOpts { records, batch: self.batch, mtp_weight: self.mtp_weight, layers: self.plan.iter().any(needs_ablation), sample_rows: self.sample_rows, gemm: if self.exact { GemmPrecision::Fp32Reference } else { GemmPrecision::Auto } };
+        // The shards' text ids as the base reads them: another release's tokenizer (the one the base was cut from) may
+        // have written them.
+        let shards: Vec<&qwen3tts::shard::Shard> = std::iter::once(&shard).chain(held_out.as_ref()).collect();
+        let writers: Vec<&Path> = self.shard_tokenizer.iter().chain(&self.reference).map(PathBuf::as_path).collect();
+        let base_vocab = base_of(&ck)?.talker.text_vocab_size;
+        let text = qwen3tts::speech_sft::shard_text_map(&self.base, base_vocab, &shards, &writers).map_err(backend)?;
+        let as_base = |id: u32| -> Result<u32> {
+            match &text {
+                None => Ok(id),
+                Some(m) => m.get(id as usize).copied().filter(|&t| t != qwen3tts::speech_sft::RowMap::ABSENT).ok_or_else(|| backend(format!("shard text token {id} is no token of the base"))),
+            }
+        };
+        let opts = |records: usize| CalibrationOpts { records, batch: self.batch, mtp_weight: self.mtp_weight, layers: self.plan.iter().any(needs_ablation), sample_rows: self.sample_rows, gemm: if self.exact { GemmPrecision::Fp32Reference } else { GemmPrecision::Auto }, text: text.clone() };
 
         on_progress("calibrating");
         let (cal_ev, mut calibration) = cal::calibrate(base_of(&ck)?, &shard, &source, &opts(self.records), &mut |s| on_progress(s)).map_err(backend)?;
@@ -267,19 +299,31 @@ impl SpeechSurgery {
         modelopt::surgery::calibration::save(&out.join(CALIBRATION_FILE), &calibration).map_err(backend)?;
         // A vocabulary trim keeps what the calibration shard and the corpus need; the held-out records it would
         // re-tokenise are left out of the measurement and counted in its report.
-        let (vocab_keep, trimmed) = self.vocabulary(&ck, &shard, held_out.as_ref())?;
+        let (vocab_keep, trimmed) = self.vocabulary(&ck, &shard, held_out.as_ref(), &as_base)?;
         let measured_shard = held_out.as_ref().unwrap_or(&shard);
         let kept: Option<std::collections::HashSet<u32>> = vocab_keep.get("text").map(|k| k.iter().map(|&i| i as u32).collect());
-        let candidates: Vec<usize> = (0..measured_shard.len()).filter(|&r| kept.as_ref().is_none_or(|k| measured_shard.record(r).text_ids.iter().all(|t| k.contains(t)))).collect();
+        let candidates: Vec<usize> = (0..measured_shard.len()).filter(|&r| kept.as_ref().is_none_or(|k| measured_shard.record(r).text_ids.iter().all(|&t| as_base(t).is_ok_and(|b| k.contains(&b))))).collect();
         let measured_records: Vec<usize> = cal::spread(candidates.len(), self.held_out_records).into_iter().map(|i| candidates[i]).collect();
-        let measured_ev = match &held_out {
-            Some(h) => Some(Evaluator::on_records(base_of(&ck)?, h, &measured_records, &opts(self.held_out_records)).map_err(backend)?.0),
-            None if kept.is_some() => Some(Evaluator::on_records(base_of(&ck)?, &shard, &measured_records, &opts(self.held_out_records)).map_err(backend)?.0),
-            None => None,
+        // A reference measures on its own evaluator, as a vocabulary trim does (it measures only records of kept tokens).
+        let measured_ev = match (&held_out, kept.is_some() || self.reference.is_some()) {
+            (Some(h), _) => Some(Evaluator::on_records(base_of(&ck)?, h, &measured_records, &opts(self.held_out_records)).map_err(backend)?),
+            (None, true) => Some(Evaluator::on_records(base_of(&ck)?, &shard, &measured_records, &opts(self.held_out_records)).map_err(backend)?),
+            (None, false) => None,
+        };
+        let measured_ev = match (measured_ev, &self.reference) {
+            (Some((mut ev, m)), Some(dir)) => {
+                on_progress(&format!("measuring against {}", dir.display()));
+                let reference = Checkpoint::read(dir).map_err(backend)?;
+                let r_base = base_of(&reference)?;
+                let r_text = qwen3tts::speech_sft::shard_text_map(dir, r_base.talker.text_vocab_size, &shards, &self.shard_tokenizer.iter().map(PathBuf::as_path).collect::<Vec<_>>()).map_err(backend)?;
+                ev.against(&m, r_base, r_text, held_out.as_ref().unwrap_or(&shard)).map_err(backend)?;
+                Some(ev)
+            }
+            (ev, _) => ev.map(|(ev, _)| ev),
         };
         let measure_on = measured_ev.as_ref().unwrap_or(&cal_ev);
         let baseline = measure_on.baseline();
-        on_progress(&format!("held-out records, unedited: loss {:.4} over {} records ({} of {} held out records hold only kept tokens)", baseline.loss, measured_records.len(), candidates.len(), measured_shard.len()));
+        on_progress(&format!("held-out records, unedited: loss {:.4} kl {:.4} over {} records ({} of {} held out records hold only kept tokens)", baseline.loss, baseline.kl(self.mtp_weight), measured_records.len(), candidates.len(), measured_shard.len()));
 
         let model = plan::Model { graph: &qwen3tts_graph, check: &|c: &Checkpoint| qwen3tts::surgery::check_upstream(&c.config, &|n| c.tensors.contains_key(n)) };
         let mut costs = Vec::new();
@@ -341,7 +385,7 @@ impl SpeechSurgery {
             Some(dir)
         };
         let outcome = SpeechSurgeryOutcome {
-            baseline: MeasuredLoss { loss: baseline.loss, talker_ce: baseline.talker_ce, code_predictor_ce: baseline.code_predictor_ce },
+            baseline: MeasuredLoss { loss: baseline.loss, talker_ce: baseline.talker_ce, code_predictor_ce: baseline.code_predictor_ce, kl: baseline.kl(self.mtp_weight) },
             edits: costs,
             params_before: ck.params(),
             params_after: if self.profile { ck.params() } else { edited.params() },
@@ -357,7 +401,7 @@ impl SpeechSurgery {
 
     /// The ids every vocabulary trim of the plan keeps: every token the
     /// shards hold and the corpus encodes to, with the rewritten files.
-    fn vocabulary(&self, ck: &Checkpoint, shard: &qwen3tts::shard::Shard, held_out: Option<&qwen3tts::shard::Shard>) -> Result<Trimmed> {
+    fn vocabulary(&self, ck: &Checkpoint, shard: &qwen3tts::shard::Shard, held_out: Option<&qwen3tts::shard::Shard>, as_base: &dyn Fn(u32) -> Result<u32>) -> Result<Trimmed> {
         let names: Vec<&String> = self.plan.iter().filter_map(|e| if let Edit::TrimVocabulary { vocabulary } = e { Some(vocabulary) } else { None }).collect();
         if names.is_empty() {
             return Ok((BTreeMap::new(), None));
@@ -370,9 +414,9 @@ impl SpeechSurgery {
         // The corpus: every utterance text of the calibration shard and the texts given; kept exactly: the token ids
         // both shards store (a recovery reads the held-out shard too, and the ids may come from another loader than
         // the files' encoding); the probe: the held-out shard's texts and the probe texts given.
-        let stored = |s: &qwen3tts::shard::Shard| (0..s.len()).flat_map(|r| s.record(r).text_ids.iter().map(|&t| t as usize)).collect::<Vec<_>>();
-        let mut extra: Vec<usize> = stored(shard);
-        extra.extend(held_out.map(stored).unwrap_or_default());
+        let stored = |s: &qwen3tts::shard::Shard| -> Result<Vec<usize>> { (0..s.len()).flat_map(|r| s.record(r).text_ids.iter().map(|&t| as_base(t).map(|b| b as usize))).collect() };
+        let mut extra: Vec<usize> = stored(shard)?;
+        extra.extend(held_out.map(stored).transpose()?.unwrap_or_default());
         // The config's own special tokens stay whatever the corpus holds.
         for key in qwen3tts::surgery::TOKEN_ID_KEYS {
             if let Some(id) = ck.config.get(key).and_then(serde_json::Value::as_u64) {
@@ -396,7 +440,8 @@ impl SpeechSurgery {
             }
             with_text += 1;
             // A record's ids frame its text: `<|im_start|>assistant\n` before, `<|im_end|>\n<|im_start|>assistant\n` after.
-            differ += usize::from(data::tokenizer::Tokenizer::encode(&tok, &rec.id.text) != rec.text_ids[3..rec.text_ids.len() - 5]);
+            let ids: Vec<u32> = rec.text_ids.iter().map(|&t| as_base(t)).collect::<Result<_>>()?;
+            differ += usize::from(data::tokenizer::Tokenizer::encode(&tok, &rec.id.text) != ids[3..ids.len() - 5]);
         }
         Ok((BTreeMap::from([("text".to_string(), t.keep.clone())]), Some((t.files, t.report, (with_text, differ)))))
     }

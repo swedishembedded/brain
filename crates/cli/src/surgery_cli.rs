@@ -32,6 +32,10 @@ brain speech-surgery BASE --calibration SHARD --plan FILE --out DIR [options]
   --sample-rows N        rows per stream point and batch the statistics take
                          (default 512).
   --exact                exact fp32 products instead of tensor cores.
+  --shard-tokenizer DIR  the release whose tokenizer wrote the shards, when
+                         BASE was cut from it with a trimmed vocabulary.
+  --reference DIR        measure against this release (the model BASE was
+                         cut from) instead of the unedited BASE.
   --id ID                the model id the checkpoint's manifest registers.
 ";
 
@@ -50,6 +54,8 @@ struct Args {
     batch: Option<usize>,
     sample_rows: Option<usize>,
     exact: bool,
+    shard_tokenizer: Option<String>,
+    reference: Option<String>,
     id: Option<String>,
 }
 
@@ -77,6 +83,8 @@ fn parse(argv: &[String]) -> Result<Args, String> {
             "--batch" => a.batch = Some(number(value()?)?),
             "--sample-rows" => a.sample_rows = Some(number(value()?)?),
             "--exact" => a.exact = true,
+            "--shard-tokenizer" => a.shard_tokenizer = Some(value()?),
+            "--reference" => a.reference = Some(value()?),
             "--id" => a.id = Some(value()?),
             other if other.starts_with('-') => return Err(format!("brain speech-surgery: unknown option '{other}'")),
             other if a.base.is_empty() => a.base = other.to_string(),
@@ -105,6 +113,12 @@ fn surgery(a: &Args) -> Result<brain::SpeechSurgery, String> {
     let plan = std::fs::read_to_string(a.plan.as_deref().unwrap_or_default()).map_err(|e| format!("brain speech-surgery: --plan: {e}"))?;
     let mut s = brain::SpeechSurgery::new(&a.base, a.calibration.clone().unwrap_or_default()).plan_json(&plan).map_err(|e| e.to_string())?.profile(a.profile).exact(a.exact);
     s = s.out_dir(a.out.clone().unwrap_or_default());
+    if let Some(d) = &a.shard_tokenizer {
+        s = s.shard_tokenizer(d);
+    }
+    if let Some(d) = &a.reference {
+        s = s.reference(d);
+    }
     if let Some(h) = &a.held_out {
         s = s.held_out(h);
     }
