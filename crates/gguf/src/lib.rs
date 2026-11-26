@@ -60,4 +60,4 @@ pub use kquant::{try_kq_rect, KqLayout, KqRect};
 pub use kv::{architecture, ArchKv};
 pub use leaf::{role, Role};
 pub use route::{route, route_path, Route};
-pub use upload::{held_tier, held_tier_of, upload_weight};
+pub use upload::{held_tier, held_tier_of, upload_fused_weight, upload_weight};

@@ -843,13 +843,20 @@ pub struct QwenResident {
 /// directory into the checkpoint inside it (for a Hugging Face directory its
 /// `config.json`, which `qwen3::store_checkpoint_path` turns back into the
 /// directory, the form `open_checkpoint` reads), and leaves a plain file path
-/// alone. Unresolvable is not fatal - the path travels on verbatim so
-/// `activate` reports it against the real open, which is where every other
-/// bad path is reported.
-fn resolve_served_base(spec: &str, models_dir: Option<&std::path::Path>) -> (String, Option<std::path::PathBuf>, Option<String>) {
+/// alone.
+///
+/// A spec that is not on disk and does not parse as a model reference is a
+/// path that is simply wrong: it travels on verbatim so `activate` reports it
+/// against the real open, as every other bad path is. A spec that IS shaped
+/// like a `vendor/repo` reference but does not resolve (a typo, an unpulled
+/// model, no store configured) is an `Err` naming the reference and the store,
+/// which the resident reports at activation instead of a later, unrelated
+/// "no tokenizer" failure.
+fn resolve_served_base(spec: &str, models_dir: Option<&std::path::Path>) -> Result<(String, Option<std::path::PathBuf>, Option<String>), String> {
     match loader::model_dir::resolve_base(spec, models_dir) {
-        Ok((weights, dir, id)) => (qwen3::store_checkpoint_path(&weights, &dir).to_string_lossy().into_owned(), Some(dir), Some(id)),
-        Err(_) => (spec.to_string(), None, None),
+        Ok((weights, dir, id)) => Ok((qwen3::store_checkpoint_path(&weights, &dir).to_string_lossy().into_owned(), Some(dir), Some(id))),
+        Err(e) if !std::path::Path::new(spec).exists() && brain_modelref::ModelRef::parse(spec).is_ok() => Err(e),
+        Err(_) => Ok((spec.to_string(), None, None)),
     }
 }
 
@@ -868,10 +875,18 @@ impl QwenResident {
     /// The resident `--checkpoint` selects, `None` when no checkpoint was
     /// named. `cfg` carries every serving-policy flag `brain serve` parsed.
     /// The tokenizer is `--tokenizer`, else the one beside the checkpoint.
-    pub fn from_config(cfg: QwenServeConfig) -> Option<QwenResident> {
+    pub fn from_config(mut cfg: QwenServeConfig) -> Option<QwenResident> {
         let spec = cfg.weights.clone().filter(|p| !p.is_empty())?;
 
-        let (path, dir, base_id) = resolve_served_base(&spec, cfg.models_dir.as_deref());
+        let (path, dir, base_id) = match resolve_served_base(&spec, cfg.models_dir.as_deref()) {
+            Ok(resolved) => resolved,
+            // An unresolvable reference is refused by name at activation (the
+            // refusal `activate` already reports), not left to fail as a missing tokenizer.
+            Err(why) => {
+                cfg.refused.get_or_insert(why);
+                (spec.clone(), None, None)
+            }
+        };
 
         let tokenizer = match cfg.tokenizer.clone().filter(|t| !t.is_empty()) {
             Some(t) => t,
@@ -1849,16 +1864,16 @@ mod tests {
         let card = checkpoint::st::ModelCard::new("Qwen/Qwen3-0.6B", "qwen");
         checkpoint::st::save_safetensors(native.join("model.brain.safetensors").to_str().unwrap(), &[("weight".to_string(), vec![2], vec![1.0, 2.0])], &serde_json::json!({"vocab_size": 23}), Some(&card)).unwrap();
 
-        let (path, dir, id) = resolve_served_base(hf.to_str().unwrap(), None);
+        let (path, dir, id) = resolve_served_base(hf.to_str().unwrap(), None).unwrap();
         assert_eq!(id.as_deref(), Some("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"), "resolved, not passed on verbatim");
         assert_eq!(dir.as_deref(), Some(hf.as_path()));
         assert_eq!(path, hf.to_str().unwrap());
 
-        let (path, _, _) = resolve_served_base(native.to_str().unwrap(), None);
+        let (path, _, _) = resolve_served_base(native.to_str().unwrap(), None).unwrap();
         assert_eq!(path, native.join("model.brain.safetensors").to_str().unwrap());
 
         let missing = root.join("absent");
-        assert_eq!(resolve_served_base(missing.to_str().unwrap(), None), (missing.to_str().unwrap().to_string(), None, None));
+        assert_eq!(resolve_served_base(missing.to_str().unwrap(), None), Ok((missing.to_str().unwrap().to_string(), None, None)));
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1879,15 +1894,22 @@ mod tests {
 
         // With the store: the reference resolves to the checkpoint, and the
         // directory it sits in carries the tokenizer `from_config` picks up.
-        let (path, dir, id) = resolve_served_base("Qwen/Qwen3-0.6B", Some(&root));
+        let (path, dir, id) = resolve_served_base("Qwen/Qwen3-0.6B", Some(&root)).unwrap();
         assert_eq!(id.as_deref(), Some("Qwen/Qwen3-0.6B"));
         assert_eq!(dir.as_deref(), Some(repo.as_path()));
         assert_eq!(path, repo.join("model.brain.safetensors").to_str().unwrap());
 
-        // Without the store (the old signature's behaviour): the ref is not
-        // a file path, so it travels on verbatim and no tokenizer is found.
-        let (path, dir, id) = resolve_served_base("Qwen/Qwen3-0.6B", None);
-        assert_eq!((path.as_str(), dir.as_deref(), id.as_deref()), ("Qwen/Qwen3-0.6B", None, None));
+        // A mistyped reference is an error naming it and the store, not a
+        // path that travels on to fail later as a missing tokenizer.
+        let err = resolve_served_base("Qwen/Qwen3-0.6b", Some(&root)).unwrap_err();
+        assert!(err.contains("Qwen/Qwen3-0.6b") && err.contains("not found in the model store") && err.contains(root.to_str().unwrap()), "{err}");
+        let err = resolve_served_base("Qwen/Qwen3-0.6B", None).unwrap_err();
+        assert!(err.contains("no models directory"), "{err}");
+
+        // The resident carries the refusal, so activation reports it.
+        let cfg = QwenServeConfig { weights: Some("Qwen/Qwen3-0.6b".to_string()), models_dir: Some(root.clone()), ..QwenServeConfig::default() };
+        let resident = QwenResident::from_config(cfg).unwrap();
+        assert!(resident.plan.refused.as_deref().is_some_and(|why| why.contains("not found in the model store")));
 
         std::fs::remove_dir_all(&root).unwrap();
     }

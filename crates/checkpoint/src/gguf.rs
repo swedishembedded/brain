@@ -2011,6 +2011,13 @@ impl crate::TensorSource for MmapGguf {
         Some((BlockLayout { ty, numel }, std::borrow::Cow::Borrowed(&self.mmaps[part][start..start + nbytes])))
     }
 
+    /// [`Self::raw_blocks`]'s layout from the header alone: a planner that asks every tensor's format (which tier
+    /// will hold it) reads no data, so it charges no bytes to the load meter.
+    fn raw_block_layout(&self, name: &str) -> Option<BlockLayout> {
+        let &(_, ty, _, _, numel) = self.index.get(name)?;
+        Some(BlockLayout { ty: GgmlType::from_id(ty)?, numel })
+    }
+
     /// Element count of `name`, without decoding - known from the header for
     /// every ggml type, quantized or not, since the caller only needs to know
     /// how many f32s a dequantized [`with_tensor`](Self::with_tensor) call

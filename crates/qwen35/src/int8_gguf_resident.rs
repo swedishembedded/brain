@@ -1493,6 +1493,9 @@ struct HiddenTaps {
 
 /// A built, multi-card, GGUF-resident Qwen3.8-27B.
 pub struct Qwen35GgufInstance {
+    /// The id the resident that built this instance serves ([`Qwen35GgufResident::model_id`]),
+    /// so an instance's refusals name the checkpoint it holds, not the well-known release.
+    model_id: String,
     cfg: Qwen35Config,
     shards: Vec<DeviceShard>,
     /// Kept open for the instance's lifetime so embedding rows can be read on
@@ -1615,14 +1618,14 @@ impl Qwen35GgufInstance {
     /// The pool the sparse KV planes and state pools of the one stage (and the drafter's KV planes) draw on: block `b` is granule
     /// `b` of every plane, state row `r` the granules of its byte range in every recurrent layer's pool.
     fn unified_ledger(&self) -> Result<unipool::StateLedger, String> {
-        let [shard] = self.shards.as_slice() else { return Err(format!("{MODEL}: the unified state pool serves one stage, this instance has {}", self.shards.len())) };
-        let KvLayout::Paged { block_rows, pool_rows } = self.kv_layout else { return Err(format!("{MODEL}: the unified state pool needs the paged KV layout")) };
+        let [shard] = self.shards.as_slice() else { return Err(format!("{}: the unified state pool serves one stage, this instance has {}", self.model_id, self.shards.len())) };
+        let KvLayout::Paged { block_rows, pool_rows } = self.kv_layout else { return Err(format!("{}: the unified state pool needs the paged KV layout", self.model_id)) };
         let caches = std::iter::once(&shard.caches).chain(self.mtp.as_ref().map(|m| &m.caches));
         let kv_planes: Vec<DeviceBuffer> = caches.flat_map(|c| c.gqa_kv.iter().zip(&c.full).filter(|(_, owned)| **owned).flat_map(|(layer, _)| [layer.k.data().clone(), layer.v.data().clone()])).collect();
         let c = &shard.caches;
         let state_planes: Vec<DeviceBuffer> = c.pool_state.iter().zip(&c.recurrent).filter(|(_, lin)| **lin).map(|(p, _)| p.clone()).collect();
         let geo = unipool::StateGeometry::of(&self.cfg, c.pool_bf16, self.max_batch);
-        let pool = unipool::UnifiedPool::new(&shard.qwen35.gpu, kv_planes, state_planes, geo, pool_rows / block_rows).map_err(|e| format!("{MODEL}: the unified state pool: {e}"))?;
+        let pool = unipool::UnifiedPool::new(&shard.qwen35.gpu, kv_planes, state_planes, geo, pool_rows / block_rows).map_err(|e| format!("{}: the unified state pool: {e}", self.model_id))?;
         Ok(unipool::StateLedger::new(pool))
     }
 
@@ -1646,7 +1649,7 @@ impl Qwen35GgufInstance {
     fn embed_row(&self, t: u32) -> Result<Vec<f32>, String> {
         self.ckpt
             .embed_rows(&self.embed.name, &[t as usize], self.embed.d)
-            .ok_or_else(|| format!("{MODEL}: token id {t} is outside '{}'", self.embed.name))?
+            .ok_or_else(|| format!("{}: token id {t} is outside '{}'", self.model_id, self.embed.name))?
     }
 
     /// A whole prefill round's embeddings, `[n, d_model]` in token order -
@@ -1661,7 +1664,7 @@ impl Qwen35GgufInstance {
         let rows: Vec<usize> = tokens.iter().map(|&t| t as usize).collect();
         self.ckpt.embed_rows(&self.embed.name, &rows, self.embed.d).ok_or_else(|| {
             let bad = tokens.iter().find(|&&t| self.ckpt.embed_rows(&self.embed.name, &[t as usize], self.embed.d).is_none()).copied().unwrap_or(0);
-            format!("{MODEL}: token id {bad} is outside '{}'", self.embed.name)
+            format!("{}: token id {bad} is outside '{}'", self.model_id, self.embed.name)
         })?
     }
 
@@ -1673,7 +1676,7 @@ impl Qwen35GgufInstance {
         let Some(embeds) = embeds else { return Ok(rows) };
         let d = self.cfg.d_model as usize;
         if embeds.width() != d {
-            return Err(format!("{MODEL}: embedding rows are {} floats wide, the model takes {d}", embeds.width()));
+            return Err(format!("{}: embedding rows are {} floats wide, the model takes {d}", self.model_id, embeds.width()));
         }
         for (pos, row) in embeds.rows_in(pos_start, pos_start + tokens.len() as u32) {
             let at = (pos - pos_start) as usize * d;
@@ -1727,7 +1730,7 @@ impl Qwen35GgufInstance {
     fn first_rows<'a>(&self, tokens: &[u32], host_rows: &'a mut Vec<f32>) -> Result<FirstRows<'a>, String> {
         if self.embeds_on_device() {
             if let Some(&bad) = tokens.iter().find(|&&t| t >= self.cfg.vocab) {
-                return Err(format!("{MODEL}: token id {bad} is outside '{}'", self.embed.name));
+                return Err(format!("{}: token id {bad} is outside '{}'", self.model_id, self.embed.name));
             }
             return Ok(FirstRows::Gather { words: tokens.len() * self.cfg.d_model as usize });
         }
@@ -1815,7 +1818,7 @@ impl Qwen35GgufInstance {
     fn stack_chunk_carry_with(&self, tokens: &[u32], pos_start: u32, slot: u32, embeds: Option<&PromptEmbeds>) -> Result<(Vec<f32>, Vec<f32>), String> {
         let d = self.cfg.d_model as usize;
         let n = tokens.len();
-        assert!(n > 0, "{MODEL}: stack_chunk_carry on an empty round");
+        assert!(n > 0, "{}: stack_chunk_carry on an empty round", self.model_id);
         let embedded = self.embed_rows_spliced(tokens, pos_start, embeds)?;
         let debug = self.stage_debug.get();
         let mut per_stage_rms = Vec::new();
@@ -1858,7 +1861,7 @@ impl Qwen35GgufInstance {
     /// plain generation for a consumer that has none.
     pub fn enable_hidden_taps(&self, layers: &[usize]) {
         for &l in layers {
-            assert!(l < self.cfg.n_layers as usize, "{MODEL}: hidden tap asked for layer {l} of a {}-layer model", self.cfg.n_layers);
+            assert!(l < self.cfg.n_layers as usize, "{}: hidden tap asked for layer {l} of a {}-layer model", self.model_id, self.cfg.n_layers);
         }
         for s in &self.shards {
             s.qwen35.set_hidden_taps(layers);
@@ -1964,10 +1967,10 @@ impl Qwen35GgufInstance {
     pub fn logits_with_norm(&self, hidden: &[f32], rows: u32, norm: &[f32]) -> Result<Vec<f32>, String> {
         let d = self.cfg.d_model as usize;
         if norm.len() != d {
-            return Err(format!("{MODEL}: logits_with_norm got a {}-wide final norm for a {d}-wide model", norm.len()));
+            return Err(format!("{}: logits_with_norm got a {}-wide final norm for a {d}-wide model", self.model_id, norm.len()));
         }
         if hidden.len() != rows as usize * d {
-            return Err(format!("{MODEL}: logits_with_norm got {} floats for {rows} rows of {d}", hidden.len()));
+            return Err(format!("{}: logits_with_norm got {} floats for {rows} rows of {d}", self.model_id, hidden.len()));
         }
         let last = self.shards.last().expect("a plan always has at least one stage");
         let nb = last.qwen35.gpu.storage_init("qwen35.head.foreign_norm", norm);
@@ -2002,9 +2005,9 @@ impl Qwen35GgufInstance {
     /// which is a silent acceptance-rate loss and not a visible failure.
     pub fn target_hidden(&self, from: u32, n: u32) -> Result<Vec<f32>, String> {
         let taps = self.taps.borrow();
-        let taps = taps.as_ref().ok_or_else(|| format!("{MODEL}: target_hidden before enable_hidden_taps"))?;
+        let taps = taps.as_ref().ok_or_else(|| format!("{}: target_hidden before enable_hidden_taps", self.model_id))?;
         if from + n > taps.filled.get() {
-            return Err(format!("{MODEL}: target_hidden asked for positions {from}..{} but only {} have been computed", from + n, taps.filled.get()));
+            return Err(format!("{}: target_hidden asked for positions {from}..{} but only {} have been computed", self.model_id, from + n, taps.filled.get()));
         }
         let w = taps.layers.len() * self.cfg.d_model as usize;
         let out = taps.rows.borrow()[from as usize * w..(from + n) as usize * w].to_vec();
@@ -2027,8 +2030,8 @@ impl Qwen35GgufInstance {
                 .iter()
                 .find(|(li, _)| *li == l)
                 .map(|(_, v)| v)
-                .ok_or_else(|| format!("{MODEL}: hidden tap for layer {l} was requested but no stage produced it"))?;
-            assert_eq!(src.len(), n * d, "{MODEL}: hidden tap for layer {l} is {} floats, expected {}", src.len(), n * d);
+                .ok_or_else(|| format!("{}: hidden tap for layer {l} was requested but no stage produced it", self.model_id))?;
+            assert_eq!(src.len(), n * d, "{}: hidden tap for layer {l} is {} floats, expected {}", self.model_id, src.len(), n * d);
             for i in 0..n {
                 let dst = (pos_start as usize + i) * w + band * d;
                 rows[dst..dst + d].copy_from_slice(&src[i * d..(i + 1) * d]);
@@ -2105,15 +2108,15 @@ impl Qwen35GgufInstance {
     /// [`Self::stack_decode_hidden`] leaving the block on the last stage's card, still being computed.
     fn stack_decode_hidden_dev(&self, tokens: &[u32], slots: &[u32], positions: &[u32]) -> Result<DeviceBuffer, String> {
         let bsz = tokens.len();
-        assert!(bsz == positions.len() && bsz == slots.len(), "{MODEL}: a decode step needs one slot and position per token ({bsz} tokens, {} slots, {} positions)", slots.len(), positions.len());
-        assert!(bsz > 0, "{MODEL}: stack_decode_hidden on an empty batch");
+        assert!(bsz == positions.len() && bsz == slots.len(), "{}: a decode step needs one slot and position per token ({bsz} tokens, {} slots, {} positions)", self.model_id, slots.len(), positions.len());
+        assert!(bsz > 0, "{}: stack_decode_hidden on an empty batch", self.model_id);
         for s in &self.shards {
-            assert!(bsz <= s.caches.slots as usize, "{MODEL}: a decode step got {bsz} sequences but a stage holds only {} slots", s.caches.slots);
+            assert!(bsz <= s.caches.slots as usize, "{}: a decode step got {bsz} sequences but a stage holds only {} slots", self.model_id, s.caches.slots);
             if let Some(&bad) = slots.iter().find(|&&sl| sl >= s.caches.slots) {
-                panic!("{MODEL}: slot {bad} is outside this instance's {} slots", s.caches.slots);
+                panic!("{}: slot {bad} is outside this instance's {} slots", self.model_id, s.caches.slots);
             }
         }
-        debug_assert!(slots.iter().collect::<std::collections::HashSet<_>>().len() == bsz, "{MODEL}: a decode step names a slot twice");
+        debug_assert!(slots.iter().collect::<std::collections::HashSet<_>>().len() == bsz, "{}: a decode step names a slot twice", self.model_id);
         let mut host_rows = Vec::new();
         let first = {
             let _embed = gpu_core::markers::range(c"decode.embed");
@@ -2394,10 +2397,10 @@ impl Qwen35GgufInstance {
     /// `prompt`, never a continuation.
     pub fn prefill_timed(&self, prompt: &[u32]) -> Result<f64, String> {
         if prompt.is_empty() {
-            return Err(format!("{MODEL}: prefill_timed needs a non-empty prompt"));
+            return Err(format!("{}: prefill_timed needs a non-empty prompt", self.model_id));
         }
         if prompt.len() as u64 > self.cap as u64 {
-            return Err(format!("{MODEL}: a prompt of {} tokens exceeds this instance's context capacity {}", prompt.len(), self.cap));
+            return Err(format!("{}: a prompt of {} tokens exceeds this instance's context capacity {}", self.model_id, prompt.len(), self.cap));
         }
         self.reset();
         let t = std::time::Instant::now();
@@ -2449,13 +2452,13 @@ impl Qwen35GgufInstance {
     /// sibling so both refuse the same shapes identically.
     fn check_batch_at(&self, tokens: &[u32], positions: &[u32]) -> Result<(), String> {
         if tokens.len() != positions.len() || tokens.is_empty() {
-            return Err(format!("{MODEL}: decode_batch_at needs one position per token ({} tokens, {} positions)", tokens.len(), positions.len()));
+            return Err(format!("{}: decode_batch_at needs one position per token ({} tokens, {} positions)", self.model_id, tokens.len(), positions.len()));
         }
         if tokens.len() > self.max_batch as usize {
-            return Err(format!("{MODEL}: batch of {} exceeds this instance's max_batch {}", tokens.len(), self.max_batch));
+            return Err(format!("{}: batch of {} exceeds this instance's max_batch {}", self.model_id, tokens.len(), self.max_batch));
         }
         if let Some(&p) = positions.iter().find(|&&p| p >= self.cap) {
-            return Err(format!("{MODEL}: position {p} is beyond this instance's context capacity {}", self.cap));
+            return Err(format!("{}: position {p} is beyond this instance's context capacity {}", self.model_id, self.cap));
         }
         Ok(())
     }
@@ -2526,7 +2529,7 @@ impl Qwen35GgufInstance {
     #[allow(clippy::too_many_arguments)]
     fn prefill_hidden_with(&self, prompt: &[u32], start: usize, end: usize, slot: u32, resume: bool, mut collect: Option<&mut Vec<f32>>, embeds: Option<&PromptEmbeds>) -> Result<Vec<f32>, String> {
         let d = self.cfg.d_model as usize;
-        assert!(start < end && end <= prompt.len(), "{MODEL}: a continued prefill needs at least one new token");
+        assert!(start < end && end <= prompt.len(), "{}: a continued prefill needs at least one new token", self.model_id);
         if start == 0 {
             for s in &self.shards {
                 s.caches.reset_work(&s.qwen35.gpu);
@@ -2616,13 +2619,13 @@ impl Qwen35GgufInstance {
         let counts: Vec<u32> = rows.iter().map(|r| r.len() as u32).collect();
         let total: u32 = counts.iter().sum();
         if total > self.spec_rows {
-            return Err(format!("{MODEL}: a verify step of {total} rows exceeds the {} rows of scratch", self.spec_rows));
+            return Err(format!("{}: a verify step of {total} rows exceeds the {} rows of scratch", self.model_id, self.spec_rows));
         }
         let tokens: Vec<u32> = rows.iter().flat_map(|r| r.iter().copied()).collect();
         let row_slots: Vec<u32> = slots.iter().zip(&counts).flat_map(|(&s, &c)| std::iter::repeat_n(s, c as usize)).collect();
         let row_positions: Vec<u32> = positions.iter().zip(&counts).flat_map(|(&p, &c)| p..p + c).collect();
         if let Some(&p) = row_positions.iter().find(|&&p| p >= self.cap) {
-            return Err(format!("{MODEL}: verify position {p} is beyond this instance's context capacity {}", self.cap));
+            return Err(format!("{}: verify position {p} is beyond this instance's context capacity {}", self.model_id, self.cap));
         }
         self.forward_rows(Some((&tokens, &row_slots, &row_positions)), Some((slots, &counts)), jobs)
     }
@@ -2630,10 +2633,10 @@ impl Qwen35GgufInstance {
     /// `verify`: the leading rows are a verify step over these sequences (slots, rows each) and not unrelated sequences.
     fn forward_rows(&self, decode: Option<(&[u32], &[u32], &[u32])>, verify: Option<(&[u32], &[u32])>, jobs: &[MultiPrefillJob<'_>]) -> Result<(Vec<f32>, Vec<MultiPrefillRows>), String> {
         let d = self.cfg.d_model as usize;
-        assert!(!jobs.is_empty() && jobs.iter().all(|j| j.start < j.end && j.end <= j.prompt.len()), "{MODEL}: a multi-sequence prefill needs at least one new token per job");
+        assert!(!jobs.is_empty() && jobs.iter().all(|j| j.start < j.end && j.end <= j.prompt.len()), "{}: a multi-sequence prefill needs at least one new token per job", self.model_id);
         let lead = decode.map_or(0, |(tokens, slots, positions)| {
-            assert!(tokens.len() == slots.len() && tokens.len() == positions.len(), "{MODEL}: a decode row needs one slot and position per token");
-            debug_assert!(verify.is_some() || slots.iter().collect::<std::collections::HashSet<_>>().len() == slots.len(), "{MODEL}: a mixed forward names a decode slot twice");
+            assert!(tokens.len() == slots.len() && tokens.len() == positions.len(), "{}: a decode row needs one slot and position per token", self.model_id);
+            debug_assert!(verify.is_some() || slots.iter().collect::<std::collections::HashSet<_>>().len() == slots.len(), "{}: a mixed forward names a decode slot twice", self.model_id);
             tokens.len()
         });
         let tokens: Vec<u32> = decode.map_or(&[][..], |(tokens, ..)| tokens).iter().copied().chain(jobs.iter().flat_map(|j| j.prompt[j.start..j.end].iter().copied())).collect();
@@ -2843,7 +2846,7 @@ impl Qwen35GgufInstance {
         top.sort_by(|a, b| b.1.total_cmp(&a.1));
         let shown: Vec<String> =
             top.iter().take(5).map(|&(i, l)| format!("({i}, {l:.3}, {:?})", self.tok.decode(&[i as u32]))).collect();
-        eprintln!("{MODEL}: pos {pos}: stage residual rms {per_stage_rms:?} | top5 {}", shown.join(" "));
+        eprintln!("{}: pos {pos}: stage residual rms {per_stage_rms:?} | top5 {}", self.model_id, shown.join(" "));
     }
 
     /// Real generation: CHUNKED prefill of `prompt` (bounded rounds of
@@ -2873,14 +2876,14 @@ impl Qwen35GgufInstance {
         on_token: &mut dyn FnMut(&[u32]) -> bool,
     ) -> Result<Vec<u32>, String> {
         if prompt.is_empty() {
-            return Err(format!("{MODEL}: empty prompt"));
+            return Err(format!("{}: empty prompt", self.model_id));
         }
         let need = prompt.len() as u64 + max_new as u64;
         if need > self.cap as u64 {
-            return Err(format!("{MODEL}: prompt ({}) + max_new ({max_new}) = {need} exceeds this instance's context capacity {}", prompt.len(), self.cap));
+            return Err(format!("{}: prompt ({}) + max_new ({max_new}) = {need} exceeds this instance's context capacity {}", self.model_id, prompt.len(), self.cap));
         }
         if let Some(bad) = prompt.iter().find(|&&t| t >= self.cfg.vocab) {
-            return Err(format!("{MODEL}: prompt token id {bad} is outside vocab {}", self.cfg.vocab));
+            return Err(format!("{}: prompt token id {bad} is outside vocab {}", self.model_id, self.cfg.vocab));
         }
         self.reset();
         let mut rng = Rng::new(seed);
@@ -2921,7 +2924,7 @@ impl Qwen35GgufInstance {
     /// `tiny()` dims; this measures it at the real one.
     pub fn tape_comparison_trace(&self, prompt: &[u32], steps: u32) -> Result<TapeTrace, String> {
         if prompt.is_empty() {
-            return Err(format!("{MODEL}: empty prompt"));
+            return Err(format!("{}: empty prompt", self.model_id));
         }
         self.reset();
         let (mut logits, mut pos) = self.replay_prompt(prompt, 0)?;
@@ -2959,7 +2962,7 @@ impl Qwen35GgufInstance {
     /// request takes.
     pub fn teacher_forced_logits(&self, prompt: &[u32], forced: &[u32]) -> Result<Vec<Vec<f32>>, String> {
         if prompt.is_empty() {
-            return Err(format!("{MODEL}: empty prompt"));
+            return Err(format!("{}: empty prompt", self.model_id));
         }
         self.reset();
         let (mut logits, mut pos) = self.replay_prompt(prompt, 0)?;
@@ -3006,10 +3009,10 @@ impl Qwen35GgufInstance {
     /// handed to `each` in order with that position.
     fn teacher_forced_rows(&self, tokens: &[u32], adapter_slot: u32, mut each: impl FnMut(u32, &[f32])) -> Result<(), String> {
         if tokens.len() < 2 {
-            return Err(format!("{MODEL}: a scored record needs at least two tokens, got {}", tokens.len()));
+            return Err(format!("{}: a scored record needs at least two tokens, got {}", self.model_id, tokens.len()));
         }
         if tokens.len() as u64 > self.cap as u64 {
-            return Err(format!("{MODEL}: a record of {} tokens exceeds this instance's context capacity {}", tokens.len(), self.cap));
+            return Err(format!("{}: a record of {} tokens exceeds this instance's context capacity {}", self.model_id, tokens.len(), self.cap));
         }
         let d = self.cfg.d_model as usize;
         self.reset();
@@ -3018,7 +3021,7 @@ impl Qwen35GgufInstance {
         let prefilled = self.prefill_hidden(tokens, 0, tokens.len(), 0, false, Some(&mut hidden));
         self.prefill_adapter_slot.set(LORA_SLOT_NONE);
         prefilled?;
-        assert_eq!(hidden.len(), tokens.len() * d, "{MODEL}: the prefill collected {} hidden values for {} rows", hidden.len() / d, tokens.len());
+        assert_eq!(hidden.len(), tokens.len() * d, "{}: the prefill collected {} hidden values for {} rows", self.model_id, hidden.len() / d, tokens.len());
         for (first, rows) in (0..tokens.len() - 1).step_by(SCORE_HEAD_ROWS).map(|r| (r, SCORE_HEAD_ROWS.min(tokens.len() - 1 - r))) {
             let logits = self.head_logits_rows(&hidden[first * d..(first + rows) * d], rows as u32);
             for (i, row) in logits.chunks(self.cfg.vocab as usize).enumerate() {
@@ -3035,7 +3038,7 @@ impl Qwen35GgufInstance {
     /// `forced[i][..j]`; every `forced[i]` has the same length.
     pub fn teacher_forced_logits_batch(&self, prompts: &[Vec<u32>], forced: &[Vec<u32>]) -> Result<BatchLogits, String> {
         if forced.len() != prompts.len() || forced.iter().any(|f| f.is_empty() || f.len() != forced[0].len()) {
-            return Err(format!("{MODEL}: a batched teacher-forced run needs equally long non-empty forced streams, one per prompt"));
+            return Err(format!("{}: a batched teacher-forced run needs equally long non-empty forced streams, one per prompt", self.model_id));
         }
         self.decode_logits_batch(prompts, forced.first().map_or(0, Vec::len), |slot, step, _| forced[slot][step])
     }
@@ -3057,10 +3060,10 @@ impl Qwen35GgufInstance {
     fn decode_logits_batch(&self, prompts: &[Vec<u32>], positions: usize, mut next: impl FnMut(usize, usize, &[f32]) -> u32) -> Result<BatchLogits, String> {
         let n = prompts.len();
         if n == 0 || positions == 0 || prompts.iter().any(|p| p.is_empty()) {
-            return Err(format!("{MODEL}: a batched decode run needs at least one position and non-empty prompts, one per sequence"));
+            return Err(format!("{}: a batched decode run needs at least one position and non-empty prompts, one per sequence", self.model_id));
         }
         if n > self.max_batch as usize {
-            return Err(format!("{MODEL}: batch of {n} exceeds this instance's max_batch {}", self.max_batch));
+            return Err(format!("{}: batch of {n} exceeds this instance's max_batch {}", self.model_id, self.max_batch));
         }
         self.reset();
         let mut rows: BatchLogits = vec![Vec::with_capacity(positions); n];
@@ -3139,10 +3142,10 @@ impl Qwen35GgufInstance {
         on_token: &mut dyn FnMut(&[u32]) -> bool,
     ) -> Result<(Vec<u32>, SpecDecodeStats), String> {
         if prompt.is_empty() {
-            return Err(format!("{MODEL}: empty prompt"));
+            return Err(format!("{}: empty prompt", self.model_id));
         }
         if k == 0 {
-            return Err(format!("{MODEL}: speculative decode needs k >= 1"));
+            return Err(format!("{}: speculative decode needs k >= 1", self.model_id));
         }
         // The verify chunk is `k+1` rows long and lands past the last
         // generated token, so the capacity check is one row wider than
@@ -3150,13 +3153,13 @@ impl Qwen35GgufInstance {
         let need = prompt.len() as u64 + max_new as u64 + k as u64;
         if need > self.cap as u64 {
             return Err(format!(
-                "{MODEL}: prompt ({}) + max_new ({max_new}) + speculation window ({k}) = {need} exceeds this instance's context capacity {}",
+                "{}: prompt ({}) + max_new ({max_new}) + speculation window ({k}) = {need} exceeds this instance's context capacity {}", self.model_id,
                 prompt.len(),
                 self.cap
             ));
         }
         if let Some(bad) = prompt.iter().find(|&&t| t >= self.cfg.vocab) {
-            return Err(format!("{MODEL}: prompt token id {bad} is outside vocab {}", self.cfg.vocab));
+            return Err(format!("{}: prompt token id {bad} is outside vocab {}", self.model_id, self.cfg.vocab));
         }
         self.reset();
         let snaps: Vec<_> = self.shards.iter().map(|s| s.qwen35.new_gdn_snapshot()).collect();
@@ -3434,11 +3437,11 @@ impl Qwen35GgufInstance {
     /// two measured regions.
     fn profile_batch_at(&self, batch: u32, position: u32, steps: u32, mut pass: impl FnMut(&[u32], &[u32]) -> Result<(), String>) -> Result<DecodeProfile, String> {
         if batch == 0 || steps == 0 {
-            return Err(format!("{MODEL}: a batch profile needs a batch and a step count (got {batch} x {steps})"));
+            return Err(format!("{}: a batch profile needs a batch and a step count (got {batch} x {steps})", self.model_id));
         }
         let last = position as u64 + 2 * steps as u64;
         if last >= self.cap as u64 {
-            return Err(format!("{MODEL}: profiling {steps} passes from position {position} runs to {last}, past this instance's capacity {}", self.cap));
+            return Err(format!("{}: profiling {steps} passes from position {position} runs to {last}, past this instance's capacity {}", self.model_id, self.cap));
         }
         let tokens = vec![1u32; batch as usize];
         // One unrecorded pass first: pipeline compilation is not decode time.
@@ -3475,10 +3478,10 @@ impl Qwen35GgufInstance {
     /// head device time, not the model's.
     pub fn profile_head_at(&self, batch: u32, position: u32, steps: u32) -> Result<DecodeProfile, String> {
         if batch == 0 || steps == 0 {
-            return Err(format!("{MODEL}: profile_head_at needs a batch and a step count (got {batch} x {steps})"));
+            return Err(format!("{}: profile_head_at needs a batch and a step count (got {batch} x {steps})", self.model_id));
         }
         if position as u64 >= self.cap as u64 {
-            return Err(format!("{MODEL}: profile_head_at: position {position} is beyond this instance's capacity {}", self.cap));
+            return Err(format!("{}: profile_head_at: position {position} is beyond this instance's capacity {}", self.model_id, self.cap));
         }
         let slots: Vec<u32> = (0..batch).collect();
         let tokens = vec![1u32; batch as usize];
@@ -3974,7 +3977,7 @@ impl Qwen35GgufResident {
             .get_or_init(|| match ResidentCheckpoint::is_hf_dir(&self.gguf_path).then(|| crate::vision_tower::read_spec(std::path::Path::new(&self.gguf_path))) {
                 Some(Ok(spec)) => spec,
                 Some(Err(e)) => {
-                    eprintln!("brain: {MODEL}: '{}' declares a vision tower that cannot be served, so it serves text only: {e}", self.gguf_path);
+                    eprintln!("brain: {}: '{}' declares a vision tower that cannot be served, so it serves text only: {e}", self.model_id, self.gguf_path);
                     None
                 }
                 None => None,
@@ -4080,7 +4083,7 @@ impl Qwen35GgufResident {
         self.sampling.get_or_init(|| {
             let declared = self.checkpoint().map_err(|e| format!("cannot open '{}': {e}", self.gguf_path)).and_then(|c| c.sampling_defaults());
             declared.unwrap_or_else(|e| {
-                residency::log::warn(&format!("{MODEL}: ignoring the checkpoint's sampling defaults: {e}"));
+                residency::log::warn(&format!("{}: ignoring the checkpoint's sampling defaults: {e}", self.model_id));
                 data::generation::SamplingDefaults::default()
             })
         })
@@ -4410,7 +4413,7 @@ impl Qwen35GgufResident {
     /// the per-layer profile behind it - for a caller sizing budgets or
     /// reporting "will this fit at all?".
     pub fn total_device_bytes(&self) -> Result<u64, String> {
-        let mg = self.checkpoint().map_err(|e| format!("{MODEL}: cannot open '{}': {e}", self.gguf_path))?;
+        let mg = self.checkpoint().map_err(|e| format!("{}: cannot open '{}': {e}", self.model_id, self.gguf_path))?;
         let cfg = mg.config(self.cap)?;
         Ok(serving_cost(&cfg, &self.serving_shape(&mg, &cfg)).total())
     }
@@ -4419,7 +4422,7 @@ impl Qwen35GgufResident {
     /// prefill round and of a decode step ([`ServingShape::stage_workspace`]). With [`Self::total_device_bytes`] it says
     /// whether a set of cards can take the model at all.
     pub fn stage_workspace_bytes(&self) -> Result<u64, String> {
-        let mg = self.checkpoint().map_err(|e| format!("{MODEL}: cannot open '{}': {e}", self.gguf_path))?;
+        let mg = self.checkpoint().map_err(|e| format!("{}: cannot open '{}': {e}", self.model_id, self.gguf_path))?;
         let cfg = mg.config(self.cap)?;
         Ok(self.serving_shape(&mg, &cfg).stage_workspace(&cfg))
     }
@@ -4599,7 +4602,7 @@ impl ResidentModel for Qwen35GgufResident {
     }
 
     fn activate(&self, _key: &InstanceKey, _device: Device) -> Result<Box<dyn Instance>, String> {
-        Err(format!("{MODEL}: single-device activate is not supported -- this model is multi-device only, claim it via ResidencyManager::claim_multi"))
+        Err(format!("{}: single-device activate is not supported -- this model is multi-device only, claim it via ResidencyManager::claim_multi", self.model_id))
     }
 }
 
@@ -4671,14 +4674,14 @@ impl Qwen35GgufResident {
     /// `max_batch` is the number of sequences the scheduler may run at once.
     pub fn activate_engine(&self, devices: &[Device]) -> Result<(Qwen35GgufEngine, QwenBpe, Vec<u32>), String> {
         let inst = self.activate_owned(devices)?;
-        let (tok, stop) = inst.ckpt.tokenizer().map_err(|e| format!("{MODEL}: '{}': {e}", self.gguf_path))?;
+        let (tok, stop) = inst.ckpt.tokenizer().map_err(|e| format!("{}: '{}': {e}", self.model_id, self.gguf_path))?;
         let mut engine = Qwen35GgufEngine::new(inst);
         engine.set_prefill_policy(self.prefill);
         if let Some(request) = &self.bank {
             // Refusing here is deliberate: a server asked for adapters that
             // cannot give them must say so, not serve the base under their names.
             let bank = request.config(engine.instance().config())?;
-            engine.enable_adapters(bank).map_err(|e| format!("{MODEL}: adapter bank: {e}"))?;
+            engine.enable_adapters(bank).map_err(|e| format!("{}: adapter bank: {e}", self.model_id))?;
         }
         Ok((engine, tok, stop))
     }
@@ -4708,23 +4711,23 @@ impl Qwen35GgufResident {
         // reservation and the allocation describe the same bytes.
         if devices.len() != plan.stages.len() || !devices.iter().all(|d| plan.stages.iter().any(|(pd, _, _)| pd == d)) {
             return Err(format!(
-                "{MODEL}: activate_multi got devices {devices:?} but the plan placed {:?} -- the reservation and the load would describe different cards",
+                "{}: activate_multi got devices {devices:?} but the plan placed {:?} -- the reservation and the load would describe different cards", self.model_id,
                 plan.stages.iter().map(|&(d, _, _)| d).collect::<Vec<_>>()
             ));
         }
 
-        let mg = self.checkpoint().map_err(|e| format!("{MODEL}: cannot open '{}': {e}", self.gguf_path))?;
-        let (tok, eos) = mg.tokenizer().map_err(|e| format!("{MODEL}: '{}': {e}", self.gguf_path))?;
+        let mg = self.checkpoint().map_err(|e| format!("{}: cannot open '{}': {e}", self.model_id, self.gguf_path))?;
+        let (tok, eos) = mg.tokenizer().map_err(|e| format!("{}: '{}': {e}", self.model_id, self.gguf_path))?;
         let (embed_name, norm_name, head_name) = mg.endpoint_names(&cfg)?;
 
         let layout = self.kv_layout();
         let state_rows = layout.state_rows(self.max_batch, self.prefix_slots);
         let unified = self.unified();
         if unified && plan.stages.len() != 1 {
-            return Err(format!("{MODEL}: the unified state pool serves one card and this plan places {} stages", plan.stages.len()));
+            return Err(format!("{}: the unified state pool serves one card and this plan places {} stages", self.model_id, plan.stages.len()));
         }
         let embed_resident = self.serving_shape(&mg, &cfg).embed.is_some();
-        residency::log::info(&format!("{MODEL}: the embedding table is {}", if embed_resident { "held on the first stage's card" } else { "read from the checkpoint on the host" }));
+        residency::log::info(&format!("{}: the embedding table is {}", self.model_id, if embed_resident { "held on the first stage's card" } else { "read from the checkpoint on the host" }));
         // The memory every stage keeps free for the activations of a prefill round and a decode step: the freed
         // blocks of those activations may stay in the device's cache up to this much. Under the cache's default bound
         // (a sixteenth of the card, at most 4 GiB) a 32K round's scratch went back to the driver at every
@@ -4732,9 +4735,9 @@ impl Qwen35GgufResident {
         // for the driver to map it again: 32K x 16 after an 8K x 64 cell lost a visible share of the run to idle gaps
         // (the serve bench cell reports the tok/s).
         let workspace = self.serving_shape(&mg, &cfg).stage_workspace(&cfg);
-        residency::log::info(&format!("{MODEL}: freed activation blocks are kept up to the stage workspace, {:.1} GiB", workspace as f64 / (1u64 << 30) as f64));
+        residency::log::info(&format!("{}: freed activation blocks are kept up to the stage workspace, {:.1} GiB", self.model_id, workspace as f64 / (1u64 << 30) as f64));
         if let Some(note) = linear_activations_note(self.linear_activations, &self.tier) {
-            residency::log::info(&format!("{MODEL}: {note}"));
+            residency::log::info(&format!("{}: {note}", self.model_id));
         }
         let mut shards = Vec::with_capacity(plan.stages.len());
         for (_, placed, _) in &plan.stages {
@@ -4768,20 +4771,20 @@ impl Qwen35GgufResident {
 
         // The head epilogue, on the LAST stage's card - see `Head`'s own doc
         // for why it is the instance's and not that shard's.
-        let last = shards.last().ok_or_else(|| format!("{MODEL}: plan has zero stages"))?;
+        let last = shards.last().ok_or_else(|| format!("{}: plan has zero stages", self.model_id))?;
         let gpu = &last.qwen35.gpu;
         let (v, d) = (cfg.vocab as usize, cfg.d_model as usize);
         // model::int8::upload_quantized takes the fastest route `mg` can
         // serve (a Q8_0 GGUF byte repack straight from blocks, no fp32
         // anywhere, when it applies) and otherwise bounds host scratch to
         // its own row-chunked fp32 fallback - never the whole 5.09 GB table.
-        let head_ops = model::ops::Ops::new(gpu.share()).map_err(|e| format!("{MODEL}: Ops::new on the head card: {e}"))?;
+        let head_ops = model::ops::Ops::new(gpu.share()).map_err(|e| format!("{}: Ops::new on the head card: {e}", self.model_id))?;
         let head_w = upload_head(&mg, &head_ops, gpu, &head_name, v, d)?;
         let norm = match mg.final_norm(&norm_name) {
             Some(Ok(w)) if w.len() == d => gpu.storage_init("qwen35.gguf.final_norm", &w),
-            Some(Ok(w)) => return Err(format!("{MODEL}: '{norm_name}' has {} elements, expected {d}", w.len())),
-            Some(Err(e)) => return Err(format!("{MODEL}: '{norm_name}': {e}")),
-            None => return Err(format!("{MODEL}: '{norm_name}' vanished between planning and load")),
+            Some(Ok(w)) => return Err(format!("{}: '{norm_name}' has {} elements, expected {d}", self.model_id, w.len())),
+            Some(Err(e)) => return Err(format!("{}: '{norm_name}': {e}", self.model_id)),
+            None => return Err(format!("{}: '{norm_name}' vanished between planning and load", self.model_id)),
         };
         let head = Head {
             ops: head_ops,
@@ -4791,6 +4794,7 @@ impl Qwen35GgufResident {
         let embed = EmbedTable { name: embed_name, d };
 
         let mut inst = Qwen35GgufInstance {
+            model_id: self.model_id.clone(),
             cfg,
             shards,
             ckpt: mg,

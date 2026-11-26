@@ -1639,7 +1639,8 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::I8,
         by_name: false,
         source: ImplSource::Tuned,
-        // `__dp4a` is the only instruction above the toolchain baseline.
+        // Runs from the baseline: the `__dp4a` is gated behind `__CUDA_ARCH__ >= 610` in the
+        // source, with a bit-identical integer body for the parts below it.
         min_cc: BASELINE_MIN_CC,
         entry: "brain_matmul_i8_gemv",
         what: "packed-int8 skinny-M GEMV (up to 8 rows of x per weight pass); 16 B weight loads and dp4a, bit-identical to matmul_i8_gemv_reg below 5 rows (and everywhere without int8 tensor cores), int8 tensor cores (mma.sync m16n8k32) from 5 rows on compute capability 8.0+",
@@ -2165,7 +2166,8 @@ pub const ALL: &[CudaKernel] = &[
         weight: Dtype::Q4,
         by_name: false,
         source: ImplSource::Tuned,
-        // `__dp4a` is the only instruction above the toolchain baseline.
+        // Runs from the baseline: the `__dp4a` is gated behind `__CUDA_ARCH__ >= 610` in the
+        // source, with a bit-identical integer body for the parts below it.
         min_cc: BASELINE_MIN_CC,
         entry: "brain_matmul_q4_gemv",
         what: "packed-int4 (W4A8) skinny-M GEMV (up to 8 rows of x per weight pass); 16 B weight loads, nibbles unpacked to dp4a operands, bit-identical to matmul_q4_gemv_reg",
@@ -5685,6 +5687,24 @@ fn code_of(src: &str) -> String {
     src.lines().map(|l| l.split("//").next().unwrap_or("")).collect::<Vec<_>>().join("\n")
 }
 
+/// Whether `code` (already comment-stripped, see [`code_of`]) uses `__dp4a`
+/// outside a `#if ... __CUDA_ARCH__ >= 610` branch. The gated branch ends at
+/// its `#else` or `#endif`; a nested conditional ends it early, which can only
+/// fail loudly (a false report), never hide an ungated use.
+fn has_ungated_dp4a(code: &str) -> bool {
+    let mut gated = false;
+    for line in code.lines().map(str::trim) {
+        if line.starts_with("#if") {
+            gated = line.contains("__CUDA_ARCH__ >= 610");
+        } else if line.starts_with("#else") || line.starts_with("#endif") {
+            gated = false;
+        } else if line.contains("__dp4a") && !gated {
+            return true;
+        }
+    }
+    false
+}
+
 /// Every invariant this registry's entries must satisfy, checked as data
 /// rather than asserted per-entry: unique names, a tier that means what it
 /// says, an entry point that exists in the source, and a declared capability
@@ -5726,11 +5746,10 @@ pub fn check_table(table: &[CudaKernel]) -> Vec<String> {
         if !k.src.contains(k.entry) {
             errs.push(format!("{}: declared entry point {:?} does not appear in its source", k.name, k.entry));
         }
-        // A kernel may run on older parts too if it gates the instruction behind the capability itself
-        // (`__CUDA_ARCH__ >= 610`) and carries a body for the rest - the same rule the tensor-core pair
-        // below is held to.
-        let gates_dp4a_itself = code.contains("__CUDA_ARCH__ >= 610");
-        if code.contains("__dp4a") && k.min_cc < DP4A_MIN_CC && !gates_dp4a_itself {
+        // A kernel may run on older parts too if every `__dp4a` sits inside an
+        // `__CUDA_ARCH__ >= 610` branch that has a body for the rest - the same rule the
+        // tensor-core pair below is held to.
+        if code.contains("__dp4a") && k.min_cc < DP4A_MIN_CC && has_ungated_dp4a(&code) {
             errs.push(format!(
                 "{}: uses __dp4a but declares min_cc {}.{}, below the capability that introduced it ({}.{})",
                 k.name, k.min_cc.0, k.min_cc.1, DP4A_MIN_CC.0, DP4A_MIN_CC.1
@@ -6181,7 +6200,11 @@ mod tests {
             programmatic: false,
             src,
         };
+        // One gated helper does not excuse a second, raw use elsewhere in the file.
+        const GATED_PLUS_RAW: &str = "__device__ int bk_dot4(unsigned a, unsigned b, int c) {\n#if __CUDA_ARCH__ >= 610\n    return __dp4a((int)a, (int)b, c);\n#else\n    return c;\n#endif\n}\nextern \"C\" __global__ void bk_dot(const int* a) { __dp4a(a[0], a[1], 0); }";
         let joined = check_table(&[kernel(UNGATED)]).join("\n");
+        assert!(joined.contains("uses __dp4a but declares min_cc"), "{joined}");
+        let joined = check_table(&[kernel(GATED_PLUS_RAW)]).join("\n");
         assert!(joined.contains("uses __dp4a but declares min_cc"), "{joined}");
         assert!(check_table(&[kernel(GATED)]).is_empty(), "{:?}", check_table(&[kernel(GATED)]));
     }

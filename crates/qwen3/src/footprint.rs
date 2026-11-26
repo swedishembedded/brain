@@ -296,38 +296,28 @@ pub fn held_weight_bytes(cfg: &QwenConfig, tier: Dtype) -> u64 {
 }
 
 /// Device bytes the serving engine holds for `cfg`'s weights with each linear and the head at the tier `tier_of`
-/// names for it (packed words plus the narrow tiers' group scales) and the embedding and norms at fp32. A tied head
-/// is the embedding table a second time: the engine gathers the embedding from the fp32 table and uploads the head
-/// from it at the head's tier.
+/// names for it ([`model::ops::Weight::bytes_for`], the one statement of a tier's footprint: packed words plus the
+/// narrow tiers' scales) and the embedding and norms at fp32. A tied head is the embedding table a second time: the
+/// engine gathers the embedding from the fp32 table and uploads the head from it at the head's tier.
 pub fn held_weight_bytes_by(cfg: &QwenConfig, tier_of: impl Fn(&str) -> Dtype) -> u64 {
-    let at = |tier: Dtype, n: u64| match tier {
-        Dtype::BF16 | Dtype::F16 => n * 2,
-        Dtype::I8 => n + (n / 32) * 4,
-        Dtype::NF4 | Dtype::Q4 => n / 2 + (n / 32) * 4,
-        // M14: the affine K-quant tiers (GGUF Q4_K / Q5_K), priced at the
-        // bytes the device buffer actually holds - the packed codes (4.5 /
-        // 8 bits per element), the 6-bit scale/min pair per 32-group (18
-        // bytes per 32 groups), and one f16 (d, dmin) pair per 8 groups.
-        // Pricing these at the fp32 promotion (n * 4) is what made every
-        // GGUF plan ~21 GiB on a 4B model.
-        Dtype::Q4K => n * 9 / 16 + (n / 32) * 18 / 8 + (n / 256) * 4,
-        Dtype::Q8K => n + (n / 32) * 18 / 8 + (n / 256) * 4,
-        _ => n * 4,
-    };
     let head = cfg.head_weight();
+    let head_bytes = |tier: Dtype| model::ops::Weight::bytes_for(tier, cfg.vocab as usize, cfg.d_model as usize);
     let tables: u64 = cfg
         .param_list()
         .into_iter()
         .map(|(name, n)| {
-            let n = n as u64;
-            if crate::q8::Q8::is_i8_linear(&name) || (name == head && !cfg.tie_embeddings) {
-                at(tier_of(&name), n)
+            if crate::q8::Q8::is_i8_linear(&name) {
+                let leaf = name.splitn(3, '.').nth(2).expect("a per-layer linear is blocks.<l>.<leaf>");
+                let (rows, cols) = crate::model::linear_dims(cfg, leaf);
+                model::ops::Weight::bytes_for(tier_of(&name), rows as usize, cols as usize)
+            } else if name == head && !cfg.tie_embeddings {
+                head_bytes(tier_of(&name))
             } else {
-                n * 4
+                n as u64 * 4
             }
         })
         .sum();
-    let tied_head = if cfg.tie_embeddings { at(tier_of(head), u64::from(cfg.vocab) * u64::from(cfg.d_model)) } else { 0 };
+    let tied_head = if cfg.tie_embeddings { head_bytes(tier_of(head)) } else { 0 };
     tables + tied_head
 }
 
@@ -341,14 +331,8 @@ pub fn held_weight_bytes_by(cfg: &QwenConfig, tier_of: impl Fn(&str) -> Dtype) -
 /// for bf16 weights on tensor cores, knowledge 326). A device that cannot hold a half tier widens it to fp32 at
 /// upload and says so. The serving resident, the SDK pipeline and the perf targets all decide by this.
 pub fn default_weight_tier(cfg: &QwenConfig, stored: Dtype, device_bytes: Option<u64>) -> Dtype {
-    // M14: a checkpoint that already stores a packed serving tier (a GGUF's
-    // Q4_K / Q5_K, brain-int4, or brain-int8) keeps it - the same tier the
-    // CPU backend can now execute natively (`kquant_ops`) and the fit
-    // estimator prices at its packed size (`Weight::bytes_for`), not the
-    // 4-bytes-per-parameter fp32 promotion that previously made every GGUF
-    // plan ~21 GiB. The floating tiers (BF16/F16) keep their old rule.
     let stored = match stored {
-        Dtype::BF16 | Dtype::F16 | Dtype::Q4K | Dtype::Q8K | Dtype::Q4 | Dtype::I8 => stored,
+        Dtype::BF16 | Dtype::F16 => stored,
         _ => Dtype::F32,
     };
     let fits = |bytes: u64| bytes >= held_weight_bytes(cfg, stored) + SERVE_HEADROOM_BYTES;
@@ -359,12 +343,15 @@ pub fn default_weight_tier(cfg: &QwenConfig, stored: Dtype, device_bytes: Option
     }
 }
 
-/// The weight tiers the Qwen3 checkpoint at `path` is served at by default: [`default_weight_tier`] of the tier the
-/// checkpoint stores its linears in, for `device_bytes` (the memory the weights may use on the largest card, `None`
+/// The weight tiers the Qwen3 checkpoint at `path` is served at by default: the tiers a block-quantized checkpoint
+/// stores ([`crate::stored_weight_policy`]), else [`default_weight_tier`] of the tier the checkpoint stores its
+/// linears in, for `device_bytes` (the memory the weights may use on the largest card, `None`
 /// when unknown). A checkpoint that cannot be opened yet is planned at fp32; opening it later reports the real error.
 pub fn default_weight_policy(path: &str, device_bytes: Option<u64>) -> model::ops::TierPolicy {
     match crate::open_checkpoint(path) {
-        Ok((checkpoint, src)) => model::ops::TierPolicy::uniform(default_weight_tier(&checkpoint, crate::source_weight_tier(&checkpoint, &*src), device_bytes)),
+        // A block-quantized checkpoint (a GGUF) is held as stored, leaf by leaf: no other tier is smaller without
+        // re-quantizing what it stores, so the card rule has nothing to choose.
+        Ok((checkpoint, src)) => crate::stored_weight_policy(&checkpoint, &*src).unwrap_or_else(|| model::ops::TierPolicy::uniform(default_weight_tier(&checkpoint, crate::source_weight_tier(&checkpoint, &*src), device_bytes))),
         Err(_) => model::ops::TierPolicy::uniform(Dtype::F32),
     }
 }

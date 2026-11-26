@@ -1362,8 +1362,10 @@ pub fn run_serve(args: &[String]) {
         });
     }
 
-    // The stdio controller serves no Qwen3, so an adapter flag here would be
-    // ignored while the operator believes it is in effect.
+    // The stdio controller builds no `QwenResident` (`qwen_cfg` is consumed
+    // only by the surfaces above), so there is no `--checkpoint` store
+    // reference to resolve here and `models_dir` is not threaded in. An
+    // adapter flag here would be ignored while the operator believes it is in effect.
     if adapter_mode != crate::continuous_train::AdapterMode::Base {
         eprintln!("brain serve: --adapter, --adapter-manifest, --watch-adapters and --serve-adapters apply to the Qwen3 the HTTP and D-Bus surfaces serve; the stdio controller serves none. Add --openai, --anthropic, --openrouter or --dbus.");
         std::process::exit(2);

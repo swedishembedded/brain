@@ -24,7 +24,7 @@ built. The CPU backend reports `int8_dot: false` on purpose (its packed WGSL ker
 
 `Ops::lands(want)` is the one answer to "which tier does this device hold `want` at"; it is `promote` except that
 int8 stays int8 on an `Ops` that was told its caller reads codes by float arithmetic
-(`Ops::hold_int8_by_float_read`). qwen3 sets it for a LoRA training build, whose int8 products are the `#w=w8`
+(`Ops::hold_int8_by_float_read`, since renamed `Ops::hold_packed_by_float_read` when it came to cover the K-quants too, #601). qwen3 sets it for a LoRA training build, whose int8 products are the `#w=w8`
 kernels and the tile decode. A caller that dispatches the packed kernel itself keeps the widening. The weight-only
 kernels themselves stay on devices with the native int8 dot (`int8_base`): the CPU JIT cannot compile their
 register-tiled form, so there the int8 weights are read through `Ops`' tile decode like NF4 and FP8, and

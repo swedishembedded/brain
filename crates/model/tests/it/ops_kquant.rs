@@ -262,14 +262,16 @@ fn kname_kq_gemv_8() -> &'static str {
 }
 
 /// `Ops::matmul` must refuse LOUDLY, not silently read a missing buffer,
-/// when a `Weight::KQuant` is paired with an activation built via
-/// `Ops::act_f32`, which promised that no quantized weight reads it (there
-/// is no packed activation to sum).
+/// when a `Weight::KQuant` whose product runs the packed kernel is paired
+/// with an activation built via `Ops::act_f32`, which promised that no
+/// quantized weight reads it (there is no packed activation to sum). A
+/// device that runs no packed-int8 kernel reads the f32 rows through the
+/// tile decode instead, so there the same pairing computes what a packed
+/// activation's product does.
 #[test]
-#[should_panic(expected = "act_f32")]
-fn kquant_matmul_refuses_an_activation_built_with_act_f32() {
+fn kquant_matmul_refuses_an_act_f32_activation_only_where_it_runs_the_packed_kernel() {
     let _device = gpu_core::testgpu::exclusive();
-    let g = Gpu::new(kernel_list());
+    let g = Gpu::new(model::ops::training_kernel_list());
     let ops = Ops::new(g).expect("Ops::new");
     let g = ops.gpu();
 
@@ -281,12 +283,27 @@ fn kquant_matmul_refuses_an_activation_built_with_act_f32() {
     let wq = g.storage(wq_words.len() as u64);
     g.write(&wq, &wq_words);
     let ng = k / GROUP;
-    let wsm = storage_u32(g, &vec![0x0101_0101u32; n * ng.div_ceil(2)]);
+    // sc = 2, m = 1 and d = dmin = 0.125: every weight is 0.125 * 2 * 1 - 0.125 * 1 = 0.125.
+    let wsm = storage_u32(g, &vec![0x0102_0102u32; n * ng.div_ceil(2)]);
     let wd = storage_u32(g, &vec![0x3000_3000u32; n * ng.div_ceil(GPS)]);
     let weight = Weight::KQuant { w: wq, sz: KqScale::Packed { wsm, wd }, n: n as u32, k: k as u32, group: GROUP as u32, bits: 4, affine: true };
 
-    let mut s = Vec::new();
-    let act = ops.act_f32(&x, 0, m as u32, k as u32);
-    let out = g.storage((m * n) as u64);
-    ops.matmul(&mut s, &weight, &act, &out, 0);
+    let product = |packed_act: bool| {
+        let mut s = Vec::new();
+        let act = if packed_act { ops.act(&mut s, &x, 0, m as u32, k as u32) } else { ops.act_f32(&x, 0, m as u32, k as u32) };
+        let out = g.storage((m * n) as u64);
+        ops.matmul(&mut s, &weight, &act, &out, 0);
+        g.submit(&[], &s);
+        g.read(&out, m * n)
+    };
+    if g.caps().numeric.int8_dot {
+        let refusal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| product(false))).expect_err("the packed product must refuse an act_f32 activation");
+        let why = refusal.downcast_ref::<String>().map(String::as_str).or_else(|| refusal.downcast_ref::<&str>().copied()).unwrap_or("");
+        assert!(why.contains("act_f32"), "the refusal names the constructor: {why}");
+    } else {
+        let (f32_rows, packed_rows) = (product(false), product(true));
+        let want = 0.1 * 0.125 * k as f32;
+        assert!(f32_rows.iter().all(|v| (v - want).abs() <= 1e-5), "the tile decode computes {want}: {f32_rows:?}");
+        assert_eq!(f32_rows, packed_rows, "without the packed kernel both activations take the same float-read product");
+    }
 }

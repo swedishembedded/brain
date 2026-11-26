@@ -589,7 +589,7 @@ impl FullFtBuild {
 }
 
 /// The `[n, k]` of the per-layer linear `leaf` of `cfg`.
-fn linear_dims(cfg: &QwenConfig, leaf: &str) -> (u32, u32) {
+pub(crate) fn linear_dims(cfg: &QwenConfig, leaf: &str) -> (u32, u32) {
     let (d, hq, hkv, ff) = (cfg.d_model, cfg.q_dim(), cfg.kv_dim(), cfg.d_ff);
     match leaf {
         "attn.wq.weight" => (hq, d),
@@ -1413,7 +1413,7 @@ impl Qwen {
         ops.set_gemm_precision(gemm);
         // A frozen int8 base is read by the weight-only `#w=w8` kernels and the tile decode, float arithmetic on any device.
         if train && cfg.lora.is_some() {
-            ops.hold_int8_by_float_read();
+            ops.hold_packed_by_float_read();
         }
         // Every build runs its steps in submission order on this one stream and already shares its packed
         // activations per shape (`Self::ops_act`), so the bf16 rounding of an activation is shared the same way: a

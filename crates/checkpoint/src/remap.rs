@@ -312,6 +312,26 @@ impl TensorSource for RemapSource<'_> {
         }
     }
 
+    /// [`Self::raw_blocks`]'s layout without the bytes: the same block-alignment answer from the source's header, so
+    /// a planner asking every tensor's format reads (and, for a row permutation, copies) nothing.
+    fn raw_block_layout(&self, name: &str) -> Option<crate::gguf::BlockLayout> {
+        match self.plan.get(name)? {
+            Fetch::Whole(src) => self.src().raw_block_layout(src),
+            Fetch::Slice { name: src, start, len } => {
+                let layout = self.src().raw_block_layout(src)?;
+                let be = layout.block_elems();
+                let aligned = start.is_multiple_of(be) && len.is_multiple_of(be) && start.checked_add(*len).is_some_and(|end| end <= layout.numel);
+                aligned.then_some(crate::gguf::BlockLayout { ty: layout.ty, numel: *len })
+            }
+            Fetch::Concat(_) => None,
+            Fetch::RowPermute { name: src, order } => {
+                let re = self.row_elems(src, order)?;
+                let layout = self.src().raw_block_layout(src)?;
+                re.is_multiple_of(layout.block_elems()).then_some(crate::gguf::BlockLayout { ty: layout.ty, numel: re * order.len() })
+            }
+        }
+    }
+
     fn with_tensor_chunks(&self, name: &str, max_elems: usize, f: &mut dyn FnMut(u64, &[f32])) -> bool {
         let Some(fetch) = self.plan.get(name) else { return false };
         match fetch {
@@ -627,6 +647,9 @@ mod tests {
         plan.insert("unaligned".to_string(), Fetch::Slice { name: "w".to_string(), start: 10, len: 32 });
         plan.insert("cat".to_string(), Fetch::Concat(vec![Fetch::Whole("w".to_string())]));
         let r = RemapSource::new(&mg, plan);
+        for name in ["whole", "blk1", "unaligned", "cat"] {
+            assert_eq!(r.raw_block_layout(name), r.raw_blocks(name).map(|(layout, _)| layout), "{name}: the header-only layout agrees with the blocks");
+        }
 
         // Whole: identical to asking the inner source directly.
         let (whole_layout, whole_bytes) = r.raw_blocks("whole").expect("whole must forward");

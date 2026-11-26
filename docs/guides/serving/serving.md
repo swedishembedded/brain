@@ -50,7 +50,7 @@ With no surface flag, `brain serve` serves the OpenAI-compatible API on
   others may read or write is refused. A server under
   its own `DIR` is not found by clients looking in the default one.
 - `--checkpoint PATH`, `--tokenizer PATH` - also serve this Qwen3 checkpoint
-  (file or repo directory), with this `tokenizer.json` when none is beside it.
+  (file, repo directory, or model-store reference `vendor/repo[-QUANT]`), with this `tokenizer.json` when none is beside it.
 - `--ready-file PATH` - see **Readiness** below.
 - `--training`, `--artifact-store DIR` - also serve training as a job (`brain/train`); the storage quota flags are in [served training](../training/served-training.md#storage-quotas)
   on the cards serving shares, with datasets and adapters moved by file
@@ -75,7 +75,7 @@ every model that serves it; no flag is spelled with an architecture name.
 
 | flag | what it chooses |
 |---|---|
-| `--checkpoint PATH` | the LLM checkpoint to serve (file or repo directory) |
+| `--checkpoint PATH` | the LLM checkpoint to serve (file, repo directory, or model-store reference `vendor/repo[-QUANT]`) |
 | `--weight-format SPEC` | weight storage: `f32`, `bf16`, `f16`, `int8`, `q4`, `nf4`, or per leaf `int8,blk.0.attn_q=f32` where the model supports rules; unset, a Qwen3 dense checkpoint is held at the precision it stores (int8 only where that does not fit the card) |
 | `--kv-cache TIER` | KV-cache storage: `f32`, `bf16`, `int8`, `fp8` |
 | `--gemm auto\|fp32` | `fp32` pins exact fp32 arithmetic (the reference tier); `auto` uses tensor cores where the device has them |

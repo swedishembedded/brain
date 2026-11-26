@@ -368,9 +368,9 @@ fn pipelines_with_ops() -> &'static [(&'static str, &'static str)] {
 }
 
 /// The tiers this engine serves through the ops façade rather than a GEMM of
-/// its own: the 4-bit group-scaled codes.
+/// its own: the 4-bit group-scaled codes and a GGUF checkpoint's K-quants.
 fn needs_ops(tiers: &TierPolicy) -> bool {
-    tiers.dtypes().any(|t| matches!(t, Dtype::NF4 | Dtype::Q4))
+    tiers.dtypes().any(|t| matches!(t, Dtype::NF4 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K))
 }
 
 /// The kernel table an engine at `tiers` needs.
@@ -1345,16 +1345,19 @@ impl Engine {
     }
 
     /// [`Self::from_source_tier_on`] with each linear (and the head) stored at the tier `tiers` names for
-    /// it: a per-leaf `--weight-format` such as a searched plan. Each fused group (Q/K/V, gate/up) must
-    /// take one tier, the half tiers cannot be mixed with each other, and int8 falls back to fp32 where
-    /// the device has no packed-int8 path, said out loud ([`Self::check_tiers`] holds the rules).
+    /// it: a per-leaf `--weight-format` such as a searched plan, or the tiers a GGUF stores
+    /// ([`crate::stored_weight_policy`]). Each fused group (Q/K/V, gate/up) must take one tier, the half
+    /// tiers cannot be mixed with each other ([`Self::check_tiers`] holds the rules), and where the device
+    /// has no packed-int8 path int8 falls back to fp32, said out loud - unless the engine runs the ops
+    /// façade (a K-quant, NF4 or Q4 tier), which reads int8 and K-quant codes through the tile decode
+    /// there and so holds them packed.
     #[allow(clippy::too_many_arguments)]
     pub fn from_source_tiers_on(parent: &Gpu, cfg: QwenConfig, src: &dyn checkpoint::TensorSource, block_size: u32, num_blocks: u32, max_batch: u32, max_blocks_per_seq: u32, max_prefill: u32, kv_int8: bool, tiers: &TierPolicy) -> Engine {
         Self::build(parent.new_like(pipelines_for(tiers)), cfg, src, block_size, num_blocks, max_batch, max_blocks_per_seq, max_prefill, kv_int8, tiers)
     }
 
     /// Whether this engine can hold `tiers`: every tier it names is a serving tier (F32, I8, BF16,
-    /// F16), bf16 and f16 are not both used (one inline-decode kernel set is built), and the tensors
+    /// F16, NF4, Q4, and the K-quants Q4K/Q8K a GGUF checkpoint stores), bf16 and f16 are not both used (one inline-decode kernel set is built), and the tensors
     /// fused into one GEMM ([`model::Model::coupled_tensors`]) take one tier. A refusal names the rule.
     pub fn check_tiers(cfg: &QwenConfig, tiers: &TierPolicy) -> Result<(), String> {
         if let Some(bad) = tiers.dtypes().find(|t| !matches!(t, Dtype::F32 | Dtype::I8 | Dtype::BF16 | Dtype::F16 | Dtype::NF4 | Dtype::Q4 | Dtype::Q4K | Dtype::Q8K)) {
@@ -1407,15 +1410,11 @@ impl Engine {
         // variant is best at some shape is a tuning question, but whether the
         // packed-dot kernels execute at all is numeric.int8_dot.
         let w8_on = weights_int8 && caps.numeric.int8_dot;
-        if weights_int8 && !w8_on {
+        // An engine on the ops façade runs its packed linears through `Ops::matmul`, which reads int8 and K-quant codes
+        // through the tile decode where the packed dot is absent: it holds them packed there instead of widening.
+        let float_read = needs_ops(tiers) && !caps.numeric.int8_dot;
+        if weights_int8 && !w8_on && !float_read {
             eprintln!("serve: int8 weights requested but this device has no packed-int8 path; using fp32 weights");
-        }
-        // Every other tier `Weight::upload` widens where the device cannot hold it; say which, never silently.
-        let mut widened: Vec<Dtype> = tiers.dtypes().filter(|&t| t != Dtype::I8 && t.promote(&caps.numeric) != t).collect();
-        widened.sort_by_key(|t| t.name());
-        widened.dedup();
-        for t in widened {
-            eprintln!("serve: {} weights requested but this device holds them as {}", t.name(), t.promote(&caps.numeric).name());
         }
         // The half tiers decode inline in the GEMM (`#w=bf16`/`#w=f16`), which
         // every backend runs; they need only the kernels [`pipelines`] adds.
@@ -1427,7 +1426,7 @@ impl Engine {
         // The tier a linear is held at: what the policy asks, with int8 falling back to fp32 (said
         // above) where the packed-dot GEMM does not execute.
         let leaf_tier = |name: &str| match tiers.want(name) {
-            Dtype::I8 if !w8_on => Dtype::F32,
+            Dtype::I8 if !w8_on && !float_read => Dtype::F32,
             t => t,
         };
         // The linears live in the packed bank when any of them is held narrower than fp32.
@@ -1620,7 +1619,17 @@ impl Engine {
         let staging = checkpoint::packed::BoundedWorkspace::new(checkpoint::packed::MemoryBudget::new(64 << 20, 0));
         // An engine serving a tier through the ops façade runs it on its own device and table
         // (`pipelines_with_ops`); otherwise a side table that only ever uploads.
-        let ops = if needs_ops(tiers) { Ops::new(gpu.share()) } else { Ops::new(gpu.new_like(model::ops::kernel_list())) }.unwrap_or_else(|e| panic!("serve: Ops::new: {e} (an engine at {} needs the ops façade's kernels: build it with Engine::from_source_tiers)", tiers.describe()));
+        let mut ops = if needs_ops(tiers) { Ops::new(gpu.share()) } else { Ops::new(gpu.new_like(model::ops::kernel_list())) }.unwrap_or_else(|e| panic!("serve: Ops::new: {e} (an engine at {} needs the ops façade's kernels: build it with Engine::from_source_tiers)", tiers.describe()));
+        if float_read {
+            ops.hold_packed_by_float_read();
+        }
+        // Every other tier the uploads widen where the device cannot hold it; say which, never silently.
+        let mut widened: Vec<Dtype> = tiers.dtypes().filter(|&t| t != Dtype::I8 && ops.lands(t) != t).collect();
+        widened.sort_by_key(|t| t.name());
+        widened.dedup();
+        for t in widened {
+            eprintln!("serve: {} weights requested but this device holds them as {}", t.name(), ops.lands(t).name());
+        }
         let (dm, ffm) = (cfg.d_model as usize, cfg.d_ff as usize);
         let (hqm, hkvm) = (cfg.q_dim() as usize, cfg.kv_dim() as usize);
         let dims = move |leaf: &str| -> (usize, usize) {
@@ -1642,7 +1651,7 @@ impl Engine {
                 let name = format!("blocks.{l}.{leaf}");
                 let (wn, wk) = dims(leaf);
                 let w = if packed {
-                    model::ops::upload_from_source(&ops, weights, &name, wn, wk, leaf_tier(&name), &staging).unwrap_or_else(|| panic!("serve: missing weight {name}"))
+                    gguf::upload_weight(&ops, weights, &name, wn, wk, leaf_tier(&name), &staging).unwrap_or_else(|| panic!("serve: missing weight {name} at {:?}", leaf_tier(&name)))
                 } else {
                     Weight::F32 { w: ps.w(&name).clone(), n: wn as u32, k: wk as u32 }
                 };
@@ -1667,7 +1676,7 @@ impl Engine {
                 let names: Vec<String> = leaves.iter().map(|leaf| format!("blocks.{l}.{leaf}")).collect();
                 let names: Vec<&str> = names.iter().map(String::as_str).collect();
                 // `check_tiers` holds every part of a fused group at one tier.
-                model::ops::upload_fused_from_source(&ops, weights, &names, n_total, dm, leaf_tier(names[0]), &staging).unwrap_or_else(|e| panic!("serve: {e}"))
+                gguf::upload_fused_weight(&ops, weights, &names, n_total, dm, leaf_tier(names[0]), &staging).unwrap_or_else(|e| panic!("serve: {e}"))
             };
             lin_weights.insert(format!("blocks.{l}.{WQKV}"), fused_weight(&["attn.wq.weight", "attn.wk.weight", "attn.wv.weight"], hqm + 2 * hkvm));
             lin_weights.insert(format!("blocks.{l}.{WGATEUP}"), fused_weight(&["mlp.gate.weight", "mlp.up.weight"], 2 * ffm));
@@ -1680,7 +1689,7 @@ impl Engine {
         // fresh, exactly the cost the old `head_dev = gpu.storage_init(...)`
         // this replaces already paid.
         let head_tier = leaf_tier(&head_name);
-        lin_weights.insert(head_name, model::ops::upload_from_source(&ops, weights, head_src, cfg.vocab as usize, cfg.d_model as usize, head_tier, &staging).expect("head weight"));
+        lin_weights.insert(head_name, gguf::upload_weight(&ops, weights, head_src, cfg.vocab as usize, cfg.d_model as usize, head_tier, &staging).expect("head weight"));
         if half {
             // A half weight is bound whole: two bytes a value.
             if let Some((name, w)) = lin_weights.iter().find(|(_, w)| HALF_TIERS.contains(&w.dtype()) && w.n() as u64 * w.k() as u64 * 2 > gpu.max_storage_binding_bytes()) {
@@ -1903,6 +1912,17 @@ impl Engine {
     /// or fp32 where the device could not honour int8.
     pub fn weights_tier(&self) -> Dtype {
         self.tier
+    }
+
+    /// The tier each linear (and the head) landed on, by name: what [`Self::weights_tier`] summarizes.
+    pub fn linear_tiers(&self) -> HashMap<String, Dtype> {
+        self.lin_weights.iter().map(|(name, w)| (name.clone(), w.dtype())).collect()
+    }
+
+    /// Device bytes the linears and the head occupy as uploaded: what a planner's
+    /// [`crate::footprint::held_weight_bytes_by`] charges for them.
+    pub fn linear_weight_bytes(&self) -> u64 {
+        self.lin_weights.values().map(Weight::resident_bytes).sum()
     }
 
     /// True when the KV cache is packed int8 rather than fp32 (unlike
@@ -2725,8 +2745,10 @@ impl Engine {
                 }
                 self.mm_into(s, x, w, out, rows, *k, *n)
             }
-            Weight::I8 { w, s: sw, n, k } => {
-                let scratch = self.i8_scratch.as_ref().expect("qwen3 serve: I8 weight built without i8_scratch");
+            // Without `i8_scratch` (a device with no packed dot, the int8 linears held for the tile decode) an int8
+            // weight takes the ops façade's product below.
+            Weight::I8 { w, s: sw, n, k } if self.i8_scratch.is_some() => {
+                let scratch = self.i8_scratch.as_ref().expect("guarded above");
                 self.mm8(s, scratch, w, sw, *n, *k, out, rows, exact);
             }
             Weight::BF16 { w, n, k } | Weight::F16 { w, n, k } => {
@@ -2746,7 +2768,7 @@ impl Engine {
             }
             // A tier without a GEMM of this engine's own: the ops façade's product, on this device.
             other => {
-                let ops = self.packed_ops.as_ref().expect("qwen3 serve: a weight outside F32/I8/BF16/F16 is only built with the ops façade (`needs_ops`)");
+                let ops = self.packed_ops.as_ref().expect("qwen3 serve: a weight outside F32/I8/BF16/F16 (or int8 without the packed dot) is only built with the ops façade (`needs_ops`)");
                 // A float-read tier takes the fp32 rows as they are; packing them would be dead work.
                 let act = if other.reads_f32_activations() { ops.act_f32(x, 0, rows, other.k()) } else { ops.act(s, x, 0, rows, other.k()) };
                 ops.matmul(s, other, &act, out, 0);

@@ -37,7 +37,7 @@ pub mod toy;
 pub mod tp;
 
 pub use config::{LoraCfg, QwenConfig};
-pub use open::{checkpoint_config, open_checkpoint, source_weight_tier, store_checkpoint_path, stored_weight_tier};
+pub use open::{checkpoint_config, open_checkpoint, source_weight_tier, store_checkpoint_path, stored_weight_policy, stored_weight_tier};
 pub use init::{init_weights, init_weights_where};
 pub use model::{check_resident_fits, resident_specs, shard_param_list, trimmed_len, trimmed_rows, Qwen, ResidentPlan, Shard, IGNORE};
 /// The weight **storage tier** [`Qwen::new_shard_dt`] takes, re-exported so a

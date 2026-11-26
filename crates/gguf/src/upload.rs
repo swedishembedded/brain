@@ -50,10 +50,54 @@ pub fn upload_weight(ops: &Ops, src: &dyn TensorSource, name: &str, n: usize, k:
     if !matches!(want, Dtype::Q4K | Dtype::Q8K) {
         return model::ops::upload_from_source(ops, src, name, n, k, want, staging);
     }
-    let (wq, wsm, wd, layout) = crate::kquant::try_kq_rect(src, name, k, 0, n, 0, k)?;
-    if held_tier(layout.ty) != want {
-        return None;
+    let rect = crate::kquant::try_kq_rect(src, name, k, 0, n, 0, k)?;
+    (held_tier(rect.3.ty) == want).then(|| upload_rect(ops, rect))
+}
+
+/// Upload the tensors `names`, the parts of one fused projection, as one
+/// `[n_total, k]` weight of tier `want`, the parts' rows in order. K-quant
+/// parts are relaid out one by one and their rows joined on the host - a
+/// K-quant row carries its own codes, sub-scales and super-block pair, so the
+/// joined weight holds exactly what each part stores; every other tier goes
+/// through [`model::ops::upload_fused_from_source`]. An error names the part
+/// that is missing, not `k` wide, or stored in a format other than the one
+/// `want` holds.
+pub fn upload_fused_weight(ops: &Ops, src: &dyn TensorSource, names: &[&str], n_total: usize, k: usize, want: Dtype, staging: &BoundedWorkspace) -> Result<Weight, String> {
+    if !matches!(want, Dtype::Q4K | Dtype::Q8K) {
+        return model::ops::upload_fused_from_source(ops, src, names, n_total, k, want, staging);
     }
+    let mut joined: Option<crate::kquant::KqRect> = None;
+    for name in names {
+        let numel = src.numel(name).ok_or_else(|| format!("{name}: missing from the checkpoint"))?;
+        if k == 0 || !numel.is_multiple_of(k) {
+            return Err(format!("{name}: {numel} elements are not rows of {k}"));
+        }
+        let (wq, wsm, wd, layout) = crate::kquant::try_kq_rect(src, name, k, 0, numel / k, 0, k).ok_or_else(|| format!("{name}: not stored as a K-quant of rows {k} wide"))?;
+        if held_tier(layout.ty) != want {
+            return Err(format!("{name}: stored as {}, which is not held at {want:?}", layout.ty.name()));
+        }
+        joined = Some(match joined {
+            None => (wq, wsm, wd, layout),
+            Some((mut jq, mut jsm, mut jd, jl)) => {
+                if layout.ty != jl.ty {
+                    return Err(format!("{names:?}: parts stored as {} and {} cannot be joined", jl.ty.name(), layout.ty.name()));
+                }
+                jq.extend(wq);
+                jsm.extend(wsm);
+                jd.extend(wd);
+                (jq, jsm, jd, crate::kquant::KqLayout { n: jl.n + layout.n, ..jl })
+            }
+        });
+    }
+    let rect = joined.ok_or_else(|| "a fused projection needs at least one part".to_string())?;
+    if rect.3.n != n_total {
+        return Err(format!("{names:?}: {} rows, expected {n_total}", rect.3.n));
+    }
+    Ok(upload_rect(ops, rect))
+}
+
+/// A relaid-out K-quant rectangle as a device weight.
+fn upload_rect(ops: &Ops, (wq, wsm, wd, layout): crate::kquant::KqRect) -> Weight {
     let g = ops.gpu();
     let upload = |words: &[u32]| {
         let b = g.storage(words.len() as u64);
@@ -61,5 +105,5 @@ pub fn upload_weight(ops: &Ops, src: &dyn TensorSource, name: &str, n: usize, k:
         b
     };
     let sz = KqScale::Packed { wsm: upload(&wsm), wd: upload(&wd) };
-    Some(Weight::KQuant { w: upload(&wq), sz, n: n as u32, k: k as u32, group: layout.group as u32, bits: layout.bits, affine: layout.affine })
+    Weight::KQuant { w: upload(&wq), sz, n: layout.n as u32, k: layout.k as u32, group: layout.group as u32, bits: layout.bits, affine: layout.affine }
 }

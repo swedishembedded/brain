@@ -75,20 +75,45 @@ pub fn source_weight_tier(cfg: &QwenConfig, src: &dyn TensorSource) -> crate::Dt
     let mut held = cfg.param_list().into_iter().map(|(name, _)| name).filter(|name| crate::q8::Q8::is_i8_linear(name) || *name == head).map(|name| model::ops::stored_tier(src, &name));
     match held.next().flatten() {
         Some(first @ (Dtype::BF16 | Dtype::F16)) if held.all(|t| t == Some(first)) => first,
-        // M14: a GGUF checkpoint's linears are K-quant (Q4_K / Q5_K) - the
-        // loader builds `Weight::KQuant` from them directly, so the
-        // checkpoint's stored tier is Q4K/Q8K, not fp32. Without this arm
-        // the whole checkpoint plans as fp32 (~21 GiB on a 4B) and its fit
-        // refuses every device.
-        None => {
-            let mut kq = cfg.param_list().into_iter().map(|(name, _)| name).filter(|name| crate::q8::Q8::is_i8_linear(name)).map(|name| model::ops::stored_tier(src, &name));
-            match kq.next().flatten() {
-                Some(t @ (Dtype::Q4K | Dtype::Q8K)) if kq.all(|t2| t2 == Some(t) || t2.is_none()) => t,
-                _ => Dtype::F32,
-            }
-        }
         _ => Dtype::F32,
     }
+}
+
+/// The tiers the engine holds `src`'s linears and head at when the checkpoint stores them block-quantized (a GGUF's
+/// Q4_K, Q5_K, Q6_K, Q8_0, ...), leaf by leaf: what [`gguf::held_tier`] keeps of each stored format - Q4_K as `Q4K`,
+/// Q5_K as `Q8K`, any other block format at int8 - and fp32 for a leaf stored as floats. The parts of one fused GEMM
+/// take one tier ([`crate::serve::Engine::check_tiers`]): their common one; int8 when they are all block-quantized
+/// in different formats (a Q4_K_M's Q6_K `wv` beside Q4_K `wq`/`wk`: the K-quant parts are re-quantized to int8,
+/// error within half an int8 step of each 32-element group); fp32 when one part is stored as floats. `None` when no
+/// linear is block-quantized: [`source_weight_tier`] describes that checkpoint. Reads tensor headers only.
+pub fn stored_weight_policy(cfg: &QwenConfig, src: &dyn TensorSource) -> Option<model::ops::TierPolicy> {
+    use crate::Dtype;
+    use checkpoint::gguf::GgmlType;
+    let stored = |name: &str| src.raw_block_layout(name).map(|layout| layout.ty).filter(|ty| !matches!(ty, GgmlType::F32 | GgmlType::F16 | GgmlType::BF16 | GgmlType::F64)).map(gguf::held_tier);
+    let one_tier = |tiers: &[Option<Dtype>]| match tiers {
+        [first, rest @ ..] if rest.iter().all(|t| t == first) => first.unwrap_or(Dtype::F32),
+        _ if tiers.iter().all(Option::is_some) => Dtype::I8,
+        _ => Dtype::F32,
+    };
+    let mut leaves: Vec<(String, Dtype, u64)> = Vec::new();
+    let mut any_quantized = false;
+    for l in 0..cfg.n_layers {
+        for group in [&["attn.wq.weight", "attn.wk.weight", "attn.wv.weight"][..], &["attn.wo.weight"], &["mlp.gate.weight", "mlp.up.weight"], &["mlp.down.weight"]] {
+            let names: Vec<String> = group.iter().map(|leaf| format!("blocks.{l}.{leaf}")).collect();
+            let tiers: Vec<Option<Dtype>> = names.iter().map(|name| stored(name)).collect();
+            any_quantized |= tiers.iter().any(Option::is_some);
+            let tier = one_tier(&tiers);
+            for (name, leaf) in names.into_iter().zip(group) {
+                let (n, k) = crate::model::linear_dims(cfg, leaf);
+                leaves.push((name, tier, u64::from(n) * u64::from(k)));
+            }
+        }
+    }
+    let head = cfg.head_weight();
+    // An untied checkpoint without its own head ties it anyway: the engine uploads the head from the embedding.
+    let head_src = if src.numel(head).is_some() { head } else { "tok.weight" };
+    leaves.push((head.to_string(), stored(head_src).unwrap_or(Dtype::F32), u64::from(cfg.vocab) * u64::from(cfg.d_model)));
+    any_quantized.then(|| model::ops::TierPolicy::per_leaf(leaves))
 }
 
 /// The brain checkpoint a model-store directory holds in place of upstream

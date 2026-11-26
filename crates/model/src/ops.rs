@@ -947,12 +947,15 @@ impl Weight {
 
     /// Device bytes an `[n, k]` weight occupies once uploaded at `dtype`: the packed
     /// elements (`Dtype::per_word` to a `u32` word) plus the scales the tier carries - one
-    /// f32 per group of 32 along `k` for int8, 4-bit and NF4, one per [`FP8_BLOCK`] x
+    /// f32 per group of 32 along `k` for int8, 4-bit and NF4, the packed sub-scale and super-block planes for the
+    /// affine K-quants (`Q4K`, `Q8K`), one per [`FP8_BLOCK`] x
     /// [`FP8_BLOCK`] block for FP8, none for the 16- and 32-bit tiers. The one place a tier's
     /// footprint is stated, so a planner's estimate and a built model's report agree. `F4E2M1` is the
     /// NVFP4 [`Weight::Micro`] (the one weight of that dtype that exists): one E4M3 scale byte per 16 weights.
     #[must_use]
     pub fn bytes_for(dtype: Dtype, n: usize, k: usize) -> u64 {
+        const KQUANT_GROUP: u64 = 32;
+        const KQUANT_SUPER_BLOCK: u64 = 256;
         if let Dtype::Cq2 | Dtype::Cq3 | Dtype::Cq4 = dtype {
             // Index words, fp16 group norms two to a word, and the codebook levels (`crate::cq`'s device layout).
             let (kpad, bits) = (crate::cq::padded(k) as u64, u64::from(dtype.bits()));
@@ -961,6 +964,10 @@ impl Weight {
         let packed = (n as u64 * k as u64).div_ceil(dtype.per_word() as u64) * 4;
         let scales = match dtype {
             Dtype::I8 | Dtype::Q4 | Dtype::NF4 => crate::int8::scale_len(n, k) as u64 * 4,
+            // The affine K-quants (`Weight::KQuant` with `KqScale::Packed`, `gguf::kquant`'s device layout): per row,
+            // one `(sc, m)` byte pair per 32-element group packed two groups to a word (`wsm`) and one f16 `(d, dmin)`
+            // pair per 256-element super-block (`wd`).
+            Dtype::Q4K | Dtype::Q8K => n as u64 * ((k as u64).div_ceil(KQUANT_GROUP).div_ceil(2) + (k as u64).div_ceil(KQUANT_SUPER_BLOCK)) * 4,
             Dtype::F8E4M3 | Dtype::F8E5M2 => (n as u64).div_ceil(FP8_BLOCK as u64) * (k as u64).div_ceil(FP8_BLOCK as u64) * 4,
             Dtype::F4E2M1 => (n as u64 * k as u64).div_ceil(16).div_ceil(4) * 4,
             _ => 0,
@@ -1601,8 +1608,8 @@ pub struct Ops {
     gemm: LibraryGemmProvider,
     /// The precision of the activation operand quantized-weight products feed ([`Ops::set_linear_activations`]).
     linear_activations: crate::policy::LinearActivations,
-    /// Whether an int8 weight is held on a device without the packed int8 dot ([`Ops::hold_int8_by_float_read`]).
-    float_read_int8: bool,
+    /// Whether int8 and K-quant weights are held packed on a device without the packed int8 dot ([`Ops::hold_packed_by_float_read`]).
+    float_read_packed: bool,
     /// How rotated-codebook products read their activations ([`Ops::set_cq_activations`]).
     cq_activations: crate::cq::CqActivations,
     /// Bytes of decoded f32 scratch one tile of a quantized product may use (see [`tiled`]).
@@ -1728,7 +1735,7 @@ impl Ops {
             idx.insert(name, i);
         }
         let gemm = LibraryGemmProvider::for_gpu(&gpu, GemmPrecision::Auto);
-        Ok(Ops { gpu, caps, idx, selector, providers, gemm, linear_activations: Default::default(), float_read_int8: false, cq_activations: Default::default(), tile_budget_bytes: DEFAULT_TILE_BUDGET_BYTES, decode_dummy: std::sync::OnceLock::new(), uploads: std::sync::OnceLock::new(), decoded: Default::default(), scratch: Default::default(), shared_quant: Default::default(), shared_bf16: Default::default() })
+        Ok(Ops { gpu, caps, idx, selector, providers, gemm, linear_activations: Default::default(), float_read_packed: false, cq_activations: Default::default(), tile_budget_bytes: DEFAULT_TILE_BUDGET_BYTES, decode_dummy: std::sync::OnceLock::new(), uploads: std::sync::OnceLock::new(), decoded: Default::default(), scratch: Default::default(), shared_quant: Default::default(), shared_bf16: Default::default() })
     }
 
     /// Choose the arithmetic of the GEMMs against bf16 weights: `Auto` takes
@@ -1753,20 +1760,22 @@ impl Ops {
         self.gemm.share_product_casts();
     }
 
-    /// Hold an int8 weight at int8 on a device without the packed int8 dot (`numeric.int8_dot`), for a caller whose
-    /// every product reads the codes against f32 activations (the weight-only `#w=w8` kernels, or [`Ops::matmul`]'s
-    /// tile decode, both plain float arithmetic): a frozen LoRA base. Without it [`Ops::lands`] widens int8 to f32
-    /// there, as a caller that dispatches the packed kernel needs.
-    pub fn hold_int8_by_float_read(&mut self) {
-        self.float_read_int8 = true;
+    /// Hold int8 and affine K-quant (`Q4K`, `Q8K`) weights at their packed tier on a device without the packed int8
+    /// dot (`numeric.int8_dot`), for a caller whose every product of them goes through [`Ops::matmul`] (or the
+    /// weight-only `#w=w8` kernels): there a device that runs no packed-int8 kernel reads the codes through the tile
+    /// decode against the f32 activation rows, plain float arithmetic. A frozen LoRA base and a server holding a
+    /// checkpoint's K-quants as stored ask for it. Without it [`Ops::lands`] widens these tiers to f32 there, as a
+    /// caller that dispatches the packed kernels itself needs.
+    pub fn hold_packed_by_float_read(&mut self) {
+        self.float_read_packed = true;
     }
 
     /// The tier a weight asked for as `want` is held at on this device: [`Dtype::promote`] on the device's numeric
-    /// support, except that int8 stays int8 under [`Ops::hold_int8_by_float_read`]. [`Weight::upload`] and the loaders
-    /// land on it; a build that decides on a tier before uploading asks it too.
+    /// support, except that int8 and the affine K-quants stay packed under [`Ops::hold_packed_by_float_read`].
+    /// [`Weight::upload`] and the loaders land on it; a build that decides on a tier before uploading asks it too.
     pub fn lands(&self, want: Dtype) -> Dtype {
-        if want == Dtype::I8 && self.float_read_int8 {
-            return Dtype::I8;
+        if matches!(want, Dtype::I8 | Dtype::Q4K | Dtype::Q8K) && self.float_read_packed {
+            return want;
         }
         want.promote(&self.caps.numeric)
     }
@@ -2521,6 +2530,11 @@ impl Ops {
             // parameter; only the affine pair needs the extra `wsm`/`wd`/
             // `xgs` buffers this arm binds.
             Weight::KQuant { w: wb, sz, .. } => {
+                // As for `I8`/`Q4` above: a device that executes no packed-int8 kernel reads the codes through the
+                // tile decode against the f32 activation rows.
+                if !self.packed_int8_runs(m, k) {
+                    return self.matmul_rows(s, w, (0, n), act, y, yoff);
+                }
                 assert!(
                     dt == Dtype::Q4K || dt == Dtype::Q8K,
                     "Ops::matmul: Weight::KQuant reached the affine dispatch arm with dtype {dt:?} -- \

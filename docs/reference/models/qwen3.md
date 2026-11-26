@@ -72,9 +72,20 @@ conversion is larger than either. Running the GGUF directly, as above, never
 pays that expansion at all -- the download saving is the whole story, the
 same as FLUX.2's text encoder, below.
 
-To make a checkpoint a `brain serve` resident, pass `--checkpoint PATH`
-(`--tokenizer PATH` names a tokenizer that is not beside the checkpoint) -- a
-`.gguf` file works here too. A checkpoint in the model store needs neither: the
+Served directly, a block-quantized GGUF is also **held** as stored, linear by
+linear: Q4_K stays a 4-bit K-quant (about 0.58 bytes a weight on the device),
+Q5_K an 8-bit-slot K-quant, and every other block format (Q6_K, Q8_0, ...)
+int8. The parts of one fused projection share a tier, so a Q/K/V group that
+mixes formats (a Q4_K_M's Q6_K `v` beside Q4_K `q`/`k`) is held at int8, and a
+part stored as floats keeps the group at fp32. The memory plan charges exactly
+those bytes. On a device without a packed int8 dot (the CPU backend) the
+codes stay packed and are read by float arithmetic through the tile decode.
+
+To make a checkpoint a `brain serve` resident, pass `--checkpoint PATH` (a
+file, a repo directory, or a model-store reference `vendor/repo[-QUANT]`, which
+is looked up in the store named by `--models-dir`; an unknown reference is
+refused by name). `--tokenizer PATH` names a tokenizer that is not beside the
+checkpoint; a `.gguf` file works here too. A checkpoint in the model store needs neither: the
 store scan serves it under its store id.
 
 ### As FLUX.2's text encoder
@@ -221,7 +232,7 @@ weights when it is loaded.
 ## Options
 
 Which checkpoint to serve is the model store, or `brain serve --checkpoint`
-(with `--tokenizer`); FLUX.2's text encoder still takes `BRAIN_FLUX2_TE`,
+(a path or a store reference, with `--tokenizer`); FLUX.2's text encoder still takes `BRAIN_FLUX2_TE`,
 above. Everything about HOW to serve it is a `brain serve` flag:
 
 These are the `lora_train` parameters:

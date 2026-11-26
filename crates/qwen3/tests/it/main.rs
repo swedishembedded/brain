@@ -26,6 +26,7 @@ mod engine_adapter_bank;
 mod engine_device_oom;
 mod engine_exact_decode;
 mod engine_glue;
+mod engine_gguf_kquant;
 mod engine_half_weights;
 mod engine_prefill_census;
 mod engine_prefill_hd128;
