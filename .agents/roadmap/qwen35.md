@@ -2910,6 +2910,17 @@ place since 2026-10-21, so the accounting is the part that shows it per step.
 
 ## Not yet done
 
+- **Device hang under served load with `--speculative auto` (open,
+  2026-11-26, knowledge #602).** 7 of 16 GH200 servers of Qwen3.8-27B-FP8
+  (with Qwen3-4B resident beside it, `--max-batch 64`) hung after hours of
+  agent traffic: the lane thread blocked in a CUDA synchronisation, GPU at
+  100%, last log lines showing speculation switching on and off at 1 to 2
+  running sequences. Suspects: the speculative verify step at that switch,
+  or any kernel whose bounds changed between steps. Next: run the same load
+  with `--speculative off` (the mitigation in place) and with `auto`, and on
+  a recurrence record the last launched kernel before restarting. The device
+  watchdog that would turn it into a failed job is in
+  `gpu-supervisor.md`.
 
 - **M18 follow-up (closed): `stream_train_real.rs` checks the generation
   shift its name promises.** Beside the finite, decreasing loss, the test
