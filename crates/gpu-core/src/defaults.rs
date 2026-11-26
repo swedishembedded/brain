@@ -67,6 +67,7 @@ impl Hardware {
     pub fn detected() -> &'static Hardware {
         static HW: std::sync::OnceLock<Hardware> = std::sync::OnceLock::new();
         HW.get_or_init(|| {
+            crate::devices::assert_devices_claimed("the hardware probe");
             let cuda = backend_cuda::usable_gpus();
             // A card is matched by its UUID, the identity both enumerations share.
             let cuda_card = |uuid: Option<[u8; 16]>| {

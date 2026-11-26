@@ -77,6 +77,24 @@ pub struct DeviceRegistry {
 
 static REGISTRY: std::sync::OnceLock<DeviceRegistry> = std::sync::OnceLock::new();
 
+/// Why this process claims no device, once [`claim_no_device`] said so.
+static NO_DEVICE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+/// Declare that this process uses no device, for `why` (a router that serves no model): from here on, enumerating
+/// devices or probing a GPU API ends the process with `why` and what asked, instead of opening the cards' device
+/// files (and, on CUDA, a context's memory) for a process that never runs anything on them. Call it before anything
+/// can probe; the first reason given stands.
+pub fn claim_no_device(why: &'static str) {
+    let _ = NO_DEVICE.set(why);
+}
+
+/// Panics when [`claim_no_device`] was called: `what` is the probe about to open a GPU API.
+pub(crate) fn assert_devices_claimed(what: &str) {
+    if let Some(why) = NO_DEVICE.get() {
+        panic!("{what} was asked for, but this process claims no device ({why})");
+    }
+}
+
 /// The registry, enumerated on first use.
 ///
 /// Three sources, in precedence order: native Vulkan, then wgpu, then CUDA.
@@ -93,6 +111,7 @@ static REGISTRY: std::sync::OnceLock<DeviceRegistry> = std::sync::OnceLock::new(
 /// [`cuda_identities`]).
 pub fn registry() -> &'static DeviceRegistry {
     REGISTRY.get_or_init(|| {
+        assert_devices_claimed("the device registry");
         let (ids, source, why) = resolve_registry_sources(
             backend_vulkan::enumerate_physical_gpus,
             backend_wgpu::enumerate_gpus,

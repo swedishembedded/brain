@@ -203,3 +203,38 @@ fn the_stdio_controller_starts_with_an_empty_model_store() {
     assert!(!stderr.contains("panicked"), "stderr:\n{stderr}");
     assert!(String::from_utf8_lossy(&out.stdout).contains("ready"), "the loop announced itself");
 }
+
+/// A router (`--upstream`) serves no model, so it claims no device: on
+/// 2026-11-26 each node's routers held `/dev/nvidia*` open on its cards,
+/// because device selection ran for every command before `serve` read its
+/// flags. Traced at the device level, the router builds no device registry
+/// and enumerates no adapter; and any code that asked for one would end the
+/// router with the reason. The child sees no GPU driver either way (CUDA
+/// devices hidden, no Vulkan or EGL driver to load), so this check never
+/// touches the machine's cards, however it ends.
+#[test]
+fn a_router_claims_no_device() {
+    let dir = scratch("router");
+    let mut child = Command::new(bin())
+        .args(["--trace-gpu", "5", "--trace-output"])
+        .arg(dir.join("trace.log"))
+        .args(["serve", "--openai", "127.0.0.1:0", "--upstream", "http://127.0.0.1:9", "--runtime-dir"])
+        .arg(dir.join("run"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .env_clear()
+        .env("HOME", dir.join("home"))
+        .env("CUDA_VISIBLE_DEVICES", "")
+        .env("VK_ICD_FILENAMES", dir.join("no-vulkan-driver.json"))
+        .env("VK_DRIVER_FILES", dir.join("no-vulkan-driver.json"))
+        .env("__EGL_VENDOR_LIBRARY_FILENAMES", dir.join("no-egl-vendor.json"))
+        .spawn()
+        .expect("spawn the router");
+    wait_for_record(&mut child, &dir.join("run"));
+    let stderr = stop(child);
+    assert!(stderr.contains("routing to 1 upstreams"), "the router came up; stderr:\n{stderr}");
+    let trace = std::fs::read_to_string(dir.join("trace.log")).expect("the device-level trace was written");
+    assert!(!trace.contains("device registry") && !trace.contains("wgpu::Instance"), "a router builds no device registry and opens no GPU API; trace:\n{trace}");
+    assert!(!stderr.contains("panicked"), "and nothing in it asked for one; stderr:\n{stderr}");
+}

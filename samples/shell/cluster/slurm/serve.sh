@@ -122,7 +122,7 @@ done
 for ((r = 0; r < servers; r++)); do cat "$workdir/url.$r"; done >"$workdir/upstreams.txt"
 mkdir -m 700 "$workdir/rt.router"
 
-"$brain" --device cpu serve --openai "$listen" --upstreams-file "$workdir/upstreams.txt" \
+"$brain" serve --openai "$listen" --upstreams-file "$workdir/upstreams.txt" \
 	--upstream-key-file "$workdir/upstream.key" --insecure-plaintext --api-key-file "$workdir/router.key" \
 	--runtime-dir "$workdir/rt.router" --ready-file "$workdir/ready.router" "${models_dir[@]}" >"$workdir/router.log" 2>&1 &
 pids+=($!)

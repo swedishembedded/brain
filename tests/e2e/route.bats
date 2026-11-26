@@ -57,7 +57,7 @@ wait_file() {
 
 start_router() {
   mkdir -p -m 700 "$TDIR/rtr"
-  "$BRAIN" serve --device cpu --runtime-dir "$TDIR/rtr" --openai "127.0.0.1:$1" \
+  "$BRAIN" serve --runtime-dir "$TDIR/rtr" --openai "127.0.0.1:$1" \
     --upstream "http://127.0.0.1:$2,http://127.0.0.1:$3" --upstream-key-file "$TDIR/upkey" \
     --upstream-health-ms 200 --api-keys-out "$TDIR/keys.json" --ready-file "$TDIR/ready-router" >"$TDIR/router.log" 2>&1 &
   PIDS+=($!)
@@ -131,13 +131,13 @@ chat() {
 }
 
 @test "a router refuses a plaintext upstream off this machine and model flags it would ignore" {
-  run "$BRAIN" serve --device cpu --runtime-dir "$TDIR" --openai 127.0.0.1:18913 --upstream http://192.0.2.1:8000
+  run "$BRAIN" serve --runtime-dir "$TDIR" --openai 127.0.0.1:18913 --upstream http://192.0.2.1:8000
   [ "$status" -eq 2 ]
   [[ "$output" == *"--insecure-plaintext"* ]]
-  run "$BRAIN" serve --device cpu --runtime-dir "$TDIR" --openai 127.0.0.1:18913 --upstream http://127.0.0.1:18914 --mock
+  run "$BRAIN" serve --runtime-dir "$TDIR" --openai 127.0.0.1:18913 --upstream http://127.0.0.1:18914 --mock
   [ "$status" -eq 2 ]
   [[ "$output" == *"--mock"* ]]
-  run "$BRAIN" serve --device cpu --runtime-dir "$TDIR" --openai 127.0.0.1:18913 --upstream http://127.0.0.1:18914/v1
+  run "$BRAIN" serve --runtime-dir "$TDIR" --openai 127.0.0.1:18913 --upstream http://127.0.0.1:18914/v1
   [ "$status" -eq 2 ]
   run "$BRAIN" serve --device cpu --runtime-dir "$TDIR" --openai 127.0.0.1:18913 --upstream-key-file "$TDIR/upkey"
   [ "$status" -eq 2 ]

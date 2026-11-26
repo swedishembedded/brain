@@ -710,6 +710,16 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
     }
     let _ = DEVICE_FLAGS.set(consumed);
 
+    // A router serves no model, so nothing below runs for it: resolving the default set enumerates every card
+    // through Vulkan, wgpu and the CUDA driver, which holds each card's device files open for the router's lifetime.
+    if routes_only(&out) {
+        if spec_text.is_some() || backend_text.is_some() {
+            eprintln!("brain serve: a router (--upstream) serves no model and claims no device; --device and --backend are not read");
+        }
+        gpu_core::devices::claim_no_device("brain serve --upstream routes to other servers and serves no model");
+        return out;
+    }
+
     let backend = backend_text.map(|text| match gpu_core::devices::Backend::parse(&text) {
         Ok(b) => b,
         Err(e) => {
@@ -777,6 +787,13 @@ fn select_backend(argv: Vec<String>) -> Vec<String> {
     }
     gpu_core::publish_compute_set(set);
     out
+}
+
+/// Whether `argv` (device flags already taken out) is `brain serve` routing to upstreams (`--upstream URL` or
+/// `--upstreams-file FILE`) instead of serving models: the one command that claims no device.
+fn routes_only(argv: &[String]) -> bool {
+    let at = subcommand_index(argv);
+    argv.get(at).is_some_and(|c| c == "serve") && argv[at + 1..].iter().any(|a| a == "--upstream" || a == "--upstreams-file")
 }
 
 /// The device flags `select_backend` consumed, in the order given: what a
@@ -1777,8 +1794,10 @@ fn main() {
     // turns `gpu_core::devices`' placement seam from inert into the
     // capacity-aware default: with no `--device`, a model lands on a card
     // that can actually hold it instead of unconditionally on card 0. An
-    // explicit selection never consults it.
-    placement::install();
+    // explicit selection never consults it. A router places nothing.
+    if !routes_only(&argv) {
+        placement::install();
+    }
     // A one-shot CLI verb (every arm below except `serve`) has nothing else
     // running in the process that needs to survive a panic - unlike
     // `serve`'s own request-isolating `catch_unwind`
