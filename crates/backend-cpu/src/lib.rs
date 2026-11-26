@@ -265,6 +265,11 @@ struct FastIdx {
     chan_place: Option<usize>,
     upsample2: Option<usize>,
     silu_mul: Option<usize>,
+    /// The declared expert activation (`glu_act.wgsl`), matched by source like the pair below. Its default form -
+    /// SwiGLU over separate gate and up buffers - is `silu_mul` by definition, so it takes `silu_mul`'s native route:
+    /// a backend that ran one through the vector `exp` and the other through the JIT's scalar one would give the two
+    /// declarations of the same function results an ulp apart.
+    glu_act: Option<usize>,
     scale_add: Option<usize>,
     /// The masked cross-entropy pair, matched by their WGSL source rather than by name: a model registers them under
     /// a name of its own (`ce_grad`, `ce_value`), which other models give to the unmasked kernels.
@@ -380,6 +385,7 @@ impl CpuBackend {
                 chan_place: find("chan_place"),
                 upsample2: find("upsample2"),
                 silu_mul: find("silu_mul"),
+                glu_act: kernels.iter().position(|(_, src)| *src == ::kernels::GLU_ACT).filter(|&i| all_native || !jit.is_compiled(i)),
                 scale_add: find("scale_add"),
                 ce_grad_masked: kernels.iter().position(|(_, src)| *src == ::kernels::CE_GRAD_MASKED).filter(|&i| all_native || !jit.is_compiled(i)),
                 ce_value_masked: kernels.iter().position(|(_, src)| *src == ::kernels::CE_VALUE_MASKED).filter(|&i| all_native || !jit.is_compiled(i)),
@@ -1172,6 +1178,21 @@ backend_api::check_binding_offsets(&self.shared.names[kind], offsets);
                 fast_ops::silu_mul(a, b, out);
             }
             return;
+        }
+        // glu_act.wgsl: params = [rows, ff, mode, act, cap_gate, cap_up]; bufs = [a, b, h]. Mode 0 (separate buffers)
+        // with act 0 (SwiGLU) is silu_mul over rows * ff elements; every other form stays on the JIT.
+        if Some(kind) == f.glu_act && bufs.len() >= 3 {
+            let pu = unsafe { std::slice::from_raw_parts(uniform, 4) };
+            if pu[2] == 0 && pu[3] == 0 {
+                unsafe {
+                    let total = pu[0] as usize * pu[1] as usize;
+                    let a = std::slice::from_raw_parts(bufs[0] as *const f32, total);
+                    let b = std::slice::from_raw_parts(bufs[1] as *const f32, total);
+                    let h = std::slice::from_raw_parts_mut(bufs[2] as *mut f32, total);
+                    fast_ops::silu_mul(a, b, h);
+                }
+                return;
+            }
         }
         if Some(kind) == f.gn_stats && bufs.len() >= 3 {
             unsafe {
