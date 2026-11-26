@@ -6,6 +6,8 @@ see CONTRIBUTING or AGENTS.md for the commit-message convention.
 
 ## [Unreleased]
 
+## [7.0.0] - 2026-11-26
+
 ### Breaking Changes
 
 - The policy-gradient loss is one type, `brain::PgLoss` (`rl::objective::pg_loss`), embedded as `loss` in both `PolicyGradientConfig` and online GRPO's `GrpoConfig`: `PolicyGradientConfig`'s `clip_eps`, `clip_eps_high`, `dual_clip`, `kl_beta`, `log_kl`, `loss_agg`, `advantage_norm`, `advantage_floor`, `max_step_kl` and `max_step_grad_norm`, `GrpoConfig`'s `clip_eps` and `kl_beta`, and `GrpoOptions`' `advantage`, `loss_agg`, `clip_eps_high` and `log_kl` moved there (`PgLoss::RECORDED` and `PgLoss::ONLINE` are each objective's defaults; the recorded objective's default gains the dual clip, below). Online GRPO gains the dual clip, the advantage floor and the step guards (`max_step_kl`, `max_step_grad_norm`), off by default, and holds its loss settings to the same ranges. The `brain/train` params, the `brain finetune` flags and the run identity are unchanged; the settings are declared once in `brain::policy_gradient_settings`.
