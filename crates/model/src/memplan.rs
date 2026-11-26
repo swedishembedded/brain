@@ -173,6 +173,25 @@ pub fn calibrated_activation_bytes(tokens: u32, layers: u64, width: u64) -> u64 
     (ACTIVATION_BYTES_PER_TOKEN_PER_LAYER_WIDTH * tokens as f64 * layers as f64 * width as f64) as u64
 }
 
+/// The largest `n` in `[lo, hi]` for which `fits(n)`, for a cost that grows with `n` (a context, a KV pool, a batch);
+/// `None` when not even `lo` fits. The one search every sizing that shrinks a plan to a device uses: a bisection, so
+/// the answer is the largest that fits rather than the last of a series of halvings.
+pub fn largest_fitting(lo: u32, hi: u32, fits: impl Fn(u32) -> bool) -> Option<u32> {
+    if !fits(lo) {
+        return None;
+    }
+    let (mut lo, mut hi) = (lo, hi.max(lo));
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if fits(mid) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    Some(lo)
+}
+
 /// The device bytes of every demand at its preferred (stored) variant: what a sizing costs before
 /// any lever is pulled.
 pub fn device_total(demands: &[Demand]) -> u64 {
@@ -544,6 +563,14 @@ mod tests {
 
     fn cap(device_gib: u64) -> Capacity {
         Capacity { device_bytes: device_gib * GIB, host_bytes: 64 * GIB }
+    }
+
+    #[test]
+    fn largest_fitting_finds_the_largest_that_fits_or_none() {
+        assert_eq!(largest_fitting(1, 1000, |n| n <= 437), Some(437));
+        assert_eq!(largest_fitting(10, 1000, |n| n <= 2000), Some(1000), "the whole range fits");
+        assert_eq!(largest_fitting(10, 1000, |n| n < 10), None, "not even the least");
+        assert_eq!(largest_fitting(10, 5, |_| true), Some(10), "an empty range is its lower end");
     }
 
     #[test]

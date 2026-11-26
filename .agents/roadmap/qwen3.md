@@ -316,8 +316,24 @@ never-fused attention slab); after, 16 of 16 complete, 0.46 req/s, TTFT p50 20.8
       the slab is fused away, so the served round could take the tensor-core round (`model::serve::
       prefill_round_rows_for`) with its activation charge (`qwen3::serve::activation_bytes`) in the plan.
 
+## The plan is sized to the card share by its estimate's arithmetic (2026-11-26)
+
+Qwen3-4B (bf16, adapters on every linear, `--max-batch 64`) was withdrawn as unservable on every GH200 a leaked
+context held 6 GB of: `resolve_ctx` and the fleet pool were sized without the adapter bank and without the
+never-fused attention scratch the estimate charges, so the estimate came out over the share it was sized to
+(1M-token pool, 87.1 GiB estimated on an 86 GiB share). One function, `serving_demands`, is now the footprint the
+estimate, the pre-load check, the batch plan, the context and the pool all use, and the pool is the largest that
+fits (`model::memplan::largest_fitting`, shared with qwen35moe's planner) instead of the last of a series of
+halvings. Measured at `--max-batch 64`: an 86 GiB share gets a 1032896-token pool estimated at 86.00 GiB
+(was 1048576, 87.11 GiB, unservable); an 80 GiB share gets 948160 tokens at 80.00 GiB (was 524288 at 49.98 GiB,
+30 GiB unused). Spec: `a_wide_batch_with_an_adapter_bank_sizes_its_pool_to_the_card_share`.
+
 ## Not yet done
 
+- [ ] One planner for every LLM family: Qwen3 (`resident_llm`), Qwen3.8 dense (`resident_qwen35::plan_served`) and
+      the MoE (`resident_qwen35moe::plan`) each choose batch, context and pool with their own code over their own
+      demand lists; they share the search (`model::memplan::largest_fitting`) and the ranked defaults, not the
+      order of choices or the refusal text. Wanted: one generic plan over a family's demand function.
 - [ ] Faster KV swap-out: the gather side runs at about half the measured
       host-bus rate (see above), dispatch-bound rather than bandwidth-bound
 - [ ] An FP8 / E4M3 weight path (INT8 is the only quantized weight format

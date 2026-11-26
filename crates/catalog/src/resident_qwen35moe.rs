@@ -365,18 +365,10 @@ fn fits(cfg: &Qwen35Config, tier: &TierPolicy, usable: u64, kv: KvTier, max_batc
 /// Contexts and pools are planned in whole multiples of this many tokens.
 const CONTEXT_GRAIN: u32 = 256;
 
-/// The largest `n` in `[lo, hi]` for which `fits(n)`, given `fits(lo)` and that the cost grows with `n`, rounded down to
-/// [`CONTEXT_GRAIN`] when it is at least one grain.
+/// The largest `n` in `[lo, hi]` for which `fits(n)` ([`model::memplan::largest_fitting`]), given `fits(lo)` and that
+/// the cost grows with `n`, rounded down to [`CONTEXT_GRAIN`] when it is at least one grain.
 fn largest_fitting(lo: u32, hi: u32, fits: impl Fn(u32) -> bool) -> u32 {
-    let (mut lo, mut hi) = (lo, hi.max(lo));
-    while lo < hi {
-        let mid = lo + (hi - lo).div_ceil(2);
-        if fits(mid) {
-            lo = mid;
-        } else {
-            hi = mid - 1;
-        }
-    }
+    let lo = model::memplan::largest_fitting(lo, hi, fits).unwrap_or(lo);
     if lo >= CONTEXT_GRAIN {
         lo / CONTEXT_GRAIN * CONTEXT_GRAIN
     } else {
