@@ -922,9 +922,9 @@ pub const LORA_TILE_MIN_OUTPUTS: u64 = 2048;
 
 /// Queries one workgroup of the row-tiled VQ assignment (`vq_argmin_tiled`) takes: from a full tile of them it
 /// leads `Op::VqAssign`, reading the (transposed) codebook once per tile where the per-query twin reads it once per
-/// query. Measured on a GH200 over a speech codec's 2048 x 256 residual codebooks (`mimi`'s batched encode, 1318 s
-/// of speech): the codec encode went from 375 to 495 audio seconds per wall second at a batch of 8 clips; a tile of 8
-/// on 64 lanes was slower than the per-query twin (too few threads per query at a serving batch).
+/// query. Measured on a GH200 over a speech codec's 2048 x 256 residual codebooks (`mimi`'s batched encode,
+/// `device_encode_throughput`): a tile of 4 raised the codec encode's rate at every batch; a tile of 8 on 64 lanes was
+/// slower than the per-query twin (too few threads per query at a serving batch).
 pub const VQ_TILE_ROWS: u32 = 4;
 
 /// The row-tiled VQ assignment's workgroup width (a device must allow it).

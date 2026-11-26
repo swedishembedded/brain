@@ -71,12 +71,11 @@ pub const SAMPLE_RATE: u32 = 24_000;
 pub const DEFAULT_CHUNK_FRAMES: usize = 16;
 
 /// Requests a device engine decodes together by default, where the card holds that wide a decoder
-/// ([`device_streams_within`] narrows it where it does not). Measured over HTTP on one GH200 (in-context clones of 8 s of
-/// speech, as many requests at once as streams, 2026-11-25), once each finished clip's codec decode on the decode thread
-/// was about 32 ms: 64 streams 91-100 s of speech a second (the 32-stream engine under the same 64 requests 79-81), 96
-/// streams 98-101, 128 streams 110-111. Past 64 each request takes longer than the speech it makes (an 8 s clip about
-/// 9.5 s at 128), so 64 keeps every request faster than real time; a frame of 32 streams is about 1,700 kernels near
-/// their launch floor, so wider frames are nearly free on the device. Every stream holds its whole utterance in the KV
+/// ([`device_streams_within`] narrows it where it does not). Measured over HTTP on one GH200 (in-context clones, as many
+/// requests at once as streams): 64 streams make more speech a second than the 32-stream engine under the same 64
+/// requests, and 96 or 128 streams only a little more, while past 64 each request takes longer than the speech it makes.
+/// 64 is the widest engine that keeps every request faster than real time; a frame of 32 streams is about 1,700 kernels
+/// near their launch floor, so wider frames are nearly free on the device. Every stream holds its whole utterance in the KV
 /// pool (about 470 MB of fp32 KV a stream at the 2048-position context), so 64 streams take about 30 GB.
 pub const DEVICE_STREAMS: usize = 64;
 

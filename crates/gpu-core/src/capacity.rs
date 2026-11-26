@@ -158,7 +158,7 @@ pub fn free_on(card: u32) -> Option<u64> {
 
 /// How often [`peak_taken_while`] reads the driver. Each read runs `nvidia-smi`, which queries every card on the node
 /// and takes its driver locks: read back to back, the probe slowed the very run it measured (a training step's own
-/// driver calls waited 10-25 ms behind it) and every other process on the node.
+/// driver calls queued behind it) and every other process on the node.
 pub const PEAK_SAMPLE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Run `f` while a sampler records the lowest free figure the driver reports

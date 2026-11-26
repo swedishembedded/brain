@@ -422,8 +422,9 @@ pub fn conv1d_bias_fwd(
 /// A stride-1 conv as a sum over its taps of products of shifted windows, on the vendor GEMM ([`ConvScratch::with_gemm`]):
 /// `y[Lo, Cout] = sum_j x_pad[j*dilation .. j*dilation + Lo, Cin] W[:, j, :]^T`, with `x_pad` the input channels-last
 /// behind `pad` zero rows and the weight permuted once to `[Cout, K, Cin]` (tap `j` is then a strided slice of it), then
-/// the same transpose-and-bias epilogue as the im2col form. No `im2col` copy, which is `K` times the input: measured as
-/// 28 % of a speech codec's decode on a GH200 at under half the card's memory and compute rate. `None` (nothing to
+/// the same transpose-and-bias epilogue as the im2col form. No `im2col` copy, which is `K` times the input: in a profile
+/// of a speech codec's decode that copy was a large share of the kernel time at under half the card's memory and
+/// compute rate (`ncu` over the codec timing test reproduces it). `None` (nothing to
 /// push) where it does not apply: a strided or grouped conv, a provider that is not active, channel counts that are not
 /// 16-byte aligned, taps reaching past the padded input, or a device list without the permute kernels.
 #[allow(clippy::too_many_arguments)]

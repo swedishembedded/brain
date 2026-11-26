@@ -111,9 +111,9 @@ pub struct SpeechSftConfig {
     pub batch: u32,
     /// Micro-batches whose records are regrouped by length, so each micro-batch holds records of about one length
     /// and computes few padding rows (and the ranks of a data-parallel run get steps of about one cost). 1 draws
-    /// records in the shuffled epoch order alone; the default, 16, is the window measured fastest on a card (a third
-    /// more frames a second than unsorted batches of 1.5-30 s utterances). Every record still trains once an epoch;
-    /// the steps then differ in their records' lengths rather than each mixing them.
+    /// records in the shuffled epoch order alone; the default, 16, is the window measured fastest on a card against
+    /// unsorted batches of mixed-length utterances (`speech_sft_bench` reproduces it). Every record still trains once an
+    /// epoch; the steps then differ in their records' lengths rather than each mixing them.
     #[serde(default = "defaults::length_bucket_steps")]
     pub length_bucket_steps: u32,
     /// The most frames a record may hold (a longer one is refused, naming

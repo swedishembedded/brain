@@ -106,6 +106,7 @@ reference). The actions are in the capability manifest too (`brain caps
 brain/qwen3tts`), reachable over D-Bus/HTTP.
 
 `encode` turns a recording into what a training shard records for it: input
+<!-- perf-number: an input length limit the action enforces, not a timing -->
 blob `audio` (a WAV at any sample rate, at most 128 MiB and 600 s; resampled to
 the codec's 24 kHz), optional param `text` (its transcript). Outputs: blob
 `codes` (u16 little-endian, `[frames, 16]` row-major, the codec's codes), blob

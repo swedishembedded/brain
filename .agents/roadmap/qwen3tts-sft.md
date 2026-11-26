@@ -96,7 +96,10 @@ ledger is the engine work it needs.
           32; the CPU backend 3.7 at one, 7.3 at 8.
         - codec alone over 256 corpus clips (1318 s, 1.5-30 s, mean 5.2 s;
           `mimi` `device_encode_throughput`): 499 at batch 1, 1000 at 8, 1205
-          in one call.
+          in one call. The row-tiled VQ assignment (`backend_api::select`
+          `VQ_TILE_ROWS` = 4) took this encode from 183 to 231 at batch 1,
+          375 to 495 at 8 and 320 to 476 at 32; a tile of 8 on 64 lanes was
+          slower than the per-frame kernel.
         - served over D-Bus (`brain serve --dbus --device gpu1`, `brain_py`,
           the 0.6B Base, the 256 clips with transcripts): single-clip
           requests 137 one at a time, 341 with 8 in flight; many-clip

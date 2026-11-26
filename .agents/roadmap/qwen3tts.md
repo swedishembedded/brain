@@ -52,7 +52,8 @@ Target, in order (each a self-contained change, measured with nsys/ncu before th
 - [x] Building a training set from recordings: the codec encoder on the device with its frames quantised across the
       CPU pool (codes bit-identical; 8 s of audio 5.8x to 291x real time, 48 s 10.3x to 613-674x), the speaker
       encoder's log-mel frames across the pool (bit-identical; 48 s 114x to 253x real time on the device), and the
-      stride-1 convs of the codec as tap sums on the vendor fp32 GEMM (no im2col; decode kernel time -18 %). 300 h of
+      stride-1 convs of the codec as tap sums on the vendor fp32 GEMM (no im2col, which ncu put at 28 % of a served
+      decode's kernel time at 43 % SM; decode kernel time -18 %). 300 h of
       audio is about half an hour of codec encode on one card.
 - [x] The encode over a batch of recordings: the codec and the speaker encoder each one recorded device pass over
       the batch (`mimi::Codec::encode_batch`, clips padded to a whole frame with per-clip length masks;

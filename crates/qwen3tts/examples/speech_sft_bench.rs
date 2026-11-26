@@ -18,6 +18,7 @@
 //! speech_sft_bench ranks --ranks N --base DIR --shard PATH [--config '{...}'] [--cards A,B,..]
 //! ```
 //!
+// perf-number: utterance lengths the synthetic shard draws, an input distribution, not a timing
 //! `synth` draws utterances of 1.5-30 s (log-normal, mean about 6.4 s, 12.5
 //! frames a second) with about four text tokens a second, every one complete,
 //! in one language (`english`). `run` trains with the given
@@ -45,6 +46,7 @@ fn synth(args: &[String]) -> Result<(), String> {
     let mut rng = Rng::new(seed);
     let (mut frames_total, mut text_total) = (0usize, 0usize);
     for r in 0..records {
+        // perf-number: utterance lengths the synthetic shard draws, an input distribution, not a timing
         // ln(seconds) ~ N(1.71, 0.55): median 5.5 s, mean about 6.4 s (80 frames).
         let secs = (1.71 + 0.55 * rng.next_gaussian()).exp().clamp(1.5, 30.0);
         let frames = (secs * 12.5).round() as usize;

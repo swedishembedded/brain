@@ -477,7 +477,7 @@ impl Codec {
 /// are tens of GB. Submitting whenever this much has been allocated keeps a
 /// long clip's peak bounded - the buffers a submitted batch no longer needs go
 /// back to the backend's held-block pool for the next stage - while a typical
-/// clip (about 100 frames, 8 s) still goes out in a handful of submissions
+/// clip (about 100 frames) still goes out in a handful of submissions
 /// rather than one per op.
 const FLUSH_BYTES: u64 = 1 << 30;
 

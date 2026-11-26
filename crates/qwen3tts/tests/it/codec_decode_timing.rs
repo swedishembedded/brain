@@ -61,6 +61,7 @@ fn codec_encode_timing_on_the_device() {
 }
 
 /// Wall time of the speaker encoder's x-vector (`ecapatdnn::SpeakerEncoder::embed_wav`) on the device and on the host
+// perf-number: the lengths of the audio the test feeds, not a timing
 /// for 8 s and 48 s of audio, warm: the other half of building a training set from recordings.
 #[test]
 #[ignore = "timing measurement, not a gate"]
