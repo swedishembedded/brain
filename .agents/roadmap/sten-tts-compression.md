@@ -206,7 +206,34 @@ the ~0.48 B rung. That rung must beat or match it, or the weight-editing path ha
   servers. The surgery engine and its parity tests run on CPU first.
 - 2026-11-25: weight surgery landed (see "Surgery: what landed and what it measured"): every edit of the plan,
   calibration, the served action and the CLI; teacher parity exact; the single-edit sensitivity profile above.
-  Open: joint layer selection (greedy re-ablation after each removal instead of individual KL); scoring the text
+  Open: scoring the text
   fold and the code predictor by Fisher; a larger Swedish corpus for the trim; `qwen3::slice` duplicates the stream
   rotation for chat models and should become a declaration over `modelopt::surgery`; an SDK-level CPU test of
   `SpeechSurgery` on a tiny release (the pipeline is covered by the modelopt parity tests and the teacher runs).
+- 2026-11-26: **rung 1 (≤ 958 M) reached parity: Sten-TTS-950M**, 952,628,480 parameters in model.safetensors
+  (codec 170,557,441 apart), recipe `sten-tts/recipe/sten-tts-950m.yaml` (sten-tts `5dc8e4d`), brain `100eeff22`.
+  - Cut (`speech_surgery`, 128/128 records): trim to 37,570 ids (training texts, the corpus inventory's texts and both
+    shards' stored ids), Talker MLP 2560 by Fisher, 4 Talker layers removed greedily (8, 12, 6, 25). Held-out loss
+    2.609 -> 3.435, KL 0.864 (Talker 0.659, code predictor 0.686). Plan sweep and the greedy/one-shot comparison:
+    knowledge 596. Narrowing MLPs beat removing layers at this size.
+  - Recovery (`speech_sft` distillation, 4 GH200 on one server, 16 utterances a card x 2 accumulation = 128 a step,
+    lr 5e-5 cosine; lr probes of 150 steps at batch 128: 1e-5 0.316, 2e-5 0.283, 3e-5 0.272, 5e-5 0.268, 7e-5 0.276,
+    1e-4 0.295, 2e-4 0.408, 4e-4 0.839 held-out distillation loss):
+    r1 4 epochs, patience 4 on 128 records: stopped by noise at step 3400 (best 3000, held-out 0.179); FLEURS CER
+    +0.0107 to the full model (fails parity 0.0025). r2 the same with patience 10 on 256 records: ran 6088 steps,
+    held-out 0.149, CER +0.0031 (fails narrowly, CI +0.0006..+0.0053). r3 6 epochs plus hidden-state KD 0.1 on pairs
+    [6,7] [12,15] [18,21] [24,28]: best step 9000 of 9132, Talker KL 0.078, code predictor KL 1.75; **every release
+    and parity gate passes**: CER -0.0001 (CI -0.0031..+0.0030), worst voice similarity drop 0.0000, identity drop 0,
+    failure delta 0, upstream qwen-tts loads. r4 (r3 without hidden KD, same schedule, stopped at 3900 as an
+    ablation): Talker KL 0.130 vs r3's 0.108 at step 3000, so the hidden term carries the gain.
+  - Not gated and stated in the card: code-switching CER 0.078 against the full model's 0.062; numbers 0.141 vs 0.157.
+  - Speed, one request at a time on one GH200 through the API: RTF 0.123 vs 0.134 (101.5 vs 93.0 frames/s), only
+    1.09x: single-stream decode is bound by the sequential per-frame steps (24 vs 28 layers, 15 code-predictor steps),
+    not by the MLP width. Training ran ~3.3k frames/s a card with the teacher beside it (about 5 % of bf16 peak by a
+    FLOP estimate); the teacher's training-sized scratch and the second KD head product (see Distillation, Open)
+    remain the obvious next costs.
+  - Fixed on the way: builds drew every overwritten weight (knowledge 595), surgery's host curvature and KL sums
+    single-threaded, oversized stream results lost (597), shard ids of the teacher's tokenizer read as a trimmed
+    student's (598), the trim did not keep the held-out shard's stored ids.
+  - Open: the code-switching gap; batched serving throughput of the variant; rung 2 (≤ 479 M) starts from this cut's
+    lessons (greedy layers, hidden KD, 256-record selection).
