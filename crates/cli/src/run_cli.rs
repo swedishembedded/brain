@@ -166,6 +166,11 @@ ROUTING ACROSS SERVERS  (one URL for every card of a cluster)
   --upstream-timeout-ms N  how long an upstream may take to start answering a
                          request (default 1860000)
   --upstream-health-ms N how often every upstream is probed (default 2000)
+  --upstream-stall-ms N  how long an upstream holding work may answer, stream
+                         and finish nothing before it is stalled: what it holds
+                         is failed (504) and it leaves rotation until it
+                         restarts, finishes something or is resumed (default
+                         600000)
   --route-queue N        requests that may wait in the router for a free slot
                          (default 1024)
   --drain-deadline-ms N  how long a drained upstream may finish what it runs
@@ -1111,6 +1116,7 @@ pub fn run_serve(args: &[String]) {
             "--drain-deadline-ms" => upstream.drain_ms = Some(positive_ms(args, &mut i, "--drain-deadline-ms").as_millis() as u64),
             "--route-queue" => upstream.queue = Some(parsed(args, &mut i, "--route-queue")),
             "--upstream-health-ms" => upstream.health_ms = Some(positive_ms(args, &mut i, "--upstream-health-ms").as_millis() as u64),
+            "--upstream-stall-ms" => upstream.stall_ms = Some(positive_ms(args, &mut i, "--upstream-stall-ms").as_millis() as u64),
             "--tokenizer" => qwen_cfg.tokenizer = Some(val(args, &mut i, "--tokenizer")),
             "--ready-file" => ready_file = Some(val(args, &mut i, "--ready-file")),
             "--admit-deadline-ms" => deadlines.admit = positive_ms(args, &mut i, "--admit-deadline-ms"),

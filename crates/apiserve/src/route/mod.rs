@@ -25,8 +25,16 @@
 //! What the router guarantees:
 //!
 //! - **Only routable upstreams take requests.** An upstream is in rotation while its `/health` and `/models` answer
-//!   (probed every [`FleetConfig::health_interval`]) and it is not draining. A drained upstream ([`Fleet::drain`], `POST
-//!   /v1/upstreams/{n}/drain`) takes nothing new and finishes what it holds.
+//!   (probed every [`FleetConfig::health_interval`]), it is not draining and it is not stalled. A drained upstream
+//!   ([`Fleet::drain`], `POST /v1/upstreams/{n}/drain`) takes nothing new and finishes what it holds.
+//! - **No request waits on an upstream that makes no progress.** An upstream holding work (requests the router sent
+//!   it, or jobs it reports waiting) that neither answers, streams nor finishes anything for
+//!   [`FleetConfig::stall_timeout`] is stalled: what the router sent it is failed (504, or an error ending the stream)
+//!   and it leaves rotation, though its `/health` still answers (a hung device can leave the process answering), until
+//!   it restarts, finishes something, or an operator resumes it. A restarted upstream's sessions and prefix record are
+//!   dropped with its cache (what was sent to the old process failed with its connections).
+//! - **Work is not queued behind work.** While some upstream reports no jobs waiting, one that reports them takes no
+//!   new request, whatever prefix or session it holds: a queue that is not moving strands everything put into it.
 //! - **A request is sent at most once.** It moves to another upstream only when the connection to the chosen one could
 //!   not be opened, so no byte of it was sent. Once sent, a failure is the client's answer (502), because the
 //!   generation may have run.
@@ -48,7 +56,7 @@ mod upstream;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -128,14 +136,17 @@ pub struct FleetConfig {
     pub queue_deadline: Duration,
     /// How long a drained upstream may finish what it runs before the rest is cut off; `None` waits for it all.
     pub drain_deadline: Option<Duration>,
+    /// How long an upstream holding work may go without answering, streaming or finishing anything before it is
+    /// stalled. Bounds one request too: a request the upstream runs alone, unstreamed, for longer is cut as stalled.
+    pub stall_timeout: Duration,
     /// Where the served models' tokenizers are found, to key prompts by tokens; `None` keys them by text.
     pub tokenizers: Option<Arc<dyn TokenizerSource>>,
 }
 
 impl FleetConfig {
     /// `upstreams` with the defaults: 5 s to connect, 31 min for an answer to start (a long prefill on a busy
-    /// upstream), health every 2 s, 256 prompts remembered per upstream, 1024 requests waiting at most, each for at most
-    /// the serving surfaces' admit deadline.
+    /// upstream), 10 min without progress before an upstream is stalled, health every 2 s, 256 prompts remembered per
+    /// upstream, 1024 requests waiting at most, each for at most the serving surfaces' admit deadline.
     pub fn new(upstreams: Vec<UpstreamUrl>) -> FleetConfig {
         FleetConfig {
             upstreams,
@@ -148,6 +159,7 @@ impl FleetConfig {
             queue_bound: 1024,
             queue_deadline: crate::DEFAULT_ADMIT_DEADLINE,
             drain_deadline: Some(Duration::from_secs(300)),
+            stall_timeout: DEFAULT_STALL_TIMEOUT,
             tokenizers: None,
         }
     }
@@ -184,7 +196,15 @@ impl FleetConfig {
         self.health_interval = interval;
         self
     }
+    pub fn with_stall_timeout(mut self, timeout: Duration) -> FleetConfig {
+        self.stall_timeout = timeout;
+        self
+    }
 }
+
+/// [`FleetConfig::stall_timeout`]'s default: longer than one long unstreamed generation on an otherwise idle upstream,
+/// so that alone does not read as a hang.
+pub const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// What the last good probe of an upstream said.
 #[derive(Default)]
@@ -219,8 +239,16 @@ pub struct Member {
     readings: Mutex<Readings>,
     /// Its idle keep-alive connections.
     pool: Arc<upstream::Pool>,
-    /// Bumped when a drain's deadline passes: every request still running there is cut off.
-    cut: tokio::sync::watch::Sender<u64>,
+    /// Set when what runs there is cut off (a drain's deadline passed, or it stalled): every request still running there
+    /// ends with the reason.
+    cut: tokio::sync::watch::Sender<Cut>,
+    /// It held work and made no progress for the stall timeout: out of rotation until it restarts, finishes something
+    /// or is resumed.
+    stalled: AtomicBool,
+    /// When it last made progress (answered, streamed or finished something, or held no work), in milliseconds since
+    /// `epoch`.
+    progress_ms: AtomicU64,
+    epoch: std::time::Instant,
     /// Bumped by every drain and resume, so a deadline cuts only the drain that set it.
     drains: AtomicUsize,
 }
@@ -236,14 +264,74 @@ struct Readings {
 /// An upstream's cumulative served counters (`/v1/health`'s `served`).
 #[derive(Clone, Copy, Default)]
 struct Served {
+    requests: u64,
     prompt_tokens: u64,
     completion_tokens: u64,
     cached_prompt_tokens: u64,
 }
 
 impl Member {
+    fn new(url: UpstreamUrl) -> Member {
+        Member {
+            url,
+            healthy: AtomicBool::new(false),
+            probed: AtomicBool::new(false),
+            draining: AtomicBool::new(false),
+            in_flight: AtomicUsize::new(0),
+            advertised: RwLock::default(),
+            readings: Mutex::default(),
+            pool: Arc::new(upstream::Pool::new(MAX_IDLE_PER_UPSTREAM)),
+            // The value before the first cut is never read: a receiver reads it only after a change.
+            cut: tokio::sync::watch::Sender::new(Cut::Drained),
+            drains: AtomicUsize::new(0),
+            stalled: AtomicBool::new(false),
+            progress_ms: AtomicU64::new(0),
+            epoch: std::time::Instant::now(),
+        }
+    }
+
     fn advertised(&self) -> std::sync::RwLockReadGuard<'_, Advertised> {
         self.advertised.read().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Whether it takes new requests: it answers its probes, is not draining and has not stalled.
+    fn routable(&self) -> bool {
+        self.healthy.load(Ordering::SeqCst) && !self.draining.load(Ordering::SeqCst) && !self.stalled.load(Ordering::SeqCst)
+    }
+
+    /// It made progress now.
+    fn progressed(&self) {
+        self.progress_ms.store(self.epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// How long since it last made progress.
+    fn since_progress(&self) -> Duration {
+        self.epoch.elapsed().saturating_sub(Duration::from_millis(self.progress_ms.load(Ordering::Relaxed)))
+    }
+}
+
+/// Why the requests running on an upstream were cut off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cut {
+    Drained,
+    Stalled,
+}
+
+impl Cut {
+    /// The client's answer for a request cut before the upstream answered.
+    fn refusal(self, stall: Duration) -> ApiError {
+        match self {
+            Cut::Drained => ApiError::bad_gateway(PROVIDER, "the upstream was drained before it answered; the request may have run"),
+            Cut::Stalled => ApiError::failure(PROVIDER, capability::FailureClass::Timeout, format!("the upstream made no progress for {}s and is out of rotation; the request may have run", stall.as_secs_f64())),
+        }
+    }
+
+    /// Why a stream that had started was ended.
+    fn ended(self) -> &'static str {
+        match self {
+            Cut::Drained => "the upstream was drained before the response ended",
+            Cut::Stalled => "the upstream made no progress within the stall timeout before the response ended",
+        }
     }
 }
 
@@ -313,6 +401,17 @@ impl Sessions {
             self.upstream.remove(&oldest);
         }
     }
+    /// Forget every session that went to upstream `index`: what made it worth returning to is gone.
+    fn forget(&mut self, index: usize) {
+        let upstream = &mut self.upstream;
+        self.order.retain(|_, key| match upstream.get(key) {
+            Some(&(i, _)) if i == index => {
+                upstream.remove(key);
+                false
+            }
+            _ => true,
+        });
+    }
 }
 
 /// A request's place in the router's queue, given up when it gets a slot, gives up, or its client goes away.
@@ -344,6 +443,7 @@ pub struct Fleet {
     queue_bound: usize,
     queue_deadline: Duration,
     drain_deadline: Option<Duration>,
+    stall_timeout: Duration,
     sessions: Mutex<Sessions>,
     tokens: Arc<key::Tokens>,
 }
@@ -374,14 +474,10 @@ impl Fleet {
         if config.upstream_key.as_deref().is_some_and(|k| k.is_empty() || k.chars().any(|c| c.is_control() || c.is_whitespace())) {
             return Err("the upstream key is empty or holds whitespace".into());
         }
-        if config.connect_timeout.is_zero() || config.response_timeout.is_zero() || config.health_interval.is_zero() || config.queue_deadline.is_zero() {
+        if config.connect_timeout.is_zero() || config.response_timeout.is_zero() || config.health_interval.is_zero() || config.queue_deadline.is_zero() || config.stall_timeout.is_zero() {
             return Err("timeouts and the health interval are positive".into());
         }
-        let members: Vec<Arc<Member>> = config
-            .upstreams
-            .into_iter()
-            .map(|url| Arc::new(Member { url, healthy: AtomicBool::new(false), probed: AtomicBool::new(false), draining: AtomicBool::new(false), in_flight: AtomicUsize::new(0), advertised: RwLock::default(), readings: Mutex::default(), pool: Arc::new(upstream::Pool::new(MAX_IDLE_PER_UPSTREAM)), cut: tokio::sync::watch::Sender::new(0), drains: AtomicUsize::new(0) }))
-            .collect();
+        let members: Vec<Arc<Member>> = config.upstreams.into_iter().map(|url| Arc::new(Member::new(url))).collect();
         let directories = Mutex::new(members.iter().map(|_| PrefixDirectory::new(config.cached_prompts)).collect());
         Ok(Arc::new(Fleet {
             members,
@@ -395,6 +491,7 @@ impl Fleet {
             queue_bound: config.queue_bound,
             queue_deadline: config.queue_deadline,
             drain_deadline: config.drain_deadline,
+            stall_timeout: config.stall_timeout,
             sessions: Mutex::default(),
             tokens: Arc::new(key::Tokens::new(config.tokenizers)),
         }))
@@ -414,20 +511,22 @@ impl Fleet {
             tokio::spawn(async move {
                 tokio::time::sleep(deadline).await;
                 if member.draining.load(Ordering::SeqCst) && member.drains.load(Ordering::SeqCst) == drain {
-                    member.cut.send_modify(|n| *n += 1);
+                    member.cut.send_replace(Cut::Drained);
                 }
             });
         }
         true
     }
 
-    /// Put a drained upstream `index` back in rotation. `false` when there is no such upstream.
+    /// Put a drained or stalled upstream `index` back in rotation. `false` when there is no such upstream.
     pub fn resume(&self, index: usize) -> bool {
         let found = self
             .members
             .get(index)
             .map(|m| {
                 m.drains.fetch_add(1, Ordering::SeqCst);
+                m.progressed();
+                m.stalled.store(false, Ordering::SeqCst);
                 m.draining.store(false, Ordering::SeqCst)
             })
             .is_some();
@@ -449,16 +548,15 @@ impl Fleet {
 
     /// Whether some upstream is in rotation.
     pub fn available(&self) -> bool {
-        self.members.iter().any(|m| m.healthy.load(Ordering::SeqCst) && !m.draining.load(Ordering::SeqCst))
+        self.members.iter().any(|m| m.routable())
     }
 
     /// The fleet as `GET /health` reports it, for a harness sizing its concurrency: per upstream (by index; addresses
-    /// stay with the operator) whether it is healthy or draining, the requests it holds (`in_flight`), the most it is
+    /// stay with the operator) whether it is healthy, draining or stalled, the requests it holds (`in_flight`), the most it is
     /// sent at once (`capacity`, its decode slots), the jobs waiting on it (`queue_depth`), and its recent completion
     /// token rate and prefix-cache hit rate between the last two probes; then the fleet's totals and the requests
     /// waiting in the router (`queued`).
     pub fn status(&self) -> Value {
-        let routable = |m: &Member| m.healthy.load(Ordering::SeqCst) && !m.draining.load(Ordering::SeqCst);
         let (mut capacity, mut in_flight, mut upstream_queued, mut rate) = (0usize, 0usize, 0usize, 0f64);
         let upstreams: Vec<Value> = self
             .members
@@ -469,7 +567,7 @@ impl Fleet {
                 let readings = m.readings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let held = m.in_flight.load(Ordering::SeqCst);
                 in_flight += held;
-                if routable(m) {
+                if m.routable() {
                     capacity += adv.slots;
                     upstream_queued += adv.queue_depth;
                     rate += readings.tokens_per_s;
@@ -478,6 +576,7 @@ impl Fleet {
                     "index": index,
                     "healthy": m.healthy.load(Ordering::SeqCst),
                     "draining": m.draining.load(Ordering::SeqCst),
+                    "stalled": m.stalled.load(Ordering::SeqCst),
                     "in_flight": held,
                     "capacity": adv.slots,
                     "queue_depth": adv.queue_depth,
@@ -526,39 +625,85 @@ impl Fleet {
             let listing = upstream::get_json(&self.connector, &member.url, "/v1/models", key, MAX_LISTING_BYTES, PROBE_TIMEOUT).await?;
             parse_advertised(&health, &listing)
         };
-        match read.await {
+        let queued = match read.await {
             Ok((advertised, served)) => {
-                let restarted = {
+                let (restarted, queued) = {
                     let mut current = member.advertised.write().unwrap_or_else(std::sync::PoisonError::into_inner);
                     let restarted = !current.instance.is_empty() && current.instance != advertised.instance;
                     *current = advertised;
-                    restarted
+                    (restarted, current.queue_depth)
                 };
                 if restarted {
-                    // Another process now: what the router recorded of its cache is gone with the old one.
-                    self.directories.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[index].clear();
-                    eprintln!("brain route: upstream {index} ({}) restarted; its prefix record is dropped", member.url);
+                    // Another process now: what the router recorded of its cache is gone with the old one. What was sent
+                    // to the old one failed with its connections; what was sent since went to the new one and runs on.
+                    self.forget(index);
+                    member.progressed();
+                    if member.stalled.swap(false, Ordering::SeqCst) {
+                        eprintln!("brain route: upstream {index} ({}) restarted; it is no longer stalled", member.url);
+                    }
+                    eprintln!("brain route: upstream {index} ({}) restarted; its sessions and prefix record are dropped", member.url);
                 }
-                member.readings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).read(served);
+                let finished = member.readings.lock().unwrap_or_else(std::sync::PoisonError::into_inner).read(served);
+                if finished {
+                    member.progressed();
+                    if member.stalled.swap(false, Ordering::SeqCst) {
+                        eprintln!("brain route: upstream {index} ({}) finished work again; it is no longer stalled", member.url);
+                    }
+                }
                 self.changed.notify_waiters();
                 member.probed.store(true, Ordering::SeqCst);
                 if !member.healthy.swap(true, Ordering::SeqCst) {
                     eprintln!("brain route: upstream {index} ({}) is in rotation", member.url);
                 }
+                queued
             }
-            Err(why) => self.mark_down(index, &why),
+            Err(why) => {
+                self.mark_down(index, &why);
+                0
+            }
+        };
+        self.check_progress(index, queued);
+    }
+
+    /// Stall upstream `index` if it holds work (`queued` jobs waiting on it as it reports them, or requests the router
+    /// sent it) and has made no progress for the stall timeout; an upstream holding none is not stuck.
+    fn check_progress(&self, index: usize, queued: usize) {
+        let member = &self.members[index];
+        let held = member.in_flight.load(Ordering::SeqCst);
+        if held == 0 && queued == 0 {
+            member.progressed();
+            return;
         }
+        let idle = member.since_progress();
+        if idle < self.stall_timeout || member.stalled.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        eprintln!(
+            "brain route: upstream {index} ({}) made no progress for {:.1}s while holding {held} requests and reporting {queued} queued; \
+             it is stalled: what it holds is failed and it is out of rotation until it restarts, finishes something or is resumed",
+            member.url,
+            idle.as_secs_f64()
+        );
+        self.forget(index);
+        member.cut.send_replace(Cut::Stalled);
+        self.changed.notify_waiters();
+    }
+
+    /// Drop what the router remembers of upstream `index`'s cache: its prefix record and the sessions that went there.
+    fn forget(&self, index: usize) {
+        self.directories.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[index].clear();
+        self.sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner).forget(index);
     }
 
     /// Take upstream `index` out of rotation until a probe answers again. Its prefix cache may not survive what
-    /// happened to it, so the record of it is dropped.
+    /// happened to it, so the record of it, and the sessions that went there, are dropped.
     fn mark_down(&self, index: usize, why: &str) {
         let member = &self.members[index];
         let was_healthy = member.healthy.swap(false, Ordering::SeqCst);
         if was_healthy || !member.probed.swap(true, Ordering::SeqCst) {
             eprintln!("brain route: upstream {index} ({}) is out of rotation: {why}", member.url);
         }
-        self.directories.lock().unwrap_or_else(std::sync::PoisonError::into_inner)[index].clear();
+        self.forget(index);
     }
 
     /// Probe every upstream every [`FleetConfig::health_interval`] until `shutdown` fires.
@@ -583,7 +728,7 @@ impl Fleet {
             let adv = m.advertised();
             let serves = adv.ids.contains(model);
             known |= serves;
-            if !serves || excluded[i] || !m.healthy.load(Ordering::SeqCst) || m.draining.load(Ordering::SeqCst) {
+            if !serves || excluded[i] || !m.routable() {
                 continue;
             }
             candidates += 1;
@@ -602,6 +747,12 @@ impl Fleet {
         if open.is_empty() {
             return Pick::Saturated;
         }
+        // Work is not queued behind work: while an upstream with room reports nothing waiting, one that reports jobs
+        // waiting is passed over, whatever prefix or session it holds. A queue that does not move (a restarted upstream
+        // still loading, a hung lane) would otherwise take every request its cache or a session points at.
+        if open.iter().any(|(_, view, _)| view.queued == 0) {
+            open.retain(|(_, view, _)| view.queued == 0);
+        }
         let mut sessions = self.sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // A session goes back to its upstream while that one has a free slot; otherwise the policy chooses, and the
         // session follows.
@@ -617,7 +768,10 @@ impl Fleet {
         }
         directories[*index].record(&chains[namespace]);
         let member = self.members[*index].clone();
-        member.in_flight.fetch_add(1, Ordering::SeqCst);
+        if member.in_flight.fetch_add(1, Ordering::SeqCst) == 0 && member.advertised().queue_depth == 0 {
+            // Work starts on an idle upstream: its stall clock starts now, not at the last probe.
+            member.progressed();
+        }
         Pick::Chosen(*index, InFlight(member, self.changed.clone()))
     }
 
@@ -670,7 +824,7 @@ fn parse_advertised(health: &Value, listing: &Value) -> Result<(Advertised, Serv
     let slots = health.get("decode_slots").and_then(Value::as_u64).filter(|&n| (1..=MAX_ADVERTISED_SLOTS).contains(&n)).ok_or("its /v1/health names no decode_slots in range")? as usize;
     let queue_depth = health.get("queue_depth").and_then(Value::as_u64).unwrap_or(0).min(MAX_ADVERTISED_SLOTS) as usize;
     let counter = |name: &str| health.get("served").and_then(|s| s.get(name)).and_then(Value::as_u64).unwrap_or(0);
-    let served = Served { prompt_tokens: counter("prompt_tokens"), completion_tokens: counter("completion_tokens"), cached_prompt_tokens: counter("cached_prompt_tokens") };
+    let served = Served { requests: counter("requests"), prompt_tokens: counter("prompt_tokens"), completion_tokens: counter("completion_tokens"), cached_prompt_tokens: counter("cached_prompt_tokens") };
     let data = listing.get("data").and_then(Value::as_array).ok_or("its /v1/models has no data list")?;
     if data.len() > MAX_LISTED_MODELS {
         return Err(format!("it lists more than {MAX_LISTED_MODELS} models"));
@@ -695,9 +849,10 @@ fn parse_advertised(health: &Value, listing: &Value) -> Result<(Advertised, Serv
 
 impl Readings {
     /// Take a new reading: the rates are over the time since the last one. A counter that went back (the upstream
-    /// restarted) starts the rates over.
-    fn read(&mut self, now: Served) {
+    /// restarted) starts the rates over. `true` when the upstream finished something since the last reading.
+    fn read(&mut self, now: Served) -> bool {
         let at = std::time::Instant::now();
+        let finished = self.last.is_some_and(|(_, before)| now.requests > before.requests || now.completion_tokens > before.completion_tokens);
         if let Some((then, before)) = self.last {
             let secs = at.duration_since(then).as_secs_f64();
             let completion = now.completion_tokens.checked_sub(before.completion_tokens);
@@ -713,6 +868,7 @@ impl Readings {
             }
         }
         self.last = Some((at, now));
+        finished
     }
 }
 
@@ -816,7 +972,7 @@ async fn one_model(State(state): State<RouteState>, Path(id): Path<String>) -> R
 /// Every model an upstream in rotation lists, once, in id order; the first upstream's card for an id wins.
 fn merged_cards(fleet: &Fleet) -> std::collections::BTreeMap<String, Value> {
     let mut cards = std::collections::BTreeMap::new();
-    for m in fleet.members.iter().filter(|m| m.healthy.load(Ordering::SeqCst) && !m.draining.load(Ordering::SeqCst)) {
+    for m in fleet.members.iter().filter(|m| m.routable()) {
         let adv = m.advertised();
         for card in &adv.cards {
             if let Some(id) = card.get("id").and_then(Value::as_str) {
@@ -932,11 +1088,12 @@ async fn forward(State(state): State<RouteState>, Extension(principal): Extensio
         let send = tokio::time::timeout(fleet.response_timeout, conn.send(Method::POST, path, fleet.key.as_deref(), accept.as_ref(), Some(&request_id), body.clone()));
         let sent = tokio::select! {
             sent = send => sent,
-            _ = cut.changed() => return ApiError::bad_gateway(PROVIDER, "the upstream was drained before it answered; the request may have run").into_response(),
+            _ = cut.changed() => return cut.borrow().refusal(fleet.stall_timeout).into_response(),
         };
         return match sent {
             Ok(Ok((response, conn))) => {
-                let mut out = relay(response, conn, member.pool.clone(), cut, (in_flight, caller_slot));
+                member.progressed();
+                let mut out = relay(response, conn, member.clone(), cut, (in_flight, caller_slot));
                 if let Ok(id) = axum::http::HeaderValue::from_str(&request_id) {
                     out.headers_mut().insert("x-request-id", id);
                 }
@@ -965,9 +1122,10 @@ async fn forward(State(state): State<RouteState>, Extension(principal): Extensio
 const MAX_UNSENT_RETRIES: usize = 4;
 
 /// The upstream's answer as the client's: its status, the headers a client of the API reads, and its body streamed
-/// through. `held` (the upstream slot, the caller's slot) lives until the body ends, the client hangs up or a drain's
-/// deadline cuts it; a body read to its end gives `conn` back to `pool`, any other end closes it.
-fn relay<H: Send + 'static>(response: hyper::Response<hyper::body::Incoming>, conn: upstream::Connection, pool: Arc<upstream::Pool>, mut cut: tokio::sync::watch::Receiver<u64>, held: H) -> Response {
+/// through, every chunk counted as the upstream's progress. `held` (the upstream slot, the caller's slot) lives until
+/// the body ends, the client hangs up or a cut (a drain's deadline, a stall) ends it; a body read to its end
+/// gives `conn` back to the upstream's pool, any other end closes it.
+fn relay<H: Send + 'static>(response: hyper::Response<hyper::body::Incoming>, conn: upstream::Connection, member: Arc<Member>, mut cut: tokio::sync::watch::Receiver<Cut>, held: H) -> Response {
     const PASSED: [header::HeaderName; 3] = [header::CONTENT_TYPE, header::CACHE_CONTROL, header::RETRY_AFTER];
     let (parts, incoming) = response.into_parts();
     let mut upstream_body = Body::new(incoming).into_data_stream();
@@ -977,20 +1135,24 @@ fn relay<H: Send + 'static>(response: hyper::Response<hyper::body::Incoming>, co
         loop {
             tokio::select! {
                 chunk = upstream_body.next() => match chunk {
-                    Some(Ok(chunk)) => yield Ok(chunk),
+                    Some(Ok(chunk)) => {
+                        member.progressed();
+                        yield Ok(chunk);
+                    }
                     Some(Err(e)) => {
                         yield Err(e);
                         break;
                     }
                     None => {
                         if let Some(conn) = conn.take() {
-                            pool.give_back(conn);
+                            member.pool.give_back(conn);
                         }
                         break;
                     }
                 },
                 _ = cut.changed() => {
-                    yield Err(axum::Error::new(std::io::Error::other("the upstream was drained before the response ended")));
+                    let why = cut.borrow().ended();
+                    yield Err(axum::Error::new(std::io::Error::other(why)));
                     break;
                 }
             }

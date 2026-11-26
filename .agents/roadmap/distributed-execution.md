@@ -216,6 +216,20 @@ Scope: Running one training job as ranks across machines, and serving one model 
       overload, the security boundary), `tests/e2e/route.bats` (two real
       `brain serve --mock` behind a real router), the unit tests in
       `crates/residency/src/affinity.rs` and `crates/apiserve/src/route/upstream.rs`.
+- [x] **The router judges upstreams by progress, not by their health answer
+      (2026-11-26, knowledge #602).** Seven upstreams hung on their device
+      while `/v1/health` answered, and after their restart three reported a
+      queue that never moved; sessions and cached prefixes kept sending work
+      into it. An upstream reporting jobs waiting now takes no new request
+      while another with room reports none; one holding work that answers,
+      streams and finishes nothing for `--upstream-stall-ms` (default 10 min)
+      is stalled: its requests fail (504 or a stream error), it leaves
+      rotation until it restarts, finishes something or is resumed; a restart
+      drops its sessions with its prefix record. Tests:
+      the two `route.rs` cases named in #602. Open: the bound has to stay above
+      the longest unstreamed generation one upstream runs alone, because the
+      upstream's served counters move only when a generation finishes; a live
+      progress counter in `/v1/health` (decode steps) would let it be short.
 
 ## Decisions
 

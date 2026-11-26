@@ -205,13 +205,27 @@ on the command line instead.
   adapter digest an upstream serves a model under, and an upstream whose
   `/v1/health` reports a new `instance` (it restarted) starts with no cache. Requests that carry the same `prompt_cache_key` (OpenAI's routing
   hint for a conversation) stay on one upstream while it has a free slot.
-  Embeddings, images and speech go by load alone.
+  While some upstream with a free slot reports no jobs waiting (`queue_depth`
+  in its `/v1/health`), one that reports them takes no new request, whatever
+  prefix or session it holds: work is not queued behind work that is not
+  moving. Embeddings, images and speech go by load alone.
 - **Health.** Every upstream's `/v1/health` (its instance id, decode slots and
   how many are free, the KV tokens a request can claim there (free blocks and
   blocks only its prefix cache holds) and its pool's total, its own queue and
   what it has served) and `/v1/models` are read every
   `--upstream-health-ms` (default 2000). An upstream is in rotation while both
-  answer; one that a request cannot connect to is taken out at once.
+  answer; one that a request cannot connect to is taken out at once. A
+  restarted upstream (a new `instance`) starts with no sessions; what was sent
+  to the old process failed with its connections (502).
+- **Stalls.** An upstream that holds work (requests the router sent it, or jobs
+  it reports waiting) and for `--upstream-stall-ms` (default 600000) neither
+  answers, streams nor finishes anything is stalled, even while its
+  `/v1/health` still answers (a hung device can leave the process answering):
+  what the router sent it is failed (504, or an error ending a started
+  stream) and it is out of rotation (`stalled` in `/v1/health`) until it
+  restarts, finishes something, or `POST /v1/upstreams/N/resume` puts it back.
+  A request one upstream runs alone and unstreamed for longer than the bound is
+  cut as stalled, so set it above the longest such generation.
 - **Models.** `GET /v1/models` lists every model any upstream in rotation
   serves, once; a request goes only to upstreams that list its `model`
   (adapters included, since a served adapter is listed as a model). A model no
@@ -222,7 +236,7 @@ on the command line instead.
   own `{"deadline_ms": N}`; what still runs then is cut off, its client's
   stream ending in an error and the upstream's generation cancelled. `POST /v1/upstreams/N/resume` puts it back. With `--caller`, only an
   admin caller may. `GET /v1/health` reports each upstream by index: healthy,
-  draining, requests in flight, decode slots.
+  draining, stalled, requests in flight, decode slots.
 - **At most once.** A request moves to another upstream only when its
   connection could not be opened, so nothing of it was sent. A failure after it
   was sent is answered with 502 and no `Retry-After`: the request may have

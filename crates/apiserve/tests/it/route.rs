@@ -63,6 +63,15 @@ struct Mock {
     kv_free: Mutex<Option<u64>>,
     /// The server task: aborting it closes the listener, so connecting is refused.
     server: Mutex<Option<tokio::task::AbortHandle>>,
+    /// The process identity its health reports: a test changes it to stand for a restart.
+    instance: Mutex<String>,
+    /// Jobs its health reports waiting on it for a lane.
+    queue_depth: AtomicUsize,
+    /// Requests it finished: what its served counters count.
+    answered: AtomicUsize,
+    /// Its device hangs: a request is taken and never finished (a stream sends its first event first), while its
+    /// health still answers.
+    wedged: AtomicBool,
 }
 
 impl Mock {
@@ -96,10 +105,13 @@ async fn mock_health(State(m): State<Arc<Mock>>, headers: HeaderMap) -> Response
     if !m.healthy.load(Ordering::SeqCst) {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
-    let completion = 10 * m.count() as u64;
-    let served = json!({"requests": m.count(), "prompt_tokens": 2 * completion, "completion_tokens": completion, "cached_prompt_tokens": completion});
+    let answered = m.answered.load(Ordering::SeqCst);
+    let completion = 10 * answered as u64;
+    let served = json!({"requests": answered, "prompt_tokens": 2 * completion, "completion_tokens": completion, "cached_prompt_tokens": completion});
     let kv_free = *m.kv_free.lock().unwrap();
-    Json(json!({"status": "ok", "instance": "mock0", "decode_slots": m.slots, "free_slots": m.slots, "kv_free_tokens": kv_free, "edge_concurrency": m.edge, "queue_depth": 0, "served": served})).into_response()
+    let instance = m.instance.lock().unwrap().clone();
+    let queue_depth = m.queue_depth.load(Ordering::SeqCst);
+    Json(json!({"status": "ok", "instance": instance, "decode_slots": m.slots, "free_slots": m.slots, "kv_free_tokens": kv_free, "edge_concurrency": m.edge, "queue_depth": queue_depth, "served": served})).into_response()
 }
 
 async fn mock_models(State(m): State<Arc<Mock>>) -> Json<Value> {
@@ -110,6 +122,18 @@ async fn mock_models(State(m): State<Arc<Mock>>) -> Json<Value> {
 async fn mock_generate(State(m): State<Arc<Mock>>, axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>, uri: axum::http::Uri, headers: HeaderMap, body: Bytes) -> Response {
     let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     m.hits.lock().unwrap().push(Hit { path: uri.path().to_string(), peer, body: body.clone(), headers });
+    if m.wedged.load(Ordering::SeqCst) {
+        if body["stream"] != json!(true) {
+            std::future::pending::<()>().await;
+        }
+        let m2 = m.clone();
+        let events = async_stream::stream! {
+            let _flag = DropFlag(m2, false);
+            yield Ok::<_, std::convert::Infallible>(Bytes::from("data: one\n\n"));
+            std::future::pending::<()>().await;
+        };
+        return Response::builder().header("content-type", "text/event-stream").body(Body::from_stream(events)).unwrap();
+    }
     if body["hold"] == json!(true) {
         m.release.acquire().await.expect("release").forget();
     }
@@ -122,9 +146,11 @@ async fn mock_generate(State(m): State<Arc<Mock>>, axum::extract::ConnectInfo(pe
             yield Ok(Bytes::from("data: two\n\n"));
             yield Ok(Bytes::from("data: [DONE]\n\n"));
             flag.1 = true;
+            m2.answered.fetch_add(1, Ordering::SeqCst);
         };
         return Response::builder().header("content-type", "text/event-stream").header("x-internal", "secret").body(Body::from_stream(events)).unwrap();
     }
+    m.answered.fetch_add(1, Ordering::SeqCst);
     let mut resp = Json(json!({"upstream": m.name})).into_response();
     resp.headers_mut().insert("x-internal", "secret".parse().unwrap());
     resp.headers_mut().insert("set-cookie", "session=1".parse().unwrap());
@@ -145,6 +171,10 @@ async fn mock(name: &str, slots: u64, edge: u64, models: &[&str]) -> (Arc<Mock>,
         stream_dropped: AtomicBool::new(false),
         server: Mutex::default(),
         kv_free: Mutex::default(),
+        instance: Mutex::new("mock0".into()),
+        queue_depth: AtomicUsize::new(0),
+        answered: AtomicUsize::new(0),
+        wedged: AtomicBool::new(false),
     });
     let app = Router::new()
         .route("/v1/health", get(mock_health))
@@ -743,6 +773,113 @@ async fn a_drain_deadline_cuts_off_what_the_upstream_still_runs() {
     until("the upstream to see its client go", || a.stream_dropped.load(Ordering::SeqCst)).await;
     assert_eq!(call(addr, Method::POST, "/v1/upstreams/0/drain", Some(CLIENT_KEY), r#"{"deadline_ms": 0}"#).await.0, StatusCode::BAD_REQUEST);
     assert_eq!(call(addr, Method::POST, "/v1/upstreams/0/drain", Some(CLIENT_KEY), r#"{"deadline": 5}"#).await.0, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_upstream_that_queues_work_without_running_it_gets_none_while_another_has_room() {
+    let (a, ua) = mock("a", 8, 16, &["m"]).await;
+    let (_b, ub) = mock("b", 8, 16, &["m"]).await;
+    let (addr, fleet, _stop) = router(&[ua, ub]).await;
+    let answered = |body: Value| async move { tokio::time::timeout(Duration::from_secs(5), chat(addr, body)).await.expect("answered, not stranded behind a queue that does not move") };
+
+    // A conversation cached on `a` (first on a tie); then `a` reports jobs waiting while its slots are free, and takes
+    // requests it never answers. The prefix it holds must not pull the next turn into that queue.
+    let cached = "You are agent one. ".repeat(200);
+    assert_eq!(chat(addr, conversation("m", &cached, 1)).await.2["upstream"], "a");
+    a.queue_depth.store(5, Ordering::SeqCst);
+    a.wedged.store(true, Ordering::SeqCst);
+    fleet.probe().await;
+    let (code, _, body) = answered(conversation("m", &cached, 2)).await;
+    assert_eq!((code, body["upstream"].as_str()), (StatusCode::OK, Some("b")));
+
+    // A session whose upstream restarted and came back with such a queue: the session follows the free upstream.
+    a.queue_depth.store(0, Ordering::SeqCst);
+    a.wedged.store(false, Ordering::SeqCst);
+    fleet.probe().await;
+    let keyed = |turns: usize| {
+        let mut body = conversation("m", &"You are agent two. ".repeat(200), turns);
+        body["prompt_cache_key"] = json!("agent-2");
+        body
+    };
+    assert_eq!(chat(addr, keyed(1)).await.2["upstream"], "a");
+    *a.instance.lock().unwrap() = "mock1".into();
+    a.queue_depth.store(10, Ordering::SeqCst);
+    a.wedged.store(true, Ordering::SeqCst);
+    fleet.probe().await;
+    let status = fleet.status();
+    assert_eq!((status["upstreams"][0]["healthy"].clone(), status["upstreams"][0]["queue_depth"].clone()), (json!(true), json!(10)));
+    let hung = a.count();
+    let (code, _, body) = answered(keyed(2)).await;
+    assert_eq!((code, body["upstream"].as_str()), (StatusCode::OK, Some("b")));
+    assert_eq!(a.count(), hung, "nothing more was sent into the queue");
+
+    // Its queue drained, `a` takes new work again.
+    a.queue_depth.store(0, Ordering::SeqCst);
+    a.wedged.store(false, Ordering::SeqCst);
+    fleet.probe().await;
+    assert_eq!(chat(addr, conversation("m", "a new conversation", 1)).await.2["upstream"], "a");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_upstream_that_stops_making_progress_fails_what_it_holds_and_leaves_rotation_until_it_restarts() {
+    let (w, uw) = mock("w", 8, 16, &["m"]).await;
+    let (b, ub) = mock("b", 8, 16, &["m"]).await;
+    let stall = Duration::from_millis(300);
+    let (addr, fleet, _stop) = router_over(config(&[uw, ub]).with_stall_timeout(stall), Arc::new(StaticKey::new(CLIENT_KEY))).await;
+    // Its device hangs: it takes requests and never finishes them, while its health still says every slot is free.
+    w.wedged.store(true, Ordering::SeqCst);
+    let keyed = |stream: bool| {
+        let mut body = conversation("m", "s", 1);
+        body["prompt_cache_key"] = json!("agent");
+        body["stream"] = json!(stream);
+        body
+    };
+    let waiting = tokio::spawn(chat(addr, keyed(false)));
+    until("the first request to reach w", || w.count() == 1).await;
+    let resp = send(addr, Method::POST, "/v1/chat/completions", Some(CLIENT_KEY), &keyed(true).to_string(), &[]).await;
+    assert_eq!(resp.status(), StatusCode::OK, "the session's stream went to w and started");
+    let mut events = Body::new(resp.into_body()).into_data_stream();
+    assert_eq!(events.next().await.unwrap().unwrap(), "data: one\n\n");
+    assert_eq!(w.count(), 2);
+
+    // Probes go on answering; past the stall bound with nothing finished or streamed, w is taken out of rotation and
+    // what it holds is failed loudly.
+    fleet.probe().await;
+    assert_eq!(fleet.status()["upstreams"][0]["stalled"], json!(false), "within the bound");
+    tokio::time::sleep(stall + Duration::from_millis(100)).await;
+    fleet.probe().await;
+    let (code, _, body) = tokio::time::timeout(Duration::from_secs(5), waiting).await.expect("failed, not stranded").unwrap();
+    assert_eq!(code, StatusCode::GATEWAY_TIMEOUT);
+    assert!(body["error"]["message"].as_str().unwrap().contains("no progress"), "{body}");
+    let ended = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(chunk) = events.next().await {
+            if chunk.is_err() {
+                return true;
+            }
+        }
+        false
+    })
+    .await
+    .expect("the stream is cut");
+    assert!(ended, "the cut stream ends in an error, not a silent end");
+    let status = fleet.status();
+    assert_eq!((status["upstreams"][0]["stalled"].clone(), status["upstreams"][0]["in_flight"].clone()), (json!(true), json!(0)));
+    assert_eq!(status["upstreams"][0]["healthy"], json!(true), "its health still answers");
+
+    // Answering probes do not put it back; the session moves to b.
+    fleet.probe().await;
+    for _ in 0..2 {
+        assert_eq!(chat(addr, keyed(false)).await.2["upstream"], "b");
+    }
+    assert_eq!(w.count(), 2);
+
+    // A restart (another instance) does.
+    w.wedged.store(false, Ordering::SeqCst);
+    *w.instance.lock().unwrap() = "mock1".into();
+    fleet.probe().await;
+    assert_eq!(fleet.status()["upstreams"][0]["stalled"], json!(false));
+    assert_eq!(chat(addr, conversation("m", "a new conversation", 1)).await.2["upstream"], "w");
+    let _ = b;
 }
 
 /// A tokenizer for the tests: one token per word.
