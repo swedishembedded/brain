@@ -22,7 +22,8 @@
 
 #![allow(non_upper_case_globals)]
 
-use std::os::raw::{c_int, c_ulong, c_void};
+use std::ffi::CString;
+use std::os::raw::{c_char, c_int, c_ulong, c_void};
 
 use crate::slot::{Stamp, StampSource};
 
@@ -87,7 +88,7 @@ extern "C" {
     // libc's `open` is variadic (the optional `mode`); rustc rejects any other
     // declaration of a symbol std itself links, and aarch64 passes variadic
     // arguments differently from fixed ones.
-    fn open(path: *const u8, flags: c_int, ...) -> c_int;
+    fn open(path: *const c_char, flags: c_int, ...) -> c_int;
     fn close(fd: c_int) -> c_int;
     fn ioctl(fd: c_int, req: c_ulong, arg: *mut c_void) -> c_int;
     fn mmap(addr: *mut c_void, len: usize, prot: c_int, flags: c_int, fd: c_int, off: i64) -> *mut c_void;
@@ -161,8 +162,7 @@ impl Device {
     /// `nbuf` buffers, and start streaming. The driver may return a nearby
     /// resolution; the accepted one is in [`Device::width`]/`height`.
     pub fn open(path: &str, width: u32, height: u32, nbuf: u32) -> Result<Device, String> {
-        let mut cpath: Vec<u8> = path.bytes().collect();
-        cpath.push(0);
+        let cpath = CString::new(path).map_err(|_| format!("open {path:?}: the path contains a NUL byte"))?;
         let fd = unsafe { open(cpath.as_ptr(), O_RDWR) };
         if fd < 0 {
             return Err(format!("open {path}: errno {}", errno()));
