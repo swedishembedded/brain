@@ -17,7 +17,6 @@ brain-gpu-core.workspace = true
 brain-backend-cpu.workspace = true
 brain-kernels.workspace = true
 brain-audio.workspace = true
-brain-checkpoint.workspace = true
 brain-onnx.workspace = true
 
 [dev-dependencies]
