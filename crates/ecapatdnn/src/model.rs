@@ -40,6 +40,7 @@ use audio::conv::{ConvGemmKernels, ConvKernels, ConvScratch};
 use backend_cpu::par;
 use bytemuck::cast_slice;
 use gpu_core::{f, BufUsage, DeviceBuffer, Gpu, Step};
+use gpu_core::select::{candidates, Dtype, KernelVariant, Op, OpShape};
 use paramstore::{ParamStore, Role};
 
 use crate::config::SpeakerConfig;
@@ -422,10 +423,18 @@ impl<'a> Pass<'a> {
         let range = |at: u32| (u64::from(at), u64::from(words));
         self.run(self.gpu().step_sliced(REGION_COPY, &[src, dst], &[range(from), range(to)], &[1, words, words, 0], words));
     }
-    /// `x[m, k] @ W[n, k]ᵀ` for the weight `wname`.
+    /// `x[m, k] @ W[n, k]ᵀ` for the weight `wname`, on the GEMM the `Op::MatMul` policy picks for this shape and device:
+    /// the register-tiled one (`matmul_reg3`, registered for the convs' lowering) or the reference. This model registers
+    /// no GEMV, so the policy's decode-regime head is passed over, as `model::block::pick_gemm` does.
     fn linear(&self, x: &DeviceBuffer, wname: &str, m: u32, k: u32, n: u32) -> DeviceBuffer {
         let out = self.st(m * n);
-        self.run(self.gpu().step(MATMUL, &[x, self.w(wname), &out], &[m, k, n], m * n));
+        let shape = OpShape { m, n, k, dtype: Dtype::F32 };
+        let chosen = candidates(Op::MatMul, shape, &self.gpu().caps()).into_iter().find(|v| *v != KernelVariant::WorkgroupPerOutput);
+        let bufs = [x, self.w(wname), &out];
+        self.run(match chosen {
+            Some(KernelVariant::RegisterTiled) => self.gpu().dispatch(MATMUL_REG3, &bufs, &[m, k, n], gpu_core::Dispatch::Workgroups(m.div_ceil(128) * n.div_ceil(128))),
+            _ => self.gpu().step(MATMUL, &bufs, &[m, k, n], m * n),
+        });
         out
     }
     /// A per-utterance `[n, c]` vector laid out `[c, n]`, the per-row term of
