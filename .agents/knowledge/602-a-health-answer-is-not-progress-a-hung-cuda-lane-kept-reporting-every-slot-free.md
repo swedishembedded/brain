@@ -77,3 +77,24 @@ The router's half is explained (`crates/apiserve/src/route/mod.rs` before the fi
 - To find the kernel: on the next hang, before restarting, take `cuda-gdb` or `compute-sanitizer` (or `nsys` with
   NVTX) on the wedged process, or at least record which kernel the lane last launched; a wait bounded by `--gpu-wait-s`
   should name the step it was waiting on.
+
+## Consequence: killing a hung server leaks its device memory
+
+The seven hung servers ignored SIGTERM (the lane thread is inside libcuda, waiting on a kernel that never ends) and
+were killed with `kill -9`. On one node three cards then kept 5.4 to 6.4 GB in use with no process attached:
+`nvidia-smi` counts the memory, `--query-compute-apps` lists no owner and no process holds `/dev/nvidia*` for it. The
+driver cannot tear a context down while one of its kernels is still running on the device, so the context outlives
+its process; only a GPU reset (`nvidia-smi -r`, root, with nothing else on the card) frees it. Nothing in brain can
+release it, and a device watchdog would not either: a bounded wait fails the job and quarantines the card, but the
+kernel keeps running. What the watchdog does buy is a server that says it is wedged instead of one an operator ends
+up killing blind.
+
+What follows from it:
+
+- Every later server on such a card sees that much less free memory. A plan sized from the card's total, or one
+  whose estimate charges more than its sizing did, is then refused at startup ("UNSERVABLE ... withdrawn before
+  ready", knowledge #605); a plan sized from what is free shrinks and serves.
+- Operationally: before restarting servers on a node, compare each card's `memory.used` with what its processes
+  hold; a card with memory used and no owner needs a reset by an administrator, or its servers must be planned for
+  the smaller share (they are, by default, since the budgets are free bytes). Taking `cuda-gdb`/`nsys` evidence of
+  the hung kernel before the kill (above) is the only chance to learn which kernel it was.
