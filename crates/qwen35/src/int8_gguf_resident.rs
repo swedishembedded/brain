@@ -5411,9 +5411,10 @@ mod tests {
         let native = ServingShape { native_attention: true, ..portable.clone() };
         assert_eq!(decode_scratch_bytes(&cfg, 64, 737_280, false) * 4 - (64 * (40u64 << 20)) * 3, decode_scratch_bytes(&cfg, 64, 737_280, true), "a quarter of the strips");
         assert!(native.stage_workspace(&cfg) < portable.stage_workspace(&cfg), "the native step holds back less");
+        // Stated as sums: the native workspace is the smaller one, so its difference from the portable one is negative.
         assert_eq!(
-            native.stage_workspace(&cfg) - portable.stage_workspace(&cfg) + decode_scratch_bytes(&cfg, 64, 737_280, true) - decode_scratch_bytes(&cfg, 64, 737_280, false),
-            prefill_staging_bytes(&cfg, 737_280, true),
+            native.stage_workspace(&cfg) + decode_scratch_bytes(&cfg, 64, 737_280, true),
+            portable.stage_workspace(&cfg) + decode_scratch_bytes(&cfg, 64, 737_280, false) + prefill_staging_bytes(&cfg, 737_280, true),
             "and the difference besides the strips is the staging"
         );
         assert_eq!(prefill_staging_bytes(&cfg, 737_280, false), 0, "the portable prefill stages nothing");
