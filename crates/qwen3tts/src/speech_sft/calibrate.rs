@@ -53,6 +53,8 @@ pub struct CalibrationOpts {
     pub gemm: GemmPrecision,
     /// The checkpoint's id of each shard text id, when another tokenizer wrote the shard ([`RowMap::text`]).
     pub text: Option<Vec<u32>>,
+    /// How the shard's x-vectors read in the checkpoint's stream ([`RowMap::xvector`]).
+    pub xvector: Option<std::sync::Arc<crate::speaker_projection::SpeakerProjection>>,
 }
 
 /// A measured checkpoint: its loss and its divergence from the unedited one.
@@ -105,7 +107,7 @@ pub struct Evaluator {
 pub fn row_map(sp: &TtsSpecials, shard: &Shard) -> Result<RowMap, String> {
     let languages = shard.meta.languages.iter().map(|l| if l == "auto" { Ok(None) } else { sp.lang.get(l).copied().map(Some).ok_or_else(|| format!("the checkpoint has no language {l:?} the shard names")) }).collect::<Result<_, _>>()?;
     let voices = shard.meta.voices.iter().map(|v| sp.spk_id.get(v).copied().ok_or_else(|| format!("the checkpoint has no voice {v:?} the shard names"))).collect::<Result<_, _>>()?;
-    Ok(RowMap { languages, voices, text: None })
+    Ok(RowMap { languages, voices, text: None, xvector: None })
 }
 
 /// `n` of `len` record indices spread evenly (`0`: all): a shard may hold its speakers one after another.
@@ -177,6 +179,7 @@ impl Evaluator {
         }
         let mut rows = row_map(&base.specials, shard)?;
         rows.text = opts.text.clone();
+        rows.xvector = opts.xvector.clone();
         if records.is_empty() {
             return Err("calibration: no record to calibrate on".into());
         }
@@ -204,9 +207,10 @@ impl Evaluator {
     /// shard) instead of the unedited checkpoint: its predictions on the same records become the ones every
     /// measurement's KL is taken to, and the baseline becomes the unedited checkpoint `model`'s distance to it. A cut of
     /// a cut is then measured against the model both came from. The reference must supervise the same positions.
-    pub fn against(&mut self, model: &SpeechSftModel, reference: Base, reference_text: Option<Vec<u32>>, shard: &Shard) -> Result<(), String> {
+    pub fn against(&mut self, model: &SpeechSftModel, reference: Base, reference_text: Option<Vec<u32>>, reference_xvector: Option<std::sync::Arc<crate::speaker_projection::SpeakerProjection>>, shard: &Shard) -> Result<(), String> {
         let mut rows = row_map(&reference.specials, shard)?;
         rows.text = reference_text;
+        rows.xvector = reference_xvector;
         let g = reference.mtp.num_code_groups as usize;
         let examples: Vec<Example> = self.records.iter().enumerate().map(|(i, &r)| example(&reference.specials, &rows, shard, r, if i % 2 == 0 { TextLayout::NonStreaming } else { TextLayout::Streaming })).collect::<Result<_, _>>()?;
         if let Some(e) = examples.iter().find(|e| SpeechSftModel::rows_needed(e.plan.len(), e.codes.len() / g) as u32 > self.block) {

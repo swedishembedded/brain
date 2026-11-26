@@ -446,6 +446,12 @@ pub fn speech_sft(cfg: &SpeechSftConfig, train: &Shard, held_out: Option<&Shard>
     let mut rows = rows;
     let writers: Vec<&Path> = cfg.teacher.iter().map(Path::new).collect();
     rows.map.text = shard_text_map(Path::new(&cfg.base), talker.text_vocab_size, &shards, &writers)?;
+    rows.map.xvector = crate::speaker_projection::SpeakerProjection::read(Path::new(&cfg.base))?.map(std::sync::Arc::new);
+    if let Some(dir) = &cfg.teacher {
+        if crate::speaker_projection::SpeakerProjection::read(Path::new(dir))?.is_some() {
+            return Err("teacher: a teacher reads the shards' own x-vectors, and this one is a cut that projects them".into());
+        }
+    }
     let frames = longest(&shards, cfg.max_frames)?;
     let mut block = 0;
     for s in &shards {
@@ -587,11 +593,12 @@ fn check_teacher(cfg: &SpeechSftConfig, shape: &SftShape, t: &Base, dir: &Path, 
     for shard in shards {
         for r in 0..shard.len() {
             let rec = shard.record(r);
-            // The teacher reads the student's x-vector in the speaker slot: only a teacher of the student's width can.
-            if rec.voice.is_none() && t.talker.d_model != shape.talker.d_model {
+            // The teacher reads the x-vector the shard stores in the speaker slot (the student its projection of it):
+            // only a teacher of the shards' x-vector width can.
+            if rec.voice.is_none() && t.talker.d_model != shard.meta.xvector_dim {
                 return Err(format!(
-                    "teacher: record {r} ({}) speaks in the x-vector slot, and the teacher ({} wide) cannot read the student's {}-wide x-vector; a distillation across widths trains named voices",
-                    rec.id.id, t.talker.d_model, shape.talker.d_model
+                    "teacher: record {r} ({}) speaks in the x-vector slot, and the teacher ({} wide) cannot read the shard's {}-wide x-vector",
+                    rec.id.id, t.talker.d_model, shard.meta.xvector_dim
                 ));
             }
             if let Some(Err(e)) = rec.text_ids.iter().map(|&id| rows.map.text_id(id).and_then(|s| text.get(s))).find(Result::is_err) {

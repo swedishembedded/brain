@@ -30,7 +30,7 @@ use crate::prompt::{PromptPlan, PromptSpec, SpeakerSlot, TextLayout, TtsSpecials
 use crate::shard::Shard;
 
 /// Which codec row each of a shard's languages and voices is.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RowMap {
     /// Per [`crate::shard::ShardMeta::languages`] entry: its language row, or
     /// `None` for `"auto"` (the no-language prefix).
@@ -41,6 +41,9 @@ pub struct RowMap {
     /// checkpoint's (a trimmed vocabulary renumbers the tokens it keeps); [`RowMap::ABSENT`] where the checkpoint has
     /// no such token. `None`: the shards' ids are the checkpoint's.
     pub text: Option<Vec<u32>>,
+    /// How a record's x-vector, made by the speaker encoder the shards were made with, reads in the checkpoint's
+    /// narrower stream ([`crate::speaker_projection`]); `None`: as stored.
+    pub xvector: Option<std::sync::Arc<crate::speaker_projection::SpeakerProjection>>,
 }
 
 impl RowMap {
@@ -91,7 +94,12 @@ pub fn example(sp: &TtsSpecials, rows: &RowMap, shard: &Shard, r: usize, layout:
     if rec.codes.is_empty() {
         return Err(named("no frames"));
     }
-    Ok(Example { plan, xvector: rec.xvector.to_vec(), codes: rec.codes.iter().map(|&c| u32::from(c)).collect(), complete: rec.complete })
+    let source = rec.xvector.to_vec();
+    let xvector = match &rows.xvector {
+        Some(p) => p.apply(&source).map_err(|e| named(&e))?,
+        None => source.clone(),
+    };
+    Ok(Example { plan, xvector, source_xvector: source, codes: rec.codes.iter().map(|&c| u32::from(c)).collect(), complete: rec.complete })
 }
 
 /// The most Talker rows any record of `shard` takes, in either layout.
@@ -300,7 +308,8 @@ impl Objective<SpeechSftModel> for SpeechObjective<'_> {
             // The x-vector is read only by a record in the x-vector slot (a named voice is its codec row): a shard of
             // named voices may carry another width's x-vectors (a student narrower than the speaker encoder).
             let reads_xvectors = (0..shard.len()).any(|r| shard.record(r).voice.is_none());
-            if meta.codebooks as usize != g || meta.codebook_size != shape.mtp.vocab || (reads_xvectors && meta.xvector_dim as usize != shape.d()) {
+            let (xvector_in, xvector_out) = self.rows.xvector.as_ref().map_or((meta.xvector_dim as usize, meta.xvector_dim as usize), |p| (p.from, p.to));
+            if meta.codebooks as usize != g || meta.codebook_size != shape.mtp.vocab || (reads_xvectors && (meta.xvector_dim as usize != xvector_in || xvector_out != shape.d())) {
                 return Err(refuse(format!(
                     "{} codebooks of {} codes and {}-wide x-vectors; the checkpoint takes {g} codebooks of {} codes and {}-wide x-vectors",
                     meta.codebooks,

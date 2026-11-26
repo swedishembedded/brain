@@ -383,7 +383,10 @@ enum Place {
 #[derive(Clone, Debug)]
 pub struct Example {
     pub plan: PromptPlan,
+    /// The x-vector as this checkpoint reads it.
     pub xvector: Vec<f32>,
+    /// The x-vector as the shard stores it, which a teacher of the shards' width reads.
+    pub source_xvector: Vec<f32>,
     pub codes: Vec<u32>,
     pub complete: bool,
 }

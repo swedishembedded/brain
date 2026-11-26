@@ -68,7 +68,7 @@ fn leaves_out(kind: &CheckpointKind, name: &str) -> bool {
 
 /// Files carried over from the base when present, beside the ones every
 /// release ships ([`REQUIRED_FILES`]).
-const OPTIONAL_FILES: &[&str] = &["tokenizer.json", "special_tokens_map.json", "added_tokens.json", "chat_template.jinja"];
+const OPTIONAL_FILES: &[&str] = &["tokenizer.json", "special_tokens_map.json", "added_tokens.json", "chat_template.jinja", crate::speaker_projection::FILE];
 /// Files every Qwen3-TTS release ships and the export carries over.
 const REQUIRED_FILES: &[&str] = &["generation_config.json", "tokenizer_config.json", "vocab.json", "merges.txt", "preprocessor_config.json"];
 /// The codec checkpoint's directory, carried over whole.

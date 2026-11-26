@@ -42,7 +42,7 @@ const CODEBOOK: u32 = 16;
 const GROUPS: u32 = 4;
 
 pub(crate) fn rows() -> RowMap {
-    RowMap { languages: LANGUAGES.iter().map(|&l| Some(l)).collect(), voices: vec![VOICE], text: None }
+    RowMap { languages: LANGUAGES.iter().map(|&l| Some(l)).collect(), voices: vec![VOICE], text: None, xvector: None }
 }
 
 /// A tiny Talker (2 layers, `d` wide, 48 codec rows) and code predictor (2

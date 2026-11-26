@@ -287,7 +287,9 @@ impl SpeechSurgery {
                 Some(m) => m.get(id as usize).copied().filter(|&t| t != qwen3tts::speech_sft::RowMap::ABSENT).ok_or_else(|| backend(format!("shard text token {id} is no token of the base"))),
             }
         };
-        let opts = |records: usize| CalibrationOpts { records, batch: self.batch, mtp_weight: self.mtp_weight, layers: self.plan.iter().any(needs_ablation), sample_rows: self.sample_rows, gemm: if self.exact { GemmPrecision::Fp32Reference } else { GemmPrecision::Auto }, text: text.clone() };
+        // A base that is itself a narrowed cut reads the shards' x-vectors through its own projection.
+        let base_xvector = qwen3tts::speaker_projection::SpeakerProjection::read(&self.base).map_err(backend)?.map(std::sync::Arc::new);
+        let opts = |records: usize| CalibrationOpts { records, batch: self.batch, mtp_weight: self.mtp_weight, layers: self.plan.iter().any(needs_ablation), sample_rows: self.sample_rows, gemm: if self.exact { GemmPrecision::Fp32Reference } else { GemmPrecision::Auto }, text: text.clone(), xvector: base_xvector.clone() };
 
         on_progress("calibrating");
         let (cal_ev, mut calibration) = cal::calibrate(base_of(&ck)?, &shard, &source, &opts(self.records), &mut |s| on_progress(s)).map_err(backend)?;
@@ -316,7 +318,8 @@ impl SpeechSurgery {
                 let reference = Checkpoint::read(dir).map_err(backend)?;
                 let r_base = base_of(&reference)?;
                 let r_text = qwen3tts::speech_sft::shard_text_map(dir, r_base.talker.text_vocab_size, &shards, &self.shard_tokenizer.iter().map(PathBuf::as_path).collect::<Vec<_>>()).map_err(backend)?;
-                ev.against(&m, r_base, r_text, held_out.as_ref().unwrap_or(&shard)).map_err(backend)?;
+                let r_xvector = qwen3tts::speaker_projection::SpeakerProjection::read(dir).map_err(backend)?.map(std::sync::Arc::new);
+                ev.against(&m, r_base, r_text, r_xvector, held_out.as_ref().unwrap_or(&shard)).map_err(backend)?;
                 Some(ev)
             }
             (ev, _) => ev.map(|(ev, _)| ev),
@@ -382,6 +385,17 @@ impl SpeechSurgery {
             let list = edited.to_list();
             let files: Vec<(String, Vec<u8>)> = trimmed.as_ref().map(|(files, _, _)| tokenizer_bytes(files)).transpose()?.unwrap_or_default();
             qwen3tts::export::export_edited(&self.base, &dir, &self.id, &qwen3tts::export::Edited { config: &edited.config, tensors: &list, files: &files }, &mut || true).map_err(backend)?;
+            // A rotated Talker stream reads the training data's x-vectors through the rotation: the cut carries the map,
+            // composed with the base's own when the base was already a narrowed cut.
+            if let Some((basis, k)) = inputs.streams.get("talker") {
+                let width = base_of(&ck)?.talker.d_model as usize;
+                let own = qwen3tts::speaker_projection::SpeakerProjection::from_columns(width, *k, |x| basis.project(x, *k)).map_err(backend)?;
+                let projection = match &base_xvector {
+                    Some(inner) => own.after(inner).map_err(backend)?,
+                    None => own,
+                };
+                projection.write(&dir).map_err(backend)?;
+            }
             Some(dir)
         };
         let outcome = SpeechSurgeryOutcome {

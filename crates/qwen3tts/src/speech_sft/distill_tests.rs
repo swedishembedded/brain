@@ -307,9 +307,18 @@ fn a_narrow_student_release_distils_from_its_teacher_and_exports_its_own_shapes(
     let err = super::speech_sft(&seeded, &other, None, model::train::FitControl::default()).unwrap_err();
     assert!(err.contains("another tokenizer"), "{err}");
 
-    // A record in the x-vector slot cannot be taught by a teacher of another width.
+    // A record in the x-vector slot cannot be taught by a teacher of another width than its stored x-vector.
     let err = super::speech_sft(&cfg(serde_json::json!({})), &shard(16, &RECORDS, 0x66), None, model::train::FitControl::default()).unwrap_err(); // seed: fixed fixture
     assert!(err.contains("x-vector slot"), "{err}");
+    // A narrowed cut carries its speaker projection: it reads the teacher-width x-vectors through it, the teacher reads
+    // them as stored, and x-vector records train across widths.
+    let wide = shard(24, &RECORDS, 0x67); // seed: fixed fixture
+    let err = super::speech_sft(&cfg(serde_json::json!({})), &wide, Some(&wide), model::train::FitControl::default()).unwrap_err();
+    assert!(err.contains("x-vector"), "without a projection the student cannot read them: {err}");
+    crate::speaker_projection::SpeakerProjection::from_columns(24, 16, |x| x[..16].to_vec()).unwrap().write(&student_dir).unwrap();
+    let r = super::speech_sft(&cfg(serde_json::json!({})), &wide, Some(&wide), model::train::FitControl::default()).unwrap();
+    assert!(r.report.steps.iter().all(|s| s.loss.is_finite()));
+    std::fs::remove_file(student_dir.join(crate::speaker_projection::FILE)).unwrap();
     // A student token the teacher's vocabulary lacks is refused at the start, by name.
     let vocab: serde_json::Map<String, serde_json::Value> = (0..26u32).map(|i| (if i == 12 { "only-student".to_string() } else { format!("t{i}") }, serde_json::json!(i))).collect();
     std::fs::write(student_dir.join("vocab.json"), serde_json::to_vec(&vocab).unwrap()).unwrap();

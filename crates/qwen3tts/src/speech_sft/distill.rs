@@ -241,6 +241,8 @@ impl TeacherMap {
             *id = self.text.get(*id)?;
         }
         out.plan.tts_pad = self.text.get(out.plan.tts_pad)?;
+        // The teacher reads the x-vector the shard stores, not the student's projection of it.
+        out.xvector = ex.source_xvector.clone();
         Ok(out)
     }
 }

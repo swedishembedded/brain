@@ -409,9 +409,15 @@ fn open_shard(path: &Path, what: &str, base_dir: &Path, request: &Request) -> Re
     if groups != Some(u64::from(shard.meta.codebooks)) {
         return Err(format!("{ACTION}: {what} holds {} codebooks per frame and the base codes {groups:?}", shard.meta.codebooks));
     }
+    // A cut with a narrower stream reads the shards' x-vectors through its speaker projection.
     let width = config["speaker_encoder_config"]["enc_dim"].as_u64();
-    if width != Some(u64::from(shard.meta.xvector_dim)) {
-        return Err(format!("{ACTION}: {what}'s x-vectors are {} wide and the base's speaker encoder writes {width:?}", shard.meta.xvector_dim));
+    let reads = match qwen3tts::speaker_projection::SpeakerProjection::read(base_dir).map_err(|e| format!("{ACTION}: base: {e}"))? {
+        Some(p) if Some(p.to as u64) == width => Some(p.from as u64),
+        Some(p) => return Err(format!("{ACTION}: the base's speaker projection writes {} values and its speaker encoder width is {width:?}", p.to)),
+        None => width,
+    };
+    if reads != Some(u64::from(shard.meta.xvector_dim)) {
+        return Err(format!("{ACTION}: {what}'s x-vectors are {} wide and the base reads {reads:?}", shard.meta.xvector_dim));
     }
     if let Some(name) = shard.meta.languages.iter().find(|l| !request.languages.contains_key(*l)) {
         return Err(format!("{ACTION}: {what} holds language {name:?}, which languages does not name"));

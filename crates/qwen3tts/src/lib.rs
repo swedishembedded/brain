@@ -36,6 +36,7 @@ pub mod socket;
 pub mod prompt;
 pub mod sft;
 pub mod shard;
+pub mod speaker_projection;
 pub mod speech_sft;
 pub mod train;
 pub mod spec;

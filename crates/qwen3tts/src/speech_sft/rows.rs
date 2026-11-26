@@ -192,6 +192,7 @@ pub fn allocate(cfg: &RowsConfig, sp: &TtsSpecials, codebook: u32, table: &mut [
         languages: meta.languages.iter().map(|n| languages.get(n).copied()).collect(),
         voices: meta.voices.iter().map(|n| voices[n]).collect(),
         text: None,
+        xvector: None,
     };
     Ok(Rows { map, languages, voices, new_rows })
 }
@@ -262,7 +263,7 @@ mod tests {
         assert_eq!(rows.languages["beta"], 33, "the first free row above the base's language band");
         assert_eq!(rows.voices["v1"], 46, "the first free row from the top that no one names");
         assert_eq!(rows.new_rows, vec![33, 46]);
-        assert_eq!(rows.map, RowMap { languages: vec![Some(30), Some(33)], voices: vec![46], text: None });
+        assert_eq!(rows.map, RowMap { languages: vec![Some(30), Some(33)], voices: vec![46], text: None, xvector: None });
     }
 
     #[test]
