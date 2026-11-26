@@ -237,3 +237,29 @@ the ~0.48 B rung. That rung must beat or match it, or the weight-editing path ha
     student's (598), the trim did not keep the held-out shard's stored ids.
   - Open: the code-switching gap; batched serving throughput of the variant; rung 2 (≤ 479 M) starts from this cut's
     lessons (greedy layers, hidden KD, 256-record selection).
+- 2026-11-26: **rung 2 (≤ 476 M) misses parity: the point of diminishing returns.** Recipe
+  `sten-tts/recipe/sten-tts-475m.yaml`, brain `f32d7a9c2`.
+  - Cut of rung 1 r3 (`compress.from`), measured against the full model (`reference`, `shard_tokenizer`):
+    fold the text projection to 1024, Talker MLP 1152 by Fisher, 6 of 8 KV groups by Taylor, Talker width 1536
+    (PCA, gain tolerance 0.25), 3 layers removed greedily (6, 15, 19), giving 469,589,504 parameters. Held-out KL to
+    the full model 0.118 (r3 itself) -> 2.858 (Talker 2.467, code predictor 1.300); loss 2.596 -> 5.409.
+  - Search (KL before recovery, all 457-472 M): fresh cuts of the full model 4.80-5.98; cuts of r3 with 8 KV groups
+    3.23-4.76, with 6 groups 2.86-3.16, with 4 groups 3.35-3.42. Width 1664 (fewer layers) 3.22. Gain tolerance 1.0
+    3.34 (worse than 0.25). MLP FFN cut in the code predictor 4.91. A fold scored by Fisher is not supported (no
+    curvature for the fold).
+  - Recoveries (4 GH200 each, 16 x 2 x 4 = 128 a step, hidden KD 0.1 on [5,5] [10,14] [15,20] [21,28] unless said):
+    A lr 5e-5, 6 epochs: FLEURS CER +0.0179. B lr 1e-4, 6 epochs: +0.0136 (best held-out Talker KL 0.184).
+    C continues B for 6 more epochs at 5e-5: +0.0125 (CI +0.0103..+0.0150). D the same with hidden KD 0.02: +0.0154
+    (stopped at 8600). Parity needs ≤ +0.0025. Every other gate holds in all four: the six release gates, voice
+    similarity and identity per voice (drops ≤ 0) and failures (0). Twelve epochs instead of six gained 0.0011. The
+    loss is in intelligibility, worst in code-switching (CER 0.119 against the full model's 0.062) and numbers.
+  - Speed, one request at a time: RTF 0.109-0.111 against 0.132 (113-115 vs 94 frames/s), 1.2x. The code predictor
+    holds about 5 ms of each frame and is untouched (knowledge 600).
+  - Multi-node: the orchestrator's served job over n105+n460 (the one v2 trained with) built the job on both
+    servers (68 GB each card) and then made no step for 15 minutes at 0 % utilisation, with nothing in the fleet log;
+    the four recoveries ran as two parallel 4-card runs instead. Not diagnosed further (NCCL logs were not captured).
+  - Fixed on the way: cutting a cut (shard tokenizer, reference measurement), x-vectors of a narrowed Talker
+    (knowledge 599), a setup that projected every x-vector twice before the first step.
+  - Open: a rung-2 recipe that reaches parity would need what the cut lost in intelligibility. Candidates: a longer
+    or different-objective recovery (higher `talker_kd_weight`, a ground-truth weight below 1), keeping the Talker at
+    2048 wide with stronger FFN/KV cuts, or a looser rung (≈ 600 M).
