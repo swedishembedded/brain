@@ -98,6 +98,7 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/jobs/{id}/events", get(job_events))
         .route("/v1/jobs/{id}/records", post(job_records))
         .route("/v1/jobs/{id}/finish", post(job_finish))
+        .route("/v1/jobs/{id}/hold", post(job_hold))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
 }
 
@@ -726,6 +727,12 @@ async fn job_finish(State(state): State<AppState>, caller: CallerExt, Path(raw):
         return ApiError::invalid_request(state.provider, "finish takes no body").into_response();
     }
     job_input(state, caller, raw, "finish", query.0, body).await
+}
+
+/// `POST /v1/jobs/{id}/hold`: the job's `hold` input, `{"version": N, "held": true|false}`: a stream that retains
+/// its versions keeps version N served under its version id while the client refers to it, or lets it go.
+async fn job_hold(State(state): State<AppState>, caller: CallerExt, Path(raw): Path<String>, query: axum::extract::Query<InputQuery>, body: Bytes) -> Response {
+    job_input(state, caller, raw, "hold", query.0, body).await
 }
 
 /// Hands `kind` input to the caller's own job `raw` and answers with the job's reply.

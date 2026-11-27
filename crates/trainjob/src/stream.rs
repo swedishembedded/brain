@@ -244,7 +244,14 @@ pub(crate) fn train(env: &JobEnv, request: &Request, inputs: &Inputs<'_>, files:
     let done = Arc::new(AtomicBool::new(false));
     let listener = {
         let (stream, done) = (Arc::clone(&stream), Arc::clone(&done));
-        std::thread::Builder::new().name("brain-train-input".into()).spawn(move || serve_inputs(&receiver, &stream, epoch, &done)).map_err(|e| format!("train: stream: cannot start the input thread: {e}"))?
+        let (bank, publish_id, retains) = (Arc::clone(&bank), refs.publish_adapter.clone(), refs.retain_versions > 0);
+        std::thread::Builder::new()
+            .name("brain-train-input".into())
+            .spawn(move || {
+                let hold = move |version: u64, held: bool| bank.hold_version(&publish_id, version, held);
+                serve_inputs(&receiver, &stream, epoch, &done, retains.then_some(&hold as &Hold<'_>));
+            })
+            .map_err(|e| format!("train: stream: cannot start the input thread: {e}"))?
     };
     // Frames the publisher made, emitted with the step they belong to; the keys trained and not yet in a saved state.
     let published: RefCell<Vec<Value>> = RefCell::new(Vec::new());
@@ -323,7 +330,7 @@ fn run_id(request: &Request) -> String {
 }
 
 /// Answers the job's input until the job is done or its surface has gone.
-fn serve_inputs(receiver: &std::sync::mpsc::Receiver<JobInput>, stream: &brain::RolloutStream, epoch: u64, done: &AtomicBool) {
+fn serve_inputs(receiver: &std::sync::mpsc::Receiver<JobInput>, stream: &brain::RolloutStream, epoch: u64, done: &AtomicBool, hold: Option<&Hold<'_>>) {
     while !done.load(Ordering::SeqCst) {
         // Input waits in the channel until the run is ready: a resumed run first restores the keys it took.
         if !stream.wait_ready(Duration::from_millis(100)) {
@@ -331,7 +338,7 @@ fn serve_inputs(receiver: &std::sync::mpsc::Receiver<JobInput>, stream: &brain::
         }
         match receiver.recv_timeout(Duration::from_millis(100)) {
             Ok(input) => {
-                let reply = answer(stream, epoch, &input.kind, &input.query, &input.body);
+                let reply = answer_holding(stream, epoch, &input.kind, &input.query, &input.body, hold);
                 input.answer(reply);
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -342,6 +349,15 @@ fn serve_inputs(receiver: &std::sync::mpsc::Receiver<JobInput>, stream: &brain::
 
 /// The job's answer to one input: `records` or `finish`, refused when it names another epoch than the run's.
 pub fn answer(stream: &brain::RolloutStream, epoch: u64, kind: &str, query: &Value, body: &[u8]) -> InputReply {
+    answer_holding(stream, epoch, kind, query, body, None)
+}
+
+/// How a stream holds a published version served under its version id: `(version, held)` to the version id.
+pub type Hold<'a> = dyn Fn(u64, bool) -> Result<String, String> + 'a;
+
+/// [`answer`], also answering `hold` (`{"version": N, "held": BOOL}`: keep version N served under its version id
+/// while a client refers to it, past the retention, or let it go) through `hold`.
+pub fn answer_holding(stream: &brain::RolloutStream, epoch: u64, kind: &str, query: &Value, body: &[u8], hold: Option<&Hold<'_>>) -> InputReply {
     let refuse = |kind: InputRefusalKind, message: String| Err(InputRefusal::new(kind, message).with_detail(json!({"epoch": epoch})));
     match query.get("epoch") {
         None | Some(Value::Null) => {}
@@ -374,6 +390,23 @@ pub fn answer(stream: &brain::RolloutStream, epoch: u64, kind: &str, query: &Val
             let admission = stream.finish();
             Ok(json!({"finishing": true, "queued_groups": admission.queued_groups, "queued_tokens": admission.queued_tokens, "epoch": epoch}))
         }
-        other => refuse(InputRefusalKind::Invalid, format!("a stream job takes records and finish, not {other:?}")),
+        "hold" => {
+            let hold = match hold {
+                Some(hold) => hold,
+                None => return refuse(InputRefusalKind::Invalid, "this stream retains no versions to hold".to_string()),
+            };
+            let asked: Value = match serde_json::from_slice(body) {
+                Ok(asked) => asked,
+                Err(e) => return refuse(InputRefusalKind::Invalid, format!("hold: {e}")),
+            };
+            let (Some(version), Some(held)) = (asked["version"].as_u64(), asked["held"].as_bool()) else {
+                return refuse(InputRefusalKind::Invalid, "hold takes {\"version\": N, \"held\": true|false}".to_string());
+            };
+            match hold(version, held) {
+                Ok(version_id) => Ok(json!({"version": version, "held": held, "version_id": version_id, "epoch": epoch})),
+                Err(why) => refuse(InputRefusalKind::Conflict, why),
+            }
+        }
+        other => refuse(InputRefusalKind::Invalid, format!("a stream job takes records, finish and hold, not {other:?}")),
     }
 }

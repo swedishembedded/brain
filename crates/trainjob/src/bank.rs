@@ -42,6 +42,13 @@ pub trait PolicyBank: Send + Sync {
         let _ = retain;
         Ok((self.publish(id, file)?, None))
     }
+
+    /// Hold version `version` of `id` served under its version id while a client refers to it (`held`), past the
+    /// retention, or let it go again (it is withdrawn once it is older than the retained ones). Returns its id.
+    fn hold_version(&self, id: &str, version: u64, held: bool) -> Result<String, String> {
+        let _ = (version, held);
+        Err(format!("adapter {id}: this bank keeps no versions"))
+    }
 }
 
 /// The id version `version` of the adapter published under `id` is served under when its versions are retained:
@@ -74,13 +81,34 @@ impl BankSlot {
 /// The adapter banks of a server's served bases: each adapter rides on the base its card names.
 pub struct ServingBank {
     hosts: Vec<(ServedBase, LiveAdapters)>,
-    /// The version ids served for each published id, oldest first.
-    retained: Mutex<HashMap<String, VecDeque<(usize, String)>>>,
+    /// The version ids served for each published id, oldest first, and the ones held past the retention.
+    retained: Mutex<Retained>,
+}
+
+#[derive(Default)]
+struct Retained {
+    served: HashMap<String, VecDeque<(usize, String)>>,
+    retain: HashMap<String, usize>,
+    held: std::collections::HashSet<String>,
+}
+
+impl Retained {
+    /// Withdraws the oldest version ids of `id` that are not held while more than its retention are not held.
+    fn trim(&mut self, id: &str, hosts: &[(ServedBase, LiveAdapters)]) {
+        let retain = self.retain.get(id).copied().unwrap_or(0);
+        let Some(kept) = self.served.get_mut(id) else { return };
+        while kept.iter().filter(|(_, v)| !self.held.contains(v)).count() > retain {
+            let Some(at) = kept.iter().position(|(_, v)| !self.held.contains(v)) else { break };
+            if let Some((host, old)) = kept.remove(at) {
+                hosts[host].1.retire(&old);
+            }
+        }
+    }
 }
 
 impl ServingBank {
     pub fn new(hosts: Vec<(ServedBase, LiveAdapters)>) -> ServingBank {
-        ServingBank { hosts, retained: Mutex::new(HashMap::new()) }
+        ServingBank { hosts, retained: Mutex::new(Retained::default()) }
     }
 
     /// `resident`'s base and its live adapters on `executor`, the executor it is registered with: one host of a bank.
@@ -116,18 +144,30 @@ impl PolicyBank for ServingBank {
         loaded.lineage = identity.lineage.clone();
         let live = &self.hosts[host].1;
         let mut retained = self.retained.lock().unwrap_or_else(|e| e.into_inner());
-        let kept = retained.entry(id.to_string()).or_default();
+        retained.retain.insert(id.to_string(), retain);
         // The same weights published again keep their version, which is served already.
         if live.identity(&versioned).is_none() {
             live.serve_version(loaded, &versioned).map_err(|e| format!("publishing adapter {id} as {versioned}: {e}"))?;
-            kept.push_back((host, versioned.clone()));
+            retained.served.entry(id.to_string()).or_default().push_back((host, versioned.clone()));
         }
-        while kept.len() > retain {
-            if let Some((host, old)) = kept.pop_front() {
-                self.hosts[host].1.retire(&old);
-            }
-        }
+        retained.trim(id, &self.hosts);
         Ok((identity, Some(versioned)))
+    }
+
+    fn hold_version(&self, id: &str, version: u64, held: bool) -> Result<String, String> {
+        let versioned = version_id(id, version);
+        let mut retained = self.retained.lock().unwrap_or_else(|e| e.into_inner());
+        let served = retained.served.get(id).is_some_and(|kept| kept.iter().any(|(_, v)| *v == versioned));
+        if held {
+            if !served {
+                return Err(format!("version {version} of {id} is no longer served under {versioned}"));
+            }
+            retained.held.insert(versioned.clone());
+        } else {
+            retained.held.remove(&versioned);
+            retained.trim(id, &self.hosts);
+        }
+        Ok(versioned)
     }
 
     fn publish(&self, id: &str, file: &Path) -> Result<AdapterIdentity, String> {

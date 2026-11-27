@@ -431,10 +431,20 @@ async fn a_stream_retaining_its_versions_serves_each_under_an_id_of_its_own_whil
     assert_eq!(served_version(&app, 2).await, 2);
     assert_eq!(version_of(&app, ADAPTER).await, Ok(2), "the published id moves on");
     assert_eq!(version_of(&app, &v(1)).await, Ok(1), "an episode that started on version 1 stays on it");
+    // Version 1 is held (a client compares against it): it stays served past the retention, until let go.
+    let hold = |version: u64, held: bool| json!({"version": version, "held": held}).to_string().into_bytes();
+    let (status, holding) = call(&app, Method::POST, &format!("/v1/jobs/{id}/hold"), Some(("application/json", hold(1, true)))).await;
+    assert_eq!((status, holding["version_id"].clone()), (StatusCode::OK, json!(v(1))), "{holding}");
     assert_eq!(post(&app, &id, "", group(sizes, "g2", 2)).await.0, StatusCode::OK);
     assert_eq!(served_version(&app, 3).await, 3);
     assert_eq!(version_of(&app, &v(2)).await, Ok(2));
-    assert!(version_of(&app, &v(1)).await.is_err(), "beyond the retention of two, version 1 is withdrawn");
+    assert_eq!(version_of(&app, &v(3)).await, Ok(3));
+    assert_eq!(version_of(&app, &v(1)).await, Ok(1), "held, version 1 stays served beside the two retained");
+    let (status, _) = call(&app, Method::POST, &format!("/v1/jobs/{id}/hold"), Some(("application/json", hold(1, false)))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(version_of(&app, &v(1)).await.is_err(), "let go, beyond the retention of two, version 1 is withdrawn");
+    let (status, gone) = call(&app, Method::POST, &format!("/v1/jobs/{id}/hold"), Some(("application/json", hold(1, true)))).await;
+    assert_eq!(status, StatusCode::CONFLICT, "a version no longer served cannot be held: {gone}");
 
     let (status, _) = call(&app, Method::POST, &format!("/v1/jobs/{id}/finish"), None).await;
     assert_eq!(status, StatusCode::OK);

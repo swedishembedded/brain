@@ -658,6 +658,14 @@ a job that has not answered within two minutes is `503` with `Retry-After` (retr
 adapter to the bank and the artifact store, and ends with the result a dataset run reports. `DELETE` cancels as for
 every job: the run writes its state and stops.
 
+**Versions of their own.** `stream.retain_versions` N (0 to 16; absent serves none) also serves each published
+version under an id of its own, `<publish_adapter>-v<version>`, with its version and lineage, so a client that
+started an episode on a version stays on it after newer ones are published; the N newest stay served and each
+`published` frame names its `version_id` and, its adapter kept in the artifact store too, its `artifact_digest` (a
+later job can start from it). `POST /v1/jobs/{id}/hold` with `{"version": N, "held": true}` keeps version N served
+past the retention while the client refers to it (an evaluation anchor), `"held": false` lets it go; holding a version
+no longer served is `409`.
+
 **Events.** Beside the `step` frames, whose `pg` object also carries `staleness_mean`, `staleness_max`,
 `policy_tokens`, `learner_wait_seconds` (the time the learner waited for the step's records), `queue_groups`,
 `queue_tokens`, `time_in_queue_seconds` (the step's groups' mean) and `dropped_stale`, the job reports:
