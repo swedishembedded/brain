@@ -1029,3 +1029,47 @@ async fn a_request_goes_where_its_model_is_resident() {
         assert_eq!(chat(addr, conversation("m1", &format!("agent {turn}"), 1)).await.2["upstream"], "a", "m1, turn {turn}");
     }
 }
+
+/// Residency must not cost a fleet its cards: a model whose resident upstreams carry a real batch (at least an eighth
+/// of their slots for it) also goes to an upstream where it is not loaded once that upstream is completely idle, since
+/// loading it there only evicts a model nobody is using. An upstream busy with another model is never used for it,
+/// whatever load the model's own upstreams carry: that would evict running work.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_loaded_model_spills_onto_an_idle_upstream_but_never_onto_a_busy_one() {
+    let models = ["m1", "m2", "m3"];
+    let (a, ua) = mock("a", 64, 128, &models).await;
+    let (b, ub) = mock("b", 64, 128, &models).await;
+    let (c, uc) = mock("c", 64, 128, &models).await;
+    for (mock, resident) in [(&a, "m1"), (&b, "m3"), (&c, "m2")] {
+        mock.card_extra.lock().unwrap().extend(models.iter().map(|m| (m.to_string(), json!({"decode_slots": 64, "resident": *m == resident}))));
+    }
+    let (addr, fleet, _stop) = router(&[ua, ub, uc]).await;
+    let held = |model: &str, agent: usize| {
+        let mut body = conversation(model, &format!("agent {agent}"), 1);
+        body["hold"] = json!(true);
+        tokio::spawn(chat(addr, body))
+    };
+    // `b` and `c` each run their own model.
+    let mut running = vec![held("m3", 100), held("m2", 101)];
+    until("b and c to run their own models", || b.count() == 1 && c.count() == 1).await;
+    // `m1` loads `a` to an eighth of its slots and past it: every upstream where it is not loaded is busy, so it stays.
+    for agent in 0..9 {
+        running.push(held("m1", agent));
+        until("the m1 batch to reach a", || a.count() == agent + 1).await;
+    }
+    assert_eq!((b.count(), c.count()), (1, 1), "a busy upstream took a model it does not hold");
+    // `b` finishes its own work and is idle: the next `m1` request spills there, while `c` stays out of it.
+    b.release.add_permits(1);
+    assert_eq!(running.remove(0).await.unwrap().2["upstream"], "b");
+    until("b to hold nothing", || fleet.status()["upstreams"][1]["in_flight"] == 0).await;
+    running.push(held("m1", 9));
+    until("the spilled m1 request to reach b", || b.count() == 2).await;
+    assert_eq!(b.hits()[1].body["model"], "m1");
+    assert_eq!((a.count(), c.count()), (9, 1));
+    a.release.add_permits(9);
+    b.release.add_permits(1);
+    c.release.add_permits(1);
+    for request in running {
+        assert_eq!(request.await.unwrap().0, StatusCode::OK);
+    }
+}
