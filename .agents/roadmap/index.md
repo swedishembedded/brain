@@ -61,6 +61,7 @@ heading and a `Scope: <one sentence>` line under it, then run `make generate/roa
 | [`horizon`](horizon.md) | horizon | Continuous-time subject-timeline model (`crates/horizon`). |
 | [`huginn`](huginn.md) | huginn | Huginn (Raven), the prelude/recurrent-core/coda decoder (`crates/huginn`). |
 | [`inkling2`](inkling2.md) | inkling2 | Inkling 2 Mini (`Inkling2LoopForConditionalGeneration`): a looped MoE decoder with depth-attention residuals, plus a vision tower, served and trained from the published checkpoint, with every new building block landing as a shared op. |
+| [`integration-2026-11-27`](integration-2026-11-27.md) | Branch integration of 2026-11-27 | Every brain branch that held a patch not on origin/main on 2026-11-27, what was landed and why the rest was not. |
 | [`januspro`](januspro.md) | januspro | Janus-Pro-7B understanding and text-to-image (`crates/januspro`). |
 | [`kernel-performance`](kernel-performance.md) | kernel-performance | Cross-cutting kernel and execution-architecture work (selection, fusion, providers, precision tiers). |
 | [`kronos`](kronos.md) | kronos | Kronos financial candlestick model (`crates/kronos`). |
