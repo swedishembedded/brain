@@ -55,16 +55,22 @@ async fn get_one(State(state): State<AppState>, Path(id): Path<String>) -> Resul
 /// `info`'s card with the adapter currently attached to it, read at request time
 /// from the executor (a hot swap changes it without re-registering the model), and
 /// on the OpenAI and OpenRouter dialects what serving it takes here: the sequences
-/// it decodes at once (`decode_slots`, absent when unknown) and whether it is built
-/// on a device now (`resident`). A router in front of several
-/// servers places a model's requests by these; `/health` sums every model.
+/// it decodes at once (`decode_slots`, absent when unknown), the model whose
+/// instance serves it (`slot_group`: itself, or for an adapter its base, whose
+/// batch and residency it shares) and whether that instance is built on a device
+/// now (`resident`). A router in front of several servers places a model's
+/// requests by these and counts the load of one slot group together; `/health`
+/// sums every model.
 fn card_of(state: &AppState, info: &ModelInfo, resident: &HashSet<String>) -> Value {
     let mut card = card(state.provider, info, state.exec.served_adapter(&info.name).as_ref());
     if state.provider != Provider::Anthropic {
         if let Some(slots) = state.exec.model_decode_slots(&info.name) {
             card["decode_slots"] = json!(slots);
         }
-        card["resident"] = json!(resident.contains(&info.name));
+        // An adapter's instance is its base's: it is resident exactly when the base is (knowledge #609).
+        let group = state.exec.slot_group(&info.name).unwrap_or_else(|| info.name.clone());
+        card["resident"] = json!(resident.contains(&group));
+        card["slot_group"] = json!(group);
     }
     card
 }

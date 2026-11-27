@@ -1124,3 +1124,110 @@ async fn a_loaded_model_spills_onto_an_idle_upstream_but_never_onto_a_busy_one()
         assert_eq!(request.await.unwrap().0, StatusCode::OK);
     }
 }
+
+/// Where `requests` held requests for `model` land on `mocks`, counted per upstream: they are sent at once and the
+/// count is read once all of them have reached an upstream. They stay held until the test releases them.
+async fn burst(addr: std::net::SocketAddr, mocks: &[Arc<Mock>], model: &str, requests: usize) -> (Vec<usize>, Vec<tokio::task::JoinHandle<(StatusCode, HeaderMap, Value)>>) {
+    let before: Vec<usize> = mocks.iter().map(|m| m.count()).collect();
+    let mut held = Vec::new();
+    for agent in 0..requests {
+        let mut body = conversation(model, &format!("agent {agent}"), 1);
+        body["hold"] = json!(true);
+        held.push(tokio::spawn(chat(addr, body)));
+    }
+    until("every request of the burst to reach an upstream", || mocks.iter().zip(&before).map(|(m, b)| m.count() - b).sum::<usize>() == requests).await;
+    (mocks.iter().zip(&before).map(|(m, b)| m.count() - b).collect(), held)
+}
+
+/// The production pattern of 2026-11-27 (knowledge #609): 16 upstreams advertising 3466 slots each, a 256-request
+/// burst for the 27B, which is resident on one of them, while every other card works for another router (each reports
+/// jobs waiting, the higher-index cards fewer). With the model's own bound on its card (`decode_slots`, what a server
+/// advertises for every model), the hot upstream takes that bound and the rest is loaded where it costs least: whole
+/// batches on the least-loaded cards (each load evicts what a card holds, so as few as the burst needs), never on
+/// the lowest-index cards whatever they run, and never all onto the hot card.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_burst_for_a_model_hot_on_one_upstream_of_a_busy_fleet_goes_to_its_least_loaded_cards() {
+    const UPSTREAMS: usize = 16;
+    const HOT: usize = 1;
+    const BOUND: u64 = 64;
+    const BURST: usize = 256;
+    let mut mocks = Vec::new();
+    let mut urls = Vec::new();
+    for i in 0..UPSTREAMS {
+        let (m, u) = mock(&format!("u{i}"), 3466, 8192, &["big", "small"]).await;
+        m.card_extra.lock().unwrap().insert("big".into(), json!({"decode_slots": BOUND, "resident": i == HOT, "slot_group": "big"}));
+        if i != HOT {
+            m.queue_depth.store(10 + 3 * (UPSTREAMS - i), Ordering::SeqCst);
+        }
+        mocks.push(m);
+        urls.push(u);
+    }
+    let (addr, _fleet, _stop) = router(&urls).await;
+    let (spread, held) = burst(addr, &mocks, "big", BURST).await;
+    eprintln!("in-flight spread of a {BURST}-request burst over {UPSTREAMS} upstreams, hot upstream {HOT}: {spread:?}");
+    let mut expected = vec![0; UPSTREAMS];
+    for i in [HOT, 13, 14, 15] {
+        expected[i] = BOUND as usize;
+    }
+    assert_eq!(spread, expected, "the hot upstream and the three least-loaded take a batch each");
+    for m in &mocks {
+        m.release.add_permits(BURST);
+    }
+    for request in held {
+        assert_eq!(request.await.unwrap().0, StatusCode::OK);
+    }
+}
+
+/// A model loaded nowhere is loaded where that costs least: on an idle upstream, not on the lowest-index one while it
+/// runs another model (which loading would evict), and failing an idle one, on the upstream holding the fewest
+/// requests.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_model_resident_nowhere_goes_to_an_idle_upstream_not_the_first_open_one() {
+    let mut mocks = Vec::new();
+    let mut urls = Vec::new();
+    for name in ["a", "b", "c"] {
+        let (m, u) = mock(name, 3466, 8192, &["cold", "warm"]).await;
+        m.card_extra.lock().unwrap().extend([("cold".to_string(), json!({"decode_slots": 64, "resident": false})), ("warm".to_string(), json!({"decode_slots": 64, "resident": name != "c"}))]);
+        mocks.push(m);
+        urls.push(u);
+    }
+    let (addr, _fleet, _stop) = router(&urls).await;
+    // `a` and `b` run the model they hold, three requests between them; `c` is idle.
+    let (spread, mut held) = burst(addr, &mocks, "warm", 3).await;
+    assert_eq!(spread[2], 0, "{spread:?}");
+    let idle = 2;
+    // The cold model goes to the idle upstream, whatever its index.
+    let (cold, more) = burst(addr, &mocks, "cold", 1).await;
+    assert_eq!(cold.iter().position(|&n| n == 1), Some(idle), "the cold model went to the idle upstream: warm {spread:?}, cold {cold:?}");
+    held.extend(more);
+    // With none idle, to the upstream holding the fewest requests.
+    let (again, more) = burst(addr, &mocks, "cold", 1).await;
+    held.extend(more);
+    let lightest = (0..3).filter(|&i| i != idle).min_by_key(|&i| (spread[i], i)).unwrap();
+    let placed = again.iter().position(|&n| n == 1).unwrap();
+    assert!(placed == lightest || placed == idle, "the second went to a lightest upstream: warm {spread:?}, cold {again:?}");
+    for m in &mocks {
+        m.release.add_permits(8);
+    }
+    for request in held {
+        assert_eq!(request.await.unwrap().0, StatusCode::OK);
+    }
+}
+
+/// An upstream decodes one batch of a base however many adapters of it it lists: adapters whose cards name the same
+/// `slot_group` count against one bound there, not one each (53 adapters on a card were 53 batches of 64).
+#[tokio::test(flavor = "multi_thread")]
+async fn adapters_of_one_base_share_one_load_bound_on_an_upstream() {
+    let (a, ua) = mock("a", 3466, 8192, &["base:x", "base:y"]).await;
+    a.card_extra.lock().unwrap().extend(["base:x", "base:y"].map(|id| (id.to_string(), json!({"decode_slots": 2, "resident": true, "slot_group": "base"}))));
+    let (addr, _fleet, _stop) = router_over(config(&[ua]).with_queue(16, Duration::from_millis(300)), Arc::new(StaticKey::new(CLIENT_KEY))).await;
+    let (spread, held) = burst(addr, std::slice::from_ref(&a), "base:x", 2).await;
+    assert_eq!(spread, [2]);
+    let (code, _, _) = chat(addr, conversation("base:y", "s", 1)).await;
+    assert_eq!(code, StatusCode::TOO_MANY_REQUESTS, "the base's batch is full whichever adapter asks");
+    a.release.add_permits(2);
+    for request in held {
+        assert_eq!(request.await.unwrap().0, StatusCode::OK);
+    }
+    assert_eq!(chat(addr, conversation("base:y", "s", 1)).await.0, StatusCode::OK);
+}

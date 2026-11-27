@@ -43,13 +43,16 @@
 //!   generation may have run.
 //! - **The fleet's edge is the sum of its decode slots.** An upstream is sent at most as many requests as it decodes at
 //!   once (`decode_slots` in its `/health`), and at most as many requests for one model as it decodes of that model
-//!   (`decode_slots` on the model's card, when the card names it). Past that on every upstream serving the model a
+//!   (`decode_slots` on the model's card, when the card names it), counted per slot group: an adapter's card names its
+//!   base (`slot_group`), and the base and all its adapters share that one bound. Past that on every upstream serving the model a
 //!   request waits in the router, in arrival order per model, for at most [`FleetConfig::queue_deadline`] (then 429);
 //!   a request whose client goes away leaves the queue. Past [`FleetConfig::queue_bound`] waiting requests it is
 //!   refused at once with 503. Both carry `Retry-After`.
 //! - **A model goes where it is loaded, and spills only onto idle cards.** An upstream whose card says the model is not
 //!   `resident` there would load it, evicting what that card holds, so it takes the model's requests only (a) while
-//!   every upstream where it is has no free slot for it, or (b) as a spill: every upstream where the model is resident
+//!   every upstream where it is has no free slot for it (an adapter is resident where its base is), and then an idle
+//!   upstream first, else the one known to hold the fewest requests, never simply the lowest-index one, or
+//!   (b) as a spill: every upstream where the model is resident
 //!   already carries at least [`FleetConfig::spill_load`] requests for it (however many slots it advertises), and
 //!   this one is idle, holding no request of the router's and reporting no job running or waiting, or holds only
 //!   requests for this model (a spill already under way). An upstream busy with another model is never a spill target.
@@ -262,6 +265,9 @@ struct Advertised {
     /// For each model whose card says so, whether it is built on the upstream's device now (`resident`). One that is
     /// not would have to be loaded there, evicting what the card holds.
     resident: HashMap<String, bool>,
+    /// For each model whose card names one, the model whose instance serves it (`slot_group`): an adapter's base. The
+    /// models of one group share one batch on the upstream, so their requests count against one bound.
+    slot_group: HashMap<String, String>,
 }
 
 /// One upstream endpoint and what the router knows of it.
@@ -272,7 +278,7 @@ pub struct Member {
     probed: AtomicBool,
     draining: AtomicBool,
     in_flight: AtomicUsize,
-    /// Of `in_flight`, the requests for each model.
+    /// Of `in_flight`, the requests for each slot group (a model, or an adapter's base with all its adapters).
     model_in_flight: Mutex<HashMap<String, usize>>,
     advertised: RwLock<Advertised>,
     /// The upstream's cumulative served counters at the last two good probes, for its recent rates.
@@ -335,9 +341,9 @@ impl Member {
         self.advertised.read().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// The requests for `model` it holds.
-    fn model_load(&self, model: &str) -> usize {
-        self.model_in_flight.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(model).copied().unwrap_or(0)
+    /// The requests for slot group `group` it holds.
+    fn model_load(&self, group: &str) -> usize {
+        self.model_in_flight.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(group).copied().unwrap_or(0)
     }
 
     /// Whether it takes new requests: it answers its probes, is not draining and has not stalled.
@@ -381,8 +387,8 @@ impl Cut {
     }
 }
 
-/// One request for a model held by an upstream: its load, given back when the response ends or is dropped, which wakes
-/// the requests waiting for a slot.
+/// One request for a slot group held by an upstream: its load, given back when the response ends or is dropped, which
+/// wakes the requests waiting for a slot.
 struct InFlight(Arc<Member>, Arc<tokio::sync::Notify>, String);
 
 impl InFlight {
@@ -406,6 +412,20 @@ impl Drop for InFlight {
         self.0.in_flight.fetch_sub(1, Ordering::SeqCst);
         self.1.notify_waiters();
     }
+}
+
+/// An upstream with room for a request, as [`Fleet::pick`] weighs it.
+struct Open {
+    index: usize,
+    view: ReplicaView,
+    /// The request's prefix namespace there (its model and adapter digest).
+    namespace: String,
+    /// The slot group the request counts against there.
+    group: String,
+    /// The requests it is known to hold or queue, the router's and those its health reports.
+    busy: usize,
+    /// It holds nothing of the router's and reports no job running or waiting.
+    idle: bool,
 }
 
 /// The outcome of choosing an upstream.
@@ -790,7 +810,7 @@ impl Fleet {
     /// `chains` holds the request's chain per namespace, built once. `excluded` upstreams failed to connect for it.
     fn pick(&self, model: &str, key: &RequestKey, chains: &mut HashMap<String, PrefixChain>, session: Option<&str>, excluded: &[bool]) -> Pick {
         let mut directories = self.directories.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (mut known, mut open, mut candidates) = (false, Vec::new(), 0usize);
+        let (mut known, mut open, mut candidates) = (false, Vec::<Open>::new(), 0usize);
         // The candidates where the model is resident, those of them carrying less than their spill load of it, and the
         // open candidates where it is not that may take a spill (see the module doc).
         let (mut residents, mut unpressed, mut spill) = (0usize, 0usize, Vec::new());
@@ -802,10 +822,12 @@ impl Fleet {
                 continue;
             }
             candidates += 1;
-            // Its slots for this model when its card names them (they bound the model's own requests there), else
+            // The model's load is its slot group's: an adapter shares its base's batch with every other adapter of it.
+            let group = adv.slot_group.get(model).map_or(model, String::as_str);
+            // Its slots for this model when its card names them (they bound the group's own requests there), else
             // its slots for every model; either way never more than its slots in all.
             let total = m.in_flight.load(Ordering::SeqCst);
-            let mine = m.model_load(model);
+            let mine = m.model_load(group);
             let (load, slots) = match adv.model_slots.get(model) {
                 Some(&slots) => (mine, slots),
                 None => (total, adv.slots),
@@ -828,13 +850,16 @@ impl Fleet {
                 if !resident && total == mine && (idle || total > 0) {
                     spill.push(open.len());
                 }
-                open.push((i, view, namespace));
+                // All it is known to hold: the router's requests, or what it runs by its last health when that is more
+                // (another router's), and what waits on it.
+                let busy = total.max(adv.slots.saturating_sub(adv.free_slots)) + adv.queue_depth;
+                open.push(Open { index: i, view, namespace, group: group.to_string(), busy, idle });
             }
         }
         // With no candidate where the model is resident there is nothing to spill from: the first rule places it.
         if residents > 0 && unpressed == 0 {
             for &o in &spill {
-                open[o].1.active = true;
+                open[o].view.active = true;
             }
         }
         if candidates == 0 {
@@ -846,31 +871,47 @@ impl Fleet {
         // Work is not queued behind work: while an upstream with room reports nothing waiting, one that reports jobs
         // waiting is passed over, whatever prefix or session it holds. A queue that does not move (a restarted upstream
         // still loading, a hung lane) would otherwise take every request its cache or a session points at.
-        if open.iter().any(|(_, view, _)| view.queued == 0) {
-            open.retain(|(_, view, _)| view.queued == 0);
+        if open.iter().any(|o| o.view.queued == 0) {
+            open.retain(|o| o.view.queued == 0);
+        }
+        // Nowhere with room is the model loaded (or may it spill): it is loaded where that costs least. An idle
+        // upstream evicts nothing in use; failing one, the upstream known to hold the fewest requests. Never
+        // simply the first open one, which put every such request on the lowest-index upstream whatever it ran
+        // (knowledge #609).
+        if !open.iter().any(|o| o.view.active) {
+            if open.iter().any(|o| o.idle) {
+                open.retain(|o| o.idle);
+                for o in &mut open {
+                    o.view.active = true;
+                }
+            } else {
+                let lightest = (0..open.len()).min_by_key(|&o| (open[o].busy, open[o].index)).expect("open is not empty");
+                open.swap(0, lightest);
+                open.truncate(1);
+                open[0].view.active = true;
+            }
         }
         let mut sessions = self.sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         // A session's upstream holds its whole history: it is weighed as holding the whole prompt, so the session goes
         // back there unless that upstream carries more than the balance bound beyond another (`balance_slack`), and
         // then follows the one the policy chooses. A rule of "while it has a free slot" pinned sessions to a card
         // whose advertised slots never fill.
-        let size = key.size(&chains[&open[0].2]);
-        let mut views: Vec<ReplicaView> = open.iter().map(|(_, v, _)| *v).collect();
-        if let Some(home) = session.and_then(|key| sessions.get(key)).and_then(|i| open.iter().position(|(o, _, _)| *o == i)) {
+        let size = key.size(&chains[&open[0].namespace]);
+        let mut views: Vec<ReplicaView> = open.iter().map(|o| o.view).collect();
+        if let Some(home) = session.and_then(|key| sessions.get(key)).and_then(|i| open.iter().position(|o| o.index == i)) {
             views[home].matched = views[home].matched.max(size.prompt);
         }
-        let chosen = choose_replica(&views, size);
-        let (index, _, namespace) = &open[chosen];
+        let chosen = &open[choose_replica(&views, size)];
         if let Some(key) = session {
-            sessions.record(key, *index);
+            sessions.record(key, chosen.index);
         }
-        directories[*index].record(&chains[namespace]);
-        let member = self.members[*index].clone();
+        directories[chosen.index].record(&chains[&chosen.namespace]);
+        let member = self.members[chosen.index].clone();
         if member.in_flight.fetch_add(1, Ordering::SeqCst) == 0 && member.advertised().queue_depth == 0 {
             // Work starts on an idle upstream: its stall clock starts now, not at the last probe.
             member.progressed();
         }
-        Pick::Chosen(*index, InFlight::take(member, self.changed.clone(), model))
+        Pick::Chosen(chosen.index, InFlight::take(member, self.changed.clone(), &chosen.group))
     }
 
     /// An upstream for a request, waiting in the router's queue while every upstream that serves its model holds as
@@ -941,6 +982,9 @@ fn parse_advertised(health: &Value, listing: &Value) -> Result<(Advertised, Serv
             }
             if let Some(resident) = card.get("resident").and_then(Value::as_bool) {
                 adv.resident.insert(id.to_string(), resident);
+            }
+            if let Some(group) = card.get("slot_group").and_then(Value::as_str).filter(|g| valid_model_id(g)) {
+                adv.slot_group.insert(id.to_string(), group.to_string());
             }
             adv.cards.push(card.clone());
             if let Some(digest) = card.get("adapter").and_then(|a| a.get("digest")).and_then(Value::as_str).filter(|d| d.len() <= 128) {

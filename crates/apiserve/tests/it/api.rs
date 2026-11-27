@@ -711,6 +711,45 @@ async fn model_card_says_how_many_sequences_the_model_decodes_and_whether_it_is_
     }
 }
 
+/// An adapter served in its base's bank, as `AdapterView` is: listed under its own id, served by the base's instance.
+struct AdapterOfChat;
+impl ResidentModel for AdapterOfChat {
+    fn manifest(&self) -> Manifest {
+        let mut manifest = chat_manifest();
+        manifest.model = "brain-chat:tuned".into();
+        manifest
+    }
+    fn instance_key(&self, a: &str, i: &Invocation) -> InstanceKey {
+        FakeChat.instance_key(a, i)
+    }
+    fn estimate(&self, k: &InstanceKey) -> MemCost {
+        FakeChat.estimate(k)
+    }
+    fn activate(&self, k: &InstanceKey, d: Device) -> Result<Box<dyn Instance>, String> {
+        FakeChat.activate(k, d)
+    }
+}
+
+/// An adapter's instance is its base's, so its card says it is resident exactly when the base is, and names the base
+/// as its slot group: a router counted 496 adapter cards as cold on 16 upstreams where their bases were hot, and
+/// loaded them onto whatever card came first (knowledge #609).
+#[tokio::test]
+async fn an_adapter_card_is_resident_when_its_base_is_and_names_the_base_as_its_slot_group() {
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 8 << 30, 0);
+    let exec = Executor::start(vec![Arc::new(FakeChat), Arc::new(AdapterOfChat)], budgets, Policy::default());
+    let key = "sk-brain-test-key".to_string();
+    let app = router(AppState::new(exec, key.clone(), Provider::OpenAI));
+    let card = get_json(&app, Provider::OpenAI, "/v1/models/brain-chat:tuned", &key).await;
+    assert_eq!((card["resident"].clone(), card["slot_group"].clone()), (json!(false), json!("brain-chat")), "{card}");
+    let body = json!({"model": "brain-chat", "messages": [{"role": "user", "content": "hi"}]});
+    assert_eq!(post_json(&app, Provider::OpenAI, &key, "/v1/chat/completions", &body).await.0, StatusCode::OK);
+    let card = get_json(&app, Provider::OpenAI, "/v1/models/brain-chat:tuned", &key).await;
+    assert_eq!(card["resident"], json!(true), "the base is built, so the adapter is served without a load: {card}");
+    let base = get_json(&app, Provider::OpenAI, "/v1/models/brain-chat", &key).await;
+    assert_eq!(base["slot_group"], json!("brain-chat"), "{base}");
+}
+
 /// brain keeps nothing of a request: no prompt, answer or upload is written
 /// anywhere or logged. Every card says so, so a client that routes by data
 /// retention can tell this server apart from one that does not say.

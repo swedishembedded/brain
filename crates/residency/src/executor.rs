@@ -382,6 +382,9 @@ pub struct Executor {
     /// The registered single-device models, so a front end can ask one whether it would take a job
     /// ([`Self::check_job`]) without a round trip to the dispatcher.
     models: Arc<RwLock<HashMap<String, Arc<dyn ResidentModel>>>>,
+    /// The registered multi-device models, kept apart from `models` (whose sums size the edge) for what a front end
+    /// asks of any served model: its slot group ([`Self::slot_group`]).
+    multi_models: Arc<RwLock<HashMap<String, Arc<dyn MultiDeviceResidentModel>>>>,
     stats: Arc<Mutex<Stats>>,
     /// The dispatcher thread's handle plus one per lane, spawned in
     /// [`Self::start`] - see [`Self::shutdown`]'s doc for why a real,
@@ -489,6 +492,7 @@ impl Executor {
             manifests,
             adapters,
             models: Arc::new(RwLock::new(known)),
+            multi_models: Arc::default(),
             stats,
             join_handles: Arc::new(Mutex::new(Some(join_handles))),
             fetches: Arc::default(),
@@ -617,6 +621,7 @@ impl Executor {
         }
         self.adapters.set(model, None);
         self.models.write().unwrap().remove(model);
+        self.multi_models.write().unwrap().remove(model);
         let _ = self.tx.send(Msg::Unregister(model.to_string()));
     }
 
@@ -632,6 +637,20 @@ impl Executor {
     /// [`Self::decode_slots`]. `None` for a model not registered that way (unknown, or multi-device).
     pub fn model_decode_slots(&self, model: &str) -> Option<usize> {
         self.models.read().unwrap().get(model).map(|m| model_slots(m.as_ref()))
+    }
+
+    /// The registered model `model`, under either registry.
+    fn registered(&self, model: &str) -> Option<Arc<dyn ResidentModel>> {
+        let single = self.models.read().unwrap().get(model).cloned();
+        single.or_else(|| self.multi_models.read().unwrap().get(model).map(|m| m.clone() as Arc<dyn ResidentModel>))
+    }
+
+    /// The model whose instances serve `model`'s requests ([`ResidentModel::instance_key`] for a generation): the
+    /// model itself, or for an adapter served in its base's bank, the base. Models of one slot group share one
+    /// instance, its batch and its residency, so a front end counts their load together. `None` for a model not
+    /// registered.
+    pub fn slot_group(&self, model: &str) -> Option<String> {
+        self.registered(model).map(|m| m.instance_key(GENERATE_ACTION, &Invocation::new()).model)
     }
 
     /// Whether the registered model `model` would accept the job `(action, inv)`
@@ -662,6 +681,7 @@ impl Executor {
     /// not to take it.
     pub fn register_multi(&self, model: Arc<dyn MultiDeviceResidentModel>) {
         let manifest = model.manifest();
+        let name = manifest.model.clone();
         self.adapters.seed(&manifest.model, model.adapter_identity());
         {
             // Copy-on-write -- see `register`'s identical dance and its doc.
@@ -670,6 +690,7 @@ impl Executor {
             v.push(manifest);
             *g = Arc::new(v);
         }
+        self.multi_models.write().unwrap().insert(name, model.clone());
         let _ = self.tx.send(Msg::RegisterMulti(model));
     }
 
@@ -2388,6 +2409,9 @@ impl crate::model::JobFeed for GroupFeed {
         self.inbox.lock().published = Some(metrics);
     }
 }
+
+/// The action a text model serves a generation under: the one a front end asks a model's instance key for.
+const GENERATE_ACTION: &str = "generate";
 
 /// A model's decode slots: its batch (1 when it declares none) on each of its replicas.
 fn model_slots(model: &dyn ResidentModel) -> usize {
