@@ -93,16 +93,18 @@ struct Retained {
 }
 
 impl Retained {
-    /// Withdraws the oldest version ids of `id` that are not held while more than its retention are not held.
-    fn trim(&mut self, id: &str, hosts: &[(ServedBase, LiveAdapters)]) {
+    /// Takes off the oldest version ids of `id` that are not held while more than its retention are not held, and
+    /// returns them (with their hosts) to withdraw: outside the lock, since withdrawing waits for the serving executor,
+    /// which may be waiting for the training that publishes under this lock.
+    fn trim(&mut self, id: &str) -> Vec<(usize, String)> {
         let retain = self.retain.get(id).copied().unwrap_or(0);
-        let Some(kept) = self.served.get_mut(id) else { return };
+        let mut gone = Vec::new();
+        let Some(kept) = self.served.get_mut(id) else { return gone };
         while kept.iter().filter(|(_, v)| !self.held.contains(v)).count() > retain {
             let Some(at) = kept.iter().position(|(_, v)| !self.held.contains(v)) else { break };
-            if let Some((host, old)) = kept.remove(at) {
-                hosts[host].1.retire(&old);
-            }
+            gone.extend(kept.remove(at));
         }
+        gone
     }
 }
 
@@ -118,6 +120,13 @@ impl ServingBank {
 }
 
 impl ServingBank {
+    /// Withdraws version ids taken off the retention.
+    fn retire(&self, gone: Vec<(usize, String)>) {
+        for (host, id) in gone {
+            self.hosts[host].1.retire(&id);
+        }
+    }
+
     /// Verifies `file` as a release of `id` and offers it; returns the host it rides on, what was loaded and the
     /// identity now served.
     fn offer(&self, id: &str, file: &Path) -> Result<(usize, LoadedAdapter, AdapterIdentity), String> {
@@ -150,7 +159,9 @@ impl PolicyBank for ServingBank {
             live.serve_version(loaded, &versioned).map_err(|e| format!("publishing adapter {id} as {versioned}: {e}"))?;
             retained.served.entry(id.to_string()).or_default().push_back((host, versioned.clone()));
         }
-        retained.trim(id, &self.hosts);
+        let gone = retained.trim(id);
+        drop(retained);
+        self.retire(gone);
         Ok((identity, Some(versioned)))
     }
 
@@ -163,10 +174,12 @@ impl PolicyBank for ServingBank {
                 return Err(format!("version {version} of {id} is no longer served under {versioned}"));
             }
             retained.held.insert(versioned.clone());
-        } else {
-            retained.held.remove(&versioned);
-            retained.trim(id, &self.hosts);
+            return Ok(versioned);
         }
+        retained.held.remove(&versioned);
+        let gone = retained.trim(id);
+        drop(retained);
+        self.retire(gone);
         Ok(versioned)
     }
 
