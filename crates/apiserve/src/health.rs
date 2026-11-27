@@ -20,6 +20,11 @@ use serde_json::{json, Value};
 
 use crate::state::AppState;
 
+/// The health answer's schema name (every field documented in the metrics and health reference).
+pub const SCHEMA: &str = "brain.server.health";
+/// Its version: bumped only when a field changes meaning or goes; adding fields keeps it.
+pub const SCHEMA_VERSION: u32 = 1;
+
 /// The health routes (registered on every provider surface, outside the edge limit).
 pub fn routes() -> Router<AppState> {
     Router::new().route("/health", get(health)).route("/v1/health", get(health))
@@ -46,12 +51,12 @@ pub(crate) fn count_served(outcome: &capability::Outcome) {
 
 /// This process's identity for its lifetime: a reader that sees it change knows the server restarted, so whatever
 /// it cached (its KV, its weights) may differ from before.
-fn instance() -> &'static str {
+pub(crate) fn instance() -> &'static str {
     static INSTANCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     INSTANCE.get_or_init(|| format!("{:016x}", rand::random::<u64>()))
 }
 
-/// `{"status", "instance", "decode_slots", "free_slots", "serving_held", "kv_free_tokens", "kv_total_tokens",
+/// `{"schema", "schema_version", "status", "instance", "decode_slots", "free_slots", "serving_held", "kv_free_tokens", "kv_total_tokens",
 /// "edge_concurrency", "queue_depth", "served": {...}}`: the process's identity, the sequences the served models decode
 /// at once and how many of those are free now (none while `serving_held`: every card runs a workload, such as a
 /// fine-tune, that has not lent it, so a router sends this server nothing), the KV tokens a new request can claim (free blocks and blocks only the prefix cache
@@ -71,6 +76,8 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
     let held = stats.serving_held;
     let free_slots = if held { 0 } else { slots.saturating_sub(running) };
     Json(json!({
+        "schema": SCHEMA,
+        "schema_version": SCHEMA_VERSION,
         "status": "ok",
         "instance": instance(),
         "decode_slots": slots,

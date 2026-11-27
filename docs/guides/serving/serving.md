@@ -252,13 +252,15 @@ on the command line instead.
   Past `--route-queue` waiting requests (default 1024) it is refused at once
   with 503. Both carry `Retry-After`, and a server's own 429 and 503 pass
   through with theirs.
-- **Metrics.** `GET /v1/metrics` (the same report as `/v1/health`) gives, per
-  upstream, `in_flight`, `capacity`, `free_slots`, `kv_free_tokens`,
-  `queue_depth`, `idle_connections`, `tokens_per_s` and
-  `prefix_hit_rate` (cached prompt tokens over prompt tokens between the last
-  two probes), and the fleet's `capacity`, `in_flight`, `queued` and
-  `tokens_per_s`: a client keeps `capacity` requests in flight to saturate the
-  fleet. Every response carries the `X-Request-Id` the upstream was sent.
+- **Metrics.** `GET /v1/metrics` (the same report as `/v1/health`, schema
+  `brain.router.health`) gives, per upstream, `in_flight`, `capacity`,
+  `free_slots`, `kv_free_tokens`, `queue_depth`, `idle_connections`,
+  `tokens_per_s` and `prefix_hit_rate` (cached prompt tokens over prompt tokens
+  between the last two probes), what the router did with it (`spills`,
+  `balance_moves`, `stalls`), and the fleet's `capacity`, `in_flight`, `queued`
+  and `tokens_per_s`: a client keeps `capacity` requests in flight to saturate
+  the fleet. Every field is in [Metrics and health](../../reference/api/metrics.md).
+  Every response carries the `X-Request-Id` the upstream was sent.
 - **Connections.** The router keeps up to 64 idle connections per upstream
   alive and reuses each for a few seconds; a request handed back unsent by a
   connection the upstream closed goes out on a fresh one.

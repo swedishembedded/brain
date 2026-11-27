@@ -12,6 +12,7 @@ mod common;
 
 mod adapter_embeds;
 mod encode_overlap;
+mod observation;
 mod outcome_report;
 mod rejection;
 mod sampling_defaults;

@@ -20,6 +20,7 @@ mod create;
 mod device_oom;
 mod dryrun;
 mod fleet;
+mod observe;
 mod full_cards;
 mod door;
 mod http;

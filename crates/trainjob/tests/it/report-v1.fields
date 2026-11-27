@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+#
+# Pinned fields of a training job's report in brain.server.metrics v1: one path per line, an array's items as [], a map keyed by data as .<key>.
+# Fields are only ever added. Each one has its row in the metrics reference (make check/metrics-fields).
+training_jobs[].report.action
+training_jobs[].report.as_of_unix_ms
+training_jobs[].report.current_phase
+training_jobs[].report.devices
+training_jobs[].report.oom_retries
+training_jobs[].report.optimizer_tokens
+training_jobs[].report.optimizer_tokens_per_s
+training_jobs[].report.outside_optimizer_steps_share
+training_jobs[].report.phases_secs
+training_jobs[].report.phases_secs.checkpoint_save
+training_jobs[].report.phases_secs.evaluation
+training_jobs[].report.phases_secs.finalize
+training_jobs[].report.phases_secs.model_load
+training_jobs[].report.phases_secs.optimizer_steps
+training_jobs[].report.phases_secs.other
+training_jobs[].report.phases_secs.staging
+training_jobs[].report.phases_secs.waiting_for_card
+training_jobs[].report.phases_secs.waiting_for_records
+training_jobs[].report.steps
+training_jobs[].report.steps.done
+training_jobs[].report.steps.total
+training_jobs[].report.wall_secs

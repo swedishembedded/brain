@@ -29,6 +29,7 @@ pub mod load_peak;
 pub mod parity;
 mod process;
 pub mod rounding;
+pub mod schema;
 mod scratch;
 pub mod step_parity;
 pub mod training;

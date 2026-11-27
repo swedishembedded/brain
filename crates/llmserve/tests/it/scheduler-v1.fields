@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+#
+# Pinned fields of a replica's scheduler in brain.server.metrics v1: one path per line, an array's items as [], a map keyed by data as .<key>.
+# Fields are only ever added. Each one has its row in the metrics reference (make check/metrics-fields).
+models[].replicas[].scheduler.admission
+models[].replicas[].scheduler.admission.admitted_width
+models[].replicas[].scheduler.admission.backoff
+models[].replicas[].scheduler.admission.backoff.calm_iterations
+models[].replicas[].scheduler.admission.backoff.cause
+models[].replicas[].scheduler.admission.backoff.failed_at_width
+models[].replicas[].scheduler.admission.backoff.grows_after_iterations
+models[].replicas[].scheduler.admission.backoff.last_device_oom_unix_ms
+models[].replicas[].scheduler.admission.backoff.last_pool_dry_unix_ms
+models[].replicas[].scheduler.admission.backoff.limit
+models[].replicas[].scheduler.admission.backoff.limited
+models[].replicas[].scheduler.admission.backoff.next_limit
+models[].replicas[].scheduler.admission.max_width
+models[].replicas[].scheduler.kv
+models[].replicas[].scheduler.kv.block_tokens
+models[].replicas[].scheduler.kv.claimable_tokens
+models[].replicas[].scheduler.kv.free_blocks
+models[].replicas[].scheduler.kv.prefix_cached_blocks
+models[].replicas[].scheduler.kv.total_blocks
+models[].replicas[].scheduler.kv.total_tokens
+models[].replicas[].scheduler.sequences
+models[].replicas[].scheduler.sequences.prefilling
+models[].replicas[].scheduler.sequences.running
+models[].replicas[].scheduler.sequences.swapped
+models[].replicas[].scheduler.sequences.waiting
+models[].replicas[].scheduler.throughput
+models[].replicas[].scheduler.throughput.decode_tokens_per_s
+models[].replicas[].scheduler.throughput.decoded_tokens
+models[].replicas[].scheduler.throughput.prefill_tokens_per_s
+models[].replicas[].scheduler.throughput.prefilled_tokens
+models[].replicas[].scheduler.throughput.window_secs

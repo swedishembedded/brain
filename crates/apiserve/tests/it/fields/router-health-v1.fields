@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+#
+# Pinned fields of brain.router.health v1: one path per line, an array's items as [], a map keyed by data as .<key>.
+# Fields are only ever added. Each one has its row in the metrics reference (make check/metrics-fields).
+capacity
+decode_slots
+in_flight
+keying
+keying.encode_seconds
+keying.encoded_tokens
+keying.memo_tokens
+keying.text_keyed_requests
+keying.token_keyed_requests
+queue_bound
+queued
+schema
+schema_version
+status
+tokens_per_s
+upstream_queue_depth
+upstreams
+upstreams[].balance_moves
+upstreams[].capacity
+upstreams[].draining
+upstreams[].free_slots
+upstreams[].healthy
+upstreams[].idle_connections
+upstreams[].in_flight
+upstreams[].index
+upstreams[].kv_free_tokens
+upstreams[].models
+upstreams[].prefix_hit_rate
+upstreams[].queue_depth
+upstreams[].serving_held
+upstreams[].spills
+upstreams[].stalled
+upstreams[].stalls
+upstreams[].tokens_per_s

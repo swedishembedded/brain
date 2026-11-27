@@ -13,6 +13,7 @@ mod backpressure;
 mod callers;
 mod connections;
 mod edge;
+mod metrics;
 mod route;
 mod seams;
 mod shutdown;

@@ -361,6 +361,9 @@ like, rather than silently fetching something adjacent.
   processes instead of in the server, so a wedged or crashed driver call
   ends a worker rather than the server (see
   [Device failure](../concepts/execution/device-failure.md#models-hosted-in-a-worker)).
+  `GET /metrics` reports its state for an observer: each model's residency,
+  KV pool, back-off and token rates, each card's memory and each training
+  job's phases ([Metrics and health](api/metrics.md)).
 - With `--upstream URL` (repeatable) or `--upstreams-file FILE`, it serves no
   model: it routes the OpenAI dialect over other `brain serve` endpoints,
   prefix-affine and weighed by load, with health checks, drain and a merged

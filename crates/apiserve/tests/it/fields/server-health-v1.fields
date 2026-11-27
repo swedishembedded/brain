@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
+#
+# Pinned fields of brain.server.health v1: one path per line, an array's items as [], a map keyed by data as .<key>.
+# Fields are only ever added. Each one has its row in the metrics reference (make check/metrics-fields).
+decode_slots
+edge_concurrency
+free_slots
+instance
+kv_free_tokens
+kv_total_tokens
+queue_depth
+schema
+schema_version
+served
+served.cached_prompt_tokens
+served.completion_tokens
+served.prompt_tokens
+served.requests
+serving_held
+status

@@ -39,6 +39,7 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
 | transcription (speech to text) | - | `POST /audio/transcriptions` | `POST /audio/transcriptions` |
 | speech synthesis (text to speech) | - | `POST /audio/speech` | `POST /audio/speech` |
 | video (generate and edit) | - | `POST /videos`, `GET /videos/{id}`, `GET /videos/{id}/content`, `GET /videos/models` | same |
+| health and metrics ([fields](metrics.md)) | `GET /health`, `GET /metrics` | `GET /health`, `GET /metrics` | `GET /health`, `GET /metrics` |
 
 - **Chat content parts**: a message's `content` may be a string or a list of
   parts. OpenAI parts are `text`, `refusal`, `image_url` (an inline `data:` URL)

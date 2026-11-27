@@ -46,6 +46,7 @@ PDF (`make docs/pdf`).
 - [The Rust SDK](reference/sdk.md) - the embeddable `brain` crate: no CLI process, no server.
 - [Configuration](reference/configuration.md) - every `BRAIN_*` environment variable.
 - [HTTP API](reference/api/http.md) - OpenAI, Anthropic and OpenRouter compatible endpoints.
+- [Metrics and health](reference/api/metrics.md) - the versioned JSON documents a server and a router report: models, cards, training jobs.
 - [D-Bus API](reference/api/dbus.md)
 - [Model catalog](reference/models/index.md) - every model, what it supports, one page each.
 - [WGSL kernel catalogue](reference/kernels/index.md) and

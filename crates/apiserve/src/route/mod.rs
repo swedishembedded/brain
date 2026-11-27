@@ -72,6 +72,7 @@
 mod key;
 mod upstream;
 
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -253,6 +254,11 @@ pub const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(300);
 /// card's `decode_slots`: those are what a server admits, often far more than its card decodes at speed.
 pub const DEFAULT_SPILL_LOAD: usize = residency::affinity::MIN_BALANCE_SLACK;
 
+/// The router's `/health` schema name (every field documented in the metrics and health reference).
+pub const HEALTH_SCHEMA: &str = "brain.router.health";
+/// Its version: bumped only when a field changes meaning or goes; adding fields keeps it.
+pub const HEALTH_SCHEMA_VERSION: u32 = 1;
+
 /// What the last good probe of an upstream said.
 #[derive(Default)]
 struct Advertised {
@@ -311,6 +317,11 @@ pub struct Member {
     epoch: std::time::Instant,
     /// Bumped by every drain and resume, so a deadline cuts only the drain that set it.
     drains: AtomicUsize,
+    /// What the router did with it, counted since the router started (`GET /health`): requests sent to it as a
+    /// spill, requests it took although their prefix or session pointed at another upstream, and times it stalled.
+    spills: AtomicU64,
+    balance_moves: AtomicU64,
+    stalls: AtomicU64,
 }
 
 /// Two readings of an upstream's served counters, the rates between them.
@@ -348,6 +359,9 @@ impl Member {
             stalled: AtomicBool::new(false),
             progress_ms: AtomicU64::new(0),
             epoch: std::time::Instant::now(),
+            spills: AtomicU64::new(0),
+            balance_moves: AtomicU64::new(0),
+            stalls: AtomicU64::new(0),
         }
     }
 
@@ -441,6 +455,8 @@ struct Open {
     busy: usize,
     /// It holds nothing of the router's and reports no job running or waiting.
     idle: bool,
+    /// The model is not resident there and it takes the request as a spill.
+    spill: bool,
 }
 
 /// The outcome of choosing an upstream.
@@ -653,11 +669,12 @@ impl Fleet {
         self.members.iter().any(|m| m.routable())
     }
 
-    /// The fleet as `GET /health` reports it, for a harness sizing its concurrency: per upstream (by index; addresses
-    /// stay with the operator) whether it is healthy, draining or stalled, the requests it holds (`in_flight`), the most it is
-    /// sent at once (`capacity`, its decode slots), the jobs waiting on it (`queue_depth`), and its recent completion
-    /// token rate and prefix-cache hit rate between the last two probes; then the fleet's totals and the requests
-    /// waiting in the router (`queued`).
+    /// The fleet as `GET /health` reports it ([`HEALTH_SCHEMA`], every field in the metrics and health reference), for a
+    /// harness sizing its concurrency: per upstream (by index; addresses stay with the operator) whether it is
+    /// healthy, draining or stalled, the requests it holds (`in_flight`), the most it is sent at once (`capacity`, its
+    /// decode slots), the jobs waiting on it (`queue_depth`), its recent completion token rate and prefix-cache hit
+    /// rate between the last two probes, and what the router did with it (`spills`, `balance_moves`, `stalls`); then
+    /// the fleet's totals and the requests waiting in the router (`queued`).
     pub fn status(&self) -> Value {
         let (mut capacity, mut in_flight, mut upstream_queued, mut rate) = (0usize, 0usize, 0usize, 0f64);
         let upstreams: Vec<Value> = self
@@ -689,12 +706,17 @@ impl Fleet {
                     "free_slots": adv.free_slots,
                     "kv_free_tokens": adv.kv_free_tokens,
                     "models": adv.ids.len(),
+                    "spills": m.spills.load(Ordering::Relaxed),
+                    "balance_moves": m.balance_moves.load(Ordering::Relaxed),
+                    "stalls": m.stalls.load(Ordering::Relaxed),
                 })
             })
             .collect();
         let queued = self.waiting.lock().unwrap_or_else(std::sync::PoisonError::into_inner).queue.len();
         let status = if self.available() { "ok" } else { "unavailable" };
         json!({
+            "schema": HEALTH_SCHEMA,
+            "schema_version": HEALTH_SCHEMA_VERSION,
             "status": status,
             "decode_slots": capacity,
             "capacity": capacity,
@@ -787,6 +809,7 @@ impl Fleet {
             member.url,
             idle.as_secs_f64()
         );
+        member.stalls.fetch_add(1, Ordering::Relaxed);
         self.forget(index);
         member.cut.send_replace(Cut::Stalled);
         self.changed.notify_waiters();
@@ -869,13 +892,14 @@ impl Fleet {
                 // All it is known to hold: the router's requests, or what it runs by its last health when that is more
                 // (another router's), and what waits on it.
                 let busy = total.max(adv.slots.saturating_sub(adv.free_slots)) + adv.queue_depth;
-                open.push(Open { index: i, view, namespace, group: group.to_string(), busy, idle });
+                open.push(Open { index: i, view, namespace, group: group.to_string(), busy, idle, spill: false });
             }
         }
         // With no candidate where the model is resident there is nothing to spill from: the first rule places it.
         if residents > 0 && unpressed == 0 {
             for &o in &spill {
                 open[o].view.active = true;
+                open[o].spill = true;
             }
         }
         if candidates == 0 {
@@ -914,10 +938,21 @@ impl Fleet {
         // whose advertised slots never fill.
         let size = key.size(&chains[&open[0].namespace]);
         let mut views: Vec<ReplicaView> = open.iter().map(|o| o.view).collect();
-        if let Some(home) = session.and_then(|key| sessions.get(key)).and_then(|i| open.iter().position(|o| o.index == i)) {
+        let session_home = session.and_then(|key| sessions.get(key)).and_then(|i| open.iter().position(|o| o.index == i));
+        if let Some(home) = session_home {
             views[home].matched = views[home].matched.max(size.prompt);
         }
-        let chosen = &open[choose_replica(&views, size)];
+        // Where the request's cache is: its session's upstream, else the one holding the longest prefix of it.
+        let home = session_home.or_else(|| (0..views.len()).filter(|&o| views[o].matched > 0).max_by_key(|&o| (views[o].matched, Reverse(o))));
+        let picked = choose_replica(&views, size);
+        let chosen = &open[picked];
+        let member = &self.members[chosen.index];
+        if chosen.spill {
+            member.spills.fetch_add(1, Ordering::Relaxed);
+        }
+        if home.is_some_and(|h| h != picked) {
+            member.balance_moves.fetch_add(1, Ordering::Relaxed);
+        }
         if let Some(key) = session {
             sessions.record(key, chosen.index);
         }

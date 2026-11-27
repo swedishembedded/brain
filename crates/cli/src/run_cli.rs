@@ -149,8 +149,9 @@ ROUTING ACROSS SERVERS  (one URL for every card of a cluster)
                          waiting requests it is refused with 503. GET /v1/models
                          lists every upstream's models and adapters once; GET
                          /v1/metrics (or /v1/health) reports per upstream in-flight,
-                         capacity, queue depth, recent tok/s and prefix-hit rate,
-                         and the fleet totals; POST /v1/upstreams/N/drain and
+                         capacity, queue depth, recent tok/s, prefix-hit rate,
+                         spills, balance moves and stalls, and the fleet totals
+                         (schema brain.router.health); POST /v1/upstreams/N/drain and
                          .../resume take upstream N (0-based) out of rotation and
                          back (an admin caller only, with --caller).
                          --models-dir DIR names the store the served models'

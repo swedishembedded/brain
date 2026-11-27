@@ -31,6 +31,7 @@
 //! - [`catalog`] — deriving API capabilities from a manifest; the `/models` filter.
 //! - [`models`] — the `/models` catalog handlers.
 //! - [`health`] - `/health`: liveness and how much work the server takes at once.
+//! - [`metrics`] - `/metrics`: the server's serving and training state as one versioned, documented JSON document.
 //! - [`route`] - one surface in front of several `brain serve` endpoints: prefix-affine,
 //!   load-weighed routing, health, drain and a merged model listing.
 //! - [`bridge`] — the async→sync seam to the shared executor (submit/stream + the
@@ -54,6 +55,7 @@ pub mod capabilities;
 pub mod catalog;
 pub mod error;
 pub mod health;
+pub mod metrics;
 pub mod hooks;
 mod listener;
 pub mod media;
@@ -142,6 +144,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .merge(models::routes())
         .merge(health::routes())
+        .merge(metrics::routes())
         .merge(provider_routes.merge(capabilities::routes()).merge(systemone::routes()).layer(edge))
         .fallback(fallback)
         // Auth wraps everything (incl. the fallback): an unauthenticated caller

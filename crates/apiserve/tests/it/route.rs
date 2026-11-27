@@ -630,11 +630,14 @@ async fn a_batch_on_one_upstream_spreads_onto_idle_ones_whatever_prefix_or_sessi
     fleet.probe().await;
     // The session follows the idle card instead of queueing its turn behind the batch, and stays there.
     assert_eq!(chat(addr, session(2)).await.2["upstream"], "b", "the session leaves the loaded upstream");
+    assert_eq!(fleet.status()["upstreams"][1]["balance_moves"], 1, "the move is counted on the upstream it went to");
     assert_eq!(chat(addr, session(3)).await.2["upstream"], "b", "and stays where it went");
+    assert_eq!(fleet.status()["upstreams"][1]["balance_moves"], 1, "a session at home is no move");
     // A new conversation sharing the batch's system prompt goes to an idle card too.
     let fresh = chat(addr, conversation("m", &system, 1)).await.2["upstream"].clone();
     assert_ne!(fresh, "a", "a cached prompt does not outweigh an idle card");
     assert_eq!(a.count(), 65, "nothing more was sent to the loaded upstream");
+    assert_eq!(fleet.status()["upstreams"][0]["balance_moves"], 0, "nothing moved onto the loaded upstream");
     a.release.add_permits(64);
     for request in batch {
         assert_eq!(request.await.unwrap().0, StatusCode::OK);
@@ -933,6 +936,7 @@ async fn an_upstream_that_stops_making_progress_fails_what_it_holds_and_leaves_r
     assert!(ended, "the cut stream ends in an error, not a silent end");
     let status = fleet.status();
     assert_eq!((status["upstreams"][0]["stalled"].clone(), status["upstreams"][0]["in_flight"].clone()), (json!(true), json!(0)));
+    assert_eq!((status["upstreams"][0]["stalls"].clone(), status["upstreams"][1]["stalls"].clone()), (json!(1), json!(0)), "the stall is counted");
     assert_eq!(status["upstreams"][0]["healthy"], json!(true), "its health still answers");
 
     // Answering probes do not put it back; the session moves to b.
@@ -1121,6 +1125,8 @@ async fn a_loaded_model_spills_onto_an_idle_upstream_but_never_onto_a_busy_one()
     running.push(held("m1", 9));
     until("the spilled m1 request to reach b", || b.count() == 2).await;
     assert_eq!(b.hits()[1].body["model"], "m1");
+    let spills: Vec<Value> = fleet.status()["upstreams"].as_array().unwrap().iter().map(|u| u["spills"].clone()).collect();
+    assert_eq!(spills, [json!(0), json!(1), json!(0)], "the router counts the spill on the upstream it went to");
     assert_eq!((a.count(), c.count()), (9, 1));
     a.release.add_permits(9);
     b.release.add_permits(1);
@@ -1300,4 +1306,17 @@ fn the_default_stall_bound_fires_while_an_agent_step_still_waits() {
     const AGENT_STEP: Duration = Duration::from_secs(480);
     let config = FleetConfig::new(Vec::new());
     assert!(config.stall_timeout + config.health_interval <= AGENT_STEP * 2 / 3, "stall {:?} + probe {:?} against a {AGENT_STEP:?} step", config.stall_timeout, config.health_interval);
+}
+
+/// Conformance: the router's `/health` (`brain.router.health` v1) has exactly the fields its `.fields` file pins (each
+/// documented, `make check/metrics-fields`); a field that goes or is renamed fails here.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_routers_health_has_exactly_the_pinned_documented_fields() {
+
+    let (_a, ua) = mock("a", 8, 16, &["m"]).await;
+    let (addr, _fleet, _stop) = router(&[ua]).await;
+    let (code, _, health) = call(addr, Method::GET, "/v1/health", Some(CLIENT_KEY), "").await;
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!((health["schema"].as_str(), health["schema_version"].as_u64()), (Some(route::HEALTH_SCHEMA), Some(1)));
+    crate::metrics::assert_pinned("brain.router.health", &crate::metrics::field_paths(&health), include_str!("fields/router-health-v1.fields"));
 }
