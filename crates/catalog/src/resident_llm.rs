@@ -863,6 +863,14 @@ pub struct QwenResident {
     /// are built in the worker too. It answers everything else from a twin of this resident over the same plan and
     /// the same adapter registry, which it offers to each worker ([`AdapterMirror`] rebuilds it there).
     worker: Option<residency::supervised::SupervisedModel>,
+    /// The KV pool in tokens as sized now, when the operator named none: the plan's at construction, grown at a cold
+    /// build to the room the card has then, or re-sized when a claim is starved ([`Self::fit_pool`]). `None` inside
+    /// the mutex is the plain two-context pool. A resident whose pool the operator named, or one hosted by a worker
+    /// (given its plan once), keeps the plan's.
+    pool: std::sync::Mutex<Option<u32>>,
+    /// Whether [`Self::pool`] may be re-sized: the operator named no pool, a card budget is known, and no worker hosts
+    /// the resident.
+    pool_defaulted: bool,
 }
 
 /// What `--checkpoint` names, as the `(path to open, repo directory,
@@ -987,7 +995,8 @@ impl QwenResident {
         for line in &chosen {
             eprintln!("brain: {}: default {line}", resident.plan.id);
         }
-        let resident = QwenResident { chosen, ..resident };
+        let pool_defaulted = cfg.kv_tokens.is_none() && resident.plan.card_budget_bytes.is_some();
+        let resident = QwenResident { chosen, pool_defaulted, ..resident };
         match hosting {
             Some(hosting) => resident.hosted_by(&hosting),
             None => resident,
@@ -1018,16 +1027,17 @@ impl QwenResident {
     /// This resident with its instances built in `hosting`'s workers, each rebuilding it from [`Self::host_spec`]
     /// and told every change of its adapters.
     fn hosted_by(self, hosting: &residency::supervised::WorkerHosting) -> QwenResident {
-        let twin = QwenResident { plan: self.plan.clone(), architecture: self.architecture, adapters: self.adapters.clone(), sampling: std::sync::OnceLock::new(), chosen: self.chosen.clone(), worker: None };
+        let twin = QwenResident { plan: self.plan.clone(), architecture: self.architecture, adapters: self.adapters.clone(), sampling: std::sync::OnceLock::new(), chosen: self.chosen.clone(), worker: None, pool: std::sync::Mutex::new(self.plan.kv_tokens), pool_defaulted: false };
         let worker = hosting.supervised(Arc::new(twin), self.host_spec()).with_adapters(self.adapters.clone());
-        QwenResident { worker: Some(worker), ..self }
+        QwenResident { worker: Some(worker), pool_defaulted: false, ..self }
     }
 
     /// The resident a resolved plan describes, built from it as it stands.
     fn from_plan(plan: QwenPlan) -> QwenResident {
         let architecture = plan.architecture.as_deref().and_then(brain_arch::by_id).map(|a| a.id);
         let adapters = AdapterRegistry::new(plan.adapter_bank.clone(), ServedBase::new(&plan.path, plan.base_id.clone()));
-        QwenResident { plan, architecture, adapters, sampling: std::sync::OnceLock::new(), chosen: Vec::new(), worker: None }
+        let pool = std::sync::Mutex::new(plan.kv_tokens);
+        QwenResident { plan, architecture, adapters, sampling: std::sync::OnceLock::new(), chosen: Vec::new(), worker: None, pool, pool_defaulted: false }
     }
 
     /// What a worker rebuilds this resident from: the resolved plan, so the worker builds the engine the serving
@@ -1138,6 +1148,37 @@ impl QwenResident {
         serving_demands(cfg, self.weight_bytes(cfg), bank.as_ref(), ctx, self.plan.max_batch, self.plan.max_prefill_cap, kv_tokens, self.plan.kv_int8_requested, self.plan.kv_offload_bytes > 0)
     }
 
+    /// The KV pool in tokens the next build sizes ([`Self::pool`]).
+    fn kv_tokens(&self) -> Option<u32> {
+        *self.pool.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Size the defaulted KV pool to the largest that fits the most bytes one of `room`'s devices offers, by the
+    /// arithmetic the estimate charges ([`serving_demands`]), keeping the context: `grow_only` takes it only when it
+    /// is larger than the pool now. `None` when nothing changed (a named or worker-hosted pool, no readable
+    /// checkpoint, nothing fits, or the same pool).
+    fn fit_pool(&self, room: &[(Device, u64)], grow_only: bool) -> Option<String> {
+        if !self.pool_defaulted || self.plan.refused.is_some() {
+            return None;
+        }
+        let bytes = room.iter().filter(|(d, _)| *d != Device::Cpu).map(|&(_, b)| b).max()?;
+        let cfg = qwen3::checkpoint_config(&self.plan.path).ok()?;
+        let fits = |tokens: u32| {
+            let kv_binding = qwen3::serve::kv_binding_bytes(&cfg, 16, tokens.div_ceil(16) + self.plan.max_batch, self.plan.kv_int8_requested);
+            fits_share(&self.serve_demands(&cfg, self.plan.ctx, Some(tokens)), bytes) && kv_binding <= WGPU_MAX_REPORTABLE_BINDING_BYTES
+        };
+        let ctx = self.plan.ctx.max(1);
+        let fleet = (u64::from(ctx) * u64::from(self.plan.max_batch) / 2).min(u64::from(MAX_DEFAULT_POOL_TOKENS)) as u32;
+        let fitted = model::memplan::largest_fitting(ctx, fleet.max(ctx.saturating_mul(2)), fits)?;
+        let mut pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+        let now = pool.unwrap_or(ctx.saturating_mul(2));
+        if fitted == now || (grow_only && fitted < now) {
+            return None;
+        }
+        *pool = Some(fitted);
+        Some(format!("KV pool {now} -> {fitted} tokens ({} MiB the card can give it)", bytes >> 20))
+    }
+
     /// Why this resident's serving plan cannot fit the card share the server gave it, naming the context that would
     /// fit (or that none does) and the other settings that shrink the plan; `None` when it fits, or when no share is
     /// known. Asked when the server starts, so a model that could only fail its requests is not listed.
@@ -1148,7 +1189,7 @@ impl QwenResident {
         let share = self.plan.card_budget_bytes.filter(|&b| b > 0)?;
         let cfg = qwen3::checkpoint_config(&self.plan.path).ok()?;
         let need = |ctx: u32, kv_tokens: Option<u32>| model::memplan::device_total(&self.serve_demands(&cfg, ctx, kv_tokens));
-        let demands = self.serve_demands(&cfg, self.plan.ctx, self.plan.kv_tokens);
+        let demands = self.serve_demands(&cfg, self.plan.ctx, self.kv_tokens());
         let total = model::memplan::device_total(&demands);
         if total <= share {
             return None;
@@ -1375,6 +1416,14 @@ impl QwenResident {
 }
 
 impl ResidentModel for QwenResident {
+    /// The defaulted KV pool, sized again to the bytes the cards can give now (shrunk when that is less).
+    fn replan(&self, _key: &InstanceKey, usable: &[(Device, u64)]) -> Option<String> {
+        self.fit_pool(usable, false)
+    }
+    /// The defaulted KV pool, grown to the room the card has beside what stays resident there (knowledge #616).
+    fn fit_to_room(&self, _key: &InstanceKey, room: &[(Device, u64)]) -> Option<String> {
+        self.fit_pool(room, true)
+    }
     fn manifest(&self) -> Manifest {
         // `Self::ctx()` is exactly the value `activate()` below builds the
         // engine's KV-cache sizing from (`max_blocks_per_seq = ctx.div_ceil(16)`,
@@ -1421,7 +1470,7 @@ impl ResidentModel for QwenResident {
         let Ok(cfg) = qwen3::checkpoint_config(&self.plan.path) else {
             return cost;
         };
-        let demands = self.serve_demands(&cfg, self.plan.ctx, self.plan.kv_tokens);
+        let demands = self.serve_demands(&cfg, self.plan.ctx, self.kv_tokens());
         residency::log::info(&format!("{}: estimate {}", self.plan.id, model::memplan::summary(&demands)));
         let activation = model::memplan::category_total(&demands, model::memplan::Category::Activations);
         MemCost::new(model::memplan::device_total(&demands) - activation, cost.ram).with_activation(activation)
@@ -1473,7 +1522,7 @@ impl ResidentModel for QwenResident {
             // See QwenResident::pool_sizing's doc comment for the arithmetic
             // -- the same derivation `estimate()` predicts a budget from, so
             // the two cannot silently drift apart.
-            let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(ctx, self.plan.max_batch, self.plan.max_prefill_cap, self.plan.kv_tokens);
+            let (block_size, max_batch, max_blocks_per_seq, num_blocks, max_prefill) = QwenResident::pool_sizing(ctx, self.plan.max_batch, self.plan.max_prefill_cap, self.kv_tokens());
             // A DEFAULT-selecting caller degrades loudly rather than hitting
             // `Engine::from_map_with_gpu`'s hard assert: nobody explicitly
             // asked this checkpoint's unusual `head_dim` for int8, so a
@@ -1598,7 +1647,7 @@ impl ResidentModel for QwenResident {
             Ok(Box::new(model::serve::Scheduler::new(eng, max_batch as usize)))
         })??;
         gpu_core::profile::stage_time(&format!("{}: build engine (total, on_device)", self.plan.id), stage_t0);
-        let mut instance = QwenInstance { max_batch: Self::pool_sizing(self.plan.ctx, self.plan.max_batch, self.plan.max_prefill_cap, self.plan.kv_tokens).1 as usize, decoding: Decoding { tok, format, stop }, engine, adapters: AdapterSync::new(self.adapters.clone()) };
+        let mut instance = QwenInstance { max_batch: Self::pool_sizing(self.plan.ctx, self.plan.max_batch, self.plan.max_prefill_cap, self.kv_tokens()).1 as usize, decoding: Decoding { tok, format, stop }, engine, adapters: AdapterSync::new(self.adapters.clone()) };
         // Every adapter offered so far is registered with the engine before
         // the first request, so a cold instance answers an adapter request
         // as soon as it answers a base one.
@@ -2142,6 +2191,38 @@ mod tests {
         }
         let too_small = resident(6 << 30);
         assert!(too_small.unfit_reason().is_some(), "a share under the weights is refused with the arithmetic");
+    }
+
+    /// Knowledge #616: a Qwen3-4B planned on a 30 GiB share (the server started while the card was busy) grows its
+    /// KV pool into a whole free card when it is next built, within that room by its own estimate; a re-plan of a
+    /// starved claim shrinks it again, and a pool the operator named never moves.
+    #[test]
+    fn a_defaulted_pool_grows_into_the_room_a_build_finds_and_a_named_one_does_not() {
+        let dir = brain_testutil::Scratch::dir("qwen3-4b-room");
+        std::fs::write(dir.join("config.json"), QWEN3_4B_CONFIG).unwrap();
+        let card = checkpoint::st::ModelCard::new("Qwen/Qwen3-4B", "qwen3");
+        let key = InstanceKey::new("Qwen/Qwen3-4B", "default");
+        let resident = |kv_tokens: Option<u32>| {
+            let serve = QwenServeConfig { max_batch: Some(64), auto_budget_bytes: Some(30 << 30), card_budget_bytes: Some(30 << 30), kv_tokens, weight_format: Some(model::ops::TierPolicy::uniform(gpu_core::select::Dtype::BF16)), ..QwenServeConfig::default() };
+            QwenResident::from_card_configured(dir.as_str(), &card, Some("unused.json"), serve)
+        };
+        let total = |r: &QwenResident| {
+            let c = r.estimate(&key);
+            c.vram + c.activation.unwrap_or(0)
+        };
+        let r = resident(None);
+        let small = r.kv_tokens().expect("a sized pool");
+        assert!(total(&r) <= 30 << 30);
+        let room = 92u64 << 30;
+        assert!(r.fit_to_room(&key, &[(Device::Gpu(0), room)]).is_some(), "the build finds a whole card");
+        let grown = r.kv_tokens().unwrap();
+        assert!(grown >= small * 3, "the pool grows into the room: {small} -> {grown} tokens");
+        assert!(total(&r) <= room, "within the room by its own estimate: {} GiB", total(&r) >> 30);
+        assert!(r.fit_to_room(&key, &[(Device::Gpu(0), 40 << 30)]).is_none(), "a build on a fuller card never shrinks it");
+        assert!(r.replan(&key, &[(Device::Gpu(0), 40 << 30)]).is_some() && total(&r) <= 40 << 30, "a starved claim re-sizes it to what the card gives now");
+
+        let named = resident(Some(100_000));
+        assert!(named.fit_to_room(&key, &[(Device::Gpu(0), room)]).is_none() && named.kv_tokens() == Some(100_000), "a named pool is the operator's");
     }
 
     /// A live server (budget known) keeps `max_batch` half-context histories

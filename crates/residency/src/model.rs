@@ -158,6 +158,16 @@ pub trait ResidentModel: Send + Sync {
     fn replan(&self, _key: &InstanceKey, _usable: &[(Device, u64)]) -> Option<String> {
         None
     }
+
+    /// Grow, to `room` (each device this instance may be built on and the bytes free there now beside everything
+    /// that stays resident, a running workload's reservation included), what this model sized for itself because the
+    /// operator named nothing: a KV pool sized when the server started on a busier card. Called before each cold
+    /// build is placed, so a model built on a card with room uses it, and nothing resident is evicted for the growth.
+    /// Returns what changed (logged; the estimate is read again after it); `None` when nothing grew. Runs on the
+    /// dispatcher thread: it may read the checkpoint's headers but must not touch a device. Defaulted to `None`.
+    fn fit_to_room(&self, _key: &InstanceKey, _room: &[(Device, u64)]) -> Option<String> {
+        None
+    }
 }
 
 /// The [`ResidentModel`] methods of a wrapper that restates only its inner
@@ -211,6 +221,9 @@ macro_rules! forward_resident_model {
         }
         fn replan(&self, key: &InstanceKey, usable: &[(Device, u64)]) -> Option<String> {
             self.inner.replan(key, usable)
+        }
+        fn fit_to_room(&self, key: &InstanceKey, room: &[(Device, u64)]) -> Option<String> {
+            self.inner.fit_to_room(key, room)
         }
     };
 }

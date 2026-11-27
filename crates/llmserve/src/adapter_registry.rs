@@ -536,6 +536,10 @@ impl<R: AdapterHost> ResidentModel for AdapterView<R> {
     fn replan(&self, key: &InstanceKey, usable: &[(Device, u64)]) -> Option<String> {
         self.base.replan(key, usable)
     }
+    /// The base's plan, which the view shares.
+    fn fit_to_room(&self, key: &InstanceKey, room: &[(Device, u64)]) -> Option<String> {
+        self.base.fit_to_room(key, room)
+    }
 }
 
 impl<R: AdapterHost + MultiDeviceResidentModel> MultiDeviceResidentModel for AdapterView<R> {

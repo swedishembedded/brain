@@ -1163,6 +1163,12 @@ impl ResidencyManager {
                 "{key}: a deferred build for this key is already in flight - retry when it adopts or fails"
             )));
         }
+        // A defaulted plan sized when the card was busier grows into the room the card has now, beside everything that
+        // stays resident (knowledge #616).
+        let room: Vec<(Device, u64)> = self.budgets.gpus().into_iter().chain(self.budgets.npus()).filter(|d| !exclude.contains(d)).map(|d| (d, self.budgets.free_on(d))).collect();
+        if let Some(change) = m.fit_to_room(&key, &room) {
+            self.event(format!("fit {key} to the room the card has: {change}"));
+        }
         let cost = self.hot_cost(&*m, &key);
         self.refuse_host_short(&key, &cost, None, 0)?;
         let device = match pick_device(&cost, &self.budgets, exclude) {
@@ -1937,6 +1943,52 @@ mod tests {
         fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
             Ok(Outcome::new().blob("out", Blob::new(Media::Bytes, vec![1])))
         }
+    }
+
+    /// Knowledge #616: a model whose defaulted pool was sized when the server started on a busier card grows it into
+    /// the room the card has when it is built, beside what stays resident there, and evicts nothing for the growth.
+    #[test]
+    fn a_cold_build_grows_a_defaulted_pool_into_the_room_beside_what_stays_resident() {
+        struct Pooled {
+            pool: std::sync::Mutex<u64>,
+            live: Arc<AtomicU32>,
+        }
+        impl ResidentModel for Pooled {
+            fn manifest(&self) -> Manifest {
+                Manifest::new("pooled", "pooled", vec![ActionSpec::new("run", "run")])
+            }
+            fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+                InstanceKey::new("pooled", "default")
+            }
+            fn estimate(&self, _k: &InstanceKey) -> MemCost {
+                MemCost::new(10 * GB + *self.pool.lock().unwrap(), 0)
+            }
+            fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn crate::Instance>, String> {
+                self.live.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(FakeInst { live: self.live.clone() }))
+            }
+            fn fit_to_room(&self, _k: &InstanceKey, room: &[(Device, u64)]) -> Option<String> {
+                let room = room.iter().map(|&(_, b)| b).max()?.checked_sub(10 * GB)?;
+                let mut pool = self.pool.lock().unwrap();
+                (room > *pool).then(|| {
+                    *pool = room;
+                    format!("pool -> {room}")
+                })
+            }
+        }
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 94 * GB, 2 * GB);
+        let mut mgr = ResidencyManager::new(budgets);
+        // Sized at startup while something else held most of the card: a 10 GB pool.
+        let pooled = Arc::new(Pooled { pool: std::sync::Mutex::new(10 * GB), live: live.clone() });
+        mgr.register(pooled.clone());
+        mgr.register(Arc::new(Fake { name: "other".into(), vram: 30 * GB, live: live.clone() }));
+        mgr.run("other", "run", &Invocation::new(), &mut |_| {}).unwrap();
+        mgr.run("pooled", "run", &Invocation::new(), &mut |_| {}).unwrap();
+        assert_eq!(*pooled.pool.lock().unwrap(), 52 * GB, "the pool takes the 62 GB the card has beside the other model, less its fixed 10");
+        assert_eq!(live.load(Ordering::SeqCst), 2, "the other model stays resident: nothing was evicted for the growth");
+        assert_eq!(mgr.budgets.get(Device::Gpu(0)).unwrap().used, 92 * GB);
     }
 
     /// A workload (a job that holds the device only while it runs, such as a fine-tune) is not a
