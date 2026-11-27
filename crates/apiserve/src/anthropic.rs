@@ -374,7 +374,7 @@ fn flatten_messages(messages: &[Value]) -> Result<Vec<Value>, ApiError> {
             _ => Vec::new(),
         };
         match role {
-            "assistant" => out.push(assistant_message(i, &blocks)?),
+            "assistant" => out.push(assistant_message(i, m, &blocks)?),
             "system" => out.push(json!({ "role": "system", "content": message_content(&blocks) })),
             _ => {
                 let mut pending: Vec<Value> = Vec::new();
@@ -401,10 +401,15 @@ fn flatten_messages(messages: &[Value]) -> Result<Vec<Value>, ApiError> {
 }
 
 /// An assistant turn: its text, reasoning and tool calls (`input` as the JSON
-/// text the contract's `arguments` carries).
-fn assistant_message(i: usize, blocks: &[Value]) -> Result<Value, ApiError> {
+/// text the contract's `arguments` carries), and the answer's `sampled` blob as
+/// the reply gave it, so the model replays the answer as those ids
+/// (`data::replay`).
+fn assistant_message(i: usize, message: &Value, blocks: &[Value]) -> Result<Value, ApiError> {
     let of_type = |kind: &'static str| blocks.iter().filter(move |b| b.get("type").and_then(Value::as_str) == Some(kind));
     let mut out = json!({ "role": "assistant", "content": message_content(blocks) });
+    if let Some(sampled) = message.get("sampled").filter(|v| v.is_object()) {
+        out["sampled"] = sampled.clone();
+    }
     let reasoning: String = of_type("thinking").filter_map(|b| b.get("thinking").and_then(Value::as_str)).collect();
     if !reasoning.is_empty() {
         out["reasoning_content"] = json!(reasoning);
@@ -585,6 +590,10 @@ pub fn from_outcome(model: &str, co: &bridge::ChatOutcome) -> Result<Value, ApiE
         "stop_sequence": Value::Null,
         "usage": usage(co.prompt_tokens, co.completion_tokens, co.cached_tokens),
     });
+    // What was sampled for the answer: a client echoes it on the assistant message it sends back.
+    if let Some(sampled) = &co.sampled {
+        message["sampled"] = sampled.clone();
+    }
     attach_served(&mut message, co);
     Ok(message)
 }
@@ -653,6 +662,7 @@ fn render_messages_stream(mut src: bridge::EventStream, model: String, est_input
         let mut cached = None;
         // The `brain` object of the finished reply, carried on the closing `message_delta`.
         let mut served: Option<Value> = None;
+        let mut sampled: Option<Value> = None;
         // Whether any real token delta was streamed. A resident that only
         // reports coarse `Progress::step` ticks (no `delta`) - `brain/qwen3omnimoe` is
         // one - carries its whole answer in the terminal `Outcome`, and would
@@ -693,6 +703,7 @@ fn render_messages_stream(mut src: bridge::EventStream, model: String, est_input
                 StreamMsg::Done(outcome) => {
                     let co = bridge::read_chat_outcome(&outcome);
                     served = co.served();
+                    sampled = co.sampled.clone();
                     completion = co.completion_tokens;
                     prompt = co.prompt_tokens;
                     cached = co.cached_tokens;
@@ -740,6 +751,10 @@ fn render_messages_stream(mut src: bridge::EventStream, model: String, est_input
         });
         if let Some(served) = served.take() {
             delta["brain"] = served;
+        }
+        // The answer's `sampled` blob, the last part of the message the stream delivered.
+        if let Some(sampled) = sampled.take() {
+            delta["delta"]["sampled"] = sampled;
         }
         yield Ok(Event::default().event("message_delta").data(delta.to_string()));
         yield Ok(Event::default().event("message_stop").data(json!({ "type": "message_stop" }).to_string()));

@@ -84,16 +84,25 @@ impl ResidentModel for Tiny {
 }
 
 fn app(arch: Arch) -> Router {
+    served(arch, Provider::OpenAI)
+}
+
+fn served(arch: Arch, provider: Provider) -> Router {
     let mut budgets = Budgets::new();
     budgets.set(Device::Cpu, 8 << 30, 0);
     let models: Vec<Arc<dyn ResidentModel>> = vec![Arc::new(Tiny(arch))];
-    router(AppState::new(Executor::start(models, budgets, Policy::default()), "k", Provider::OpenAI))
+    router(AppState::new(Executor::start(models, budgets, Policy::default()), "k", provider))
 }
 
 async fn post(app: &Router, body: &Value) -> Value {
+    post_to(app, "/v1/chat/completions", body).await
+}
+
+async fn post_to(app: &Router, uri: &str, body: &Value) -> Value {
     let req = Request::builder()
         .method(Method::POST)
-        .uri("/v1/chat/completions")
+        .uri(uri)
+        .header("x-api-key", "k")
         .header(header::AUTHORIZATION, "Bearer k")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(body.to_string()))
@@ -104,7 +113,7 @@ async fn post(app: &Router, body: &Value) -> Value {
     let text = String::from_utf8_lossy(&bytes).to_string();
     assert_eq!(status, StatusCode::OK, "{text}");
     if body["stream"] == json!(true) {
-        // The stream's chunks, each a JSON object.
+        // The stream's chunks (an OpenAI stream's, an Anthropic stream's events), each a JSON object.
         let chunks: Vec<Value> = text.lines().filter_map(|l| l.strip_prefix("data: ")).filter(|d| *d != "[DONE]").map(|d| serde_json::from_str(d).unwrap()).collect();
         return json!(chunks);
     }
@@ -145,10 +154,12 @@ async fn an_echoed_answer_is_replayed_and_the_prefix_cache_serves_it() {
         assert!(prompt2.starts_with(&extended), "the second prompt is the first, its answer and the turns after it");
         let cached = second["usage"]["prompt_tokens_details"]["cached_tokens"].as_u64().unwrap() as usize;
         println!("prefix cache: {cached} of {} prompt ids served; first prompt {} ids, its answer {} ids", prompt2.len(), prompt1.len(), generated.len());
-        // The tiny Qwen3.8 engine has no prefix cache (the served 27B's ring engine does); the Qwen3 engine serves the
-        // first prompt's full blocks. It indexes prompt blocks only, so the answer's ids are prefilled again.
+        // The tiny Qwen3.8 engine has no prefix cache; the Qwen3 engine keeps a finished sequence's blocks through its
+        // answer, so the second call reuses every full block of the first prompt and its answer. The answer's last id
+        // was sampled and never fed back, so it has no KV row.
         if matches!(arch, Arch::Qwen3) {
-            assert_eq!(cached, prompt1.len() / 8 * 8, "the second call reuses the first prompt's full blocks");
+            assert_eq!(first["choices"][0]["finish_reason"], json!("length"), "{first}");
+            assert_eq!(cached, (prompt1.len() + generated.len() - 1) / 8 * 8, "the second call reuses the first prompt's and its answer's full blocks");
         }
     }
 }
@@ -175,4 +186,33 @@ async fn a_stream_carries_the_sampled_blob_in_its_terminal_chunk() {
     let last = chunks.as_array().unwrap().iter().rev().find(|c| c["choices"][0]["finish_reason"].is_string()).expect("a terminal chunk").clone();
     assert!(last["choices"][0]["delta"]["sampled"]["token_ids"].is_string(), "{last}");
     assert_eq!(last["brain"]["history"]["append_only"], json!(true), "{last}");
+}
+
+/// SPEC (HTTP contract, Anthropic dialect): `/v1/messages` carries the answer's `sampled` blob on the reply and on a
+/// stream's closing `message_delta`, takes it back on the assistant message a client sends, and reports
+/// `brain.history`, as the OpenAI route does; the echoed answer is served from the prefix cache.
+#[tokio::test]
+async fn the_anthropic_route_carries_and_replays_the_sampled_answer() {
+    let app = served(Arch::Qwen3, Provider::Anthropic);
+    let ask = |messages: &[Value], stream: bool| json!({"model": "tiny", "max_tokens": 6, "temperature": 0, "system": "You are an agent.", "messages": messages, "stream": stream});
+    let mut messages = vec![json!({"role": "user", "content": "List the files."})];
+    let first = post_to(&app, "/v1/messages", &ask(&messages, false)).await;
+    assert!(first["sampled"]["token_ids"].is_string(), "a reply carries what was sampled: {first}");
+    assert_eq!(first["brain"]["history"]["append_only"], json!(true), "{first}");
+    messages.push(json!({"role": "assistant", "content": first["content"], "sampled": first["sampled"]}));
+    messages.push(json!({"role": "user", "content": "Count them."}));
+    let second = post_to(&app, "/v1/messages", &ask(&messages, false)).await;
+    assert_eq!(second["brain"]["history"], json!({"append_only": true, "diverged_turn": null, "reason": null}), "{second}");
+    let cached = second["usage"]["cache_read_input_tokens"].as_u64().unwrap();
+    let generated = ids(&first["sampled"]["token_ids"]).len() as u64;
+    let prompt1 = first["usage"]["input_tokens"].as_u64().unwrap();
+    assert_eq!(cached, (prompt1 + generated - 1) / 8 * 8, "the echoed answer is served from the prefix cache: {second}");
+    let mut dropped = messages.clone();
+    dropped[1].as_object_mut().unwrap().remove("sampled");
+    let rendered = post_to(&app, "/v1/messages", &ask(&dropped, false)).await;
+    assert_eq!(rendered["brain"]["history"]["reason"], json!("missing"), "{rendered}");
+    let events = post_to(&app, "/v1/messages", &ask(&messages, true)).await;
+    let closing = events.as_array().unwrap().iter().find(|e| e["type"] == "message_delta").expect("a closing message_delta").clone();
+    assert!(closing["delta"]["sampled"]["token_ids"].is_string(), "{closing}");
+    assert_eq!(closing["brain"]["history"]["append_only"], json!(true), "{closing}");
 }

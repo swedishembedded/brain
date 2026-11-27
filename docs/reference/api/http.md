@@ -214,7 +214,9 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   numbers.
 - **Answers are replayed as they were sampled.** A chat reply's assistant
   message (`choices[0].message.sampled`, or `choices[0].delta.sampled` in a
-  stream's terminal chunk) carries what the model sampled: `token_ids` (the
+  stream's terminal chunk; on `/v1/messages` the reply's `sampled`, or
+  `delta.sampled` on a stream's closing `message_delta`) carries what the model
+  sampled: `token_ids` (the
   generated ids, the end-of-turn token included when one ended the answer),
   `prefill_token_ids` (the generation prompt it continued), `finish`,
   `tokenizer_digest`, `context_len` and `context_hash` (`sha256:` of the
@@ -222,7 +224,9 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   LEB128 varint, the run base64-encoded. Send the object back unchanged on that
   assistant message: the next prompt then holds the answer as those ids, and
   the template renders only the other turns, so every request of a session
-  extends the previous one and its answer. An assistant message without it, or
+  extends the previous one and its answer. A finished answer's rows stay in the
+  prefix cache, so the next request is served from it through the answer (its
+  last id excepted: no step read it). An assistant message without it, or
   with one that does not match (another tokenizer, an edited conversation), is
   rendered by the chat template. Every chat reply reports
   `brain.history: {append_only, diverged_turn, reason}`: whether every earlier
