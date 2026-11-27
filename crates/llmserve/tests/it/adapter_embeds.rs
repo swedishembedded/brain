@@ -45,6 +45,8 @@ impl Vision {
             flavor: TemplateFlavor::default(),
             thinking_open: false,
             raw: true,
+            prefill_len: 0,
+            history: None,
         };
         Ok((req, Some(PromptEmbeds::run(EMBED_WIDTH, 2, vec![0.5; 2 * EMBED_WIDTH]).expect("rows"))))
     }

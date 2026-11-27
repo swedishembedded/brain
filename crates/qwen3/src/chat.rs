@@ -336,7 +336,11 @@ pub struct ParsedRequest {
     pub thinking_open: bool,
     /// A raw completion (no chat template): the output is plain text, with
     /// no reasoning or tool-call markup read out of it.
-    pub raw: bool,
+    pub raw: bool,    /// How many ids at the end of `ids` are the generation prompt (the assistant turn's opening and any prefill),
+    /// which a reply's `sampled` reports as `prefill_token_ids`. 0 for a raw prompt.
+    pub prefill_len: usize,
+    /// Whether the prompt replays every earlier answer as it was sampled; `None` for a raw prompt.
+    pub history: Option<data::replay::History>,
 }
 
 impl ParsedRequest {
@@ -415,7 +419,7 @@ fn sampler_params(tok: &QwenBpe, inv: &Invocation, temp: f32, top_k: usize, top_
 }
 
 /// The chat-template settings [`render_prompt`] reads beside `enable_thinking`, as the params a `generate` action
-/// whose requests it renders declares: `preserve_thinking` and `template_flavor`, and `reasoning_effort` where the
+/// whose requests it renders declares: `template_flavor`, and `reasoning_effort` where the
 /// model's own template reads it (Qwen3.8's; the Qwen3-era template does not, so a Qwen3 model refuses it by name at
 /// admission instead of serving a prompt its template never writes). `reasoning_effort` has no default of brain's
 /// own: left out, the template's own default applies. The flavor defaults to `flavor` (the model's own: a Qwen3.8
@@ -432,16 +436,15 @@ pub fn template_params(flavor: qwen_chat::TemplateFlavor) -> Vec<capability::Par
         qwen_chat::TemplateFlavor::Qwen38 => "qwen3.8",
         _ => "qwen3",
     };
-    let mut params = Vec::with_capacity(3);
+    let mut params = Vec::with_capacity(2);
     if reads_effort {
         params.push(ParamSpec::new("reasoning_effort", ParamType::Str, "reasoning effort level the chat template writes as an instruction: xhigh (the template's default, detailed deliberation), medium (no instruction), or low (brief thinking)"));
     }
-    params.push(ParamSpec::new("preserve_thinking", ParamType::Bool, "Qwen3.8 chat-template kwarg: keep <think> blocks from prior assistant turns in the rendered history (inert under the Qwen3-era template, whose history framing is positional)").default(json!(true)));
     params.push(
         ParamSpec::new(
             "template_flavor",
             ParamType::Str,
-            "chat template flavor: qwen3.8 (XML <function=> tool-call payloads, prefilled open <think>, preserve_thinking kwarg) or qwen3 (JSON <tool_call> payloads, positional think framing)",
+            "chat template flavor: qwen3.8 (XML <function=> tool-call payloads, prefilled open <think>, reasoning kept on every turn) or qwen3 (JSON <tool_call> payloads, positional think framing)",
         )
         .default(json!(flavor)),
     );
@@ -474,61 +477,132 @@ pub struct RenderedPrompt {
 /// prompt a request becomes - or to parse a reply to it with
 /// [`parse_reply`] - gets it from here without loading a model.
 pub fn render_prompt(inv: &Invocation) -> Result<RenderedPrompt, String> {
-    let enable_thinking = inv.get_bool("enable_thinking").unwrap_or(true);
-    // `reasoning_effort` goes to the template as the request set it: the Qwen3.8 template reads it (its own default
-    // when absent), and the Qwen3-era renderer refuses a value it would have no place to write.
-    let reasoning_effort = inv.get_str("reasoning_effort");
-    // Qwen3.8's `preserve_thinking` chat-template kwarg: only takes effect on
-    // a Qwen38-flavor render (see data::qwen_chat); under this module's
-    // Qwen3-era flavor the upstream template has no such kwarg and the value
-    // is inert, but it is forwarded so a flavor switch needs no parser change.
-    let preserve_thinking = inv.get_bool("preserve_thinking");
-    // `template_flavor` selects which upstream template the prompt is
-    // rendered with (and, with it, the tool-call wire form): the Qwen3-era
-    // JSON form (default) or the Qwen3.8 XML form. The 3.8 template also
-    // prefills an open `<think>` when thinking is enabled.
-    let flavor = match inv.get_str("template_flavor").as_deref() {
-        None | Some("qwen3") => qwen_chat::TemplateFlavor::Qwen3,
-        Some("qwen3.8") | Some("qwen38") => qwen_chat::TemplateFlavor::Qwen38,
-        Some(other) => {
-            return Err(format!("qwen: unsupported template_flavor '{other}' (expected \"qwen3\" or \"qwen3.8\")"))
-        }
-    };
-    let (tool_choice, tools) = resolve_tools(inv)?;
-    // The prefill follows the render: only a template-rendered prompt with
-    // the Qwen3.8 flavor and thinking enabled ends in an open `<think>\n`
-    // (a raw `chat=false` prompt has no template and no prefill).
-    let mut thinking_open = flavor == qwen_chat::TemplateFlavor::Qwen38 && enable_thinking;
-    let mut raw = false;
-    let text = match inv.get_str("messages").filter(|s| !s.is_empty()) {
-        Some(raw) => {
-            let msgs = parse_chat_messages(&raw, inv.get_str("system").as_deref())?;
-            qwen_chat::render_for_generation(&msgs, &tools, qwen_chat::TemplateOpts {
-                enable_thinking,
-                reasoning_effort: reasoning_effort.clone(),
-                preserve_thinking,
-                flavor,
-                ..Default::default()
-            })?
-        }
-        None => {
-            let prompt = inv.get_str("prompt").unwrap_or_default();
-            if inv.get_bool("chat").unwrap_or(true) {
-                let msgs = [ChatMessage::user(prompt)];
-                qwen_chat::render_for_generation(&msgs, &tools, qwen_chat::TemplateOpts {
-                    enable_thinking,
-                    reasoning_effort: reasoning_effort.clone(),
-                    flavor,
-                    ..Default::default()
-                })?
-            } else {
-                thinking_open = false; // no template, no prefilled `<think>`
-                raw = true;
-                prompt
+    render_prompt_as(&ChatFormat::Qwen, inv)
+}
+
+/// How one request's conversation becomes template text: the renderer and its settings, the turns (the system prompt
+/// first), and whether the request reasons. [`Self::render`] renders any run of turns the same way, which
+/// [`data::replay`] needs for the turns around each replayed answer.
+pub struct ChatRender<'a> {
+    renderer: Renderer<'a>,
+    pub turns: Vec<serde_json::Value>,
+    pub thinking: bool,
+    pub tool_choice: ToolChoice,
+    pub flavor: qwen_chat::TemplateFlavor,
+}
+
+enum Renderer<'a> {
+    /// `data::qwen_chat`'s port of Qwen's templates.
+    Qwen { tools: Vec<String>, reasoning_effort: Option<String> },
+    /// The checkpoint's own Jinja template, with the request's schemas as written and its extra variables.
+    Template { template: &'a data::chat_template::ChatTemplate, tools: Option<data::chat_template::Value>, extra: std::collections::BTreeMap<String, data::chat_template::Value> },
+}
+
+impl ChatRender<'_> {
+    /// `turns` (OpenAI-shaped) as template text, reasoning on or off, with or without the generation prompt.
+    pub fn render(&self, turns: &[serde_json::Value], thinking: bool, generation: bool) -> Result<String, String> {
+        match &self.renderer {
+            Renderer::Qwen { tools, reasoning_effort } => {
+                let raw = serde_json::to_string(turns).map_err(|e| format!("qwen: messages JSON: {e}"))?;
+                let msgs = parse_chat_messages(&raw, None)?;
+                qwen_chat::render(&msgs, tools, qwen_chat::TemplateOpts { add_generation_prompt: generation, enable_thinking: thinking, reasoning_effort: reasoning_effort.clone(), flavor: self.flavor })
+            }
+            Renderer::Template { template, tools, extra } => {
+                let turns = template.conversation(turns).map_err(|e| e.to_string())?;
+                let mut extra = extra.clone();
+                // However this model's template reaches no-think mode (see `ChatTemplate::render_no_think`), the
+                // caller only says so.
+                let text = match (thinking, generation) {
+                    (false, true) => template.render_no_think(turns, tools.clone(), &extra),
+                    (false, false) => {
+                        extra.extend(data::chat_template::no_think_switches());
+                        template.render(turns, tools.clone(), false, &extra)
+                    }
+                    (true, _) => {
+                        extra.entry("enable_thinking".to_string()).or_insert_with(|| data::chat_template::Value::from(true));
+                        template.render(turns, tools.clone(), generation, &extra)
+                    }
+                };
+                text.map_err(|e| e.to_string())
             }
         }
+    }
+}
+
+/// A request's prompt before rendering: chat turns, or a raw prompt (`chat: false`) with no template.
+pub enum PromptSource<'a> {
+    Chat(ChatRender<'a>),
+    Raw { text: String, tool_choice: ToolChoice, flavor: qwen_chat::TemplateFlavor },
+}
+
+/// What `inv` asks to have rendered in `format`: its turns and the renderer, or its raw prompt. Tools are refused
+/// when the template has no place for them; a format with no template accepts only a raw prompt.
+pub fn prompt_source<'a>(format: &'a ChatFormat, inv: &Invocation) -> Result<PromptSource<'a>, String> {
+    let thinking = inv.get_bool("enable_thinking").unwrap_or(true);
+    let (tool_choice, tools) = resolve_tools(inv)?;
+    let messages = inv.get_str("messages").filter(|s| !s.is_empty());
+    let chat = messages.is_some() || inv.get_bool("chat").unwrap_or(true);
+    let template = match format {
+        ChatFormat::Template(t) => Some(t.as_ref()),
+        _ => None,
     };
-    Ok(RenderedPrompt { text, tool_choice, flavor, thinking_open, raw })
+    // The scanner reads tool calls in the wire form the template teaches the model: Qwen3.8's `<function=...>` XML
+    // when the template writes it, otherwise the JSON `<tool_call>` payload, and drops the framing newlines a template
+    // that writes its reply parts on separate lines puts there. Qwen's port takes the flavor the request names.
+    let flavor = match format {
+        ChatFormat::Qwen => match inv.get_str("template_flavor").as_deref() {
+            None | Some("qwen3") => qwen_chat::TemplateFlavor::Qwen3,
+            Some("qwen3.8") | Some("qwen38") => qwen_chat::TemplateFlavor::Qwen38,
+            Some(other) => return Err(format!("qwen: unsupported template_flavor '{other}' (expected \"qwen3\" or \"qwen3.8\")")),
+        },
+        _ => template.and_then(data::chat_template::ChatTemplate::reply_flavor).unwrap_or(qwen_chat::TemplateFlavor::Qwen3),
+    };
+    if !chat {
+        return Ok(PromptSource::Raw { text: inv.get_str("prompt").unwrap_or_default(), tool_choice, flavor });
+    }
+    let system = inv.get_str("system").filter(|s| !s.is_empty());
+    let mut turns: Vec<serde_json::Value> = Vec::new();
+    let renderer = match format {
+        ChatFormat::None => return Err("this checkpoint ships no chat template: send a raw prompt (`chat: false`) instead of chat messages".to_string()),
+        ChatFormat::Qwen => {
+            // `reasoning_effort` goes to the template as the request set it: the Qwen3.8 template reads it (its own
+            // default when absent), and the Qwen3-era renderer refuses a value it would have no place to write. The
+            // single-prompt form is one user turn with no system prompt.
+            if messages.is_some() {
+                turns.extend(system.map(|s| json!({"role": "system", "content": s})));
+            }
+            Renderer::Qwen { tools, reasoning_effort: inv.get_str("reasoning_effort") }
+        }
+        ChatFormat::Template(t) => {
+            if !tools.is_empty() && !t.source().contains("tools") {
+                return Err("this checkpoint's chat template has no place for tools".to_string());
+            }
+            turns.extend(system.map(|s| json!({"role": "system", "content": s})));
+            // The schemas as the request wrote them, key order and all: `tojson` in a template prints them in that
+            // order, which `parse_tools`' re-serialization (sorted keys) would change. A `tool_choice` of `none`
+            // emptied `tools`.
+            let schemas = match (tools.is_empty(), inv.get_str("tools")) {
+                (false, Some(raw)) => Some(data::chat_template::parse_json_ordered(&raw).map_err(|e| format!("tools JSON: {e}"))?),
+                _ => None,
+            };
+            let mut extra = template_kwargs(inv)?;
+            if let Some(effort) = inv.get_str("reasoning_effort").filter(|e| !e.is_empty()) {
+                if !t.source().contains(data::chat_template::ReasoningEffort::KWARG) {
+                    return Err("this checkpoint's chat template does not read reasoning_effort".to_string());
+                }
+                data::chat_template::ReasoningEffort::parse(&effort).map_err(|e| e.to_string())?.apply(&mut extra);
+            }
+            Renderer::Template { template: t, tools: schemas, extra }
+        }
+    };
+    match messages {
+        Some(raw) => {
+            let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| format!("messages JSON: {e}"))?;
+            turns.extend(v.as_array().ok_or("messages must be a JSON array")?.iter().cloned());
+        }
+        None => turns.push(json!({"role": "user", "content": inv.get_str("prompt").unwrap_or_default()})),
+    }
+    Ok(PromptSource::Chat(ChatRender { renderer, turns, thinking, tool_choice, flavor }))
 }
 
 /// The request's `tool_choice` and the tool schemas the prompt shows.
@@ -602,68 +676,18 @@ impl ChatFormat {
     }
 }
 
-/// [`render_prompt`] in `format`. A template renders the request's messages
-/// (or its single `prompt` as one user turn) with the template's own markup;
-/// the prompt opens a reasoning block when the render ends in `<think>` (R1
-/// prefills it), and tools are refused when the template has no place for
-/// them. A format with no template accepts only a raw prompt.
+/// [`render_prompt`] in `format`: the request's turns as the template writes them, every earlier answer rendered by
+/// the template (a served request replays sampled answers as their ids instead, [`parse_request_as`]). The prompt
+/// opens a reasoning block when the render ends in `<think>` (R1 and Qwen3.8 with reasoning prefill it).
 pub fn render_prompt_as(format: &ChatFormat, inv: &Invocation) -> Result<RenderedPrompt, String> {
-    let template = match format {
-        ChatFormat::Qwen => return render_prompt(inv),
-        ChatFormat::Template(t) => Some(t.as_ref()),
-        ChatFormat::None => None,
-    };
-    let (tool_choice, tools) = resolve_tools(inv)?;
-    let messages = inv.get_str("messages").filter(|s| !s.is_empty());
-    let chat = messages.is_some() || inv.get_bool("chat").unwrap_or(true);
-    // The scanner reads tool calls in the wire form the template teaches the
-    // model: Qwen3.8's `<function=...>` XML when the template writes it,
-    // otherwise the JSON `<tool_call>` payload, and drops the framing newlines
-    // a template that writes its reply parts on separate lines puts there.
-    let flavor = template.and_then(data::chat_template::ChatTemplate::reply_flavor).unwrap_or(qwen_chat::TemplateFlavor::Qwen3);
-    if !chat {
-        return Ok(RenderedPrompt { text: inv.get_str("prompt").unwrap_or_default(), tool_choice, flavor, thinking_open: false, raw: true });
-    }
-    let t = template.ok_or("this checkpoint ships no chat template: send a raw prompt (`chat: false`) instead of chat messages")?;
-    if !tools.is_empty() && !t.source().contains("tools") {
-        return Err("this checkpoint's chat template has no place for tools".to_string());
-    }
-    let mut turns: Vec<serde_json::Value> = Vec::new();
-    if let Some(system) = inv.get_str("system").filter(|s| !s.is_empty()) {
-        turns.push(json!({"role": "system", "content": system}));
-    }
-    match messages {
-        Some(raw) => {
-            let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| format!("messages JSON: {e}"))?;
-            turns.extend(v.as_array().ok_or("messages must be a JSON array")?.iter().cloned());
+    match prompt_source(format, inv)? {
+        PromptSource::Raw { text, tool_choice, flavor } => Ok(RenderedPrompt { text, tool_choice, flavor, thinking_open: false, raw: true }),
+        PromptSource::Chat(chat) => {
+            let text = chat.render(&chat.turns, chat.thinking, true)?;
+            let thinking_open = text.trim_end_matches('\n').ends_with("<think>");
+            Ok(RenderedPrompt { text, tool_choice: chat.tool_choice, flavor: chat.flavor, thinking_open, raw: false })
         }
-        None => turns.push(json!({"role": "user", "content": inv.get_str("prompt").unwrap_or_default()})),
     }
-    let turns = t.conversation(&turns).map_err(|e| e.to_string())?;
-    // The schemas as the request wrote them, key order and all: `tojson` in a template prints them in that order,
-    // which `parse_tools`' re-serialization (sorted keys) would change. A `tool_choice` of `none` emptied `tools`.
-    let tools = match (tools.is_empty(), inv.get_str("tools")) {
-        (false, Some(raw)) => Some(data::chat_template::parse_json_ordered(&raw).map_err(|e| format!("tools JSON: {e}"))?),
-        _ => None,
-    };
-    let mut extra = template_kwargs(inv)?;
-    if let Some(effort) = inv.get_str("reasoning_effort").filter(|e| !e.is_empty()) {
-        if !t.source().contains(data::chat_template::ReasoningEffort::KWARG) {
-            return Err("this checkpoint's chat template does not read reasoning_effort".to_string());
-        }
-        data::chat_template::ReasoningEffort::parse(&effort).map_err(|e| e.to_string())?.apply(&mut extra);
-    }
-    let text = if inv.get_bool("enable_thinking") == Some(false) {
-        // However this model's template reaches no-think mode (see
-        // `ChatTemplate::render_no_think`), the caller only says so.
-        t.render_no_think(turns, tools, &extra)
-    } else {
-        extra.entry("enable_thinking".to_string()).or_insert_with(|| data::chat_template::Value::from(true));
-        t.render(turns, tools, true, &extra)
-    }
-    .map_err(|e| e.to_string())?;
-    let thinking_open = text.trim_end_matches('\n').ends_with("<think>");
-    Ok(RenderedPrompt { text, tool_choice, flavor, thinking_open, raw: false })
 }
 
 /// The extra variables a request hands its chat template (`chat_template_kwargs` of the OpenAI extension): a JSON
@@ -696,21 +720,69 @@ pub fn parse_request_as(tok: &QwenBpe, format: &ChatFormat, inv: &Invocation) ->
 pub fn parse_escaped_request_as(tok: &QwenBpe, format: &ChatFormat, inv: &Invocation) -> Result<ParsedRequest, String> {
     let (max_new, temp, top_k, seed) = sampling_params(inv)?;
     let top_p = inv.get_f64("top_p").unwrap_or(1.0) as f32;
-    let RenderedPrompt { mut text, tool_choice, flavor, thinking_open, raw } = render_prompt_as(format, inv)?;
-    if let Some(suffix) = inv.get_str("suffix") {
-        if !raw {
-            return Err("'suffix' fills in the middle of a raw prompt (`chat: false`), not of chat messages".to_string());
+    let (ids, prefill_len, history, tool_choice, flavor, thinking_open, raw) = match prompt_source(format, inv)? {
+        PromptSource::Raw { mut text, tool_choice, flavor } => {
+            if let Some(suffix) = inv.get_str("suffix") {
+                let fim = data::fim::FimFormat::of(|t| tok.special_id(t).is_some()).ok_or(NO_FIM_TOKENS)?;
+                text = fim.prompt(&text, &suffix);
+            }
+            (tok.encode(&text), 0, None, tool_choice, flavor, false, true)
         }
-        let fim = data::fim::FimFormat::of(|t| tok.special_id(t).is_some()).ok_or(NO_FIM_TOKENS)?;
-        text = fim.prompt(&text, &suffix);
-    }
-    let ids = tok.encode(&text);
+        PromptSource::Chat(chat) => {
+            if inv.get_str("suffix").is_some() {
+                return Err("'suffix' fills in the middle of a raw prompt (`chat: false`), not of chat messages".to_string());
+            }
+            let replayed = replay_prompt(tok, format, &chat)?;
+            let thinking_open = tok.decode(&replayed.ids[replayed.ids.len() - replayed.prefill_len..]).trim_end_matches('\n').ends_with("<think>");
+            (replayed.ids, replayed.prefill_len, Some(replayed.history), chat.tool_choice, chat.flavor, thinking_open, false)
+        }
+    };
     if ids.is_empty() {
         return Err("qwen: empty prompt".to_string());
     }
     let stops = parse_stops(inv.get_str("stop").as_deref())?;
     let sampler = sampler_params(tok, inv, temp, top_k, top_p, thinking_open && !raw, !raw)?;
-    Ok(ParsedRequest { ids, max_new, temp, top_p, top_k, sampler, seed, stops, tool_choice, flavor, thinking_open, raw })
+    Ok(ParsedRequest { ids, prefill_len, history, max_new, temp, top_p, top_k, sampler, seed, stops, tool_choice, flavor, thinking_open, raw })
+}
+
+/// The ids of `chat`'s prompt: every earlier answer that carries the `sampled` ids a reply gave it replayed as those
+/// ids, the rest rendered by the template in segments ([`data::replay`]).
+fn replay_prompt(tok: &QwenBpe, format: &ChatFormat, chat: &ChatRender) -> Result<data::replay::Replayed, String> {
+    let special = |text: &str| tok.special_id(text).map(|id| (text.to_string(), vec![id]));
+    // The markers a generation ends with: the format's own, else the first token the template writes after an answer
+    // (the checkpoint's end of turn, `<|im_end|>`).
+    let mut end_of_turn: Vec<(String, Vec<u32>)> = format.end_of_turn().into_iter().filter_map(special).collect();
+    let probe = [json!({"role": "user", "content": "probe-question"}), json!({"role": "assistant", "content": "probe-answer"})];
+    if end_of_turn.is_empty() {
+        let text = chat.render(&probe, chat.thinking, false)?;
+        let after = text.rfind("probe-answer").map(|at| &text[at + "probe-answer".len()..]).unwrap_or_default();
+        if let Some(&first) = tok.encode(after).first() {
+            let piece = tok.decode(&[first]);
+            if tok.special_id(&piece) == Some(first) {
+                end_of_turn.push((piece, vec![first]));
+            }
+        }
+    }
+    // The markers that open or close a turn, which an answer may not hold: the ends, and the token the generation
+    // prompt opens the assistant turn with.
+    let mut turn_markers: std::collections::HashSet<u32> = end_of_turn.iter().flat_map(|(_, ids)| ids.iter().copied()).collect();
+    if let Ok(opened) = chat.render(&probe[..1], true, true) {
+        let closed = chat.render(&probe[..1], true, false).unwrap_or_default();
+        if let Some(&first) = opened.strip_prefix(closed.as_str()).map(|g| tok.encode(g)).as_deref().and_then(<[u32]>::first) {
+            if tok.special_id(&tok.decode(&[first])) == Some(first) {
+                turn_markers.insert(first);
+            }
+        }
+    }
+    let path = data::replay::PromptPath {
+        render: &|turns, thinking, generation| chat.render(turns, thinking, generation),
+        encode: &|text| tok.encode(text),
+        end_of_turn: &end_of_turn,
+        turn_markers: &turn_markers,
+        vocab: tok.vocab_size(),
+        tokenizer_digest: tok.digest(),
+    };
+    data::replay::replay(&chat.turns, &path, chat.thinking)
 }
 
 /// Why a `suffix` cannot be honoured: the vocabulary has no
@@ -1355,37 +1427,6 @@ mod tests {
         assert!(seq.advance(&tok, &tok.encode("prose"), &mut |_| {}));
         let out = seq.finish(&tok, &tok.encode("prose"), &mut |_| {}).unwrap();
         assert_eq!(out.outputs.get("finish_reason").and_then(|v| v.as_str()), Some("cancelled"));
-    }
-
-    /// `preserve_thinking` threads through to the renderer, but it is the
-    /// QWEN3.8 template's kwarg: under the Qwen3-era flavor this module
-    /// renders, the upstream template has no such kwarg and history framing
-    /// stays positional (a reasoned turn after the last user query keeps its
-    /// think block, earlier turns lose it) regardless of the kwarg. If this
-    /// test ever fails, parse_request started rendering a different flavor -
-    /// which also flips the tool-call wire format (JSON vs the 3.8 XML form)
-    /// and needs the scanner to follow.
-    #[test]
-    fn preserve_thinking_is_inert_under_the_qwen3_flavor() {
-        let Some(tok) = real_tok() else { return };
-        let msgs = r#"[
-            {"role": "user", "content": "q1"},
-            {"role": "assistant", "content": "a1", "reasoning_content": "thinking one"},
-            {"role": "user", "content": "q2"}
-        ]"#;
-        let render = |pt: Option<bool>| {
-            let mut inv = Invocation::new().set("messages", json!(msgs));
-            if let Some(pt) = pt {
-                inv = inv.set("preserve_thinking", json!(pt));
-            }
-            tok.decode(&parse_request(&tok, &inv).unwrap().ids)
-        };
-        for pt in [None, Some(true), Some(false)] {
-            let text = render(pt);
-            // Earlier turn's reasoning dropped, its content kept.
-            assert!(!text.contains("thinking one"), "pt={pt:?}:\n{text}");
-            assert!(text.contains("a1"), "pt={pt:?}:\n{text}");
-        }
     }
 
     /// `template_flavor` selects which upstream template generation

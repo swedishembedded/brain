@@ -860,8 +860,6 @@ fn is_leading_system(messages: &[Value], i: usize) -> bool {
     messages[..=i].iter().all(|m| matches!(m.get_attr("role").ok().as_ref().and_then(Value::as_str), Some("system" | "developer")))
 }
 
-/// The context variables that turn reasoning off in the templates that have a
-/// switch: `enable_thinking` (Qwen3, Qwen3.8) and `thinking` (DeepSeek-V3.1).
 /// `node` as a template value, with the `arguments` of every tool call under it parsed as JSON where they are
 /// JSON text. `in_call` marks `node` as a tool call (or its `function`), whose `arguments` field is the one parsed.
 /// `turn` with every tool call in the OpenAI shape `transformers` renders (`{id, type, function: {name, arguments}}`),
@@ -911,7 +909,9 @@ fn with_argument_objects(node: &serde_json::Value, in_call: bool) -> Value {
     Value::from(minijinja::value::Serde(&fields))
 }
 
-fn no_think_switches() -> BTreeMap<String, Value> {
+/// The context variables that turn reasoning off in every template that has a switch (Qwen3's `enable_thinking`,
+/// DeepSeek-V3.1's `thinking`).
+pub fn no_think_switches() -> BTreeMap<String, Value> {
     BTreeMap::from([("enable_thinking".to_string(), Value::from(false)), ("thinking".to_string(), Value::from(false))])
 }
 

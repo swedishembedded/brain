@@ -36,7 +36,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use data::chat_template::{parse_json_ordered, ChatTemplate};
-use data::qwen_chat::{self, ChatMessage as QcMessage, Role, TemplateFlavor, TemplateOpts, ToolCallMsg};
+use data::qwen_chat::{self, ChatMessage as QcMessage, TemplateFlavor, TemplateOpts, ToolCallMsg};
 use minijinja::Value;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -258,54 +258,6 @@ fn matches_qwen_chat_qwen38_with_a_tools_schema_and_generation_prompt() {
     let got = tmpl.render(messages, Some(tools), true, &extra).expect("generic render");
 
     assert_eq!(got, expected, "generic Jinja engine diverges from qwen_chat::render on the tools-schema branch (Qwen38)");
-}
-
-#[test]
-fn matches_qwen_chat_qwen38_with_preserve_thinking_false() {
-    let Some((tmpl, flavor)) = load_template() else {
-        brain_testutil::skip("Qwen3.8 tokenizer_config.json not found (set QWEN3_DIR to the qwen3.8 resources dir)");
-        return;
-    };
-    want_flavor!(flavor, Flavor::Qwen38, "Qwen3");
-
-    // -------- qwen_chat (hand-ported) side --------
-    // Reasoning on the FIRST assistant turn sits before the last real user
-    // query, so `preserve_thinking=false` must strip it (the trailing turn,
-    // after that query, keeps its -- empty -- think block either way).
-    let qc_msgs = vec![
-        QcMessage::user("q1"),
-        QcMessage {
-            role: Role::Assistant,
-            content: "a1".into(),
-            reasoning_content: Some("thinking one".into()),
-            ..Default::default()
-        },
-        QcMessage::user("q2"),
-        QcMessage::assistant("a2"),
-    ];
-    let expected = qwen_chat::render(&qc_msgs, &[], TemplateOpts {
-        add_generation_prompt: false,
-        enable_thinking: true,
-        flavor: TemplateFlavor::Qwen38,
-        preserve_thinking: Some(false),
-        ..Default::default()
-    })
-    .expect("qwen_chat render");
-
-    // -------- generic Jinja engine side (same conversation, as JSON) --------
-    let messages_json = r#"[
-        {"role":"user","content":"q1"},
-        {"role":"assistant","content":"a1","reasoning_content":"thinking one"},
-        {"role":"user","content":"q2"},
-        {"role":"assistant","content":"a2"}
-    ]"#;
-    let messages = parse_json_ordered(messages_json).unwrap();
-    let mut extra = BTreeMap::new();
-    extra.insert("enable_thinking".to_string(), Value::from(true));
-    extra.insert("preserve_thinking".to_string(), Value::from(false));
-    let got = tmpl.render(messages, None, false, &extra).expect("generic render");
-
-    assert_eq!(got, expected, "generic Jinja engine diverges from qwen_chat::render on preserve_thinking=false (Qwen38)");
 }
 
 #[test]

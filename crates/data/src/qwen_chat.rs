@@ -109,7 +109,7 @@ impl ChatMessage {
 /// | tools preamble | "You may call one or more functions…", system content BEFORE the tools block, JSON `<tool_call>` example | "You have access to the following functions:", system content AFTER the `<IMPORTANT>` block, `<function=…><parameter=…>` example |
 /// | history tool calls | `{"name": …, "arguments": {…}}` JSON payload | `<function=name>` + one `<parameter=key>` block per argument |
 /// | assistant reasoning source | `reasoning_content` field, else split out of an embedded `</think>` in `content` | `reasoning_content` field only |
-/// | history reasoning framing | only after the last real user query, and only the final turn or a reasoned one | `preserve_thinking` kwarg: kept on EVERY turn by default; `false` strips everything up to the last real user query |
+/// | history reasoning framing | only after the last real user query, and only the final turn or a reasoned one | kept on every turn (the template's default; its `preserve_thinking` switch is not offered) |
 /// | whitespace | content emitted verbatim | `content`/`reasoning_content` trimmed (the Jinja `\|trim`) |
 /// | generation prompt (thinking on) | nothing after `<\|im_start\|>assistant` | prefills an open `<think>\n` |
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -146,17 +146,11 @@ pub struct TemplateOpts {
     /// Which template generation to transcribe (default [`TemplateFlavor::Qwen3`],
     /// the behavior this port was originally validated against).
     pub flavor: TemplateFlavor,
-    /// Qwen3.8's `preserve_thinking` chat-template kwarg. `None` is the
-    /// template's `undefined` and keeps reasoning on EVERY assistant turn;
-    /// `Some(false)` strips reasoning from every assistant turn up to and
-    /// including the last real (non-tool-response) user query. Ignored under
-    /// [`TemplateFlavor::Qwen3`].
-    pub preserve_thinking: Option<bool>,
 }
 
 impl Default for TemplateOpts {
     fn default() -> TemplateOpts {
-        TemplateOpts { add_generation_prompt: true, enable_thinking: true, reasoning_effort: None, flavor: TemplateFlavor::Qwen3, preserve_thinking: None }
+        TemplateOpts { add_generation_prompt: true, enable_thinking: true, reasoning_effort: None, flavor: TemplateFlavor::Qwen3 }
     }
 }
 
@@ -630,19 +624,13 @@ pub fn render(msgs: &[ChatMessage], tools: &[String], opts: TemplateOpts) -> Res
             let (reasoning, content) = resolve_reasoning(m, opts.flavor == TemplateFlavor::Qwen38);
             if opts.flavor == TemplateFlavor::Qwen38 {
                 // Qwen3.8: field-only reasoning, everything trimmed, and the
-                // think block gated by preserve_thinking (default: keep on
-                // EVERY assistant turn) rather than by position heuristics.
+                // think block on every assistant turn (the template's default).
                 let reasoning = reasoning.trim();
                 let content = content.trim();
-                if opts.preserve_thinking.unwrap_or(true) || index > last_query_index {
-                    out.push_str("<|im_start|>assistant\n<think>\n");
-                    out.push_str(reasoning);
-                    out.push_str("\n</think>\n\n");
-                    out.push_str(content);
-                } else {
-                    out.push_str("<|im_start|>assistant\n");
-                    out.push_str(content);
-                }
+                out.push_str("<|im_start|>assistant\n<think>\n");
+                out.push_str(reasoning);
+                out.push_str("\n</think>\n\n");
+                out.push_str(content);
                 for (ci, call) in m.tool_calls.iter().enumerate() {
                     if ci == 0 {
                         if !content.is_empty() {
@@ -2946,31 +2934,12 @@ mod tests {
     }
 
     #[test]
-    fn qwen38_preserve_thinking_default_keeps_history_reasoning() {
-        // Default (kwarg undefined): EVERY assistant turn keeps its think
-        // block - the pre-query turn, and the final turn that has no
-        // reasoning at all (empty reasoning, still framed).
+    fn qwen38_keeps_history_reasoning_on_every_turn() {
+        // EVERY assistant turn keeps its think block - the pre-query turn, and
+        // the final turn that has no reasoning at all (empty reasoning, still
+        // framed).
         let msgs = qwen38_msgs_with_history_reasoning();
         let s = render(&msgs, &[], TemplateOpts { add_generation_prompt: false, flavor: TemplateFlavor::Qwen38, ..Default::default() }).unwrap();
-        assert!(s.contains("<|im_start|>assistant\n<think>\nthinking one\n</think>\n\na1<|im_end|>\n"), "got: {s:?}");
-        assert!(s.contains("<|im_start|>assistant\n<think>\n\n</think>\n\na2<|im_end|>\n"), "got: {s:?}");
-    }
-
-    #[test]
-    fn qwen38_preserve_thinking_false_strips_pre_query_reasoning() {
-        let msgs = qwen38_msgs_with_history_reasoning();
-        let s = render(&msgs, &[], TemplateOpts { add_generation_prompt: false, flavor: TemplateFlavor::Qwen38, preserve_thinking: Some(false), ..Default::default() }).unwrap();
-        // a1 sits before the last real user query (index 1 < 2): stripped.
-        assert!(s.contains("<|im_start|>assistant\na1<|im_end|>\n"), "got: {s:?}");
-        assert!(!s.contains("thinking one"), "got: {s:?}");
-        // The trailing assistant (after the last query) keeps its block.
-        assert!(s.contains("<|im_start|>assistant\n<think>\n\n</think>\n\na2<|im_end|>\n"), "got: {s:?}");
-    }
-
-    #[test]
-    fn qwen38_preserve_thinking_true_matches_the_default() {
-        let msgs = qwen38_msgs_with_history_reasoning();
-        let s = render(&msgs, &[], TemplateOpts { add_generation_prompt: false, flavor: TemplateFlavor::Qwen38, preserve_thinking: Some(true), ..Default::default() }).unwrap();
         assert!(s.contains("<|im_start|>assistant\n<think>\nthinking one\n</think>\n\na1<|im_end|>\n"), "got: {s:?}");
         assert!(s.contains("<|im_start|>assistant\n<think>\n\n</think>\n\na2<|im_end|>\n"), "got: {s:?}");
     }

@@ -45,6 +45,8 @@ fn request(seed: u32, max_new: usize) -> ParsedRequest {
         flavor: TemplateFlavor::default(),
         thinking_open: false,
         raw: true,
+        prefill_len: 0,
+        history: None,
     }
 }
 

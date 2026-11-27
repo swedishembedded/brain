@@ -219,7 +219,7 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   before anything is queued (a streamed request is refused with a plain 400,
   never an event stream). A setting the request leaves out takes the default the
   action declares - the sampler's and the chat template's alike
-  (`enable_thinking`, `template_flavor`, `preserve_thinking` where the model
+  (`enable_thinking`, `template_flavor` where the model
   declares them; `reasoning_effort` has none of brain's own, so a template that
   reads it applies its own default) - and a field the model's action does not take
   is refused with 400 `unsupported_parameter` naming the field and the model

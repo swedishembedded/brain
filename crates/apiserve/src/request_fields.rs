@@ -45,7 +45,7 @@ fn sampler_fields() -> impl Iterator<Item = &'static str> {
 }
 
 /// The fields OpenAI's chat grammar reads, OpenRouter's included.
-const OPENAI_CHAT_READS: [&str; 20] = [
+const OPENAI_CHAT_READS: [&str; 19] = [
     "model",
     "messages",
     "stream",
@@ -65,7 +65,6 @@ const OPENAI_CHAT_READS: [&str; 20] = [
     "enable_thinking",
     "reasoning_effort",
     "max_tiles",
-    "preserve_thinking",
     "template_flavor",
 ];
 

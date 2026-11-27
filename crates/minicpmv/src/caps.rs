@@ -288,6 +288,8 @@ impl Session {
             flavor: rendered.flavor,
             thinking_open: rendered.thinking_open,
             raw: rendered.raw,
+            prefill_len: 0,
+            history: None,
         };
         Ok(Request { parsed, prepared, opts })
     }

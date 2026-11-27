@@ -65,6 +65,8 @@ impl Frontend for Front {
             flavor: Default::default(),
             thinking_open: false,
             raw: true,
+            prefill_len: 0,
+            history: None,
         })
     }
 }

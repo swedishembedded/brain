@@ -199,7 +199,7 @@ pub fn manifest() -> Manifest {
              extremely slow (~75 min/decode step on real hardware) - so SET `max_new` to 2-4 EXPLICITLY before enabling this: the manifest default is sized \
              for the resident KV-cached path (see DEFAULT_MAX_NEW) and would be months of generation here. `messages`/`system`/`stop`/`tools`/`tool_choice`/`eos` \
              are REJECTED (crate::stream::generate has no chat rendering, EOS override or tool-call path); `chat`/`precision`/`enable_thinking`/ \
-             `reasoning_effort`/`preserve_thinking`/`template_flavor` are silently ignored rather than rejected (a manifest-default param cannot be told \
+             `reasoning_effort`/`template_flavor` are silently ignored rather than rejected (a manifest-default param cannot be told \
              apart from a caller-supplied one once validated, so an explicit non-default value here has no effect and no error)",
         )
         .default(json!(false)))

@@ -86,6 +86,7 @@ mod parity;
 mod peft_export;
 mod real_full_ft_precision;
 mod real_resident_full_ft;
+mod replay_sessions;
 mod resident_full_ft;
 mod rope_scaling_model;
 mod serve_conformance;

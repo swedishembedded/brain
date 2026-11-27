@@ -323,7 +323,7 @@ pub const MIN_BALANCE_SLACK: usize = 8;
 
 /// The request parameters that shape the start of a rendered chat prompt, before the first message: everything a
 /// request of one conversation repeats ahead of its history.
-pub const PROMPT_SHAPING: [&str; 8] = ["chat", "tools", "tool_choice", "system", "enable_thinking", "reasoning_effort", "preserve_thinking", "template_flavor"];
+pub const PROMPT_SHAPING: [&str; 7] = ["chat", "tools", "tool_choice", "system", "enable_thinking", "reasoning_effort", "template_flavor"];
 
 /// A raw prompt (no message boundaries) is cut into links of this many bytes.
 pub const RAW_PROMPT_LINK_BYTES: usize = 1024;

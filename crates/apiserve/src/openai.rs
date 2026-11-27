@@ -325,7 +325,7 @@ pub async fn handle_chat(state: AppState, body: Bytes, native: bool) -> Response
 /// The members of the request's `chat_template_kwargs` that no dedicated parameter carries, as JSON text, or `None`
 /// when there are none.
 fn template_kwargs_beyond_the_known(body: &Value) -> Option<String> {
-    const KNOWN: [&str; 5] = ["enable_thinking", "reasoning_effort", "preserve_thinking", "template_flavor", "max_tiles"];
+    const KNOWN: [&str; 4] = ["enable_thinking", "reasoning_effort", "template_flavor", "max_tiles"];
     let rest: serde_json::Map<String, Value> = body.get("chat_template_kwargs")?.as_object()?.iter().filter(|(k, _)| !KNOWN.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
     (!rest.is_empty()).then(|| Value::Object(rest).to_string())
 }
@@ -545,20 +545,6 @@ pub fn to_invocation(provider: Provider, body: &Value) -> Result<(String, Invoca
     if let Some(v) = max_tiles {
         let n = v.as_i64().filter(|n| (0..=MAX_TILES).contains(n)).ok_or_else(|| ApiError::invalid_request(provider, format!("'max_tiles' must be an integer in 0..={MAX_TILES}")))?;
         inv = inv.set("max_tiles", json!(n));
-    }
-    // `preserve_thinking` (Qwen3.8 chat-template kwarg: keep <think> blocks
-    // from prior assistant turns in the rendered history): same extension
-    // point as `reasoning_effort` - nested under `chat_template_kwargs` or,
-    // tolerated, top-level. It only takes effect on the Qwen3.8-flavor render
-    // (the Qwen3-era template has no such kwarg; its history framing is
-    // positional), which the chat renderer itself owns.
-    let preserve_thinking = body
-        .get("chat_template_kwargs")
-        .and_then(|k| k.get("preserve_thinking"))
-        .and_then(|v| v.as_bool())
-        .or_else(|| body.get("preserve_thinking").and_then(|v| v.as_bool()));
-    if let Some(pt) = preserve_thinking {
-        inv = inv.set("preserve_thinking", json!(pt));
     }
     // `template_flavor` (which upstream chat template the resident renders,
     // and with it the tool-call wire form): same extension point as the other

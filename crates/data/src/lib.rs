@@ -38,6 +38,7 @@ pub mod message_scan;
 pub mod packing;
 pub mod qwen_chat;
 pub mod qwen_tokenizer;
+pub mod replay;
 pub mod rng;
 pub mod special_match;
 pub mod sample;

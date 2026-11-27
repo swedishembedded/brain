@@ -247,6 +247,8 @@ fn build_request(ids: Vec<u32>, max_new: usize, ngram: NoRepeatNgram) -> ParsedR
         flavor: TemplateFlavor::default(),
         thinking_open: false,
         raw: true,
+        prefill_len: 0,
+        history: None,
     }
 }
 
