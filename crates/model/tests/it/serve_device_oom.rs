@@ -229,13 +229,16 @@ fn a_refused_request_never_takes_the_sequences_beside_it_down() {
 }
 
 #[test]
-fn the_batch_grows_back_once_the_card_has_held_the_smaller_one_for_a_while() {
+fn the_batch_grows_back_once_the_card_has_held_the_smaller_one_for_a_while_and_says_what_it_admits() {
     let mut sched = Scheduler::new(Toy::new(4096, 2), 8);
     // A burst that overfills the card sends the scheduler to a batch of one or two ...
     for i in 0..6 {
         sched.submit(Request { prompt: prompt(10 + i), max_new: 4, stop: Vec::new() });
     }
+    assert_eq!(sched.admitted_width(), 8, "before any failure the scheduler admits its whole batch");
     drain(&mut sched);
+    // It says so, so a server advertises the width it admits now rather than its nominal batch.
+    assert!(sched.admitted_width() <= 2, "the card held two at most: {}", sched.admitted_width());
     // ... and later traffic, on a card that now has room for eight, is not held to that for ever.
     sched.decoder_mut().slots = 8;
     let failures = sched.decoder_mut().failures;
@@ -248,6 +251,7 @@ fn the_batch_grows_back_once_the_card_has_held_the_smaller_one_for_a_while() {
         widest = widest.max(sched.running_len());
     }
     assert_eq!(widest, 8, "all eight run together again");
+    assert_eq!(sched.admitted_width(), 8, "and it admits its whole batch again");
     assert!(ids.iter().all(|id| done.contains_key(id)));
     assert_eq!(sched.decoder_mut().failures, failures, "no further failure on the way back");
 }

@@ -342,6 +342,11 @@ pub trait JobFeed {
 /// instance's: fresh enough for a router probing every few seconds, rare enough to cost nothing beside a decode step.
 pub const METRICS_PUBLISH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
+/// The metric (in [`Instance::metrics`]) naming how many sequences an instance's scheduler admits at once now: its
+/// batch, or fewer while its card has shown it holds no more. What a model's card advertises as its `decode_slots`
+/// ([`crate::Executor::model_decode_slots`]).
+pub const ADMITTED_WIDTH: &str = "admitted_width";
+
 /// A built, Hot model instance. Dropping it frees the device memory (RAII), so the
 /// manager demotes simply by dropping. Actions run on the manager's worker thread,
 /// never on an async/bus thread.

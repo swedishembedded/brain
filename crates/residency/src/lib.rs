@@ -56,7 +56,7 @@ pub use adapter::{AdapterIdentity, PolicyLineage};
 pub use devpool::DevicePool;
 pub use executor::{Executor, InFlightJob, Job};
 pub use manager::{DeviceBudget, InstancePlacement, ResidencyManager, ResidencyReport};
-pub use model::{Alias, Instance, JobFeed, OfArchitecture, ResidentModel, METRICS_PUBLISH_INTERVAL};
+pub use model::{Alias, Instance, JobFeed, OfArchitecture, ResidentModel, ADMITTED_WIDTH, METRICS_PUBLISH_INTERVAL};
 pub use multi::{MultiDeviceCost, MultiDeviceResidentModel};
 pub use runplan::{Eviction, PlanError, Placement, RunPlan};
 pub use scheduler::Policy;

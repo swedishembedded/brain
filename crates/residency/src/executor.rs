@@ -633,10 +633,30 @@ impl Executor {
         self.models.read().unwrap().values().map(|m| model_slots(m.as_ref())).sum()
     }
 
-    /// The sequences the registered single-device model `model` carries at once: its share of
-    /// [`Self::decode_slots`]. `None` for a model not registered that way (unknown, or multi-device).
+    /// The sequences of `model` this server decodes at once now, for any registered model (single- or
+    /// multi-device): on each of its replicas, the width its scheduler admits now (the [`ADMITTED_WIDTH`] metric
+    /// its built instance last reported, knowledge #610) or, for a replica not built or not reporting, its batch
+    /// ([`ResidentModel::batch_limit`], 1 when it declares none). An adapter answers for its base's instances. `None` for
+    /// a model not registered.
+    ///
+    /// [`ADMITTED_WIDTH`]: crate::ADMITTED_WIDTH
     pub fn model_decode_slots(&self, model: &str) -> Option<usize> {
-        self.models.read().unwrap().get(model).map(|m| model_slots(m.as_ref()))
+        let m = self.registered(model)?;
+        let batch = m.batch_limit().unwrap_or(1).max(1);
+        let replicas = m.replicas().max(1);
+        let group = m.instance_key(GENERATE_ACTION, &Invocation::new()).model;
+        let widths: Vec<usize> = {
+            let stats = self.stats.lock().unwrap_or_else(|e| e.into_inner());
+            stats
+                .metrics
+                .iter()
+                .filter(|(k, _)| k.model == group)
+                .filter_map(|(_, metrics)| metrics.iter().find(|(n, _)| n == crate::ADMITTED_WIDTH).and_then(|(_, v)| v.as_u64()))
+                .map(|w| (w as usize).min(batch))
+                .take(replicas)
+                .collect()
+        };
+        Some(widths.iter().sum::<usize>() + batch * (replicas - widths.len()))
     }
 
     /// The registered model `model`, under either registry.
@@ -4227,6 +4247,80 @@ mod tests {
         fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
             Ok(Outcome::new().blob("out", Blob::new(Media::Bytes, vec![1])))
         }
+    }
+
+    /// Every served model advertises how many of its sequences the server decodes at once, a multi-device one too:
+    /// the 27B, registered multi-device, named no bound, so a router compared its load with the server's nominal sum of
+    /// every model (3466) and sent 244 requests to one card (knowledge #610).
+    #[test]
+    fn a_multi_device_model_advertises_its_decode_slots_too() {
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0).set(Device::Gpu(1), 24 * GB, 0);
+        let exec = Executor::start(vec![], budgets, Policy::default());
+        exec.register_multi(Arc::new(MultiFake { name: "int8thinker".into(), per_gpu: GB, live: Arc::default() }));
+        assert_eq!(exec.model_decode_slots("int8thinker"), Some(1), "a model declaring no batch decodes one sequence");
+        assert_eq!(exec.slot_group("int8thinker").as_deref(), Some("int8thinker"));
+        exec.shutdown();
+    }
+
+    /// A model's advertised decode slots are what its scheduler admits now, not its nominal batch: a card short of
+    /// memory runs fewer sequences at once ("at most 30-32 run at once" on a 64-wide 27B), and a router that sends it
+    /// its nominal batch queues the rest on it.
+    #[test]
+    fn a_models_decode_slots_are_the_width_its_scheduler_admits_now() {
+        use crate::model::JobFeed;
+        const BATCH: usize = 64;
+        const ADMITTED: usize = 30;
+        struct Wide(Arc<AtomicBool>);
+        struct WideInst(Arc<AtomicBool>);
+        impl ResidentModel for Wide {
+            fn manifest(&self) -> Manifest {
+                Manifest::new("wide", "a batching model", vec![ActionSpec::new("run", "run")])
+            }
+            fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+                InstanceKey::new("wide", "default")
+            }
+            fn estimate(&self, _k: &InstanceKey) -> MemCost {
+                MemCost::new(GB, 0)
+            }
+            fn batch_limit(&self) -> Option<usize> {
+                Some(BATCH)
+            }
+            fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+                Ok(Box::new(WideInst(self.0.clone())))
+            }
+        }
+        impl Instance for WideInst {
+            fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+                Ok(Outcome::new())
+            }
+            fn run_open(&mut self, _a: &str, invs: &[Invocation], _p: &mut dyn FnMut(usize, Progress), feed: &mut dyn JobFeed) -> bool {
+                while !self.0.load(Ordering::SeqCst) {
+                    feed.publish(vec![(crate::ADMITTED_WIDTH.to_string(), serde_json::json!(ADMITTED))]);
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                for i in 0..invs.len() {
+                    feed.finish(i, Ok(Outcome::new()));
+                }
+                while !feed.close() {}
+                true
+            }
+        }
+        let release = Arc::new(AtomicBool::new(false));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 8 * GB, 0);
+        let exec = Executor::start(vec![Arc::new(Wide(release.clone()))], budgets, Policy::default());
+        assert_eq!(exec.model_decode_slots("wide"), Some(BATCH), "nothing built: the nominal batch");
+        let (tx, rx) = channel();
+        exec.submit(Job::new("wide", "run", Invocation::new()).reply(move |r| tx.send(r).unwrap()));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while exec.model_decode_slots("wide") != Some(ADMITTED) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(exec.model_decode_slots("wide"), Some(ADMITTED), "the busy instance's scheduler admits {ADMITTED}");
+        release.store(true, Ordering::SeqCst);
+        rx.recv_timeout(Duration::from_secs(10)).expect("answered").unwrap();
+        exec.shutdown();
     }
 
     #[test]

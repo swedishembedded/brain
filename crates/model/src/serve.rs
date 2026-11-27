@@ -2407,6 +2407,12 @@ impl<D: PagedDecoder> Scheduler<D> {
         self.max_running
     }
 
+    /// The most sequences (decoding and prefilling) it admits at once now: [`Self::max_running`], or fewer while the
+    /// card has shown it holds no more ([`MemoryPressure`]). What a server advertises as the model's decode slots.
+    pub fn admitted_width(&self) -> usize {
+        self.pressure.limit.map_or(self.max_running, |l| l.min(self.max_running))
+    }
+
     /// Bring preempted sequences back onto the device, oldest demotion first,
     /// while the pool can hold them and the batch has room. A promote that
     /// cannot fit yet leaves the sequence demoted and stops the loop - the
@@ -2880,7 +2886,7 @@ impl<D: PagedDecoder> Scheduler<D> {
     /// A request that can never be admitted (see `next_admissible`) is rejected on the
     /// way and one whose adapter is still loading is stepped over.
     fn admit_one(&mut self, report: &mut StepReport, allow: impl FnOnce(usize) -> bool) -> bool {
-        if !self.swapped.is_empty() || self.running.len() + self.prefilling.len() >= self.pressure.limit.map_or(self.max_running, |l| l.min(self.max_running)) {
+        if !self.swapped.is_empty() || self.running.len() + self.prefilling.len() >= self.admitted_width() {
             return false;
         }
         let Some(pos) = self.next_admissible(report) else { return false };
