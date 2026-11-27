@@ -173,11 +173,11 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
         None => request.init.clone(),
     };
     let work = Workdir::create(env)?;
-    progress(Progress::event(0, 1, json!({"type": "stage", "stage": "staging the corpus"})));
+    progress(Progress::event(0, 1, json!({"type": "stage", "stage": "staging the corpus", "phase": crate::observe::STAGING})));
     let corpus = work.path().join("corpus.jsonl");
     bring(&request.corpus, &inv.blobs, env.store.as_ref(), work.staging(), &corpus)?;
     inv.cancel.check()?;
-    progress(Progress::event(0, 1, json!({"type": "stage", "stage": "learning the vocabulary and initialising the weights"})));
+    progress(Progress::event(0, 1, json!({"type": "stage", "stage": "learning the vocabulary and initialising the weights", "phase": crate::observe::MODEL_LOAD})));
     let out = work.path().join("model");
     let made = init.corpus(&corpus).out_dir(&out).run().map_err(trainer_failure)?;
     let report = json!({

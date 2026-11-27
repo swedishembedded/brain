@@ -600,6 +600,7 @@ pub fn step_frame(progress: &brain::FineTuneProgress, seconds: f64) -> Value {
         "lr": finite(progress.lr),
         "grad_norm": progress.grad_norm.map(finite),
         "seconds": seconds,
+        "time": crate::observe::loop_time_json(&progress.time),
     });
     if let Some(eval) = progress.eval_loss {
         frame["eval_loss"] = finite(eval);
@@ -872,7 +873,7 @@ pub fn run(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], progre
     let teacher_dir = p.distill_teacher.as_deref().map(|teacher| resolve_model(env.models_dir.as_deref(), "distill_teacher", teacher)).transpose()?;
     let steps = p.steps;
     let work = Workdir::create(env)?;
-    progress(Progress::event(0, steps, json!({"type": "stage", "stage": "staging the datasets"})));
+    progress(Progress::event(0, steps, json!({"type": "stage", "stage": "staging the datasets", "phase": crate::observe::STAGING})));
     let staged = match (&request.data, &request.stream) {
         (Some(data), _) => stage(data, &inv.blobs, env.store.as_ref(), &work)?,
         (None, Some(stream)) => crate::stream::stage(stream, &inv.blobs, env.store.as_ref(), &work)?,
@@ -882,7 +883,7 @@ pub fn run(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], progre
         return Err("cancelled".into());
     }
     let files = RunFiles::of(run.as_ref(), &request, work.path().join("run"));
-    progress(Progress::event(0, steps, json!({"type": "stage", "stage": "loading the base and training"})));
+    progress(Progress::event(0, steps, json!({"type": "stage", "stage": "loading the base and training", "phase": crate::observe::MODEL_LOAD})));
     // A distillation's teacher adapter, when the request names one by digest, is fetched into the job's directory like
     // a dataset.
     let teacher_adapter = match (p.objective, crate::request::DistillTeacherRef::parse(p.teacher.as_deref())?) {
@@ -912,8 +913,15 @@ pub fn run(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], progre
         };
         // The waits and the steps report through the one progress sink, never at once.
         let sink = std::cell::RefCell::new(&mut *progress);
-        let pause = |retry: u32, wait: Duration, why: &str| (sink.borrow_mut())(Progress::event(0, steps, json!({"type": "stage", "stage": format!("the card ran out of memory; retry {retry} of {DEVICE_OOM_RETRIES} in {} s from the last saved step ({why})", wait.as_secs())})));
-        let attempt = || train_objective(&request, &inputs, &files, None, &inv.cancel, &mut |step| (sink.borrow_mut())(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64()))));
+        let pause = |retry: u32, wait: Duration, why: &str| (sink.borrow_mut())(Progress::event(0, steps, json!({"type": "stage", "stage": format!("the card ran out of memory; retry {retry} of {DEVICE_OOM_RETRIES} in {} s from the last saved step ({why})", wait.as_secs()), "phase": crate::observe::WAITING_FOR_CARD})));
+        // Each retry builds its trainer again from the last saved state: a model load of its own.
+        let attempts = std::cell::Cell::new(0u32);
+        let attempt = || {
+            if attempts.replace(attempts.get() + 1) > 0 {
+                (sink.borrow_mut())(Progress::event(0, steps, json!({"type": "stage", "stage": "loading the base and training from the last saved step", "phase": crate::observe::MODEL_LOAD})));
+            }
+            train_objective(&request, &inputs, &files, None, &inv.cancel, &mut |step| (sink.borrow_mut())(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64()))))
+        };
         retry_device_oom(&inv.cancel, pause, attempt)?
     };
     work.ensure_within_quota()?;

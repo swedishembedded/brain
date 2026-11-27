@@ -538,7 +538,7 @@ pub fn run(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], progre
     let teacher_dir = resolve_teacher(env, &request)?;
     let work = Workdir::create(env)?;
     let total = p.steps.unwrap_or(0);
-    progress(Progress::event(0, total, json!({"type": "stage", "stage": "staging the shards"})));
+    progress(Progress::event(0, total, json!({"type": "stage", "stage": "staging the shards", "phase": crate::observe::STAGING})));
     let stage = |source: &Source, name: &str| -> Result<std::path::PathBuf, String> {
         let path = work.path().join(name);
         bring(source, &inv.blobs, env.store.as_ref(), work.staging(), &path)?;
@@ -570,7 +570,7 @@ pub fn run(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], progre
     // request's, or one drawn here for all of them.
     let seed = run.as_ref().map(crate::runs::Run::seed).or(p.seed).or_else(|| request.spread.ranked().then(brain::random_seed));
     let cfg = sft_config(&request, &base_dir, teacher_dir.as_deref(), seed)?;
-    progress(Progress::event(0, total, json!({"type": "stage", "stage": "loading the base and training"})));
+    progress(Progress::event(0, total, json!({"type": "stage", "stage": "loading the base and training", "phase": crate::observe::MODEL_LOAD})));
     let began = Instant::now();
     let state = run.as_ref().map(crate::runs::Run::state_path);
     let identity = json!({"base": p.base, "dataset": request.digests().iter().map(Digest::hex).collect::<Vec<_>>()});
@@ -673,7 +673,7 @@ mod tests {
     /// a held-out loss when one was measured, and the objective's own metrics by name.
     #[test]
     fn a_step_frame_carries_the_reports_fields() {
-        let step = model::train::StepReport { step: 3, steps: 9, loss: 1.5, lr: 1e-4, grad_norm: Some(0.5), work: Default::default(), eval_loss: Some(2.0), metrics: vec![("talker_ce", 1.25), ("code_predictor_ce", 0.75), ("eos_accuracy", 0.5), ("held_out_talker_ce", 2.25)] };
+        let step = model::train::StepReport { step: 3, steps: 9, loss: 1.5, lr: 1e-4, grad_norm: Some(0.5), work: Default::default(), eval_loss: Some(2.0), metrics: vec![("talker_ce", 1.25), ("code_predictor_ce", 0.75), ("eos_accuracy", 0.5), ("held_out_talker_ce", 2.25)], time: Default::default() };
         let frame = step_frame(&step, 7.0);
         assert_eq!(frame, json!({"type": "step", "step": 3, "steps": 9, "loss": 1.5, "lr": 1e-4_f32, "grad_norm": 0.5, "frames_per_s": 0.0, "seconds": 7.0, "eval_loss": 2.0, "talker_ce": 1.25, "code_predictor_ce": 0.75, "eos_accuracy": 0.5, "held_out_talker_ce": 2.25}));
     }

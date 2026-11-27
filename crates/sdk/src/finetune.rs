@@ -1656,12 +1656,17 @@ pub struct FineTuneProgress {
     /// self-distillation run and `pg_scoring_seconds` (the time the step spent scoring examples it drew for the
     /// first time). Empty for a supervised run.
     pub metrics: Vec<(String, f32)>,
+    /// What the step measured: its phases' seconds, its token accounting and its device memory.
+    pub work: crate::StepWork,
+    /// Where the training loop's wall time has gone so far (optimizer steps, evaluation, checkpoints, waiting for
+    /// records), cumulative from the loop's start.
+    pub time: crate::LoopTime,
 }
 
 impl FineTuneProgress {
     /// The progress of the optimiser step `s` just completed.
     pub(crate) fn of(s: &model::StepReport) -> FineTuneProgress {
-        FineTuneProgress { step: s.step, steps: s.steps, loss: s.loss, lr: s.lr, grad_norm: s.grad_norm, eval_loss: s.eval_loss, metrics: s.metrics.iter().map(|(name, value)| (name.to_string(), *value)).collect() }
+        FineTuneProgress { step: s.step, steps: s.steps, loss: s.loss, lr: s.lr, grad_norm: s.grad_norm, eval_loss: s.eval_loss, metrics: s.metrics.iter().map(|(name, value)| (name.to_string(), *value)).collect(), work: s.work, time: s.time }
     }
 }
 

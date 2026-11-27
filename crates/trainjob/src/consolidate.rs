@@ -474,7 +474,7 @@ pub fn run_full(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], p
     let base_dir = job::resolve_base(env.models_dir.as_deref(), &p.base)?;
     let (_, sharded) = full_plan(env, &request, &base_dir)?;
     let work = Workdir::create(env)?;
-    progress(Progress::event(0, p.steps, json!({"type": "stage", "stage": "staging the datasets"})));
+    progress(Progress::event(0, p.steps, json!({"type": "stage", "stage": "staging the datasets", "phase": crate::observe::STAGING})));
     let staged = job::stage(&request.data, &inv.blobs, env.store.as_ref(), &work)?;
     if inv.cancel.is_cancelled() {
         return Err("cancelled".into());
@@ -495,7 +495,7 @@ pub fn run_full(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], p
     for (path, share) in &staged.weighted_replay {
         ft = ft.replay_at(path, *share);
     }
-    progress(Progress::event(0, p.steps, json!({"type": "stage", "stage": "loading the base and training"})));
+    progress(Progress::event(0, p.steps, json!({"type": "stage", "stage": "loading the base and training", "phase": crate::observe::MODEL_LOAD})));
     let began = Instant::now();
     let frame = |step: &brain::FineTuneProgress| Progress::event(step.step, step.steps, job::step_frame(step, began.elapsed().as_secs_f64()));
     let outcome = if request.spread.ranked() {

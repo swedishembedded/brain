@@ -1599,6 +1599,33 @@ fn rate(tokens: u64, secs: f64) -> f64 {
     }
 }
 
+/// Where a training loop's wall time has gone since it started, as of a [`StepReport`]: cumulative, so a reader
+/// takes a phase's share from one report. The loop starts once the model and the data are prepared, so a caller that
+/// times its run from before the build sees that preparation as the difference between its own wall time and
+/// [`Self::elapsed_secs`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LoopTime {
+    /// Seconds since the loop started.
+    pub elapsed_secs: f64,
+    /// Seconds inside optimizer steps ([`StepWork::step_secs`] summed): drawing batches, forward, backward, optimizer.
+    pub steps_secs: f64,
+    /// Seconds scoring the held-out or monitoring set, with the evaluation snapshots and the best parameters it keeps.
+    pub evaluation_secs: f64,
+    /// Seconds writing checkpoints, the training state and published adapter versions.
+    pub checkpoint_secs: f64,
+    /// Seconds waiting for the objective's next records (a run fed while it goes on).
+    pub waiting_for_records_secs: f64,
+    /// Record tokens the steps trained on ([`StepWork::useful_tokens`] summed).
+    pub useful_tokens: u64,
+}
+
+impl LoopTime {
+    /// Record tokens per second inside optimizer steps.
+    pub fn step_tokens_per_s(&self) -> f64 {
+        rate(self.useful_tokens, self.steps_secs)
+    }
+}
+
 /// One completed optimizer step, as [`fit_controlled`] hands it to
 /// [`FitControl::on_step`].
 #[derive(Clone, Debug, PartialEq)]
@@ -1622,6 +1649,8 @@ pub struct StepReport {
     /// What the objective measured in the step, by name ([`Objective::metrics`]): the policy-gradient
     /// objective's clip fraction, KL and importance ratio, for example. Empty for an objective with none.
     pub metrics: Vec<(&'static str, f32)>,
+    /// Where the loop's wall time has gone so far, this step and its evaluation included.
+    pub time: LoopTime,
 }
 
 /// What a caller controls about a [`fit_controlled`] run beyond [`FitOpts`].
@@ -2415,6 +2444,9 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
             first_step
         }
     };
+    // Where the loop's time goes, for every step's report.
+    let loop_clock = std::time::Instant::now();
+    let mut time = LoopTime::default();
     for step in first_step..steps_end {
         // The schedule counts applied updates (AdamW's `t` counts the same), so a step that applies none does not
         // consume warmup or shorten the decay. A cooldown is a window of loop steps with its own end, so it is
@@ -2557,11 +2589,14 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         last_train = Some(loss);
         completed = step + 1;
         selection.step_trained(loss);
+        time.steps_secs += work.step_secs();
+        time.useful_tokens += work.useful_tokens;
 
         let last = step + 1 == opts.steps;
         let cooled = selection.cooldown.is_some_and(|c| c.ends_at(step));
         let due = opts.eval_interval > 0 && ((step + 1) % opts.eval_interval == 0 || ((last || cooled) && selection.selecting()));
         let mut step_eval = None;
+        let eval_clock = std::time::Instant::now();
         if due {
             if let Some(eval_loss) = agreed_eval(&mut obj, &model, &rng, opts.eval_batches, grad_sync.as_ref(), parameter_sharded, &mut health, step + 1)? {
                 step_eval = Some(eval_loss);
@@ -2650,6 +2685,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
                 eprintln!("  {name}: {value:.4}");
             }
         }
+        time.evaluation_secs += eval_clock.elapsed().as_secs_f64();
         if cooled {
             eprintln!("stopping at step {}: the cooldown is done; the best evaluation's parameters are kept", step + 1);
             stopped_early = true;
@@ -2670,6 +2706,7 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
                     ts.elapsed().as_secs_f64()
                 );
                 last_save = std::time::Instant::now();
+                time.checkpoint_secs += ts.elapsed().as_secs_f64();
                 commit(p, completed)?;
             }
         }
@@ -2677,27 +2714,39 @@ pub fn fit_controlled_sharded<M: Model, O: Objective<M>>(
         // The adapter of every `every`-th step, written by the rank that writes and handed over before the step is
         // reported, so its report can say the version is out.
         if let Some(publication) = control.publish.as_mut().filter(|p| writer && p.every > 0 && completed.is_multiple_of(p.every)) {
+            let published = std::time::Instant::now();
             let path = publication.snapshots.path(completed);
             let snapshots = &publication.snapshots;
             crate::lora::device_adapter::save_lora_with_lineage(path.to_str().expect("utf-8 path"), &model, &snapshots.lora, snapshots.card_id, snapshots.base_id, snapshots.family, None, publication.provenance.map(|of| of(completed)))?;
             (publication.publish)(completed, &path)?;
+            time.checkpoint_secs += published.elapsed().as_secs_f64();
         }
 
         let keep_going = match control.on_step.as_mut() {
-            Some(on_step) => on_step(&StepReport { step: completed, steps: opts.steps, loss, lr, grad_norm, eval_loss: step_eval, work, metrics: obj.metrics() }),
+            Some(on_step) => {
+                time.elapsed_secs = loop_clock.elapsed().as_secs_f64();
+                on_step(&StepReport { step: completed, steps: opts.steps, loss, lr, grad_norm, eval_loss: step_eval, work, metrics: obj.metrics(), time })
+            }
             None => true,
         };
         let periodic = control.state_every > 0 && completed.is_multiple_of(control.state_every);
         let mut saved_now = false;
+        let saving = std::time::Instant::now();
         if keep_going && periodic {
             save_state!(completed);
             saved_now = true;
         }
+        time.checkpoint_secs += saving.elapsed().as_secs_f64();
         // An objective fed while the run goes on waits here for the next step's records, after this step's state is
         // safe, so what it trained is durable however long the wait.
         let next = match (keep_going, completed < opts.steps) {
             (false, _) => crate::objective::Supply::Stopped,
-            (true, true) => obj.supply(),
+            (true, true) => {
+                let waiting = std::time::Instant::now();
+                let supply = obj.supply();
+                time.waiting_for_records_secs += waiting.elapsed().as_secs_f64();
+                supply
+            }
             // The run's last step: nothing more is asked of the objective.
             (true, false) => crate::objective::Supply::Ready,
         };

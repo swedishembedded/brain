@@ -213,7 +213,7 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
     };
     let base_dir = job::resolve_base(env.models_dir.as_deref(), &p.base)?;
     let work = Workdir::create(env)?;
-    progress(Progress::event(0, p.steps, json!({"type": "stage", "stage": "staging the corpora"})));
+    progress(Progress::event(0, p.steps, json!({"type": "stage", "stage": "staging the corpora", "phase": crate::observe::STAGING})));
     let staged = job::stage(&request.data, &inv.blobs, env.store.as_ref(), &work)?;
     inv.cancel.check()?;
     let out_dir = work.path().join("run");
@@ -221,7 +221,7 @@ pub fn run(env: &JobEnv, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -
     if let Some(r) = &resumable {
         run = run.seed(r.seed()).resume_state(r.state_path()).checkpoint_every(p.checkpoint_every.unwrap_or(crate::runs::DEFAULT_CHECKPOINT_EVERY));
     }
-    progress(Progress::event(0, p.steps, json!({"type": "stage", "stage": "encoding the corpora, loading the base and training"})));
+    progress(Progress::event(0, p.steps, json!({"type": "stage", "stage": "encoding the corpora, loading the base and training", "phase": crate::observe::MODEL_LOAD})));
     let began = Instant::now();
     let outcome = run.run_with(&inv.cancel, |step| progress(Progress::event(step.step, step.steps, job::step_frame(step, began.elapsed().as_secs_f64())))).map_err(trainer_failure)?;
     if outcome.status != brain::FineTuneStatus::Completed {

@@ -82,6 +82,9 @@ pub struct TrainConfig {
     pub bank: crate::bank::BankSlot,
 }
 
+/// One action's run, given the progress sink it reports to.
+type Work<'a> = dyn FnMut(&mut dyn FnMut(Progress)) -> ActionResult + 'a;
+
 /// The training workload. See the module doc.
 pub struct TrainResident {
     env: JobEnv,
@@ -406,16 +409,16 @@ struct TrainInstance {
 impl Instance for TrainInstance {
     fn run(&mut self, action: &str, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         let env = &self.env;
-        let work: &mut dyn FnMut() -> ActionResult = match action {
-            request::ACTION => &mut || job::run(env, inv, &self.devices, progress),
-            consolidate::FULL_ACTION => &mut || consolidate::run_full(env, inv, &self.devices, progress),
-            consolidate::MERGE_ACTION => &mut || consolidate::run_merge(env, inv, progress),
-            create::ACTION => &mut || create::run(env, inv, progress),
-            pretrain::ACTION => &mut || pretrain::run(env, inv, progress),
-            dryrun::ACTION => &mut || dryrun::run(env, inv, progress),
-            timeline::ACTION => &mut || timeline::run(env, inv, progress),
-            speech::ACTION => &mut || speech::run(env, inv, &self.devices, progress),
-            surgery::ACTION => &mut || surgery::run(env, inv, progress),
+        let work: &mut Work<'_> = match action {
+            request::ACTION => &mut |progress| job::run(env, inv, &self.devices, progress),
+            consolidate::FULL_ACTION => &mut |progress| consolidate::run_full(env, inv, &self.devices, progress),
+            consolidate::MERGE_ACTION => &mut |progress| consolidate::run_merge(env, inv, progress),
+            create::ACTION => &mut |progress| create::run(env, inv, progress),
+            pretrain::ACTION => &mut |progress| pretrain::run(env, inv, progress),
+            dryrun::ACTION => &mut |progress| dryrun::run(env, inv, progress),
+            timeline::ACTION => &mut |progress| timeline::run(env, inv, progress),
+            speech::ACTION => &mut |progress| speech::run(env, inv, &self.devices, progress),
+            surgery::ACTION => &mut |progress| surgery::run(env, inv, progress),
             other => return Err(format!("{} has no action '{other}'", request::MODEL)),
         };
         // A `full_train` that only checks its settings trains nothing: host work, never refused for a CPU placement.
@@ -424,13 +427,15 @@ impl Instance for TrainInstance {
         let allow_cpu = inv.params.get("allow_cpu").and_then(serde_json::Value::as_bool).unwrap_or(false);
         // The trainer reports a device failure (an allocation the card cannot hold) as a panic. One run's failure is
         // that run's error, not the server's.
+        let devices = self.devices.iter().map(|&d| residency::observe::device_name(d)).collect();
         let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // A run on several cards scopes each rank to its own card; the first card is where it is checked.
             residency::on_device(self.devices[0], || {
                 if trains {
                     cpu_admission(action, allow_cpu, residency::build_target())?;
                 }
-                work()
+                // The run's account of its wall time goes to the server's metrics as it goes (`crate::observe`).
+                crate::observe::observed(&inv.report, action, devices, progress, |progress| work(progress))
             })
         }));
         match run {

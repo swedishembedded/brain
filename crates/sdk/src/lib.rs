@@ -198,8 +198,12 @@ pub use model::lsa::LsaConfig;
 pub use model::NativeSparse;
 #[cfg(feature = "study")]
 /// What one optimizer step of a run measured: its phases' seconds and its
-/// token accounting (see [`ChatFineTuneOutcome::step_work`]).
+/// token accounting (see [`ChatFineTuneOutcome::step_work`] and [`FineTuneProgress::work`]).
 pub use model::StepWork;
+#[cfg(feature = "study")]
+/// Where a training loop's wall time has gone so far: optimizer steps, evaluation, checkpoints, waiting for records
+/// ([`FineTuneProgress::time`]).
+pub use model::LoopTime;
 /// The settings and statistics of [`ChatFineTune::policy_gradient`]: reinforcement learning from rollouts collected
 /// outside brain.
 #[cfg(feature = "study")]

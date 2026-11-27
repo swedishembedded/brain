@@ -31,6 +31,7 @@
 //! * [`consolidate`]: the jobs that produce a checkpoint, `full_train` and `merge`.
 //! * [`pretrain`]: `pretrain`, raw-text training of every weight with held-out evaluation.
 //! * [`job`]: one run, from staged inputs to the adapter and its report.
+//! * [`observe`]: a run's account of its own wall time, phase by phase, published for the server's metrics.
 //! * [`parallel`]: a run spread over the server's cards (`cards`) and over several servers (`job`), as ranks.
 //! * [`stream`]: a policy-gradient job fed rollout groups while it runs, publishing each new adapter version to the
 //!   serving bank ([`bank`]).
@@ -43,6 +44,7 @@ pub mod consolidate;
 pub mod create;
 pub mod dryrun;
 pub mod job;
+pub mod observe;
 pub mod parallel;
 pub mod pretrain;
 pub mod quota;
