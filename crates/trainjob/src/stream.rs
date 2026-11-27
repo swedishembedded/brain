@@ -89,7 +89,8 @@ pub struct StreamRefs {
     pub support: Option<usize>,
     pub start_adapter: Option<Source>,
     /// How many of the newest published versions are also served under an id of their own (`<id>-v<N>`), so a
-    /// client can stay on the version it started on; 0 serves none.
+    /// client can stay on the version it started on, each also kept in the artifact store (named in its published
+    /// frame's `artifact_digest`) so a later run can start from it; 0 serves and keeps none.
     pub retain_versions: usize,
 }
 
@@ -264,6 +265,11 @@ pub(crate) fn train(env: &JobEnv, request: &Request, inputs: &Inputs<'_>, files:
     };
     let publish_id = refs.publish_adapter.clone();
     let mut publish = |step: u32, path: &std::path::Path| -> std::io::Result<()> {
+        // A retained version is kept in the artifact store too, so a client can continue a later run from it.
+        let artifact = match (&env.store, refs.retain_versions > 0) {
+            (Some(store), true) => Some(store.publish(path).map_err(|e| std::io::Error::other(job::store_failure(&e)))?.0.hex()),
+            _ => None,
+        };
         let (identity, version_id) = bank.publish_retaining(&publish_id, path, refs.retain_versions).map_err(std::io::Error::other)?;
         std::fs::remove_file(path).ok();
         // The bank read the identity from the card this run wrote: it must be this run's, at this step.
@@ -272,6 +278,9 @@ pub(crate) fn train(env: &JobEnv, request: &Request, inputs: &Inputs<'_>, files:
         let mut frame = json!({"type": "published", "version": identity.version, "digest": identity.digest, "step": step, "lineage": lineage});
         if let Some(version_id) = version_id {
             frame["version_id"] = json!(version_id);
+        }
+        if let Some(artifact) = artifact {
+            frame["artifact_digest"] = json!(artifact);
         }
         published.borrow_mut().push(frame);
         *last_published.borrow_mut() = Some(step);

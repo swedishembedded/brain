@@ -441,6 +441,10 @@ async fn a_stream_retaining_its_versions_serves_each_under_an_id_of_its_own_whil
     let (frames, _) = frames_until(&app, &id, 0, |_| false).await;
     let ids: Vec<(u64, String)> = of_type(&frames, "published").iter().map(|f| (f["version"].as_u64().unwrap(), f["version_id"].as_str().unwrap().to_string())).collect();
     assert_eq!(ids, [(1, v(1)), (2, v(2)), (3, v(3))], "every published frame names its version id");
+    for frame in of_type(&frames, "published") {
+        let artifact = frame["artifact_digest"].as_str().unwrap_or_else(|| panic!("a retained version is kept in the store: {frame}"));
+        assert!(rig.store.contains(&trainjob::store::Digest::parse(artifact).unwrap()), "the store holds {artifact}");
+    }
 }
 
 #[test]
