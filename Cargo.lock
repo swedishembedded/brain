@@ -3423,6 +3423,7 @@ dependencies = [
  "brain-data",
  "brain-dbus",
  "brain-events",
+ "brain-gpu-core",
  "brain-horizon",
  "brain-llmserve",
  "brain-loader",

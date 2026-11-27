@@ -17,6 +17,7 @@ mod dbus;
 mod cards;
 mod consolidate;
 mod create;
+mod device_oom;
 mod dryrun;
 mod fleet;
 mod full_cards;

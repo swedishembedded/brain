@@ -29,6 +29,8 @@ serde = { workspace = true }
 serde_json.workspace = true
 
 [dev-dependencies]
+# A device refusing an allocation, raised the way the driver's refusal unwinds.
+brain-gpu-core.workspace = true
 # The served Qwen3-TTS checkpoints an installed speech fine-tune is listed beside, and the base's upstream file.
 brain-loader.workspace = true
 safetensors.workspace = true

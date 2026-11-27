@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use capability::{ActionResult, Blob, Invocation, Media, Outcome, Progress};
 use serde_json::{json, Value};
@@ -724,6 +724,53 @@ pub(crate) fn trainer_failure(e: brain::Error) -> String {
     }
 }
 
+/// A training run's failure, typed until it is answered: a card that refused an allocation is tried again
+/// ([`retry_device_oom`]), anything else is the job's answer.
+pub(crate) struct RunFailure {
+    message: String,
+    device_oom: bool,
+}
+
+impl From<String> for RunFailure {
+    fn from(message: String) -> RunFailure {
+        RunFailure { message, device_oom: false }
+    }
+}
+
+fn run_failure(e: brain::Error) -> RunFailure {
+    let device_oom = matches!(e, brain::Error::DeviceOutOfMemory { .. });
+    RunFailure { message: trainer_failure(e), device_oom }
+}
+
+/// How often a run whose card refused an allocation is tried again, and the back-off before the first retry (doubled
+/// before each later one): about a minute in all, enough for serving to shrink its cache or a neighbour to finish.
+const DEVICE_OOM_RETRIES: u32 = 5;
+const DEVICE_OOM_FIRST_BACKOFF: Duration = Duration::from_secs(2);
+
+/// Runs `attempt` until it succeeds or fails for a reason other than a full card; a full card is waited out (doubling
+/// back-off, at most [`DEVICE_OOM_RETRIES`] times, ended early by `cancel`) and tried again. `pause` hears each wait.
+pub(crate) fn retry_device_oom<T>(cancel: &capability::CancelToken, mut pause: impl FnMut(u32, Duration, &str), mut attempt: impl FnMut() -> Result<T, RunFailure>) -> Result<T, String> {
+    let mut backoff = DEVICE_OOM_FIRST_BACKOFF;
+    for retry in 1..=DEVICE_OOM_RETRIES + 1 {
+        match attempt() {
+            Ok(done) => return Ok(done),
+            Err(f) if !f.device_oom || retry > DEVICE_OOM_RETRIES => return Err(f.message),
+            Err(f) => {
+                pause(retry, backoff, &f.message);
+                let until = Instant::now() + backoff;
+                while Instant::now() < until {
+                    if cancel.is_cancelled() {
+                        return Err("cancelled".into());
+                    }
+                    std::thread::sleep(Duration::from_millis(50).min(until.saturating_duration_since(Instant::now())));
+                }
+                backoff *= 2;
+            }
+        }
+    }
+    unreachable!("the last attempt returns")
+}
+
 /// Where a run's datasets, base, teachers and files are: what every rank of it trains from.
 pub(crate) struct Inputs<'a> {
     pub(crate) base_dir: &'a Path,
@@ -736,7 +783,7 @@ pub(crate) struct Inputs<'a> {
 
 /// Trains `request`'s objective once, writing where `files` says, on the device this thread is scoped to: as `rank`
 /// (with the seed every rank shares) when it is one rank of a data-parallel run. Every step reaches `on_step`.
-fn train_objective(request: &Request, inputs: &Inputs<'_>, files: &RunFiles, rank: Option<(u64, brain::DataParallel)>, cancel: &capability::CancelToken, on_step: &mut dyn FnMut(&brain::FineTuneProgress)) -> Result<Trained, String> {
+fn train_objective(request: &Request, inputs: &Inputs<'_>, files: &RunFiles, rank: Option<(u64, brain::DataParallel)>, cancel: &capability::CancelToken, on_step: &mut dyn FnMut(&brain::FineTuneProgress)) -> Result<Trained, RunFailure> {
     let Inputs { base_dir, teacher_dir, teacher_adapter, staged } = *inputs;
     let completed = |status: brain::FineTuneStatus| if status == brain::FineTuneStatus::Completed { Ok(()) } else { Err("cancelled".to_string()) };
     let adapter = |path: &Option<PathBuf>| path.clone().ok_or_else(|| "train: the run completed with no adapter".to_string());
@@ -746,15 +793,15 @@ fn train_objective(request: &Request, inputs: &Inputs<'_>, files: &RunFiles, ran
             if let Some((seed, rank)) = rank {
                 ft = ft.seed(seed).data_parallel(rank);
             }
-            let outcome = ft.run_with(cancel, on_step).map_err(trainer_failure)?;
+            let outcome = ft.run_with(cancel, on_step).map_err(run_failure)?;
             completed(outcome.status)?;
             Ok(Trained { adapter: adapter(&outcome.adapter)?, record: outcome.record.clone(), adapter_sha256: outcome.adapter_digest.clone().unwrap_or_default(), evaluations: Vec::new(), resumed_at: outcome.resumed_at, summary: preference_summary(&outcome) })
         }
         Objective::Feedback => {
             if rank.is_some() {
-                return Err("train: the feedback objective does not train as ranks".to_string());
+                return Err("train: the feedback objective does not train as ranks".to_string().into());
             }
-            let outcome = build_feedback(request, base_dir, staged, files)?.run_with(cancel, on_step).map_err(trainer_failure)?;
+            let outcome = build_feedback(request, base_dir, staged, files)?.run_with(cancel, on_step).map_err(run_failure)?;
             completed(outcome.status)?;
             Ok(Trained { adapter: adapter(&outcome.adapter)?, record: outcome.record.clone(), adapter_sha256: outcome.adapter_digest.clone().unwrap_or_default(), evaluations: Vec::new(), resumed_at: outcome.resumed_at, summary: feedback_summary(&outcome) })
         }
@@ -763,7 +810,7 @@ fn train_objective(request: &Request, inputs: &Inputs<'_>, files: &RunFiles, ran
             if let Some((seed, rank)) = rank {
                 ft = ft.seed(seed).data_parallel(rank);
             }
-            let outcome = ft.run_with(cancel, on_step).map_err(trainer_failure)?;
+            let outcome = ft.run_with(cancel, on_step).map_err(run_failure)?;
             completed(outcome.status)?;
             Ok(Trained { adapter: adapter(&outcome.adapter)?, record: outcome.record.clone(), adapter_sha256: outcome.adapter_digest.clone().unwrap_or_default(), evaluations: Vec::new(), resumed_at: outcome.resumed_at, summary: distill_summary(&outcome) })
         }
@@ -772,7 +819,7 @@ fn train_objective(request: &Request, inputs: &Inputs<'_>, files: &RunFiles, ran
             if let Some((seed, rank)) = rank {
                 ft = ft.seed(seed).data_parallel(rank);
             }
-            let outcome = ft.run_with(cancel, on_step).map_err(trainer_failure)?;
+            let outcome = ft.run_with(cancel, on_step).map_err(run_failure)?;
             completed(outcome.status)?;
             let evaluations = if request.params.keep_evaluations { outcome.curve.iter().map(|p| (p.step, files.evaluations.join(format!("step-{}.safetensors", p.step)))).collect() } else { Vec::new() };
             Ok(Trained { adapter: adapter(&outcome.adapter)?, record: outcome.record.clone(), adapter_sha256: outcome.adapter_digest.clone().unwrap_or_default(), evaluations, resumed_at: outcome.resumed_at, summary: outcome.report() })
@@ -796,7 +843,7 @@ fn train_ranks(request: &Request, env: &JobEnv, inputs: &Inputs<'_>, files: &Run
                 let _ = frames.send(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64())));
             }
         };
-        train_objective(request, inputs, &rank_files[i], Some((seed, rank)), cancel, &mut on_step)
+        train_objective(request, inputs, &rank_files[i], Some((seed, rank)), cancel, &mut on_step).map_err(|f| f.message)
     };
     let mut ranks_trained = crate::parallel::train_as_ranks(&request.spread, ACTION, env, devices, brain::Sharding::Replicated, train_rank, progress)?;
     let first = ranks_trained.swap_remove(0);
@@ -856,7 +903,18 @@ pub fn run(env: &JobEnv, inv: &Invocation, devices: &[residency::Device], progre
     } else if request.spread.ranked() {
         train_ranks(&request, env, &inputs, &files, &work, devices, &inv.cancel, began, progress)?
     } else {
-        train_objective(&request, &inputs, &files, None, &inv.cancel, &mut |step| progress(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64()))))?
+        // A card that refuses an allocation mid-run (serving grew, a neighbour took memory) is waited out and the run
+        // tried again from its last saved state, so the run saves one every DEFAULT_CHECKPOINT_EVERY steps in the job's
+        // directory when it has no resumable state of its own. A seed is drawn here so every attempt is the same run.
+        let files = match files.resumable {
+            Some(_) => files,
+            None => RunFiles { resumable: Some((files.out_dir.join("oom-retry.state"), p.seed.unwrap_or_else(brain::random_seed), crate::runs::DEFAULT_CHECKPOINT_EVERY)), ..files },
+        };
+        // The waits and the steps report through the one progress sink, never at once.
+        let sink = std::cell::RefCell::new(&mut *progress);
+        let pause = |retry: u32, wait: Duration, why: &str| (sink.borrow_mut())(Progress::event(0, steps, json!({"type": "stage", "stage": format!("the card ran out of memory; retry {retry} of {DEVICE_OOM_RETRIES} in {} s from the last saved step ({why})", wait.as_secs())})));
+        let attempt = || train_objective(&request, &inputs, &files, None, &inv.cancel, &mut |step| (sink.borrow_mut())(Progress::event(step.step, step.steps, step_frame(step, began.elapsed().as_secs_f64()))));
+        retry_device_oom(&inv.cancel, pause, attempt)?
     };
     work.ensure_within_quota()?;
     // A server that runs none of a job's rank 0 answers for its ranks only: the server of rank 0 publishes the run.
