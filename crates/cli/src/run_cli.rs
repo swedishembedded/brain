@@ -170,7 +170,8 @@ ROUTING ACROSS SERVERS  (one URL for every card of a cluster)
                          and finish nothing before it is stalled: what it holds
                          is failed (504) and it leaves rotation until it
                          restarts, finishes something or is resumed (default
-                         600000)
+                         300000, under an agent step's timeout so its client
+                         can still retry)
   --route-queue N        requests that may wait in the router for a free slot
                          (default 1024)
   --drain-deadline-ms N  how long a drained upstream may finish what it runs

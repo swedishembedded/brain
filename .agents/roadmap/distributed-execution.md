@@ -227,7 +227,7 @@ Scope: Running one training job as ranks across machines, and serving one model 
       queue that never moved; sessions and cached prefixes kept sending work
       into it. An upstream reporting jobs waiting now takes no new request
       while another with room reports none; one holding work that answers,
-      streams and finishes nothing for `--upstream-stall-ms` (default 10 min)
+      streams and finishes nothing for `--upstream-stall-ms` (default 5 min)
       is stalled: its requests fail (504 or a stream error), it leaves
       rotation until it restarts, finishes something or is resumed; a restart
       drops its sessions with its prefix record. Tests:

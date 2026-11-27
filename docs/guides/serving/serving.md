@@ -221,7 +221,8 @@ on the command line instead.
   restarted upstream (a new `instance`) starts with no sessions; what was sent
   to the old process failed with its connections (502).
 - **Stalls.** An upstream that holds work (requests the router sent it, or jobs
-  it reports waiting) and for `--upstream-stall-ms` (default 600000) neither
+  it reports waiting) and for `--upstream-stall-ms` (default 300000, under
+  the step timeout of an agent client, so it can still retry) neither
   answers, streams nor finishes anything is stalled, even while its
   `/v1/health` still answers (a hung device can leave the process answering):
   what the router sent it is failed (504, or an error ending a started

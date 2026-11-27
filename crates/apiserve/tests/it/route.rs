@@ -1290,3 +1290,14 @@ async fn a_burst_never_lands_on_cards_a_fine_tune_holds() {
         assert_eq!(request.await.unwrap().0, StatusCode::OK);
     }
 }
+
+/// A stall is worth detecting only while the requests it holds are still waited for. Agent runtimes bound one step
+/// (one model call) at minutes: 480 s in the fleet of 2026-11-27, where a 600 s default stall bound fired only after
+/// every client it would have saved had timed out, so held requests vanished instead of failing over (knowledge
+/// #612). The default bound, plus one probe to notice it, leaves such a client a third of its step to retry.
+#[test]
+fn the_default_stall_bound_fires_while_an_agent_step_still_waits() {
+    const AGENT_STEP: Duration = Duration::from_secs(480);
+    let config = FleetConfig::new(Vec::new());
+    assert!(config.stall_timeout + config.health_interval <= AGENT_STEP * 2 / 3, "stall {:?} + probe {:?} against a {AGENT_STEP:?} step", config.stall_timeout, config.health_interval);
+}

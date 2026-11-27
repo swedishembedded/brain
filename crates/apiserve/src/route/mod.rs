@@ -167,7 +167,7 @@ pub struct FleetConfig {
 
 impl FleetConfig {
     /// `upstreams` with the defaults: 5 s to connect, 31 min for an answer to start (a long prefill on a busy
-    /// upstream), 10 min without progress before an upstream is stalled, health every 2 s, 256 prompts remembered per
+    /// upstream), 5 min without progress before an upstream is stalled ([`DEFAULT_STALL_TIMEOUT`]), health every 2 s, 256 prompts remembered per
     /// upstream, 1024 requests waiting at most, each for at most the serving surfaces' admit deadline, and a model
     /// spilling onto idle upstreams once its resident upstreams each carry [`DEFAULT_SPILL_LOAD`] requests of it.
     pub fn new(upstreams: Vec<UpstreamUrl>) -> FleetConfig {
@@ -230,9 +230,20 @@ impl FleetConfig {
     }
 }
 
-/// [`FleetConfig::stall_timeout`]'s default: longer than one long unstreamed generation on an otherwise idle upstream,
-/// so that alone does not read as a hang.
-pub const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(600);
+/// [`FleetConfig::stall_timeout`]'s default: five minutes.
+///
+/// A stall is worth detecting only while the requests the upstream holds are still waited for: detected, they fail
+/// with 504 and their clients can send them again elsewhere. Agent runtimes bound one step (one model call) at
+/// minutes; the fleet of 2026-11-27 ran with 480 s, and the earlier default of 600 s fired only after every client it
+/// would have saved had given up, so held requests vanished instead of failing over (knowledge #612). Five minutes
+/// plus one probe leaves such a client a third of its step to retry.
+///
+/// Against that, the bound must exceed what an upstream can legitimately do without any sign of progress: one
+/// unstreamed generation running alone. Progress is anything the upstream answers, streams or finishes for any
+/// request, so a batch shows progress whenever one of its requests ends; five minutes of a lone unstreamed request
+/// is about 10k tokens on a 27B card at single-stream speed, past an agent step's output. A deployment with longer
+/// lone generations or more patient clients sets `--upstream-stall-ms`.
+pub const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// [`FleetConfig::spill_load`]'s default: the small batch past which a cached prompt stops holding work on a busy
 /// replica against an idle one (`residency::affinity::MIN_BALANCE_SLACK`, knowledge #607), so a model spills onto an
