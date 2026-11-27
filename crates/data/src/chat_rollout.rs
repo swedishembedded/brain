@@ -68,6 +68,17 @@
 //!   differs): a log-probability is the token's given everything before it, so an importance ratio is exact only in
 //!   the context the sampler saw (a server that adds an instruction to the prompt, a producer that rewrites the
 //!   history, a template that writes an earlier answer otherwise than it was generated all change it).
+//! * A **session-merged record**: one rollout record of a whole agent session whose every sampled answer is supervised
+//!   (`"train": true`), each with its `token_ids`, `prompt_token_ids` and `behavior_logprobs`, trained as one sequence
+//!   by a run that packs answers (`pack_answers`; [`crate::chat::ChatSample::answers_packed`]): the shared context is
+//!   encoded once, and the loss covers the sampled tokens only. It is exact when the session is append-only: every
+//!   later answer's `prompt_token_ids` are the session so far (the earlier requests, the answers' sampled ids and the
+//!   turns between, as the template renders them). A record that names `prompt_token_ids` on any answer is held to that
+//!   on every later answer that carries `behavior_logprobs` (they must name `token_ids` and `prompt_token_ids`, and
+//!   those must extend the session), and is refused otherwise (rule `session_not_append_only`, naming the first answer):
+//!   a template that renders an earlier answer otherwise than it was sampled (an earlier turn's reasoning dropped), or
+//!   a compacted history, is not append-only, and its producer sends the session as one record per call. Without
+//!   packing, the same record trains as one example per answer, each in its own request.
 //! * `"truncated": true` on the record: the rollout did not reach an outcome (the token budget cut it, a step timed
 //!   out), so its reward says nothing about the action. A policy-gradient run never trains on such a record and its
 //!   reward takes no part in its group's advantages; it is counted, not drawn. A truncated rollout is masked as a
@@ -183,6 +194,11 @@ pub enum RecordRule {
     /// sequence-level estimator needs (`behavior_logprobs` on the answer, a `reward` and `group`, and the record being
     /// its whole rollout: no `rollout` key).
     TeacherScores,
+    /// A session-merged record (several supervised answers of one session trained as one sequence) whose session is
+    /// not append-only: a later answer's `prompt_token_ids` are not the session so far (the earlier requests, the
+    /// answers as they were sampled and the turns between), or a later answer with `behavior_logprobs` names no
+    /// `token_ids` and `prompt_token_ids` to show it. Its producer sends the session as one record per call instead.
+    SessionNotAppendOnly,
 }
 
 /// The training-record contract this build of brain holds records to: its name, as the example set's `manifest.json`
@@ -248,6 +264,7 @@ impl RecordRule {
             RecordRule::BehaviorSupportCount => "behavior_support_count",
             RecordRule::BehaviorSupport => "behavior_support",
             RecordRule::TeacherScores => "teacher_scores",
+            RecordRule::SessionNotAppendOnly => "session_not_append_only",
         }
     }
 }

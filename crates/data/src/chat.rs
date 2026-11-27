@@ -267,6 +267,17 @@ fn check_sampled(tok: &dyn Tokenizer, tmpl: &ChatTemplate, before: &[u32], text:
     if let Some(prompt) = &sampled.prompt {
         if let Some(at) = first_difference(prompt, before) {
             let field = format!("messages[{message}].prompt_token_ids");
+            if answer > 0 {
+                // A later answer of a session-merged record: its context is the session so far, the earlier answers as
+                // they were sampled. A request that differs from it was re-rendered or compacted after an earlier call.
+                return Err(TemplateError::of_record(RecordFault::new(RecordRule::SessionNotAppendOnly, &field), format!(
+                    "{field}: the session is not append-only: the request of supervised answer {answer} ({} ids) does not extend the session so far ({} ids: the earlier requests, the answers as they were sampled and the turns between); they first differ at position {at}, where the request holds {} and the session {}. The request was rendered otherwise than the session it continues (an earlier answer re-rendered, its reasoning dropped, a compaction), so the merged sample would score later answers in a context their sampler never saw; send the session as one record per call",
+                    prompt.len(),
+                    before.len(),
+                    show(prompt, at),
+                    show(before, at)
+                )));
+            }
             return Err(TemplateError::of_record(RecordFault::new(RecordRule::PromptTokenIdsMismatch, &field), format!(
                 "{field}: the sampler was given {} ids before supervised answer {answer} and the context the chat template renders encodes to {}: they first differ at position {at}, where the sampler was given {} and the context holds {}; the behaviour log-probabilities were taken in another context than the one the trainer would score them in",
                 prompt.len(),
@@ -707,7 +718,17 @@ impl ChatSample {
             let mut support_parts: Vec<(usize, Option<&BehaviorSupport>)> = Vec::new();
             let mut answer = 0;
             let mut context = "";
+            // A record of several answers that names the ids a request held is a session-merged record: every later
+            // answer is exact only in the context its sampler saw, which only its request's own ids can show (the
+            // template may render the session otherwise than it was sent), so each must name them.
+            let merged_session = segments.iter().any(|s| s.supervised && s.token_ids.as_ref().is_some_and(|t| t.prompt.is_some()));
             for RenderedSegment { text, supervised, behavior_logprobs, behavior_top, behavior_support, token_ids, teacher_logprobs, message, loss_weight } in segments {
+                if merged_session && *supervised && answer > 0 && behavior_logprobs.is_some() && token_ids.as_ref().is_none_or(|s| s.prompt.is_none()) {
+                    let field = format!("messages[{message}].prompt_token_ids");
+                    return Err(TemplateError::of_record(RecordFault::new(RecordRule::SessionNotAppendOnly, &field), format!(
+                        "{field}: supervised answer {answer} of a session-merged record carries behaviour log-probabilities without \"token_ids\" and \"prompt_token_ids\", so nothing shows that its request extended the session so far (the context the trainer would score it in); name both on every answer of a merged session, or send the session as one record per call"
+                    )));
+                }
                 let encoded = match token_ids {
                     Some(sampled) => {
                         let thinking_open = context.ends_with("<think>\n");
