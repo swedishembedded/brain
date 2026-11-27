@@ -25,7 +25,7 @@
 //! 1. **The cheapest active replica with a free slot** (one that is built or
 //!    already has work), by [`replica_cost`]: the prefill it still has to do
 //!    (the prompt less what its cache holds), the load it already carries
-//!    (each request weighed at the prompt over [`balance_slack`] of its slots),
+//!    (each request weighed at the prompt over its [`balance_slack`]),
 //!    and how close the request would bring its KV pool to full. A
 //!    conversation returns to the replica holding its history unless that one
 //!    is far busier; a light load is served by as few cards as possible and
@@ -239,13 +239,13 @@ pub struct RequestSize {
 }
 
 /// What running a request of `size` on `view` is expected to cost, in prompt units: the prefill still to do, plus
-/// `size.prompt / balance_slack(slots)` for every request it already carries or queues (so a replica holding the whole
-/// prompt is worth up to `balance_slack` more requests than an idle one), plus a KV penalty growing with the square of
-/// the share of its free KV the request would take, and prohibitive when it would not fit.
-pub fn replica_cost(view: &ReplicaView, size: RequestSize) -> f64 {
+/// `size.prompt / slack` for every request it already carries or queues (so a replica holding the whole prompt is
+/// worth up to `slack` more requests than an idle one; `slack` is its [`balance_slack`]), plus a KV penalty growing
+/// with the square of the share of its free KV the request would take, and prohibitive when it would not fit.
+pub fn replica_cost(view: &ReplicaView, size: RequestSize, slack: f64) -> f64 {
     let prompt = size.prompt.max(1) as f64;
     let uncached = size.prompt.saturating_sub(view.matched) as f64;
-    let busy = (view.load + view.queued) as f64 * prompt / balance_slack(view.slots) as f64;
+    let busy = (view.load + view.queued) as f64 * prompt / slack.max(1.0);
     let kv = match view.kv_free {
         None => 0.0,
         Some(free) => {
@@ -278,7 +278,14 @@ pub fn choose_replica(views: &[ReplicaView], size: RequestSize) -> usize {
     };
     let least_loaded = |of: &mut dyn Iterator<Item = usize>| of.min_by(lighter);
     let free: Vec<usize> = usable.iter().copied().filter(|&i| views[i].load < views[i].slots).collect();
-    let cheapest = free.iter().copied().filter(|&i| views[i].active).map(|i| (replica_cost(&views[i], size), i)).min_by(|a, b| a.0.total_cmp(&b.0).then_with(|| lighter(&a.1, &b.1)));
+    let share = |v: &ReplicaView| (v.load + v.queued) as f64 / v.slots.max(1) as f64;
+    let lightest = free.iter().filter(|&&i| views[i].active).map(|&i| share(&views[i])).fold(f64::INFINITY, f64::min);
+    let cheapest = free
+        .iter()
+        .copied()
+        .filter(|&i| views[i].active)
+        .map(|i| (replica_cost(&views[i], size, balance_slack(views[i].slots, lightest)), i))
+        .min_by(|a, b| a.0.total_cmp(&b.0).then_with(|| lighter(&a.1, &b.1)));
     if let Some((_, i)) = cheapest {
         return i;
     }
@@ -291,13 +298,28 @@ pub fn choose_replica(views: &[ReplicaView], size: RequestSize) -> usize {
     least_loaded(&mut pool.into_iter()).unwrap_or(0)
 }
 
-/// How many requests a replica may carry beyond another before holding the whole prompt in cache stops paying for
-/// it ([`replica_cost`]): an eighth of its slots, at least 8. Below that the cached prefill wins; past it balance does,
-/// so a prefix every request shares (one system prompt) spreads over the replicas instead of piling onto the one that
-/// served it first, and on wide replicas load counts as a share of the slots.
-pub fn balance_slack(slots: usize) -> usize {
-    (slots / 8).max(8)
+/// How many requests a replica of `slots` slots may carry beyond the lightest one before holding the whole prompt in
+/// cache stops paying for it ([`replica_cost`]), when the lightest active replica with room carries `lightest` of its
+/// slots: a quarter of that load, at least [`MIN_BALANCE_SLACK`] requests. Below that the cached prefill wins; past it
+/// balance does, so a prefix every request shares (one system prompt) or a conversation's history spreads over the
+/// replicas instead of piling onto the one that served it first.
+///
+/// The bound follows the load, not the slots: a replica's slots are what it admits, which can be far more than its
+/// card decodes at speed (a server advertising thousands), so a bound in slots let a cached prompt hold hundreds of
+/// requests on one card while others idled (knowledge #607). Against an idle replica the bound is
+/// [`MIN_BALANCE_SLACK`]: a cached prompt saves one prefill, an idle card serves every request after it. Under an even
+/// load it grows with the load, so a quarter's imbalance is the most a cache hit buys and conversations stay put while
+/// the fleet is balanced; moving one changes the difference by one request, far less than the bound, so it does not
+/// swing back. Load counts as a share of the slots, so replicas of different widths balance by share.
+pub fn balance_slack(slots: usize, lightest: f64) -> f64 {
+    let lightest = if lightest.is_finite() { lightest.max(0.0) } else { 0.0 };
+    (lightest * slots as f64 / 4.0).max(MIN_BALANCE_SLACK as f64)
 }
+
+/// The fewest requests a replica may carry beyond an idle one before a cached prompt stops keeping work there: a small
+/// batch, which decodes about as fast as one request, so piling it onto the cached replica costs little; past it an
+/// idle card is worth more than the prefill a hit saves.
+pub const MIN_BALANCE_SLACK: usize = 8;
 
 /// The request parameters that shape the start of a rendered chat prompt, before the first message: everything a
 /// request of one conversation repeats ahead of its history.
@@ -582,11 +604,16 @@ mod tests {
     fn a_prefix_every_request_shares_does_not_pin_a_wide_replica_while_others_idle() {
         // Replicas with hundreds of slots are never full: the hit must give way once its replica carries much more
         // than the least loaded one, or one shared system prompt sends every request to one replica.
+        // However many slots they advertise: the bound is in requests, a quarter of the lightest load, at least 8.
         let hit = MIN_USEFUL_PREFIX * 4;
-        let wide = |load, matched| ReplicaView { load, slots: 256, queued: 0, kv_free: None, active: true, can_run: true, matched };
-        assert_eq!(choose(&[wide(20, hit), wide(0, 0)]), 0, "a little more load is worth the cached prefill");
-        assert_eq!(choose(&[wide(40, hit), wide(0, 0)]), 1, "far more load is not");
-        assert_eq!(choose(&[wide(40, hit), wide(10, hit / 2), wide(0, 0)]), 1, "half the prompt cached on a lightly loaded replica is cheapest");
+        for slots in [256, 4096] {
+            let wide = |load, matched| ReplicaView { load, slots, queued: 0, kv_free: None, active: true, can_run: true, matched };
+            assert_eq!(choose(&[wide(6, hit), wide(0, 0)]), 0, "a small batch is worth the cached prefill");
+            assert_eq!(choose(&[wide(20, hit), wide(0, 0)]), 1, "a real batch is not worth an idle card");
+            assert_eq!(choose(&[wide(64, hit), wide(2, hit / 2), wide(0, 0)]), 1, "half the prompt cached on a lightly loaded replica is cheapest");
+            assert_eq!(choose(&[wide(70, hit), wide(60, 0)]), 0, "under an even load a conversation stays where it is cached");
+            assert_eq!(choose(&[wide(80, hit), wide(60, 0)]), 1, "past a quarter's imbalance it moves");
+        }
     }
 
     #[test]

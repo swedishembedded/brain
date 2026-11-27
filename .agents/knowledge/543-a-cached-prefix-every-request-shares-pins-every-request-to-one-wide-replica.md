@@ -15,3 +15,6 @@ hit only among free replicas within `balance_slack(slots)` requests (an eighth o
 least-loaded share; past it load decides, and the next replica records the prefix too. With it the same workload ran
 at 4907 tok/s (round-robin 4978) while multi-turn conversations kept their 0.82 hit rate. Any affinity policy keyed
 on cache state needs a load bound that scales with the replica's width, not a "full" test.
+
+Superseded in its bound by #607: a bound in slots fails when the slots are an admission figure, not a decode
+rate; the bound now follows the lightest replica's load.

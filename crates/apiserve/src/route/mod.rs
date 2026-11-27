@@ -18,8 +18,11 @@
 //!
 //! A client sees one URL and one key. Each upstream is a [`Member`] of the [`Fleet`]; a request goes to one of them,
 //! chosen by the policy the in-process dispatcher uses for replicas of a model (`residency::affinity`): the upstream
-//! whose prefix cache holds the longest useful prefix of the prompt, among those with a free slot, else the one with the
-//! lowest load relative to its slots. Requests and responses pass through unbuffered (a streamed completion reaches the
+//! whose prefix cache holds the longest useful prefix of the prompt, among those with a free slot, unless it carries
+//! more than a few requests (a quarter of the lightest load, at least 8) beyond another, else the one with the lowest
+//! load relative to its slots. The bound is in requests, not slots: an upstream's `decode_slots` is what it admits,
+//! often far more than its card decodes at speed, so a cached prompt never holds a batch on one card while another
+//! idles. Requests and responses pass through unbuffered (a streamed completion reaches the
 //! client token by token), and a client that hangs up closes its upstream connection, which cancels the generation.
 //!
 //! What the router guarantees:
@@ -53,8 +56,10 @@
 //!   Spilling is thrash-free: a card changes model only while nothing runs on it and the model it gains has a real
 //!   batch elsewhere, and once loaded there the model is resident like any other. Without it a wide model (a 4B with
 //!   hundreds of decode slots per card) never fills its one resident card and every card holding an idle model waits.
-//! - **Conversations stay together.** Requests carrying the same `prompt_cache_key` (OpenAI's routing hint) go to
-//!   the same upstream while it has a free slot; without one, the prefix decides.
+//! - **Conversations stay together while the fleet is balanced.** Requests carrying the same `prompt_cache_key`
+//!   (OpenAI's routing hint) go to the same upstream, weighed as holding their whole prompt, so they leave it only
+//!   when it carries more than the balance bound beyond another upstream with room, and then stay where they went;
+//!   without a key, the prefix decides.
 //! - **Only what is known is forwarded.** The JSON body is forwarded byte for byte after its top level is checked; the
 //!   upstream sees only `Host`, `Content-Type`, `Content-Length`, `Accept`, the router's `X-Request-Id` for the request
 //!   and the router's own upstream key, never the client's key or any other header. The client sees only the
@@ -226,10 +231,9 @@ impl FleetConfig {
 /// so that alone does not read as a hang.
 pub const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// [`FleetConfig::spill_share`]'s default: an eighth of the slots, the load at which the affinity policy already
-/// prefers balance over a whole cached prompt (`residency::affinity::balance_slack`, knowledge #543). A model carrying
-/// that much on every card it is loaded on has a batch that keeps another card's decode busy, so loading it on a card
-/// that does nothing pays back its load; below it, the one card it is loaded on serves it as one batch.
+/// [`FleetConfig::spill_share`]'s default: an eighth of the model's slots on its card. A model carrying that much on
+/// every card it is loaded on has a batch that keeps another card's decode busy, so loading it on a card that does
+/// nothing pays back its load; below it, the one card it is loaded on serves it as one batch.
 pub const DEFAULT_SPILL_SHARE: f64 = 0.125;
 
 /// The fewest requests for a model every upstream where it is resident must carry before it spills: under that the
@@ -854,14 +858,16 @@ impl Fleet {
             open.retain(|(_, view, _)| view.queued == 0);
         }
         let mut sessions = self.sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        // A session goes back to its upstream while that one has a free slot; otherwise the policy chooses, and the
-        // session follows.
-        let sticky = session.and_then(|key| sessions.get(key)).and_then(|i| open.iter().position(|(o, _, _)| *o == i));
-        let chosen = sticky.unwrap_or_else(|| {
-            let views: Vec<ReplicaView> = open.iter().map(|(_, v, _)| *v).collect();
-            let size = key.size(&chains[&open[0].2]);
-            choose_replica(&views, size)
-        });
+        // A session's upstream holds its whole history: it is weighed as holding the whole prompt, so the session goes
+        // back there unless that upstream carries more than the balance bound beyond another (`balance_slack`), and
+        // then follows the one the policy chooses. A rule of "while it has a free slot" pinned sessions to a card
+        // whose advertised slots never fill.
+        let size = key.size(&chains[&open[0].2]);
+        let mut views: Vec<ReplicaView> = open.iter().map(|(_, v, _)| *v).collect();
+        if let Some(home) = session.and_then(|key| sessions.get(key)).and_then(|i| open.iter().position(|(o, _, _)| *o == i)) {
+            views[home].matched = views[home].matched.max(size.prompt);
+        }
+        let chosen = choose_replica(&views, size);
         let (index, _, namespace) = &open[chosen];
         if let Some(key) = session {
             sessions.record(key, *index);

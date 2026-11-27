@@ -586,6 +586,56 @@ async fn a_session_key_keeps_a_conversation_on_one_upstream() {
     assert_eq!(b.hits().iter().filter(|h| h.body["prompt_cache_key"] == "session-7").count(), 4, "the key is forwarded");
 }
 
+/// A server's `decode_slots` is an admission bound, not what its card decodes at speed: a card advertising thousands
+/// of slots is busy long before they fill. A batch on one upstream therefore spreads onto idle upstreams where the
+/// model is just as resident, even when the busy one holds every request's prefix and the conversation's session: a
+/// cached prompt is worth a few requests of load, never a whole idle card. Moved, a session stays where it went.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_batch_on_one_upstream_spreads_onto_idle_ones_whatever_prefix_or_session_it_holds() {
+    let mut mocks = Vec::new();
+    for name in ["a", "b", "c", "d"] {
+        mocks.push(mock(name, 3466, 4096, &["m"]).await);
+    }
+    let urls: Vec<String> = mocks.iter().map(|(_, u)| u.clone()).collect();
+    for (m, _) in &mocks[1..] {
+        m.healthy.store(false, Ordering::SeqCst);
+    }
+    let (addr, fleet, _stop) = router(&urls).await;
+    let a = &mocks[0].0;
+    let system = "You are the agent. ".repeat(400);
+    let session = |turns: usize| {
+        let mut body = conversation("m", &system, turns);
+        body["prompt_cache_key"] = json!("agent-0");
+        body
+    };
+    // While `a` is the only upstream, the session starts there and a batch of 64 sharing its system prompt runs there.
+    assert_eq!(chat(addr, session(1)).await.2["upstream"], "a");
+    let mut batch = Vec::new();
+    for agent in 0..64 {
+        let mut body = conversation("m", &system, 1);
+        body["messages"][1]["content"] = json!(format!("task {agent}"));
+        body["hold"] = json!(true);
+        batch.push(tokio::spawn(chat(addr, body)));
+    }
+    until("the batch to run on a", || a.count() == 65).await;
+    // The other cards come up idle, with the model resident (every card serves it alike).
+    for (m, _) in &mocks[1..] {
+        m.healthy.store(true, Ordering::SeqCst);
+    }
+    fleet.probe().await;
+    // The session follows the idle card instead of queueing its turn behind the batch, and stays there.
+    assert_eq!(chat(addr, session(2)).await.2["upstream"], "b", "the session leaves the loaded upstream");
+    assert_eq!(chat(addr, session(3)).await.2["upstream"], "b", "and stays where it went");
+    // A new conversation sharing the batch's system prompt goes to an idle card too.
+    let fresh = chat(addr, conversation("m", &system, 1)).await.2["upstream"].clone();
+    assert_ne!(fresh, "a", "a cached prompt does not outweigh an idle card");
+    assert_eq!(a.count(), 65, "nothing more was sent to the loaded upstream");
+    a.release.add_permits(64);
+    for request in batch {
+        assert_eq!(request.await.unwrap().0, StatusCode::OK);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_adapter_is_routed_only_to_the_upstreams_serving_it_and_the_status_reports_rates() {
     let (a, ua) = mock("a", 8, 16, &["base", "base:tuned-a"]).await;
