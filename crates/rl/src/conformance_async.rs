@@ -20,6 +20,10 @@
 //!   log-probability renormalised over that support (one forward with the support's ids as extra targets, equal to a
 //!   softmax over the support's logits of the model's own `logits_all`), and the weights the estimator installs for it
 //!   are one backward equal to the sum of their label equivalents; a model whose head takes no extra targets refuses it.
+//! * **merged sessions:** an append-only agent session merged into one sample (every sampled answer supervised, the
+//!   shared context once) trains, under the token sum, exactly the gradient of its records of one call each: the
+//!   equivalence a session-merged record ([`data::chat_rollout`]) rests on, which holds only if the architecture's
+//!   forward is causal and a row's padding reaches none of its positions.
 //! * **policy publication:** the adapter the run hands to its publisher every step is a file the architecture's own
 //!   serving bank takes (the check is the caller's, [`Publication::check`]: the bank lives above this crate).
 //!
@@ -31,7 +35,7 @@ use std::sync::{Arc, Mutex};
 
 use model::conformance::{build, build_exact, Subject, BATCH, RANK, SEQ};
 use model::training::require_token_objectives;
-use model::{AdapterPublish, AdapterSnapshots, Batch, FitControl, FitOpts, Model, ModelConfig, StepReport, IGNORE};
+use model::{AdapterPublish, AdapterSnapshots, Batch, FitControl, FitOpts, Model, ModelConfig, Objective, StepReport, StepVerdict, Supply, IGNORE};
 use serde_json::Value;
 
 use crate::objective::external::PolicyGradientConfig;
@@ -237,7 +241,7 @@ fn score_centring<M: Model>(subject: &Subject<M>, seed: u64) -> Result<Verdict, 
     // cancelled by the tail's.
     let loss = PgLoss { centring_low: 1e-6, centring_high: 1.5, ..config(Estimator::ScoreCentred).loss };
     let spec = loss.spec();
-    let batch = PgBatch { targets: &targets, old_lp: &old_lp, ref_lp: None, advantage: &advantage, is_weight: None, top: Some(SamplerTop { k: K, ids: &ids, logprobs: &sampler }), support: None };
+    let batch = PgBatch { targets: &targets, old_lp: &old_lp, ref_lp: None, advantage: &advantage, is_weight: None, top: Some(SamplerTop { k: K, ids: &ids, logprobs: &sampler }), support: None, scale: None };
     let denominator = 7.0f32;
 
     m.set_batch(Batch::Lm { tokens: &tokens, targets: &targets });
@@ -377,13 +381,80 @@ fn support_replay<M: Model>(subject: &Subject<M>, seed: u64) -> Result<Verdict, 
     let old_lp: Vec<f32> = (0..n).map(|i| if supervised(i) { new_lp[i] - 0.1 } else { 0.0 }).collect();
     let advantage: Vec<f32> = (0..n).map(|i| if supervised(i) { if i % 2 == 0 { 1.0 } else { -0.5 } } else { f32::NAN }).collect();
     let spec = config(Estimator::ClippedSurrogate).loss.spec();
-    let batch = PgBatch { targets: &targets, old_lp: &old_lp, ref_lp: None, advantage: &advantage, is_weight: None, top: None, support: Some(SamplerSupport { k: K, ids: &ids, logprobs: &sampler }) };
+    let batch = PgBatch { targets: &targets, old_lp: &old_lp, ref_lp: None, advantage: &advantage, is_weight: None, top: None, support: Some(SamplerSupport { k: K, ids: &ids, logprobs: &sampler }), scale: None };
     let (weights, terms) = weigh(&new_lp, Some(&new_slots), &batch, &spec);
     if !terms.finite || weights.extra.as_ref().is_none_or(|e| e.iter().all(|&c| c == 0.0)) {
         return Err(format!("{name}: the weights over the supports are not finite, or renormalise nothing"));
     }
     one_backward_is_its_label_equivalents(subject, seed, &m, &tokens, &targets, &ids, K, &weights, "support-normalised")?;
     Ok(Verdict::Holds)
+}
+
+/// The adapters' gradient of one streamed step over `examples` (one group), on `m` as it is; `seed` is the run's.
+fn step_gradient<M: Model>(m: &mut M, examples: Vec<StreamExample>, seed: u64) -> Result<Vec<(String, Vec<f32>)>, String> {
+    let group = StreamGroup { key: "session".to_string(), examples };
+    let tokens = group.policy_tokens();
+    let settings = StreamSettings { step_tokens: tokens, queue_tokens: tokens, max_staleness: None, block: SEQ as usize, top_k: None, support: None };
+    let feed = RolloutFeed::new(settings, || true, Default::default())?;
+    feed.open();
+    let mut objective = StreamedPolicyGradient::new(Arc::clone(&feed), config(Estimator::ClippedSurrogate), BATCH as usize)?;
+    Objective::<M>::prepare(&mut objective, m).map_err(|e| e.to_string())?;
+    Objective::<M>::begin(&mut objective, seed, 0);
+    feed.offer(vec![group]).map_err(|e| format!("{e:?}"))?;
+    if !matches!(Objective::<M>::supply(&mut objective), Supply::Ready) {
+        return Err("the step's group was not supplied".to_string());
+    }
+    m.zero_grads();
+    Objective::<M>::micro_steps(&mut objective, m, &mut data::rng::Rng::new(seed), 1);
+    m.poll_wait();
+    if !matches!(Objective::<M>::step_verdict(&mut objective), StepVerdict::Apply) {
+        return Err("the step was not finite".to_string());
+    }
+    Ok(m.param_names().into_iter().filter(|n| model::adapter::device::is_adapter_param(n)).map(|n| {
+        let g = m.read_grad(&n);
+        (n, g)
+    }).collect())
+}
+
+/// Merged sessions on `subject`: two append-only sessions of a group (three calls and two, rewarded apart) as records
+/// of one call each, and each merged into one sample; under the token sum the two steps' gradients agree. Built at
+/// the exact fp32 arithmetic, so what differs is the order of a sum.
+fn merged_sessions<M: Model>(subject: &Subject<M>, seed: u64) -> Result<(), String> {
+    let name = subject.name;
+    let (mut m, _) = build_exact(subject, Some(RANK), BATCH, seed);
+    model::conformance_grad::randomize_adapters(&m, seed);
+    let vocab = ModelConfig::vocab(m.config());
+    // Session tokens: a context token, then (answer, observation) per call; the last call's observation never sent.
+    let sessions: [(&[u32], f32); 2] = [(&[1, 2, 3, 4, 5, 6], 1.0), (&[7, 8, 9, 10], -1.0)];
+    let behavior = |at: usize| -1.0 - 0.1 * (at % 5) as f32;
+    let (mut per_call, mut merged) = (Vec::new(), Vec::new());
+    for (ids, advantage) in sessions {
+        let ids: Vec<u32> = ids.iter().map(|t| t % vocab).collect();
+        // Answers sit at the odd positions: call k's request is everything before its answer.
+        let answers: Vec<usize> = (1..ids.len()).step_by(2).collect();
+        let at_answers = |len: usize, supervised: &dyn Fn(usize) -> bool| {
+            let mask: Vec<bool> = (0..len).map(supervised).collect();
+            let behavior = (0..len).map(|t| if mask[t] { behavior(t) } else { f32::NAN }).collect();
+            StreamExample { ids: ids[..len].to_vec(), mask, behavior, advantage, policy_version: None, top: None, support: None }
+        };
+        for &a in &answers {
+            per_call.push(at_answers(a + 1, &|t| t == a));
+        }
+        merged.push(at_answers(ids.len(), &|t| answers.contains(&t)));
+    }
+    let want = step_gradient(&mut m, per_call, seed)?;
+    let got = step_gradient(&mut m, merged, seed)?;
+    let largest = want.iter().flat_map(|(_, w)| w.iter()).fold(0.0f32, |a, &b| a.max(b.abs()));
+    if largest == 0.0 {
+        return Err(format!("{name}: the per-call step moved no adapter"));
+    }
+    for ((tensor, g), (_, w)) in got.iter().zip(&want) {
+        let off = g.iter().zip(w).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+        if off > 1e-4 * largest {
+            return Err(format!("{name}: {tensor}: a merged session's gradient is {off:e} from its per-call records' (largest gradient {largest:e}); the forward is not causal, or a row's padding reaches it"));
+        }
+    }
+    Ok(())
 }
 
 /// Run A49 for `subject` as `declares` says it should behave, publishing through `publication` when the architecture
@@ -404,6 +475,7 @@ pub fn run_async<M: Model>(subject: &Subject<M>, declares: AsyncDeclares, public
     }
     let published = Mutex::new(Vec::new());
     online(subject, seed, publication, dir, &published)?;
+    merged_sessions(subject, seed)?;
     let policy_publication = match publication {
         None => Verdict::Refused("it serves no adapters: no bank takes a published version".to_string()),
         Some(_) => {

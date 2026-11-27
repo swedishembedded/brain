@@ -121,7 +121,7 @@ fn support_replay_is_trls() {
         let (targets, old, adv, bsl) = ([label], [f(&case["behavior_logprob"]) as f32], [f(&case["advantage"]) as f32], [f(&case["behavior_support_logprob"]) as f32]);
         let band = CentringBand { low: f(&case["low"]) as f32, high: f(&case["high"]) as f32 };
         let spec = PgSpec { band: ClipBand::new(0.2, 0.2), kl_beta: 0.0, estimator: PgEstimator::ScoreCentred(band) };
-        let batch = PgBatch { targets: &targets, old_lp: &old, ref_lp: None, advantage: &adv, is_weight: None, top: Some(SamplerTop { k: top.len(), ids: &top, logprobs: &btl }), support: Some(SamplerSupport { k: support.len(), ids: &support, logprobs: &bsl }) };
+        let batch = PgBatch { targets: &targets, old_lp: &old, ref_lp: None, advantage: &adv, is_weight: None, top: Some(SamplerTop { k: top.len(), ids: &top, logprobs: &btl }), support: Some(SamplerSupport { k: support.len(), ids: &support, logprobs: &bsl }), scale: None };
         let (weights, terms) = weigh(&new_lp, Some(&new_slots), &batch, &spec);
         let norm = model::head_ce::renormalise_over_support(new_lp[0], &new_slots, &support).unwrap();
         close(name, "support-normalised log-probability", norm.label, f(&case["log_prob"]));

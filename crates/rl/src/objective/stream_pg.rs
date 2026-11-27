@@ -15,7 +15,15 @@
 //! ([`model::Objective::supply`]) until [`StreamSettings::step_tokens`] policy tokens are queued, takes whole groups in
 //! arrival order until the step holds that many, and trains them as one step of the shared policy-gradient batch
 //! ([`super::pg_batch`]): the gradient of a step is the sum over its policy tokens divided by the step's own count of
-//! them (`token-sum`) or by its sequences times a constant (`constant-length`), however many micro-batches hold them.
+//! them (`token-sum`), by its sequences times a constant (`constant-length`), or the mean over its sequences of each
+//! sequence's own per-token mean (`seq-mean`), however many micro-batches hold them.
+//!
+//! A sequence is one record as it was rendered: a record per model call is one sequence per call, so under every
+//! aggregation an episode of many calls weighs by its calls (and, under the token sum, by their tokens). A
+//! session-merged record ([`data::chat_rollout`]: a whole append-only session, every sampled answer supervised, trained
+//! with `pack_answers`) is one sequence for the episode: under the token sum it trains exactly what its per-call records
+//! train (the same tokens in the same contexts, the shared context forwarded once), and under the per-sequence mean
+//! every episode of a step weighs alike, whatever its count of calls.
 //!
 //! What a step trains is a function of the records and their order alone: the same records in the same order give the
 //! same steps however many offers carried them.
@@ -34,7 +42,7 @@
 //! The behaviour log-probabilities are the sampler's own (`behavior_logprobs` on every policy token): a stream's
 //! records were drawn by served versions this run cannot replay, so the start-of-run proxy has no meaning here and is
 //! refused, as are what this objective does not yet train (importance correction, teacher contexts, images, the
-//! numerics gate, a per-sequence mean). The estimator is the configuration's: the clipped surrogate, or the
+//! numerics gate). The estimator is the configuration's: the clipped surrogate, or the
 //! score-centred one over the sampler's top-K, whose K the stream fixes before the run ([`StreamSettings::top_k`]).
 
 use std::collections::{HashSet, VecDeque};
@@ -120,9 +128,6 @@ pub fn check_streamable(cfg: &PolicyGradientConfig, top_k: Option<usize>) -> Res
     }
     if cfg.kv_roundtrip.is_some() {
         return refuse("does not replay a KV round trip");
-    }
-    if cfg.loss.loss_agg == LossAgg::SeqMean {
-        return refuse("normalises each step over its own tokens; name loss_agg token-sum (or constant-length): a per-sequence mean needs one sequence per micro-batch and a fixed count of them per step");
     }
     match (cfg.loss.spec().estimator.needs_sampler_top(), top_k) {
         (true, None) => return refuse("with estimator score-centred centres over the sampler's top-K: name its K (stream.top_k), which every record carries"),
@@ -611,7 +616,23 @@ impl StreamedPolicyGradient {
                         }
                     }
                 }
-                Laid { tokens, targets, old_lp, advantage, ref_lp: None, rows: rows.len(), top, support }
+                // A per-sequence mean: each row's terms by its own count of supervised positions, the step by its
+                // count of sequences ([`LossAgg::SeqMean`]).
+                let (scale, sequences) = if self.cfg.loss.loss_agg == LossAgg::SeqMean {
+                    let mut scale = vec![0.0f32; targets.len()];
+                    let mut sequences = 0;
+                    for (row, chunk) in targets.chunks(block).zip(scale.chunks_mut(block)) {
+                        let n = row.iter().filter(|&&t| t != IGNORE).count();
+                        if n > 0 {
+                            sequences += 1;
+                            chunk.iter_mut().for_each(|s| *s = 1.0 / n as f32);
+                        }
+                    }
+                    (Some(scale), sequences)
+                } else {
+                    (None, 0)
+                };
+                Laid { tokens, targets, old_lp, advantage, ref_lp: None, rows: rows.len(), sequences, top, support, scale }
             })
             .collect()
     }
@@ -669,6 +690,10 @@ struct Laid {
     advantage: Vec<f32>,
     ref_lp: Option<Vec<f32>>,
     rows: usize,
+    /// Rows with a supervised position: the sequences a per-sequence mean averages over.
+    sequences: usize,
+    /// Under a per-sequence mean, `1 / n` at every position of a row of `n` supervised positions.
+    scale: Option<Vec<f32>>,
     /// The sampler's top-K at each position, `[rows * block * k]`, under the score-centred estimator.
     top: Option<(Vec<u32>, Vec<f32>)>,
     /// The support of each position's target (`[rows * block * n]` ids, `[rows * block]` the sampler's figure within
@@ -680,7 +705,7 @@ impl Laid {
     fn batch(&self, settings: &StreamSettings) -> PgBatch<'_> {
         let top = self.top.as_ref().zip(settings.top_k).map(|((ids, logprobs), k)| SamplerTop { k, ids, logprobs });
         let support = self.support.as_ref().zip(settings.support).map(|((ids, logprobs), k)| SamplerSupport { k, ids, logprobs });
-        PgBatch { targets: &self.targets, old_lp: &self.old_lp, ref_lp: self.ref_lp.as_deref(), advantage: &self.advantage, is_weight: None, top, support }
+        PgBatch { targets: &self.targets, old_lp: &self.old_lp, ref_lp: self.ref_lp.as_deref(), advantage: &self.advantage, is_weight: None, top, support, scale: self.scale.as_deref() }
     }
 }
 
@@ -754,6 +779,7 @@ impl<M: Model> Objective<M> for StreamedPolicyGradient {
         let rows: usize = laid.iter().map(|l| l.rows).sum();
         let denominator = match self.cfg.loss.loss_agg {
             LossAgg::ConstantLength(n) => Some(rows.max(1) as f32 * n as f32),
+            LossAgg::SeqMean => Some(laid.iter().map(|l| l.sequences).sum::<usize>().max(1) as f32),
             agg => agg.denominator(rows, supervised, 1),
         };
         let spec = self.cfg.loss.spec();

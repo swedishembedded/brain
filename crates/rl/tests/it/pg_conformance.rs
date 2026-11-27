@@ -80,7 +80,7 @@ struct Term {
 /// The objective as a training step runs it: one supervised position through [`weigh`].
 fn brain_term(t: &Token) -> Term {
     let (targets, old, refs, adv, w) = ([1u32], [t.old], [t.ref_lp.unwrap_or(0.0)], [t.adv], [t.w]);
-    let batch = PgBatch { targets: &targets, old_lp: &old, ref_lp: t.ref_lp.map(|_| &refs[..]), advantage: &adv, is_weight: Some(&w), top: None, support: None };
+    let batch = PgBatch { targets: &targets, old_lp: &old, ref_lp: t.ref_lp.map(|_| &refs[..]), advantage: &adv, is_weight: Some(&w), top: None, support: None, scale: None };
     let (weights, terms) = weigh(&[t.new], None, &batch, &PgSpec::clipped(t.band, t.beta));
     Term { ratio: terms.ratio_sum, kl: (terms.kl_tokens > 0).then_some(f64::from(terms.kl_sum)), loss: f64::from(terms.loss), weight: f64::from(weights.label[0]), clipped: terms.clipped == 1, dual_clipped: terms.dual_clipped == 1 }
 }
@@ -166,7 +166,7 @@ fn brain_step(agg: LossAgg, spec: &PgSpec, rows: &[AggRow]) -> (f64, Vec<Vec<f64
     for row in rows {
         let targets: Vec<u32> = row.supervised.iter().map(|&s| if s { 1 } else { IGNORE }).collect();
         let adv = vec![row.adv; targets.len()];
-        let batch = PgBatch { targets: &targets, old_lp: &row.old, ref_lp: Some(&row.ref_lp), advantage: &adv, is_weight: None, top: None, support: None };
+        let batch = PgBatch { targets: &targets, old_lp: &row.old, ref_lp: Some(&row.ref_lp), advantage: &adv, is_weight: None, top: None, support: None, scale: None };
         let (weights, terms) = weigh(&row.new, None, &batch, spec);
         let den = f64::from(agg.denominator(1, total, k).unwrap_or(terms.supervised.max(1) as f32));
         loss += f64::from(terms.loss) / den / k as f64;

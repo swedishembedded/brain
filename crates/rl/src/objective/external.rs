@@ -794,7 +794,7 @@ struct Laid {
 
 impl Laid {
     fn batch(&self) -> PgBatch<'_> {
-        PgBatch { targets: &self.targets, old_lp: &self.old_lp, ref_lp: self.has_ref.then_some(&self.ref_lp[..]), advantage: &self.advantage, is_weight: self.is_weight.as_deref(), top: self.top.as_ref().map(|(k, ids, logprobs)| SamplerTop { k: *k, ids, logprobs }), support: self.support.as_ref().map(|(k, ids, logprobs)| SamplerSupport { k: *k, ids, logprobs }) }
+        PgBatch { targets: &self.targets, old_lp: &self.old_lp, ref_lp: self.has_ref.then_some(&self.ref_lp[..]), advantage: &self.advantage, is_weight: self.is_weight.as_deref(), top: self.top.as_ref().map(|(k, ids, logprobs)| SamplerTop { k: *k, ids, logprobs }), support: self.support.as_ref().map(|(k, ids, logprobs)| SamplerSupport { k: *k, ids, logprobs }), scale: None }
     }
 }
 

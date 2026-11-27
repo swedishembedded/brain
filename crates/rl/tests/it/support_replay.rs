@@ -101,7 +101,7 @@ fn a_replayed_support_starts_at_ratio_one_and_the_whole_row_figure_does_not() {
     let drawn = draw_from(&m, 5);
     let l = lay_out(&drawn);
     let spec = PgSpec::clipped(ClipBand::new(0.2, 0.2), 0.0);
-    let replayed = PgBatch { targets: &l.targets, old_lp: &l.whole, ref_lp: None, advantage: &l.advantage, is_weight: None, top: None, support: Some(SamplerSupport { k: K, ids: &l.ids, logprobs: &l.sampler }) };
+    let replayed = PgBatch { targets: &l.targets, old_lp: &l.whole, ref_lp: None, advantage: &l.advantage, is_weight: None, top: None, support: Some(SamplerSupport { k: K, ids: &l.ids, logprobs: &l.sampler }), scale: None };
     Model::set_batch(&m, Batch::Lm { tokens: &drawn.tokens, targets: &l.targets });
     install_sampler_ids(&m, &replayed, &spec).unwrap();
     let _ = Model::forward(&m);
@@ -112,7 +112,7 @@ fn a_replayed_support_starts_at_ratio_one_and_the_whole_row_figure_does_not() {
     let off = (terms.ratio_min - 1.0).abs().max((terms.ratio_max - 1.0).abs());
     assert!(off < 2e-5, "replayed: the ratio at step 0 is one at every token: [{}, {}]", terms.ratio_min, terms.ratio_max);
     // Without replay: the sampler's figure, the distribution that drew the token, against the whole row.
-    let biased = PgBatch { targets: &l.targets, old_lp: &l.sampler, ref_lp: None, advantage: &l.advantage, is_weight: None, top: None, support: None };
+    let biased = PgBatch { targets: &l.targets, old_lp: &l.sampler, ref_lp: None, advantage: &l.advantage, is_weight: None, top: None, support: None, scale: None };
     let (_, terms) = weigh(&new_lp, None, &biased, &spec);
     assert!(terms.ratio_max < 0.999, "not replayed: the ratio sits below one, at the support's mass: max {}", terms.ratio_max);
     for at in (0..T).filter(|&at| l.targets[at] != IGNORE) {
@@ -230,6 +230,7 @@ impl<M: Model> Harness<M> {
             is_weight: None,
             top: centring.then_some(SamplerTop { k: K, ids: &self.l.ids, logprobs: &self.top_whole }),
             support: Some(SamplerSupport { k: K, ids: &self.l.ids, logprobs: &self.l.sampler }),
+            scale: None,
         }
     }
 

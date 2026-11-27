@@ -388,7 +388,44 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       widths): 1024 rows x 32,000-token vocabulary, the sparse backward 0.45 s at K 1 and 0.52 s at K 256 against
       0.42-0.44 s for the weighted backward, so the scan was kept (knowledge #618). Open: measure it on a card at K 256
       (nsys); in-process online GRPO still records no supports (its sampler is the run's own).
+- [x] **Session-merged samples** (A40-A41, lane rl-merge, 2026-11-27; knowledge 619). Measured first: a stream step
+      weighs an episode by its call records (`token-sum`: by their policy tokens; `constant-length` and the offline
+      `seq-mean`: by their count), so a 60-call episode outweighs a 2-call one 30:1 at equal call length
+      (`rl` `it::session_samples::a_streamed_step_weighs_an_episode_by_its_call_records_so_sixty_calls_outweigh_two_thirty_to_one`),
+      and each call re-forwards the context the earlier calls built. The merged form is the existing packed rollout
+      record: one record of the whole session, every sampled answer `"train": true` with `token_ids`,
+      `prompt_token_ids`, `behavior_logprobs` (and top-K / support when sampled so), trained with `pack_answers: true`
+      (`ChatSample::answers_packed`; batch, SFT and the stream job alike). New: a packed record that names
+      `prompt_token_ids` on any answer is held to the append-only property, every later answer with behaviour
+      log-probabilities naming `token_ids` + `prompt_token_ids` that equal the session so far, else refused by rule
+      `session_not_append_only` naming the answer (`data` `it::chat_session_records`: a template that drops an earlier
+      answer's reasoning is refused, each of its call records valid alone). A packed record naming no
+      `prompt_token_ids` keeps the older packed semantics (the template's history; unvalidated, as before). The contract
+      example set and `CONTRACT_DIGEST` are unchanged (the rule depends on the run's packing, not on the record). The
+      stream now trains `seq-mean` too (each row's terms by its own supervised count through `PgBatch::scale`, the step
+      by its sequences), so merged sessions can weigh every episode alike; `token-sum` stays the setting under which a
+      merged sample equals its per-call records. Oracles: `rl` `it::session_samples` (merged vs per-call gradient under
+      `token-sum`, relative gap 3.4e-7; `seq-mean` over two merged sessions is the mean of each alone), and the A49
+      conformance check `merged sessions` on every architecture (qwen3, qwen35, qwen35moe, ricursive, inkling2 at the
+      exact fp32 GEMM, tolerance 1e-4 of the largest gradient; checked to fail with one answer unmasked). Cost on the
+      CPU toy (4 sessions x 12 calls, 48-token context, 12-token answers, 20-token observations): 11328 sequence tokens
+      (13568 forwarded) per call against 1648 (1664) merged, forward+backward 0.43 s against 0.05 s, same 576 policy
+      tokens. Producer contract (for an orchestrator's call projection): emit one merged record per exact rollout when
+      every call is exact and call `k+1`'s prompt ids start with call `k`'s prompt ids followed by its generated ids
+      (the tokens between are the next turns, as the template renders them); otherwise, or when brain refuses the
+      record with `session_not_append_only`, emit the per-call records. Its messages are the last request's messages
+      plus the last answer, with each assistant turn the session sampled marked `train` and carrying that call's
+      fields; `reward`, `group`, `policy_version` (the oldest call's), `sampler`, `tokenizer_digest` once on the record (calls drawn under different sampler controls stay per call);
+      no `rollout` key needed (the record is the whole rollout). Send with `pack_answers: true` and a `max_block` that
+      holds the whole session; choose `loss_agg` `token-sum` to reproduce the per-call reference or `seq-mean` to weigh
+      episodes alike.
+- [ ] **Group-prefix packing** (A42-A43): the rollouts of a group share their prompt, which every rollout's row
+      forwards again. Packing a group into one row needs what no forward has yet: per-token position ids that restart
+      at each branch and an attention mask that is a tree (each continuation sees the prefix and itself), in every
+      architecture's attention, plus a state fork at the branch point for the recurrent and linear-attention mixers
+      (qwen35's gated delta net, ricursive), with the gradient of the shared prefix accumulated once. The oracle would
+      be the per-rollout rows' gradient, as for merged sessions. Not started: measure the prompt share of a group's
+      forwarded tokens on a real run first (an agent session's prompt is a small share of its merged length).
 - [ ] Later, each driven by a profile and recorded as a knowledge entry (bottleneck, baseline, evidence, change,
       oracle, result, decision): colocated serve-and-train scheduling and whether the frozen base can be shared
-      (A37-A39); merging append-only calls of one session and group-prefix packing in training, against the per-call
-      reference (A40-A43); head and coefficient cost (A44-A45); multi-actor publication (A46-A48).
+      (A37-A39); head and coefficient cost (A44-A45); multi-actor publication (A46-A48).

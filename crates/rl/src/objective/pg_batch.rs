@@ -120,6 +120,10 @@ pub struct PgBatch<'a> {
     pub top: Option<SamplerTop<'a>>,
     /// The support each position's target was drawn from, when its record carries one ([`SamplerSupport`]).
     pub support: Option<SamplerSupport<'a>>,
+    /// The factor each position's whole term (policy, KL and imitation alike), its weight and its slot coefficients are
+    /// scaled by (`None`: one everywhere), a constant the parameters do not move: a per-sequence mean over rows that
+    /// share a micro-batch puts `1 / n` on the `n` supervised positions of each sequence.
+    pub scale: Option<&'a [f32]>,
 }
 
 /// The extra-target slots per position a batch takes under `spec`: the sampler's top-K under the score-centred
@@ -267,12 +271,14 @@ pub fn weigh(new_lp: &[f32], new_slots: Option<&[f32]>, batch: &PgBatch<'_>, spe
         terms.supervised += 1;
         terms.finite &= new_lp[i].is_finite();
         let advantage = batch.advantage[i];
+        let scale = batch.scale.map(|s| s[i]);
         if advantage.is_nan() {
-            weights[i] = 1.0;
-            terms.loss -= new_lp[i];
+            weights[i] = scale.unwrap_or(1.0);
+            terms.loss -= scale.unwrap_or(1.0) * new_lp[i];
             terms.imitation_tokens += 1;
             continue;
         }
+        let loss_before = terms.loss;
         let ref_lp = batch.ref_lp.map(|r| r[i]);
         let is_weight = batch.is_weight.map_or(1.0, |w| w[i]);
         let kl = ref_lp.filter(|_| spec.kl_beta > 0.0);
@@ -330,6 +336,13 @@ pub fn weigh(new_lp: &[f32], new_slots: Option<&[f32]>, batch: &PgBatch<'_>, spe
                 None => slot_weights.iter().map(|&w| w as f32).collect(),
             };
             extra[row.start..row.start + coefs.len()].copy_from_slice(&coefs);
+        }
+        if let Some(scale) = scale {
+            weights[i] *= scale;
+            terms.loss = loss_before + scale * (terms.loss - loss_before);
+            if let Some(extra) = extra.as_mut() {
+                extra[row].iter_mut().for_each(|c| *c *= scale);
+            }
         }
         terms.policy_tokens += 1;
         terms.signed_tokens += usize::from(advantage != 0.0);
@@ -508,7 +521,7 @@ mod tests {
     const SPEC: PgSpec = PgSpec::clipped(ClipBand::new(0.2, 0.2), 0.0);
 
     fn batch<'a>(targets: &'a [u32], old: &'a [f32], advantage: &'a [f32]) -> PgBatch<'a> {
-        PgBatch { targets, old_lp: old, ref_lp: None, advantage, is_weight: None, top: None, support: None }
+        PgBatch { targets, old_lp: old, ref_lp: None, advantage, is_weight: None, top: None, support: None, scale: None }
     }
 
     fn weigh_clipped(new_lp: &[f32], batch: &PgBatch<'_>, spec: &PgSpec) -> (Vec<f32>, BatchTerms) {
@@ -555,7 +568,7 @@ mod tests {
         let (old_lp, new_lp) = (lp(&old), lp(&new));
         let targets = vec![1u32; token.len()];
         let advantage = vec![0.0f32; token.len()];
-        let b = PgBatch { targets: &targets, old_lp: &old_lp, ref_lp: Some(&old_lp), advantage: &advantage, is_weight: None, top: None, support: None };
+        let b = PgBatch { targets: &targets, old_lp: &old_lp, ref_lp: Some(&old_lp), advantage: &advantage, is_weight: None, top: None, support: None, scale: None };
         let (_, t) = weigh_clipped(&new_lp, &b, &SPEC);
         let reported = f64::from(t.kl_sum) / t.kl_tokens as f64;
         assert!((reported - kl_exact).abs() < 1e-3 * kl_exact, "reported {reported}, KL(pi || ref) {kl_exact}");
@@ -599,7 +612,7 @@ mod tests {
             let advantage: Vec<f32> = tokens.iter().map(|&(_, a, _)| a as f32).collect();
             let is_weight: Vec<f32> = tokens.iter().map(|&(_, _, w)| w as f32).collect();
             let targets = vec![1u32; tokens.len()];
-            let b = PgBatch { targets: &targets, old_lp: &old_lp, ref_lp: Some(&ref_lp), advantage: &advantage, is_weight: Some(&is_weight), top: None, support: None };
+            let b = PgBatch { targets: &targets, old_lp: &old_lp, ref_lp: Some(&ref_lp), advantage: &advantage, is_weight: Some(&is_weight), top: None, support: None, scale: None };
             let (weights, terms) = weigh_clipped(&new_lp, &b, &spec);
             let mut total = 0.0f64;
             for i in 0..tokens.len() {

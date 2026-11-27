@@ -367,7 +367,7 @@ fn a_stream_job_is_refused_where_it_could_not_publish_or_be_fed() {
     let mut seq = params.clone();
     seq["loss_agg"] = json!("seq-mean");
     let refused = crate::support::run(&rig, seq, &[], &Frames::default()).unwrap_err();
-    assert!(refused.contains("token-sum"), "{refused}");
+    assert!(refused.contains("surface") && !refused.contains("loss_agg"), "a stream trains a per-sequence mean; the job is refused for its surface alone: {refused}");
 }
 
 /// The stream trains whatever estimator the job's policy-gradient settings select: the score-centred one centres over
