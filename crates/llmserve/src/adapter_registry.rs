@@ -180,6 +180,9 @@ struct State {
     /// continues its count, and offering the same weights again keeps their
     /// number. One small record per distinct id; the ids are the operator's.
     releases: HashMap<String, (String, u64)>,
+    /// Ids whose release keeps the version it was given where it was first published (a version of another id
+    /// served under an id of its own, [`LiveAdapters::serve_version`]): offering it does not number it here.
+    numbered_elsewhere: HashSet<String>,
 }
 
 impl State {
@@ -309,7 +312,7 @@ impl AdapterRegistry {
         if !state.entries.contains_key(&id) && state.entries.len() as u32 >= MAX_SERVED_ADAPTERS {
             return Err(format!("this server already offers {MAX_SERVED_ADAPTERS} adapters, the most it holds; retire one before adding {id}"));
         }
-        if number {
+        if number && !state.numbered_elsewhere.contains(&id) {
             state.stamp(&mut loaded);
         }
         match state.entries.get_mut(&id) {
@@ -344,12 +347,18 @@ impl AdapterRegistry {
         Ok(identity)
     }
 
+    /// Mark `id` as one whose releases keep the version they carry when offered.
+    fn keep_numbering(&self, id: &str) {
+        self.lock().numbered_elsewhere.insert(id.to_string());
+    }
+
     fn release(&self, id: &str) {
         let mut state = self.lock();
         let Some(entry) = state.entries.get_mut(id) else { return };
         entry.leases -= 1;
         if entry.leases == 0 {
             state.entries.remove(id);
+            state.numbered_elsewhere.remove(id);
             drop(state);
             self.generation.fetch_add(1, Ordering::SeqCst);
         }
@@ -611,6 +620,22 @@ impl LiveAdapters {
         let identity = self.target.registry().replace(adapter)?;
         self.executor.set_served_adapter(&id, Some(identity));
         Ok(())
+    }
+
+    /// Serve `adapter`, a release already offered under its own card id, also under `version_id`, a model of its own
+    /// that keeps the release's version and lineage: a request for `version_id` is decoded by exactly that release,
+    /// whatever its card id is offered as since. Withdrawn with [`Self::retire`]; requests already accepted finish.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::serve`]; `version_id` is offered already as another release.
+    pub fn serve_version(&self, mut adapter: LoadedAdapter, version_id: &str) -> Result<(), String> {
+        if self.target.registry().ids().iter().any(|id| id == version_id) {
+            return Err(format!("adapter id {version_id} is offered already"));
+        }
+        adapter.release.id = version_id.to_string();
+        self.target.registry().keep_numbering(version_id);
+        self.serve(adapter)
     }
 
     /// The release offered under `id` (its digest and policy version), when this resident offers one.
@@ -890,6 +915,35 @@ mod tests {
         let other = loaded(&dir, "Qwen/Qwen3-0.6B:lab:other:v1", 0.5);
         let _other = reg.attach(other).unwrap();
         assert_eq!(reg.identity("Qwen/Qwen3-0.6B:lab:other:v1").unwrap().version, 1, "each id counts for itself");
+    }
+
+    /// A release served under an id of its own for its version keeps the version and the weights it was published
+    /// with, while its card id goes on to newer releases; withdrawn, the id forgets that it keeps a number.
+    #[test]
+    fn a_version_served_under_an_id_of_its_own_keeps_its_number_while_the_card_id_moves_on() {
+        let dir = scratch_dir("registry-version-ids");
+        let reg = registry(Some(AdapterBankSettings::default()));
+        let (one, two) = (loaded(&dir, ID, 0.5), loaded(&dir, ID, 0.25));
+        let _lease = reg.attach(one).unwrap();
+        reg.replace(two.clone()).unwrap();
+        let published = reg.identity(ID).unwrap();
+        assert_eq!(published.version, 2);
+
+        let version_id = "Qwen/Qwen3-0.6B:lab:canary:v2-pinned";
+        let mut pinned = two.clone();
+        pinned.version = published.version;
+        pinned.release.id = version_id.to_string();
+        reg.keep_numbering(version_id);
+        let lease = reg.attach(pinned).unwrap();
+        let kept = reg.identity(version_id).unwrap();
+        assert_eq!((kept.version, &kept.digest), (2, &published.digest), "the version and weights it was published as");
+
+        reg.replace(loaded(&dir, ID, 0.125)).unwrap();
+        assert_eq!(reg.identity(ID).unwrap().version, 3, "the card id moves on");
+        assert_eq!(reg.identity(version_id).unwrap().version, 2, "the version id does not");
+        drop(lease);
+        assert!(reg.identity(version_id).is_none());
+        assert!(!reg.lock().numbered_elsewhere.contains(version_id), "withdrawn, nothing is kept of it");
     }
 
     /// The identity a request is admitted under carries the version's lineage, and a newer version replacing the

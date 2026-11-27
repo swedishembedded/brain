@@ -403,3 +403,49 @@ async fn a_stream_trains_the_score_centred_estimator_over_the_records_top_k() {
     assert!(steps[0]["pg"]["sampler_mass"].as_f64().is_some_and(|m| m > 0.0), "{}", steps[0]);
     assert_eq!(of_type(&frames, "published").len(), 2, "the starting policy, then the one step's");
 }
+
+/// The policy version that answers a chat request for `model`.
+async fn version_of(app: &Router, model: &str) -> Result<u64, Value> {
+    let body = json!({"model": model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 2});
+    let (status, reply) = call(app, Method::POST, "/v1/chat/completions", Some(("application/json", body.to_string().into_bytes()))).await;
+    if status != StatusCode::OK {
+        return Err(reply);
+    }
+    Ok(reply["brain"]["policy_version"].as_u64().unwrap_or_else(|| panic!("the reply names its policy version: {reply}")))
+}
+
+/// A stream that retains its versions also serves each newest one under an id of its own, so a client that started
+/// an episode on a version stays on it after newer ones are published; the oldest beyond the retention are withdrawn.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stream_retaining_its_versions_serves_each_under_an_id_of_its_own_while_retained() {
+    let rig = rig_stream("stream-retain");
+    let app = router(AppState::new(rig.exec.clone(), KEY, Provider::OpenAI).with_training(true));
+    let sizes = sizes(&rig);
+    let tokens = (sizes[0] + sizes[1]) as u64;
+    let stream = json!({"publish_adapter": ADAPTER, "publish_every": 1, "max_staleness": 4, "step_tokens": tokens, "queue_tokens": tokens, "retain_versions": 2});
+    let id = create(&app, stream_job(stream, json!({}))).await;
+    let v = |n: u64| trainjob::bank::version_id(ADAPTER, n);
+    assert_eq!(served_version(&app, 1).await, 1);
+    assert_eq!(version_of(&app, &v(1)).await, Ok(1), "the starting version under its own id");
+    assert_eq!(post(&app, &id, "", group(sizes, "g1", 1)).await.0, StatusCode::OK);
+    assert_eq!(served_version(&app, 2).await, 2);
+    assert_eq!(version_of(&app, ADAPTER).await, Ok(2), "the published id moves on");
+    assert_eq!(version_of(&app, &v(1)).await, Ok(1), "an episode that started on version 1 stays on it");
+    assert_eq!(post(&app, &id, "", group(sizes, "g2", 2)).await.0, StatusCode::OK);
+    assert_eq!(served_version(&app, 3).await, 3);
+    assert_eq!(version_of(&app, &v(2)).await, Ok(2));
+    assert!(version_of(&app, &v(1)).await.is_err(), "beyond the retention of two, version 1 is withdrawn");
+
+    let (status, _) = call(&app, Method::POST, &format!("/v1/jobs/{id}/finish"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (frames, _) = frames_until(&app, &id, 0, |_| false).await;
+    let ids: Vec<(u64, String)> = of_type(&frames, "published").iter().map(|f| (f["version"].as_u64().unwrap(), f["version_id"].as_str().unwrap().to_string())).collect();
+    assert_eq!(ids, [(1, v(1)), (2, v(2)), (3, v(3))], "every published frame names its version id");
+}
+
+#[test]
+fn a_retention_beyond_the_bound_is_refused() {
+    let doc = |n: u32| json!({"publish_adapter": ADAPTER, "publish_every": 1, "step_tokens": 8, "queue_tokens": 8, "retain_versions": n}).to_string();
+    assert_eq!(trainjob::stream::StreamRefs::parse(&doc(3)).unwrap().retain_versions, 3);
+    assert!(trainjob::stream::StreamRefs::parse(&doc(trainjob::stream::MAX_RETAINED_VERSIONS + 1)).unwrap_err().contains("retain_versions"));
+}

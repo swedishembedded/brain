@@ -53,6 +53,8 @@ pub const MAX_STREAM_STEPS: u32 = brain::OPEN_ENDED_STREAM_STEPS;
 pub const MAX_STEP_TOKENS: u64 = 1 << 24;
 /// The most policy tokens a queue holds.
 pub const MAX_QUEUE_TOKENS: u64 = 1 << 26;
+/// The most published versions a stream keeps served under ids of their own: each holds a slot of the bank's.
+pub const MAX_RETAINED_VERSIONS: u32 = 16;
 /// The longest `stream` document accepted, in bytes.
 pub const MAX_STREAM_DOCUMENT_BYTES: usize = 16 * 1024;
 
@@ -68,6 +70,7 @@ struct StreamDoc {
     top_k: Option<u64>,
     support: Option<u64>,
     start_adapter: Option<SourceDoc>,
+    retain_versions: Option<u32>,
 }
 
 /// The `stream` document of a request.
@@ -85,6 +88,9 @@ pub struct StreamRefs {
     /// The widest sampler support a record may carry per token (`behavior_support_*`).
     pub support: Option<usize>,
     pub start_adapter: Option<Source>,
+    /// How many of the newest published versions are also served under an id of their own (`<id>-v<N>`), so a
+    /// client can stay on the version it started on; 0 serves none.
+    pub retain_versions: usize,
 }
 
 impl StreamRefs {
@@ -119,13 +125,16 @@ impl StreamRefs {
         if doc.support.is_some_and(|n| !(1..=brain::MAX_STREAM_SUPPORT as u64).contains(&n)) {
             return refuse(format!("support must be 1 to {}", brain::MAX_STREAM_SUPPORT));
         }
+        if doc.retain_versions.is_some_and(|n| n > MAX_RETAINED_VERSIONS) {
+            return refuse(format!("retain_versions must be 0 to {MAX_RETAINED_VERSIONS}"));
+        }
         let start_adapter = doc.start_adapter.map(|s| s.resolve("start_adapter").map_err(|e| format!("stream: {}", e.trim_start_matches("data.")))).transpose()?;
         if let Some(Source::Blob(name)) = &start_adapter {
             if name != "adapter" {
                 return refuse(format!("start_adapter names the input blob {name:?}; the starting adapter is the input \"adapter\""));
             }
         }
-        Ok(StreamRefs { publish_adapter: doc.publish_adapter, publish_every: doc.publish_every, step_tokens: doc.step_tokens as usize, queue_tokens: doc.queue_tokens as usize, max_staleness: doc.max_staleness, max_steps: doc.max_steps, top_k: doc.top_k.map(|k| k as usize), support: doc.support.map(|n| n as usize), start_adapter })
+        Ok(StreamRefs { publish_adapter: doc.publish_adapter, publish_every: doc.publish_every, step_tokens: doc.step_tokens as usize, queue_tokens: doc.queue_tokens as usize, max_staleness: doc.max_staleness, max_steps: doc.max_steps, top_k: doc.top_k.map(|k| k as usize), support: doc.support.map(|n| n as usize), start_adapter, retain_versions: doc.retain_versions.unwrap_or(0) as usize })
     }
 
     pub fn digests(&self) -> Vec<Digest> {
@@ -255,12 +264,16 @@ pub(crate) fn train(env: &JobEnv, request: &Request, inputs: &Inputs<'_>, files:
     };
     let publish_id = refs.publish_adapter.clone();
     let mut publish = |step: u32, path: &std::path::Path| -> std::io::Result<()> {
-        let identity = bank.publish(&publish_id, path).map_err(std::io::Error::other)?;
+        let (identity, version_id) = bank.publish_retaining(&publish_id, path, refs.retain_versions).map_err(std::io::Error::other)?;
         std::fs::remove_file(path).ok();
         // The bank read the identity from the card this run wrote: it must be this run's, at this step.
         let lineage = identity.lineage.as_ref().filter(|l| l.run == run && l.epoch == epoch && l.update == step).ok_or_else(|| std::io::Error::other(format!("publishing adapter {publish_id}: the served release names {:?}, not run {run:?} epoch {epoch} update {step}", identity.lineage)))?;
         stream.set_version(identity.version);
-        published.borrow_mut().push(json!({"type": "published", "version": identity.version, "digest": identity.digest, "step": step, "lineage": lineage}));
+        let mut frame = json!({"type": "published", "version": identity.version, "digest": identity.digest, "step": step, "lineage": lineage});
+        if let Some(version_id) = version_id {
+            frame["version_id"] = json!(version_id);
+        }
+        published.borrow_mut().push(frame);
         *last_published.borrow_mut() = Some(step);
         Ok(())
     };
