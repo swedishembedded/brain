@@ -86,6 +86,15 @@ pub trait PagedDecoder {
     /// KV blocks currently free in the pool.
     fn free_blocks(&self) -> u32;
 
+    /// The bytes the device could allocate right now, as its driver reports them, or `None` (the default) for a
+    /// decoder that cannot ask. After an out-of-memory failure the scheduler reads it to tell a card that gained
+    /// memory since (another resident or process gave some back), whose batch it then gives back at once, from a card
+    /// whose limit is still the width that failed ([`MemoryPressure`]). Read only while the batch is held under its
+    /// width, at most once an iteration, so it must be cheap (one driver query, no device work).
+    fn device_free_bytes(&self) -> Option<u64> {
+        None
+    }
+
     /// The largest `prompt + max_new` a single sequence's capacity admits.
     fn max_seq_len(&self) -> usize;
 
@@ -1304,48 +1313,106 @@ impl std::fmt::Display for RejectReason {
 
 /// How the scheduler answers a device allocation failure: activation scratch and recurrent state live beside the KV
 /// pool, so the pool's block count cannot say how many sequences the card holds. A failure is the card telling the
-/// scheduler its real limit, so the scheduler admits fewer sequences at once ([`Self::limit`]) and gives the card
-/// the batch back one sequence at a time, after [`Self::GROW_AFTER_STEPS`] iterations that ran without a failure.
+/// scheduler its real limit, so the scheduler admits fewer sequences at once ([`Self::limit`]) and gives the batch
+/// back as soon as the card holds more, re-judged after every iteration:
+///
+/// - under the width that failed, the limit grows by half (at least one sequence) every [`Self::GROW_AFTER_STEPS`]
+///   iterations without a failure, so a halved batch is back within a few dozen iterations;
+/// - at that width, it grows the same way as soon as the device reports more free memory than at the failure
+///   ([`PagedDecoder::device_free_bytes`], by [`Self::ROOM_GAINED_BYTES`]): the card gained room, and the width
+///   that failed says nothing about it any more;
+/// - otherwise it probes past that width by an eighth every [`Self::PROBE_AFTER_STEPS`] iterations, which bounds what
+///   a card whose limit really is that width pays for being probed (a recompute of what was in flight);
+/// - a scheduler that has drained forgets it all: everything it held is given back.
+///
+/// A KV pool that ran out of free blocks ([`crate::paged::pool_ran_dry`]) is not the card's limit: the pool is
+/// sized when it is built, and running it dry means the block accounting was short. Its sequences go back to the queue
+/// and nothing is narrowed, unless it happens again before an iteration succeeds: an accounting that keeps failing is
+/// then held to fewer sequences like the card (knowledge #613: a burst read every dry pool as the card's limit, and
+/// the batch collapsed to 5 of 64 while the card was half empty).
 #[derive(Debug, Default)]
 struct MemoryPressure {
     /// Most sequences (decoding and prefilling) in flight while the card has shown it cannot hold more; `None` until a
     /// failure.
     limit: Option<usize>,
-    /// Iterations with work in flight since the last failure.
+    /// The fewest sequences in flight at a failure since the scheduler last drained or the card gained room.
+    failed_at: Option<usize>,
+    /// What [`PagedDecoder::device_free_bytes`] read once the last failure's sequences were given back.
+    free_at_failure: Option<u64>,
+    /// Iterations with work in flight since the last failure or growth.
     calm_steps: u32,
     /// Whether the iteration now running has had a failure.
     failed_this_step: bool,
+    /// Whether the last failure was a dry pool not followed by a calm iteration.
+    dry_pending: bool,
     /// Consecutive failures of a call that carried the only sequence in the scheduler.
     lone_failures: u32,
 }
 
 impl MemoryPressure {
-    /// Iterations without a failure after which the limit grows by one sequence. A growth the card cannot hold costs
-    /// a recompute of what was in flight, so it is tried rarely: the cost is at most one failure per this many
-    /// iterations.
-    const GROW_AFTER_STEPS: u32 = 32;
+    /// Calm iterations after which a limit under the width that failed (or on a card that gained room) grows by half.
+    const GROW_AFTER_STEPS: u32 = 4;
+    /// Calm iterations after which a limit at the width that failed, on a card that gained no room, grows by an eighth.
+    const PROBE_AFTER_STEPS: u32 = 32;
+    /// Free device memory beyond what the failure left that counts as the card having gained room.
+    const ROOM_GAINED_BYTES: u64 = 256 << 20;
     /// Failures of a sequence that is alone on the card after which it is refused: nothing else holds memory it could
     /// be waiting for. The prefix cache is given back before the last attempt.
     const LONE_ATTEMPTS: u32 = 3;
 
-    fn fail(&mut self, in_flight: usize) {
+    /// A call with `in_flight` sequences failed; `dry`: the KV pool ran out of blocks rather than the device of memory.
+    /// The caller records [`Self::free_at_failure`] once it has given back what the call carried.
+    fn fail(&mut self, in_flight: usize, dry: bool) {
         self.failed_this_step = true;
         self.calm_steps = 0;
+        if dry && !self.dry_pending {
+            self.dry_pending = true;
+            return;
+        }
+        let in_flight = in_flight.max(1);
+        self.failed_at = Some(self.failed_at.map_or(in_flight, |f| f.min(in_flight)));
         let halved = (in_flight / 2).max(1);
         self.limit = Some(self.limit.map_or(halved, |l| l.min(halved)));
     }
 
-    /// An iteration that had `in_flight` sequences ended; `max` is the scheduler's own ceiling.
-    fn end_step(&mut self, in_flight: usize, max: usize) {
-        if std::mem::take(&mut self.failed_this_step) || in_flight == 0 {
+    /// Whether the batch is held under the width that failed or at it: only then is the device's free memory asked.
+    fn at_failed_width(&self) -> bool {
+        matches!((self.limit, self.failed_at), (Some(l), Some(f)) if l + 1 >= f)
+    }
+
+    /// An iteration that had `in_flight` sequences ended; `max` is the scheduler's own ceiling; `free`: the device's
+    /// free bytes now, asked only when [`Self::at_failed_width`].
+    fn end_step(&mut self, in_flight: usize, max: usize, free: Option<u64>) {
+        if std::mem::take(&mut self.failed_this_step) {
+            return;
+        }
+        if in_flight == 0 {
+            *self = MemoryPressure::default();
             return;
         }
         self.lone_failures = 0;
+        self.dry_pending = false;
         let Some(limit) = self.limit else { return };
+        if self.at_failed_width() && matches!((free, self.free_at_failure), (Some(now), Some(then)) if now >= then.saturating_add(Self::ROOM_GAINED_BYTES)) {
+            // The card gained room since the failure: the width that failed no longer bounds it.
+            self.failed_at = None;
+            self.free_at_failure = None;
+        }
         self.calm_steps += 1;
-        if self.calm_steps >= Self::GROW_AFTER_STEPS {
+        let fast = !self.at_failed_width();
+        let (after, grown) = if fast {
+            let cap = self.failed_at.map_or(max, |f| f.saturating_sub(1).max(limit + 1));
+            (Self::GROW_AFTER_STEPS, (limit + (limit / 2).max(1)).min(cap))
+        } else {
+            (Self::PROBE_AFTER_STEPS, limit + (limit / 8).max(1))
+        };
+        if self.calm_steps >= after {
             self.calm_steps = 0;
-            self.limit = (limit + 1 < max).then_some(limit + 1);
+            self.limit = (grown < max).then_some(grown);
+            if self.limit.is_none() {
+                self.failed_at = None;
+                self.free_at_failure = None;
+            }
         }
     }
 }
@@ -2438,7 +2505,7 @@ impl<D: PagedDecoder> Scheduler<D> {
                 // Cached prefix blocks are reclaimable capacity; a sequence
                 // that already exists outranks the prefix cache exactly as
                 // admission does.
-                self.dec.reclaim_prefix(need - self.dec.free_blocks());
+                self.reclaim_for_running(need - self.dec.free_blocks());
                 if self.dec.free_blocks() < need {
                     break;
                 }
@@ -2531,6 +2598,29 @@ impl<D: PagedDecoder> Scheduler<D> {
         self.blocks_for_next_token() + self.prefill_debt()
     }
 
+    /// Reclaim up to `want` cached prefix blocks for sequences already in flight, and re-read what every prefill that
+    /// has not started yet adopts from the cache: the blocks it was admitted to adopt may be among those reclaimed, and
+    /// its debt ([`Self::prefill_owed`]) must then count them, or the pool runs dry under it (knowledge #613). `true`
+    /// when anything was reclaimed. O(unstarted prefills x prompt) only when blocks were actually freed.
+    fn reclaim_for_running(&mut self, want: u32) -> bool {
+        if self.dec.reclaim_prefix(want) == 0 {
+            return false;
+        }
+        let stale: Vec<usize> = (0..self.prefilling.len()).filter(|&i| self.prefilling[i].adopted > 0 && self.prefilling[i].table.blocks().is_empty()).collect();
+        for i in stale {
+            let p = &self.prefilling[i];
+            let adopted = self.adopted_blocks(&p.prompt, p.adapter, p.embeds.as_deref());
+            self.prefilling[i].adopted = adopted;
+        }
+        true
+    }
+
+    /// Whether a prefill admitted but not started yet counts on blocks of the prefix cache: a reclaim now could free
+    /// them before it adopts them.
+    fn unstarted_prefill_adopts(&self) -> bool {
+        self.prefilling.iter().any(|p| p.adopted > 0 && p.table.blocks().is_empty())
+    }
+
     /// Make the pool able to back everything this iteration has committed to -
     /// one more token for every active sequence and the rest of every prefill -
     /// or leave it with a single sequence, which fits by construction
@@ -2569,7 +2659,10 @@ impl<D: PagedDecoder> Scheduler<D> {
         if self.dec.free_blocks() >= need {
             return;
         }
-        self.dec.reclaim_prefix(need - self.dec.free_blocks());
+        if self.reclaim_for_running(need - self.dec.free_blocks()) {
+            // A prefill not started yet may have lost blocks it was admitted to adopt: it owes them now.
+            need = self.committed_blocks();
+        }
         let mut active = self.running.iter().filter(|r| !r.done).count();
         let promoted: std::collections::HashSet<u64> = report.promoted.iter().copied().collect();
         while self.dec.free_blocks() < need {
@@ -2909,6 +3002,12 @@ impl<D: PagedDecoder> Scheduler<D> {
         };
         let want = self.dec.blocks_for(need as u32 + 1).saturating_sub(cached) + self.dec.sequence_state_blocks() + self.committed_blocks();
         let free = self.dec.free_blocks();
+        if free < want && self.unstarted_prefill_adopts() {
+            // Reclaiming now could free the cached blocks a request admitted before this one is about to adopt (the
+            // cold end of the cache is every conversation's earlier turn): its prefill would then run the pool dry.
+            // It starts this iteration or the next; this request waits until then (knowledge #613).
+            return false;
+        }
         if free < want {
             // Cached prefix blocks are reclaimable capacity: live sequences always
             // outrank the cache, but not the cache this very request reuses.
@@ -3192,8 +3291,11 @@ impl<D: PagedDecoder> Scheduler<D> {
         self.dec.abandon_prefill();
         let carried = decoding.len() + self.prefilling.len();
         let in_flight = self.running.len() + self.prefilling.len();
-        self.pressure.fail(in_flight);
-        eprintln!("[warn] scheduler: the device ran out of memory ({} bytes refused); {carried} sequence(s) go back to the queue and at most {} run at once until the card holds more", oom.bytes, self.pressure.limit.unwrap_or(0));
+        self.pressure.fail(in_flight, crate::paged::pool_ran_dry(&oom));
+        match self.pressure.limit {
+            Some(limit) => eprintln!("[warn] scheduler: {oom}; {carried} sequence(s) go back to the queue and at most {limit} run at once until the card holds more"),
+            None => eprintln!("[warn] scheduler: {oom}; {carried} sequence(s) go back to the queue, the batch stays {}", self.admitted_width()),
+        }
         let lone = in_flight == 1;
         if lone {
             self.pressure.lone_failures += 1;
@@ -3220,6 +3322,11 @@ impl<D: PagedDecoder> Scheduler<D> {
         }
         if refuse {
             self.pressure.lone_failures = 0;
+        }
+        // The card as the failure leaves it, with what the call carried given back: the baseline a later reading must
+        // beat for the card to have gained room.
+        if self.pressure.failed_this_step && self.pressure.failed_at.is_some() {
+            self.pressure.free_at_failure = self.dec.device_free_bytes();
         }
     }
 
@@ -3248,7 +3355,8 @@ impl<D: PagedDecoder> Scheduler<D> {
             self.record_service_time(*id);
         }
         let in_flight = self.running.len() + self.prefilling.len() + completed.len();
-        self.pressure.end_step(in_flight, self.max_running);
+        let free = if self.pressure.at_failed_width() { self.dec.device_free_bytes() } else { None };
+        self.pressure.end_step(in_flight, self.max_running, free);
         completed
     }
 

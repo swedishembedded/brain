@@ -1360,6 +1360,11 @@ impl PagedDecoder for Qwen35GgufEngine {
     fn free_blocks(&self) -> u32 {
         self.alloc.free_blocks()
     }
+    /// The least the driver reports free over the cards the shards hold (see the Qwen3 engine's), since a step needs
+    /// room on every one of them.
+    fn device_free_bytes(&self) -> Option<u64> {
+        self.inst.shards.iter().map(|s| s.qwen35.gpu.max_buffer_bytes()).min()
+    }
     fn max_seq_len(&self) -> usize {
         self.inst.cap as usize
     }

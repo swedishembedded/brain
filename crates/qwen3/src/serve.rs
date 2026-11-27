@@ -4886,6 +4886,11 @@ impl model::serve::PagedDecoder for Engine {
     fn free_blocks(&self) -> u32 {
         Engine::free_blocks(self)
     }
+    /// The driver's free figure where the backend reads one live (CUDA's `cuMemGetInfo`); elsewhere the largest
+    /// allocation the device allows, which does not move, so the scheduler never reads it as room gained.
+    fn device_free_bytes(&self) -> Option<u64> {
+        Some(self.gpu.max_buffer_bytes())
+    }
     fn max_seq_len(&self) -> usize {
         Engine::max_seq_len(self)
     }

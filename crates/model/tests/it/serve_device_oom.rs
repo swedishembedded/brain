@@ -60,6 +60,10 @@ impl PagedDecoder for Toy {
     fn free_blocks(&self) -> u32 {
         self.alloc.free_blocks() + self.phantom_free
     }
+    fn device_free_bytes(&self) -> Option<u64> {
+        // A GiB of scratch and state a sequence: what the card could still give.
+        Some((self.slots.saturating_sub(self.live) as u64) << 30)
+    }
     fn max_seq_len(&self) -> usize {
         1024
     }
@@ -290,4 +294,83 @@ fn a_kv_pool_that_cannot_back_an_admitted_prefill_queues_the_request_instead_of_
     }
     assert!(sched.decoder_mut().abandoned >= 1, "the exhausted pool sent the prefilling sequences back");
     assert_eq!(sched.decoder_mut().alloc.free_blocks(), 8, "every block is back in the pool");
+}
+
+/// Conformance (knowledge #613): with work queued and the card's room back, the running width climbs back to the whole
+/// batch within a bounded number of iterations after an out-of-memory failure, not one sequence every few dozen. On
+/// 2026-11-27 servers sat at 5-25 of 64 for minutes with 28-48 requests queued and the card half empty.
+#[test]
+fn after_a_card_runs_out_the_batch_is_whole_again_within_a_few_dozen_iterations_once_it_has_room() {
+    let mut sched = Scheduler::new(Toy::new(4096, 2), 32);
+    let ids: Vec<u64> = (0..48).map(|i| sched.submit(Request { prompt: prompt(10 + i % 7), max_new: 400, stop: Vec::new() })).collect();
+    // The card holds two: the failures narrow the batch to that.
+    for _ in 0..64 {
+        sched.step();
+    }
+    assert!(sched.decoder_mut().failures > 0 && sched.admitted_width() <= 3, "the failures narrowed the batch: {}", sched.admitted_width());
+    // The card has room for the whole batch again (whatever held it is gone).
+    sched.decoder_mut().slots = 32;
+    let mut iterations = 0;
+    while sched.running_len() < 32 {
+        sched.step();
+        iterations += 1;
+        assert!(iterations <= 48, "the batch climbs back to 32 within 48 iterations; at {iterations} it runs {}", sched.running_len());
+    }
+    assert_eq!(sched.admitted_width(), 32, "and says so to whoever routes work to it");
+    let (done, rejected) = drain(&mut sched);
+    assert!(rejected.is_empty(), "{rejected:?}");
+    assert!(ids.iter().all(|id| done.contains_key(id)) || sched.decoder_mut().failures > 0);
+}
+
+/// A KV pool that runs out of free blocks once (its accounting was short) is not the card's memory limit: the
+/// sequences go back to the queue and the batch is not narrowed (knowledge #613).
+#[test]
+fn a_kv_pool_that_ran_dry_once_does_not_narrow_the_batch() {
+    let mut toy = Toy::new(16, 16);
+    toy.phantom_free = 40;
+    let mut sched = Scheduler::new(toy, 8);
+    for i in 0..8 {
+        sched.submit(Request { prompt: prompt(40 + i), max_new: 4, stop: Vec::new() });
+    }
+    sched.step();
+    assert!(sched.decoder_mut().abandoned >= 1, "the pool ran dry under the admitted prefills");
+    sched.decoder_mut().phantom_free = 0;
+    assert_eq!(sched.admitted_width(), 8, "a dry pool is the scheduler's accounting, not the card: the batch stays whole");
+    let (_, rejected) = drain(&mut sched);
+    assert!(rejected.is_empty(), "{rejected:?}");
+}
+
+/// Conformance (knowledge #613): under a steady stream of arrivals of varied lengths, the running width tracks what
+/// the card holds as it changes: down when room is taken (another resident grows), back up to the whole batch within a
+/// bounded number of iterations once the room is given back, re-judged every iteration while requests keep coming.
+#[test]
+fn under_a_stream_of_arrivals_the_running_width_tracks_the_room_the_card_has() {
+    let mut rng = data::rng::Lcg::random();
+    let mut sched = Scheduler::new(Toy::new(8192, 16), 16);
+    let mut wide_again = Vec::new();
+    for step in 0..900 {
+        // Room for 16, then for 4 while something else holds the card, then for 16 again.
+        sched.decoder_mut().slots = if (300..450).contains(&step) { 4 } else { 16 };
+        // Two arrivals an iteration, prompts of 8-80 tokens, replies of 20-120: the queue never runs empty.
+        for _ in 0..2 {
+            if sched.waiting_len() < 64 {
+                let len = 8 + rng.next_u32() as usize % 72;
+                sched.submit(Request { prompt: prompt(len), max_new: 20 + rng.next_u32() as usize % 100, stop: Vec::new() });
+            }
+        }
+        let report = sched.step_report();
+        assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+        if (400..450).contains(&step) {
+            assert!(sched.running_len() <= 4, "the card holds four at step {step}: {} run", sched.running_len());
+        }
+        if step >= 500 {
+            wide_again.push(sched.running_len());
+        }
+    }
+    // Sequences that finish leave their rows empty until the next iteration admits into them, so "whole" is the batch
+    // less those few.
+    let least = *wide_again.iter().min().unwrap();
+    let mean = wide_again.iter().sum::<usize>() as f64 / wide_again.len() as f64;
+    assert!(least >= 12 && mean >= 14.5, "from 50 iterations after the room came back the batch stays whole: mean {mean:.1}, least {least}");
+    assert_eq!(sched.admitted_width(), 16);
 }

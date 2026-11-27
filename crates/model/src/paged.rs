@@ -203,10 +203,26 @@ pub struct BlockTable {
     routing: Option<Box<crate::routing::RoutingLog>>,
 }
 
+/// What a [`gpu_core::DeviceOutOfMemory`] names when a KV pool ran out of free blocks: the pool's own accounting was
+/// short, no device allocation failed ([`pool_ran_dry`]).
+pub const KV_POOL_RAN_DRY: &str = "the paged KV pool";
+
+/// What it names when the memory behind a block could not be had ([`BlockBacking`]): a real device limit.
+const KV_BLOCK_BACKING: &str = "the memory of a paged KV block";
+
+/// Whether `oom` is a KV pool that ran out of free blocks rather than a device that refused memory. The pool's size
+/// is fixed when it is built, so such a failure says the scheduler's block accounting was short, not that the card
+/// holds fewer sequences than it runs.
+pub fn pool_ran_dry(oom: &gpu_core::DeviceOutOfMemory) -> bool {
+    oom.what == KV_POOL_RAN_DRY
+}
+
 /// Unwind with the typed out-of-memory payload for a KV pool that could not back a request's blocks (`why` is the
-/// allocator's own account, [`BlockAllocator::exhausted`]).
-fn raise_pool_exhausted(why: &str) -> ! {
-    gpu_core::DeviceOutOfMemory { bytes: 0, what: "the paged KV pool".to_string(), detail: why.to_string() }.raise()
+/// allocator's own account, [`BlockAllocator::exhausted`]): [`KV_POOL_RAN_DRY`] when it had no free block,
+/// [`KV_BLOCK_BACKING`] when the backing refused one.
+fn raise_pool_exhausted(alloc: &BlockAllocator, why: &str) -> ! {
+    let what = if alloc.backing_error.is_some() { KV_BLOCK_BACKING } else { KV_POOL_RAN_DRY };
+    gpu_core::DeviceOutOfMemory { bytes: 0, what: what.to_string(), detail: why.to_string() }.raise()
 }
 
 impl BlockTable {
@@ -370,12 +386,12 @@ impl BlockTable {
     /// catches (`Scheduler::step_report`): the sequences the step carried go back to the queue and fewer run at
     /// once until the pool has room, instead of the panic taking the lane and every request in flight with it.
     pub fn append_or_raise(&mut self, alloc: &mut BlockAllocator) -> (u32, u32) {
-        self.append(alloc).unwrap_or_else(|e| raise_pool_exhausted(&e))
+        self.append(alloc).unwrap_or_else(|e| raise_pool_exhausted(alloc, &e))
     }
 
     /// [`Self::reserve`] with [`Self::append_or_raise`]'s answer to a pool that cannot back `n` more tokens.
     pub fn reserve_or_raise(&mut self, n: u32, alloc: &mut BlockAllocator) -> u32 {
-        self.reserve(n, alloc).unwrap_or_else(|e| raise_pool_exhausted(&e))
+        self.reserve(n, alloc).unwrap_or_else(|e| raise_pool_exhausted(alloc, &e))
     }
 
     /// Ensure capacity for `n` more tokens by pre-allocating blocks (used by

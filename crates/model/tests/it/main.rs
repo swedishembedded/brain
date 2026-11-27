@@ -158,6 +158,7 @@ mod router_gate_sigmoid_expert_cap;
 mod router_sigmoid_reference;
 mod saved_boundaries;
 mod serve_adapters;
+mod serve_agent_burst;
 mod serve_background_prefill;
 mod serve_continuous;
 mod serve_device_oom;
