@@ -214,7 +214,10 @@ on the command line instead.
   blocks only its prefix cache holds) and its pool's total, its own queue and
   what it has served) and `/v1/models` are read every
   `--upstream-health-ms` (default 2000). An upstream is in rotation while both
-  answer; one that a request cannot connect to is taken out at once. A
+  answer and its health does not say `serving_held` (every card it serves on
+  runs a workload, such as a fine-tune, that has not lent it, so nothing sent
+  there would run before the workload ends); one that a request cannot
+  connect to is taken out at once. A
   restarted upstream (a new `instance`) starts with no sessions; what was sent
   to the old process failed with its connections (502).
 - **Stalls.** An upstream that holds work (requests the router sent it, or jobs

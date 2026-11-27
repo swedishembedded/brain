@@ -51,9 +51,10 @@ fn instance() -> &'static str {
     INSTANCE.get_or_init(|| format!("{:016x}", rand::random::<u64>()))
 }
 
-/// `{"status", "instance", "decode_slots", "free_slots", "kv_free_tokens", "kv_total_tokens", "edge_concurrency",
-/// "queue_depth", "served": {...}}`: the process's identity, the sequences the served models decode at once and how
-/// many of those are free now, the KV tokens a new request can claim (free blocks and blocks only the prefix cache
+/// `{"status", "instance", "decode_slots", "free_slots", "serving_held", "kv_free_tokens", "kv_total_tokens",
+/// "edge_concurrency", "queue_depth", "served": {...}}`: the process's identity, the sequences the served models decode
+/// at once and how many of those are free now (none while `serving_held`: every card runs a workload, such as a
+/// fine-tune, that has not lent it, so a router sends this server nothing), the KV tokens a new request can claim (free blocks and blocks only the prefix cache
 /// holds, an upper bound) and the pool's total, summed over the paged text models (null when none is resident), the requests the surface admits at once before it sheds with 503, the jobs waiting for a lane now,
 /// and the cumulative counts of finished generations, prompt, completion and prefix-cached prompt tokens (a reader
 /// takes rates from two readings). Model counters are as of the dispatcher's last pass.
@@ -66,11 +67,15 @@ async fn health(State(state): State<AppState>) -> Json<Value> {
     };
     let slots = state.exec.decode_slots();
     let running = sum("running_sequences").unwrap_or(0) as usize;
+    // Every card runs a workload that has not lent it: nothing it is sent can run until the workload ends.
+    let held = stats.serving_held;
+    let free_slots = if held { 0 } else { slots.saturating_sub(running) };
     Json(json!({
         "status": "ok",
         "instance": instance(),
         "decode_slots": slots,
-        "free_slots": slots.saturating_sub(running),
+        "free_slots": free_slots,
+        "serving_held": held,
         "kv_free_tokens": sum("kv_free_tokens"),
         "kv_total_tokens": sum("kv_total_tokens"),
         "edge_concurrency": state.edge_concurrency,

@@ -819,6 +819,7 @@ async fn health_reports_the_decode_slots_behind_the_key() {
             let health = get_json(&app, p, uri, &key).await;
             assert_eq!(health["status"], "ok", "{p}: {uri}");
             let slots = health["decode_slots"].as_u64().expect("decode_slots");
+            assert_eq!(health["serving_held"], json!(false), "no workload holds a card: {health}");
             assert!(slots >= 1 && health["edge_concurrency"].as_u64().expect("edge_concurrency") >= slots, "{p}: {health}");
         }
     }

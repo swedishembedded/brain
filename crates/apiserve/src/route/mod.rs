@@ -28,7 +28,8 @@
 //! What the router guarantees:
 //!
 //! - **Only routable upstreams take requests.** An upstream is in rotation while its `/health` and `/models` answer
-//!   (probed every [`FleetConfig::health_interval`]), it is not draining and it is not stalled. A drained upstream
+//!   (probed every [`FleetConfig::health_interval`]), it is not draining, it is not stalled, and its health does not
+//!   say `serving_held` (every card runs a workload, such as a fine-tune, that has not lent it). A drained upstream
 //!   ([`Fleet::drain`], `POST /v1/upstreams/{n}/drain`) takes nothing new and finishes what it holds.
 //! - **No request waits on an upstream that makes no progress.** An upstream holding work (requests the router sent
 //!   it, or jobs it reports waiting) that neither answers, streams nor finishes anything for
@@ -250,6 +251,8 @@ struct Advertised {
     queue_depth: usize,
     /// Of its decode slots, those free (as of its last dispatcher pass).
     free_slots: usize,
+    /// Every card runs a workload that has not lent it (`serving_held`): nothing sent there runs until it ends.
+    held: bool,
     /// Free tokens of its KV pool, when it reports them.
     kv_free_tokens: Option<u64>,
     /// The process's identity: a change means it restarted, its caches (and maybe its weights) gone.
@@ -346,9 +349,10 @@ impl Member {
         self.model_in_flight.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(group).copied().unwrap_or(0)
     }
 
-    /// Whether it takes new requests: it answers its probes, is not draining and has not stalled.
+    /// Whether it takes new requests: it answers its probes, is not draining, has not stalled, and its cards are not
+    /// all held by a workload (knowledge #611).
     fn routable(&self) -> bool {
-        self.healthy.load(Ordering::SeqCst) && !self.draining.load(Ordering::SeqCst) && !self.stalled.load(Ordering::SeqCst)
+        self.healthy.load(Ordering::SeqCst) && !self.draining.load(Ordering::SeqCst) && !self.stalled.load(Ordering::SeqCst) && !self.advertised().held
     }
 
     /// It made progress now.
@@ -662,6 +666,7 @@ impl Fleet {
                 json!({
                     "index": index,
                     "healthy": m.healthy.load(Ordering::SeqCst),
+                    "serving_held": adv.held,
                     "draining": m.draining.load(Ordering::SeqCst),
                     "stalled": m.stalled.load(Ordering::SeqCst),
                     "in_flight": held,
@@ -971,7 +976,8 @@ fn parse_advertised(health: &Value, listing: &Value) -> Result<(Advertised, Serv
     let free_slots = health.get("free_slots").and_then(Value::as_u64).map_or(slots, |n| (n as usize).min(slots));
     let kv_free_tokens = health.get("kv_free_tokens").and_then(Value::as_u64);
     let instance = health.get("instance").and_then(Value::as_str).filter(|s| s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric())).unwrap_or("").to_string();
-    let mut adv = Advertised { slots, queue_depth, free_slots, kv_free_tokens, instance, ..Advertised::default() };
+    let held = health.get("serving_held").and_then(Value::as_bool).unwrap_or(false);
+    let mut adv = Advertised { slots, queue_depth, free_slots, held, kv_free_tokens, instance, ..Advertised::default() };
     for card in data {
         let Some(id) = card.get("id").and_then(Value::as_str).filter(|id| valid_model_id(id)) else {
             return Err("it lists a model whose id is not a plain string".into());

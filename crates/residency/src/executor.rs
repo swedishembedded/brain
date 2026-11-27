@@ -171,6 +171,10 @@ pub struct Stats {
     /// `Done` arrives. `admitted` moves the instant a job starts running;
     /// `jobs`/`batches` are the batching-shape counters `Done` already needed.
     pub admitted: u64,
+    /// Every device this server computes models on runs a workload that has not lent it ([`capability::lease`]): no
+    /// request can run here until the workload ends or lends its card, so a router keeps requests away
+    /// (knowledge #611). Refreshed with `metrics`.
+    pub serving_held: bool,
     /// LIVE queued-job count (unlike `queue_peak`, a high-water mark that never
     /// resets) - the number a dashboard/braintop panel actually wants to watch
     /// change in real time. `InFlightJob::since_ms` is per-request; this is the
@@ -916,6 +920,8 @@ struct Dispatcher {
     /// Workloads asking for their lent devices back, granted once nothing runs on them; until then nothing new
     /// starts there and running serving groups there take no late jobs.
     reclaims: Vec<Reclaim>,
+    /// The devices of each running workload group: held from serving unless lent ([`Stats::serving_held`]).
+    workload_devices: HashMap<InstanceKey, Vec<Device>>,
     /// The dispatcher's own inbox, for the threads that drop abandoned instances.
     done: Sender<Msg>,
     stats: Arc<Mutex<Stats>>,
@@ -952,6 +958,7 @@ impl Dispatcher {
             workload_lanes: lanes.workloads,
             lent: HashSet::new(),
             reclaims: Vec::new(),
+            workload_devices: HashMap::new(),
             done,
             stats,
             health,
@@ -1167,8 +1174,10 @@ fn dispatch_loop(rx: Receiver<Msg>, mut d: Dispatcher, capacity: Option<Capacity
             // A running group holds its instance: what it last published stands for it.
             let published: HashMap<InstanceKey, Vec<(String, serde_json::Value)>> = d.open_groups.iter().filter_map(|(k, g)| g.inbox.lock().published.clone().map(|m| (k.clone(), m))).collect();
             let metrics = d.mgr.all_metrics(&published);
+            let serving_held = d.serving_held();
             if let Ok(mut s) = d.stats.lock() {
                 s.metrics = metrics;
+                s.serving_held = serving_held;
                 s.load = instance_loads(&d.queue, &d.running_jobs);
             }
             last_metrics = Some(Instant::now());
@@ -1177,9 +1186,18 @@ fn dispatch_loop(rx: Receiver<Msg>, mut d: Dispatcher, capacity: Option<Capacity
 }
 
 impl Dispatcher {
+    /// Whether every device this server computes models on runs a workload that has not lent it
+    /// ([`Stats::serving_held`]). A server with no such device is never held.
+    fn serving_held(&self) -> bool {
+        let budgets = self.mgr.budgets();
+        let mut computing = budgets.devices().filter(|&d| d != Device::Cpu || budgets.cpu_computes()).peekable();
+        let held: HashSet<Device> = self.workload_devices.values().flatten().filter(|d| !self.lent.contains(d)).copied().collect();
+        computing.peek().is_some() && computing.all(|d| held.contains(&d))
+    }
+
     /// Apply one message to the dispatcher's state.
     fn on_msg(&mut self, msg: Msg) {
-        let Dispatcher { queue, mgr, policy, running, busy, stats, running_jobs, open_groups, replica_routes, next_id, done, lent, reclaims, .. } = self;
+        let Dispatcher { queue, mgr, policy, running, busy, stats, running_jobs, open_groups, replica_routes, next_id, done, lent, reclaims, workload_devices, .. } = self;
         match msg {
             Msg::Submit(mut job) => match mgr.instance_key_for(&job.model, &job.action, &job.inv) {
                 Some(key) => {
@@ -1293,6 +1311,7 @@ impl Dispatcher {
                 // dropped on this thread (`drop_elsewhere`).
                 running.remove(&key);
                 open_groups.remove(&key);
+                workload_devices.remove(&key);
                 running_jobs.retain(|r| r.key != key); // group finished - drop its jobs
                 busy.remove(&device);
                 if failed {
@@ -1318,6 +1337,7 @@ impl Dispatcher {
                 // See `Msg::Done`'s identical reordering + doc, above.
                 running.remove(&key);
                 open_groups.remove(&key);
+                workload_devices.remove(&key);
                 running_jobs.retain(|r| r.key != key);
                 for &d in &devices {
                     busy.remove(&d);
@@ -1493,7 +1513,7 @@ impl Dispatcher {
     /// Assign as many runnable groups as there are free device lanes.
     fn assign(&mut self) {
         let reclaiming = self.reclaiming();
-        let Dispatcher { queue, mgr, policy, lanes, workload_lanes, lent, done, running, busy, stats, running_jobs, open_groups, health: supervised, holds, manifests, .. } = self;
+        let Dispatcher { queue, mgr, policy, lanes, workload_lanes, lent, done, running, busy, stats, running_jobs, open_groups, health: supervised, holds, manifests, workload_devices, .. } = self;
         let health = supervised.as_deref();
         let contract = policy.admission;
         // Quarantined devices are excluded exactly like busy ones, so a group is
@@ -1691,6 +1711,9 @@ impl Dispatcher {
                 ClaimOutcome::Single(_, device) => vec![*device],
                 ClaimOutcome::Multi(_, devices) => devices.clone(),
             };
+            if workload {
+                workload_devices.insert(ckey.clone(), group_devices.clone());
+            }
             let target = match outcome {
                 ClaimOutcome::Single(work, device) => {
                     busy.insert(device);
@@ -4247,6 +4270,71 @@ mod tests {
         fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
             Ok(Outcome::new().blob("out", Blob::new(Media::Bytes, vec![1])))
         }
+    }
+
+    /// A server whose every card runs a workload that does not lend it (a fine-tune holding its card for the whole run)
+    /// cannot serve: it says so (`Stats::serving_held`), so a router stops sending it requests that would wait, making
+    /// no token until the run ends (13-41 queued on each training card, knowledge #611). A workload that lends its
+    /// card while it waits does not hold it, and the card serves again once the run ends.
+    #[test]
+    fn a_card_running_a_workload_that_does_not_lend_it_is_held_from_serving() {
+        struct Train(Arc<AtomicBool>);
+        struct TrainInst(Arc<AtomicBool>);
+        impl ResidentModel for Train {
+            fn manifest(&self) -> Manifest {
+                Manifest::new("train", "a workload", vec![ActionSpec::new("run", "run")])
+            }
+            fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+                InstanceKey::new("train", "default")
+            }
+            fn estimate(&self, _k: &InstanceKey) -> MemCost {
+                MemCost::new(4 * GB, 0)
+            }
+            fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+                Ok(Box::new(TrainInst(self.0.clone())))
+            }
+            fn transient(&self) -> bool {
+                true
+            }
+        }
+        impl Instance for TrainInst {
+            fn run(&mut self, _a: &str, inv: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+                let wait = || {
+                    while !self.0.load(Ordering::SeqCst) {
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                };
+                if inv.get_bool("lend").unwrap_or(false) {
+                    inv.lease.lent(wait);
+                } else {
+                    wait();
+                }
+                Ok(Outcome::new())
+            }
+        }
+        let held = |exec: &Executor, want: bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while exec.stats().serving_held != want && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            exec.stats().serving_held
+        };
+        let release = Arc::new(AtomicBool::new(false));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0);
+        let exec = Executor::start(vec![Arc::new(Train(release.clone()))], budgets, Policy::default());
+        assert!(!exec.stats().serving_held, "an idle server serves");
+        for (lend, holds) in [(false, true), (true, false)] {
+            release.store(false, Ordering::SeqCst);
+            let (tx, rx) = channel();
+            exec.submit(Job::new("train", "run", Invocation::new().set("lend", serde_json::json!(lend))).reply(move |r| tx.send(r).unwrap()));
+            std::thread::sleep(Duration::from_millis(200));
+            assert_eq!(held(&exec, holds), holds, "a run that lends its card: {lend}");
+            release.store(true, Ordering::SeqCst);
+            rx.recv_timeout(Duration::from_secs(10)).expect("answered").unwrap();
+            assert!(!held(&exec, false), "the card serves again once the run ends");
+        }
+        exec.shutdown();
     }
 
     /// Every served model advertises how many of its sequences the server decodes at once, a multi-device one too:

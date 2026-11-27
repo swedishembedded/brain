@@ -74,6 +74,8 @@ struct Mock {
     wedged: AtomicBool,
     /// Fields its card for a model carries beyond the id (its decode slots for that model, whether it is resident).
     card_extra: Mutex<std::collections::HashMap<String, Value>>,
+    /// Its health says every card runs a workload that has not lent it.
+    serving_held: AtomicBool,
 }
 
 impl Mock {
@@ -113,7 +115,9 @@ async fn mock_health(State(m): State<Arc<Mock>>, headers: HeaderMap) -> Response
     let kv_free = *m.kv_free.lock().unwrap();
     let instance = m.instance.lock().unwrap().clone();
     let queue_depth = m.queue_depth.load(Ordering::SeqCst);
-    Json(json!({"status": "ok", "instance": instance, "decode_slots": m.slots, "free_slots": m.slots, "kv_free_tokens": kv_free, "edge_concurrency": m.edge, "queue_depth": queue_depth, "served": served})).into_response()
+    let held = m.serving_held.load(Ordering::SeqCst);
+    let free_slots = if held { 0 } else { m.slots };
+    Json(json!({"status": "ok", "instance": instance, "decode_slots": m.slots, "free_slots": free_slots, "serving_held": held, "kv_free_tokens": kv_free, "edge_concurrency": m.edge, "queue_depth": queue_depth, "served": served})).into_response()
 }
 
 async fn mock_models(State(m): State<Arc<Mock>>) -> Json<Value> {
@@ -189,6 +193,7 @@ async fn mock(name: &str, slots: u64, edge: u64, models: &[&str]) -> (Arc<Mock>,
         answered: AtomicUsize::new(0),
         wedged: AtomicBool::new(false),
         card_extra: Mutex::default(),
+        serving_held: AtomicBool::new(false),
     });
     let app = Router::new()
         .route("/v1/health", get(mock_health))
@@ -1230,4 +1235,58 @@ async fn adapters_of_one_base_share_one_load_bound_on_an_upstream() {
         assert_eq!(request.await.unwrap().0, StatusCode::OK);
     }
     assert_eq!(chat(addr, conversation("base:y", "s", 1)).await.0, StatusCode::OK);
+}
+
+/// A server whose every card runs a fine-tune that holds it serves nothing until the run ends: its health says
+/// `serving_held` and the router sends it nothing, whatever it has resident or cached, and takes it back once the run
+/// is over. Training cards held 13-41 queued requests, producing no token, while they stayed in rotation (knowledge #611).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_upstream_whose_cards_a_workload_holds_takes_no_request_until_it_ends() {
+    let (a, ua) = mock("a", 3466, 8192, &["m"]).await;
+    let (b, ub) = mock("b", 3466, 8192, &["m"]).await;
+    a.card_extra.lock().unwrap().insert("m".into(), json!({"decode_slots": 64, "resident": true}));
+    b.card_extra.lock().unwrap().insert("m".into(), json!({"decode_slots": 64, "resident": false}));
+    a.serving_held.store(true, Ordering::SeqCst);
+    let (addr, fleet, _stop) = router(&[ua, ub]).await;
+    for turn in 0..3 {
+        assert_eq!(chat(addr, conversation("m", "s", turn + 1)).await.2["upstream"], "b", "turn {turn}");
+    }
+    assert_eq!(a.count(), 0, "the held upstream was sent nothing although the model is resident there");
+    assert_eq!(fleet.status()["upstreams"][0]["serving_held"], json!(true));
+    a.serving_held.store(false, Ordering::SeqCst);
+    fleet.probe().await;
+    assert_eq!(chat(addr, conversation("m", "s", 1)).await.2["upstream"], "a", "back in rotation once the run ended");
+}
+
+/// The production burst of 2026-11-27 with its training cards (knowledge #611): the 27B burst of 256 over 16
+/// upstreams, resident on upstream 1, while upstreams 2, 4, 8 and 12 each run a fine-tune that holds the card and
+/// report nothing waiting (their queue is the requests they will never run), and the rest work for another router.
+/// No request goes to a held card.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_burst_never_lands_on_cards_a_fine_tune_holds() {
+    const UPSTREAMS: usize = 16;
+    const HELD: [usize; 4] = [2, 4, 8, 12];
+    let mut mocks = Vec::new();
+    let mut urls = Vec::new();
+    for i in 0..UPSTREAMS {
+        let (m, u) = mock(&format!("u{i}"), 3466, 8192, &["big"]).await;
+        m.card_extra.lock().unwrap().insert("big".into(), json!({"decode_slots": 64, "resident": i == 1, "slot_group": "big"}));
+        if HELD.contains(&i) {
+            m.serving_held.store(true, Ordering::SeqCst);
+        } else if i != 1 {
+            m.queue_depth.store(10 + 3 * (UPSTREAMS - i), Ordering::SeqCst);
+        }
+        mocks.push(m);
+        urls.push(u);
+    }
+    let (addr, _fleet, _stop) = router(&urls).await;
+    let (spread, held) = burst(addr, &mocks, "big", 256).await;
+    eprintln!("in-flight spread with fine-tunes holding upstreams {HELD:?}: {spread:?}");
+    assert!(HELD.iter().all(|&i| spread[i] == 0), "a held card took requests: {spread:?}");
+    for m in &mocks {
+        m.release.add_permits(256);
+    }
+    for request in held {
+        assert_eq!(request.await.unwrap().0, StatusCode::OK);
+    }
 }

@@ -314,11 +314,12 @@ impl ResidencyManager {
         self.models.get(model).map(|m| m.manifest()).or_else(|| self.multi_models.get(model).map(|m| m.manifest()))
     }
 
-    /// A starved or too-large claim's second chance: offer `m` the bytes each device can give this server right now
-    /// ([`ResidentModel::replan`]). `true` when the model re-sized its defaulted plan, which is logged as a warning
+    /// A starved or too-large claim's second chance: offer `m` the bytes each device can give this server right now,
+    /// less what running workloads reserved there ([`ResidentModel::replan`]). `true` when the model re-sized its defaulted plan, which is logged as a warning
     /// naming every value that changed, and the claim is worth trying once more.
     fn replan_starved(&mut self, model: &str, m: &dyn ResidentModel, key: &InstanceKey) -> bool {
-        let usable: Vec<(Device, u64)> = self.budgets.devices().filter(|d| *d != Device::Cpu).map(|d| (d, self.budgets.usable_on(d))).collect();
+        // A running workload's reservation is never evicted for serving, so a plan may count only on what is left.
+        let usable: Vec<(Device, u64)> = self.budgets.devices().filter(|d| *d != Device::Cpu).map(|d| (d, self.budgets.usable_on(d).saturating_sub(self.workload_reservation_on(d)))).collect();
         match m.replan(key, &usable) {
             Some(change) => {
                 crate::log::warn(&format!("{key}: its defaulted plan no longer fit the memory this server can use now, so it was re-planned: {change}"));
@@ -1634,9 +1635,23 @@ impl ResidencyManager {
             if matches!(d, Device::Cpu) {
                 continue;
             }
+            let workload = self.workload_reservation_on(d);
             let Some(b) = self.budgets.get_mut(d) else { continue };
-            b.measure(b.used.saturating_add(free_now));
+            let measured = b.used.saturating_add(free_now);
+            // A workload's reservation is in `used` from the moment it is placed, but its run allocates it as it goes,
+            // so `free_now` still holds the part not allocated yet: counted twice, serving was given it and its growth
+            // ran the run out of memory (knowledge #611). While a workload holds the card, a measurement may shrink it,
+            // never grow it.
+            b.measure(if workload > 0 { measured.min(b.total) } else { measured });
         }
+    }
+
+    /// The bytes charged on `device` to workloads ([`ResidentModel::transient`]) placed there now: reserved for a run
+    /// that may not have allocated them yet, so no serving instance may count on them.
+    fn workload_reservation_on(&self, device: Device) -> u64 {
+        let single: u64 = self.residents.iter().filter(|(k, e)| e.device == device && self.is_transient(&k.model)).map(|(_, e)| e.cost.resident_on(device)).sum();
+        let multi: u64 = self.multi_residents.iter().filter(|(k, e)| e.devices.contains(&device) && self.is_transient(&k.model)).map(|(_, e)| e.cost.on(device)).sum();
+        single + multi
     }
 
     /// Execute an eviction plan, but try a CARD before accepting the host
@@ -3048,6 +3063,53 @@ mod tests {
         // The memory returns and the same model is placed again, no restart.
         mgr.refresh_accelerator_capacity(&[(Device::Gpu(0), 24 * GB)]);
         mgr.run("fills", "run", &Invocation::new(), &mut |_| {}).expect("recovered");
+    }
+
+    /// A workload's reservation is charged in full when it is placed, but the run allocates it as it goes: a live
+    /// measurement then still finds the part it has not allocated free. Counting it twice handed it to serving, whose
+    /// growth ran the fine-tune out of memory (`cuMemAlloc`) on its card (knowledge #611). While a workload holds a
+    /// card its capacity may fall with a measurement but never rise, and a re-plan is offered the card less the
+    /// reservation.
+    #[test]
+    fn serving_never_grows_into_a_running_workloads_reservation() {
+        struct Workload(Fake);
+        impl ResidentModel for Workload {
+            fn manifest(&self) -> Manifest {
+                self.0.manifest()
+            }
+            fn instance_key(&self, a: &str, i: &Invocation) -> InstanceKey {
+                self.0.instance_key(a, i)
+            }
+            fn estimate(&self, k: &InstanceKey) -> MemCost {
+                self.0.estimate(k)
+            }
+            fn activate(&self, k: &InstanceKey, d: Device) -> Result<Box<dyn crate::Instance>, String> {
+                self.0.activate(k, d)
+            }
+            fn transient(&self) -> bool {
+                true
+            }
+        }
+        let live = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0);
+        let mut mgr = ResidencyManager::new(budgets);
+        mgr.register(Arc::new(Workload(Fake { name: "job".into(), vram: 16 * GB, live: live.clone() })));
+        mgr.register(Arc::new(Fake { name: "served".into(), vram: 10 * GB, live: live.clone() }));
+        let job = InstanceKey::new("job", "default");
+        mgr.claim("job", "run", &Invocation::new(), 0, &no_exclude()).expect("the job is placed");
+        // The run has allocated 4 GB of its 16 so far: the card measures 20 GB free.
+        mgr.refresh_accelerator_capacity(&[(Device::Gpu(0), 20 * GB)]);
+        assert_eq!(mgr.budgets.get(Device::Gpu(0)).unwrap().total, 24 * GB, "the card did not grow");
+        assert!(mgr.claim("served", "run", &Invocation::new(), 0, &no_exclude()).is_err(), "8 GB beside the run's reservation do not hold 10");
+        // Memory another process takes still shrinks the card.
+        mgr.refresh_accelerator_capacity(&[(Device::Gpu(0), 2 * GB)]);
+        assert_eq!(mgr.budgets.get(Device::Gpu(0)).unwrap().total, 18 * GB);
+        // Once the run ends, the measurement is the card's again.
+        mgr.release(&job);
+        mgr.refresh_accelerator_capacity(&[(Device::Gpu(0), 24 * GB)]);
+        assert_eq!(mgr.budgets.get(Device::Gpu(0)).unwrap().total, 24 * GB);
+        mgr.run("served", "run", &Invocation::new(), &mut |_| {}).expect("served once the run is gone");
     }
 
     /// The multi-device claim path makes the same distinction.
