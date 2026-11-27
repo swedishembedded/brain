@@ -49,6 +49,9 @@ use crate::place::{could_ever_fit, fits_when_empty, no_exclude, pick_device, pla
 use crate::{Device, Instance, InstanceKey, MemCost, ResidentModel, Tier};
 
 mod cards;
+mod life;
+
+pub use life::{BuildRecord, EvictionRecord, InstanceLife, LifeState};
 
 /// A hot instance handle: the (mutex-guarded) instance plus the device it lives on.
 /// The scheduler runs it outside the manager lock; the key stays pinned meanwhile.
@@ -268,6 +271,8 @@ pub struct ResidencyManager {
     /// Models that re-sized their defaulted plan since [`Self::take_replanned`] last asked
     /// ([`ResidentModel::replan`]): their manifests (the context they advertise) have changed.
     replanned: Vec<String>,
+    /// Each serving instance's builds and evictions, for an observer ([`Self::lives`]).
+    lives: HashMap<InstanceKey, life::Life>,
 }
 
 /// One multi-device resident instance's bookkeeping - parallel to
@@ -300,6 +305,7 @@ impl ResidencyManager {
             evictions: 0,
             eviction: Box::new(CostAware),
             replanned: Vec::new(),
+            lives: HashMap::new(),
         }
     }
 
@@ -418,6 +424,7 @@ impl ResidencyManager {
             self.retiring.remove(&model);
             self.models.remove(&model);
             self.multi_models.remove(&model);
+            self.life_forget(&model);
             self.event(format!("retired {model}"));
         }
     }
@@ -994,6 +1001,29 @@ impl ResidencyManager {
         ResidencyReport { placements, multi_placements, budgets }
     }
 
+    /// Every budgeted device as an observer reads it ([`crate::observe::CardObservation`]), accelerators by index
+    /// first; `held` are the devices a running workload holds from serving.
+    pub fn cards(&self, held: &HashSet<Device>) -> Vec<crate::observe::CardObservation> {
+        let mut devices: Vec<Device> = self.budgets.devices().collect();
+        devices.sort_by_key(|&d| device_order(d));
+        devices
+            .into_iter()
+            .filter_map(|d| {
+                let b = self.budgets.get(d)?;
+                Some(crate::observe::CardObservation {
+                    device: d,
+                    total_bytes: b.total,
+                    reserved_bytes: b.reserved,
+                    used_bytes: b.used,
+                    free_bytes: self.budgets.free_on(d),
+                    ceiling_bytes: self.budgets.ceiling_on(d),
+                    workload_reservation_bytes: self.workload_reservation_on(d),
+                    serving_held: held.contains(&d),
+                })
+            })
+            .collect()
+    }
+
     pub fn budgets(&self) -> &Budgets {
         &self.budgets
     }
@@ -1144,6 +1174,7 @@ impl ResidencyManager {
             self.charge(&hot_cost, device);
             self.residents.retier(&key, hot_cost, device, Tier::Hot);
             self.residents.set_pinned(&key, true);
+            self.life_building(&key);
             self.event(format!("promote {key} -> {device:?} (warm->hot)"));
             return Ok((Claimed::Promote(handle), device, key));
         }
@@ -1194,6 +1225,7 @@ impl ResidencyManager {
         self.charge(&cost, device);
         self.residents.insert(key.clone(), cost, device);
         self.residents.set_pinned(&key, true);
+        self.life_building(&key);
         self.event(format!("promote {key} -> {device:?} (building)"));
         Ok((Claimed::Build(m), device, key))
     }
@@ -1202,6 +1234,7 @@ impl ResidencyManager {
     pub fn adopt(&mut self, key: &InstanceKey, handle: InstanceHandle) -> InstanceHandle {
         self.instances.insert(key.clone(), handle.clone());
         self.builds += 1;
+        self.life_built(key, true);
         self.event(format!("built {key}"));
         handle
     }
@@ -1217,6 +1250,8 @@ impl ResidencyManager {
             return None;
         };
         self.residents.remove(key);
+        self.life_built(key, false);
+        self.life_evicted(key, false);
         self.event(format!("build-failed {key} (instance abandoned)"));
         Some(Abandoned { key: key.clone(), charges: self.single_charges(&entry.cost, entry.device), instance })
     }
@@ -1235,6 +1270,8 @@ impl ResidencyManager {
         if self.charges_multi_host(&entry.cost, &entry.devices) {
             charges.push((Device::Cpu, entry.cost.ram()));
         }
+        self.life_built(key, false);
+        self.life_evicted(key, false);
         self.event(format!("build-failed {key} (multi-device, instance abandoned)"));
         Some(Abandoned { key: key.clone(), charges, instance })
     }
@@ -1252,6 +1289,7 @@ impl ResidencyManager {
         };
         self.residents.remove(key);
         self.evictions += 1;
+        self.life_evicted(key, false);
         self.event(format!("abandon {key} <- {:?}", entry.device));
         Some(Abandoned { key: key.clone(), charges: self.single_charges(&entry.cost, entry.device), instance })
     }
@@ -1271,6 +1309,7 @@ impl ResidencyManager {
             self.refund(&entry.cost, entry.device);
         }
         self.instances.remove(key);
+        self.life_built(key, false);
         self.event(format!("build-failed {key}"));
     }
 
@@ -1471,6 +1510,7 @@ impl ResidencyManager {
         self.charge_multi_host(&cost, &devices);
         self.multi_claims += 1;
         self.multi_residents.insert(key.clone(), MultiEntry { cost, devices: devices.clone(), pinned: true, last_claimed: self.multi_claims });
+        self.life_building(&key);
         self.event(format!("promote {key} -> {devices:?} (building, multi-device)"));
         Ok((ClaimedMulti::Build(m), devices, key))
     }
@@ -1499,6 +1539,7 @@ impl ResidencyManager {
     pub fn adopt_multi(&mut self, key: &InstanceKey, handle: InstanceHandle) -> InstanceHandle {
         self.instances.insert(key.clone(), handle.clone());
         self.builds += 1;
+        self.life_built(key, true);
         self.event(format!("built {key} (multi-device)"));
         handle
     }
@@ -1513,6 +1554,7 @@ impl ResidencyManager {
             self.refund_multi_host(&entry.cost, &entry.devices);
         }
         self.instances.remove(key);
+        self.life_built(key, false);
         self.event(format!("build-failed {key} (multi-device)"));
     }
 
@@ -1557,6 +1599,7 @@ impl ResidencyManager {
                 self.refund_multi_host(&entry.cost, &entry.devices);
                 self.instances.remove(key);
                 self.evictions += 1;
+                self.life_evicted(key, false);
                 self.event(format!("evict {key} <- {:?} (multi-device)", entry.devices));
                 true
             }
@@ -1877,6 +1920,7 @@ impl ResidencyManager {
                         self.refund(&entry.cost, entry.device);
                         self.charge(&warm_cost, home);
                         self.residents.retier(key, warm_cost, home, Tier::Warm);
+                        self.life_evicted(key, true);
                         self.event(format!("demote {key} <- {:?} (warm)", entry.device));
                         return;
                     }
@@ -1890,6 +1934,7 @@ impl ResidencyManager {
             self.refund(&entry.cost, entry.device);
             self.instances.remove(key); // drops the Instance → frees the GPU
             self.evictions += 1;
+            self.life_evicted(key, false);
             self.event(format!("evict {key} <- {:?}", entry.device));
         }
     }

@@ -282,7 +282,7 @@ impl Manager {
     fn build_inv(&self, params: &str, in_fds: HashMap<String, ZOwnedFd>, in_meta: &str) -> Result<Invocation, String> {
         let params: Value = if params.trim().is_empty() { json!({}) } else { serde_json::from_str(params).map_err(|e| format!("params JSON: {e}"))? };
         let meta: Value = if in_meta.trim().is_empty() { json!({}) } else { serde_json::from_str(in_meta).map_err(|e| format!("in_meta JSON: {e}"))? };
-        let mut inv = Invocation { params, blobs: Default::default(), cancel: Default::default(), scope: String::new(), inbox: Default::default(), lease: Default::default() };
+        let mut inv = Invocation { params, blobs: Default::default(), cancel: Default::default(), scope: String::new(), inbox: Default::default(), lease: Default::default(), report: Default::default() };
         // A call carries at most a few blobs and a bounded total: each fd is
         // capped on its own (`MAX_FD_BLOB_BYTES`), and without these bounds a
         // caller could still pass as many as the bus allows.

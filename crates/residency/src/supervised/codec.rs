@@ -166,7 +166,7 @@ pub(super) fn decode_jobs(text: &str, fds: Vec<OwnedFd>, tokens: Vec<CancelToken
             let params = map.get("params").cloned().unwrap_or_else(|| json!({}));
             let scope = map.get("scope").and_then(Value::as_str).unwrap_or("").to_string();
             // An inbox does not cross the process boundary: a worker's job reads no input.
-            Ok(Invocation { params, blobs: blobs.read(map.get("blobs"))?, cancel, scope, inbox: Default::default(), lease: Default::default() })
+            Ok(Invocation { params, blobs: blobs.read(map.get("blobs"))?, cancel, scope, inbox: Default::default(), lease: Default::default(), report: Default::default() })
         })
         .collect::<Result<Vec<_>, String>>()?;
     blobs.done()?;

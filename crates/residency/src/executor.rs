@@ -255,6 +255,8 @@ enum Msg {
     /// replies with a residency + budget snapshot. Mirrors how [`Stats`] is
     /// exposed, but read straight from the manager rather than the counters.
     Report(Sender<crate::ResidencyReport>),
+    /// What an observer reads of the cards and the instances' lives - see [`Executor::observe`].
+    Observe(Sender<crate::observe::Observation>),
     /// An in-flight query: the dispatcher replies with one [`InFlightJob`] per job
     /// currently queued OR running. Handled like [`Msg::Report`] - read from the
     /// dispatcher's own live queue + running set, so it is scheduling-consistent.
@@ -397,6 +399,15 @@ pub struct Executor {
     /// The model fetches in flight, one per model, shared by every caller of
     /// [`Self::ensure_model`].
     pub(crate) fetches: Arc<crate::supply::Fetches>,
+    /// What each model answered and the workload jobs, for [`Self::served`] and [`Self::workloads`].
+    observers: Observers,
+}
+
+/// The records the dispatcher keeps for an observer as it answers jobs ([`crate::observe`]).
+#[derive(Clone, Default)]
+struct Observers {
+    served: Arc<crate::observe::ServedCounters>,
+    workloads: Arc<crate::observe::Workloads>,
 }
 
 impl Executor {
@@ -484,7 +495,8 @@ impl Executor {
         }
 
         let manifests = Arc::new(RwLock::new(Arc::new(manifests)));
-        let dispatcher = Dispatcher::new(mgr, policy, Lanes { serving: lanes, workloads: workload_lanes }, tx.clone(), stats.clone(), supervision.map(|s| s.health), manifests.clone());
+        let observers = Observers::default();
+        let dispatcher = Dispatcher::new(mgr, policy, Lanes { serving: lanes, workloads: workload_lanes }, tx.clone(), stats.clone(), supervision.map(|s| s.health), manifests.clone(), observers.clone());
         let h = std::thread::Builder::new()
             .name("brain-dispatcher".into())
             .spawn(move || dispatch_loop(rx, dispatcher, capacity))
@@ -500,6 +512,7 @@ impl Executor {
             stats,
             join_handles: Arc::new(Mutex::new(Some(join_handles))),
             fetches: Arc::default(),
+            observers,
         }
     }
 
@@ -669,6 +682,13 @@ impl Executor {
         single.or_else(|| self.multi_models.read().unwrap().get(model).map(|m| m.clone() as Arc<dyn ResidentModel>))
     }
 
+    /// Whether `model` is a workload ([`ResidentModel::transient`]): a job such as a fine-tune that holds a device
+    /// while it runs and nothing after, listed with the workload jobs ([`Self::workloads`]) rather than as a served
+    /// model.
+    pub fn is_workload(&self, model: &str) -> bool {
+        self.models.read().unwrap().get(model).is_some_and(|m| m.transient())
+    }
+
     /// The model whose instances serve `model`'s requests ([`ResidentModel::instance_key`] for a generation): the
     /// model itself, or for an adapter served in its base's bank, the base. Models of one slot group share one
     /// instance, its batch and its residency, so a front end counts their load together. `None` for a model not
@@ -814,6 +834,31 @@ impl Executor {
         rx.recv().unwrap_or_default()
     }
 
+    /// What an observer reads of the server now ([`crate::observe`]): every card's memory as the manager accounts it
+    /// (with its workload reservation and whether a workload holds it from serving) and every serving instance's
+    /// life (resident, building, warm or evicted, with its last build and eviction). Round-trips through the
+    /// dispatcher like [`Self::residency`], so it is consistent with scheduling; empty once the dispatcher is gone.
+    pub fn observe(&self) -> crate::observe::Observation {
+        let (tx, rx) = channel();
+        if self.tx.send(Msg::Observe(tx)).is_err() {
+            return crate::observe::Observation::default();
+        }
+        rx.recv().unwrap_or_default()
+    }
+
+    /// What each registered model has answered since the executor started, by the model name its jobs gave: results
+    /// with their prompt and completion tokens, cancellations, and errors by failure class. No dispatcher round trip.
+    pub fn served(&self) -> HashMap<String, crate::observe::ModelServed> {
+        self.observers.served.snapshot()
+    }
+
+    /// The workload jobs (fine-tunes and the like) not ended, and the last few that ended, in submit order: their
+    /// state, times and the report each job publishes about itself ([`capability::report`]). No dispatcher round
+    /// trip.
+    pub fn workloads(&self) -> Vec<crate::observe::WorkloadJob> {
+        self.observers.workloads.snapshot()
+    }
+
     /// A live list of every job the executor currently holds - queued or running -
     /// each with a stable submit-order `id`, model/action, coarse phase, and elapsed
     /// time since it was enqueued. Round-trips a query through the dispatcher (the
@@ -946,12 +991,15 @@ struct Dispatcher {
     /// The executor's manifest list, refreshed when a model re-sizes its defaulted plan
     /// ([`ResidencyManager::take_replanned`]): the context it advertises changes with it.
     manifests: Arc<RwLock<Arc<Vec<Manifest>>>>,
+    observers: Observers,
 }
 
 impl Dispatcher {
-    fn new(mgr: ResidencyManager, policy: Policy, lanes: Lanes, done: Sender<Msg>, stats: Arc<Mutex<Stats>>, health: Option<Arc<Health<Device>>>, manifests: Arc<RwLock<Arc<Vec<Manifest>>>>) -> Dispatcher {
+    #[allow(clippy::too_many_arguments)]
+    fn new(mgr: ResidencyManager, policy: Policy, lanes: Lanes, done: Sender<Msg>, stats: Arc<Mutex<Stats>>, health: Option<Arc<Health<Device>>>, manifests: Arc<RwLock<Arc<Vec<Manifest>>>>, observers: Observers) -> Dispatcher {
         Dispatcher {
             manifests,
+            observers,
             mgr,
             policy,
             lanes: lanes.serving,
@@ -1204,10 +1252,17 @@ impl Dispatcher {
 
     /// Apply one message to the dispatcher's state.
     fn on_msg(&mut self, msg: Msg) {
-        let Dispatcher { queue, mgr, policy, running, busy, stats, running_jobs, open_groups, replica_routes, next_id, done, lent, reclaims, workload_devices, .. } = self;
+        let Dispatcher { queue, mgr, policy, running, busy, stats, running_jobs, open_groups, replica_routes, next_id, done, lent, reclaims, workload_devices, observers, .. } = self;
         match msg {
             Msg::Submit(mut job) => match mgr.instance_key_for(&job.model, &job.action, &job.inv) {
                 Some(key) => {
+                    // Every answer to a job for a registered model is counted for an observer, a refusal at the door
+                    // too (an unknown model's is not: its name is the caller's, unbounded).
+                    let (served, model, cancel, reply) = (observers.served.clone(), job.model.clone(), job.inv.cancel.clone(), job.reply);
+                    job.reply = Box::new(move |result| {
+                        served.count(&model, &result, cancel.is_cancelled());
+                        reply(result)
+                    });
                     if let Err(refusal) = mgr.check_job(&job.model, &job.action, &job.inv) {
                         (job.reply)(Err(refusal));
                         return;
@@ -1216,6 +1271,9 @@ impl Dispatcher {
                     let key = replica_routes.route(mgr, &job.model, &job.inv, key, queue, running_jobs);
                     let id = *next_id;
                     *next_id += 1;
+                    if mgr.is_transient(&job.model) {
+                        watch_workload(&observers.workloads, id, &mut job);
+                    }
                     let enqueued = Instant::now();
                     let (deadline, deadline_source) = policy.admission.deadline(enqueued, job.deadline);
                     let class = if mgr.is_transient(&job.model) { Class::Workload } else { Class::Serving };
@@ -1279,6 +1337,10 @@ impl Dispatcher {
             }
             Msg::Report(tx) => {
                 let _ = tx.send(mgr.report());
+            }
+            Msg::Observe(tx) => {
+                let held: HashSet<Device> = workload_devices.values().flatten().filter(|d| !lent.contains(d)).copied().collect();
+                let _ = tx.send(crate::observe::Observation { cards: mgr.cards(&held), lives: mgr.lives() });
             }
             Msg::InFlight(tx) => {
                 let now = Instant::now();
@@ -1478,6 +1540,27 @@ fn least_loaded_replica(replicas: usize, key: InstanceKey, load: &dyn Fn(&Instan
 /// Record (`Some(reason)`) or clear (`None`) that `key` cannot be served, logging only
 /// the transitions so a model that stays unservable is announced once, not on every
 /// request that it fails.
+/// Record the workload job `id` for an observer: its invocation carries an armed report the job publishes to, its
+/// admission and its answer are recorded.
+fn watch_workload(workloads: &Arc<crate::observe::Workloads>, id: u64, job: &mut Job) {
+    if !job.inv.report.is_armed() {
+        job.inv.report = capability::report::JobReport::armed();
+    }
+    workloads.submitted(id, &job.model, &job.action, job.inv.report.clone());
+    let (admitted, admit) = (workloads.clone(), job.on_admit.take());
+    job.on_admit = Some(Box::new(move || {
+        admitted.started(id);
+        if let Some(admit) = admit {
+            admit();
+        }
+    }));
+    let (ended, cancel, reply) = (workloads.clone(), job.inv.cancel.clone(), std::mem::replace(&mut job.reply, Box::new(|_| {})));
+    job.reply = Box::new(move |result| {
+        ended.ended(id, &result, cancel.is_cancelled());
+        reply(result)
+    });
+}
+
 fn note_unservable(stats: &Arc<Mutex<Stats>>, key: &InstanceKey, reason: Option<&str>) {
     let Ok(mut s) = stats.lock() else { return };
     match reason {
@@ -4858,5 +4941,158 @@ mod tests {
         let err = exec.run_blocking("fills", "run", Invocation::new(), |_| {}).expect_err("the card stays short");
         assert!(err.contains("queue deadline"), "it is refused at its deadline: {err}");
         assert!(err.contains("right now"), "the refusal names the shortage it waited for: {err}");
+    }
+
+    /// What an observer reads of the server (`Executor::observe`): each card's memory as the manager accounts it,
+    /// and each serving instance's life, its build (when, how long) and its eviction (when, after how long resident).
+    #[test]
+    fn an_observer_reads_each_cards_memory_and_each_instances_build_and_eviction() {
+        let builds = Arc::new(AtomicU32::new(0));
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0);
+        let models: Vec<Arc<dyn ResidentModel>> = vec![
+            Arc::new(Slow { name: "small".into(), vram: 10 * GB, ms: 1, builds: builds.clone() }),
+            Arc::new(Slow { name: "large".into(), vram: 20 * GB, ms: 1, builds: builds.clone() }),
+        ];
+        let exec = Executor::start(models, budgets, Policy::default());
+        exec.run_blocking("small", "run", Invocation::new(), |_| {}).expect("served");
+        let seen = exec.observe();
+        let card = seen.cards.iter().find(|c| c.device == Device::Gpu(0)).expect("the card is listed");
+        assert_eq!((card.total_bytes, card.used_bytes, card.free_bytes, card.workload_reservation_bytes, card.serving_held), (24 * GB, 10 * GB, 14 * GB, 0, false));
+        let small = seen.lives.iter().find(|l| l.key.model == "small").expect("the built instance is listed");
+        assert_eq!((small.state, small.devices.as_slice()), (crate::LifeState::Resident, [Device::Gpu(0)].as_slice()));
+        assert!(small.last_build.is_some_and(|b| b.succeeded), "{small:?}");
+        assert_eq!(small.last_eviction, None);
+        // The large model needs the card: the small one is evicted, and says so.
+        exec.run_blocking("large", "run", Invocation::new(), |_| {}).expect("served");
+        let seen = exec.observe();
+        let small = seen.lives.iter().find(|l| l.key.model == "small").expect("an evicted instance stays listed");
+        assert_eq!(small.state, crate::LifeState::Evicted);
+        assert!(small.devices.is_empty());
+        let evicted = small.last_eviction.expect("its eviction is recorded");
+        assert!(evicted.resident_for.is_some() && !evicted.demoted, "{evicted:?}");
+        assert!(evicted.at_unix_ms >= small.last_build.unwrap().ended_unix_ms);
+        let large = seen.lives.iter().find(|l| l.key.model == "large").unwrap();
+        assert_eq!(large.state, crate::LifeState::Resident);
+        assert_eq!(seen.cards.iter().find(|c| c.device == Device::Gpu(0)).unwrap().used_bytes, 20 * GB);
+        exec.shutdown();
+    }
+
+    /// Every answer to a job for a registered model is counted per model: results with their tokens, cancellations,
+    /// and errors by failure class.
+    #[test]
+    fn every_answer_is_counted_per_model_by_kind() {
+        struct Answers;
+        struct AnswersInst;
+        impl ResidentModel for Answers {
+            fn manifest(&self) -> Manifest {
+                Manifest::new("answers", "answers as asked", vec![ActionSpec::new("run", "run")])
+            }
+            fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+                InstanceKey::new("answers", "default")
+            }
+            fn estimate(&self, _k: &InstanceKey) -> MemCost {
+                MemCost::new(0, 1 << 20)
+            }
+            fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+                Ok(Box::new(AnswersInst))
+            }
+        }
+        impl Instance for AnswersInst {
+            fn run(&mut self, _a: &str, inv: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+                match inv.get_str("do").as_deref() {
+                    Some("fail") => Err(capability::failure::tag(capability::FailureClass::Unavailable, "the card is gone")),
+                    Some("break") => Err("something broke".to_string()),
+                    _ => {
+                        let mut out = Outcome::new();
+                        out.outputs = serde_json::json!({"prompt_tokens": 3, "completion_tokens": 5});
+                        Ok(out)
+                    }
+                }
+            }
+        }
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Cpu, 8 * GB, 0);
+        let exec = Executor::start(vec![Arc::new(Answers)], budgets, Policy::default());
+        for what in ["ok", "ok", "fail", "break"] {
+            let _ = exec.run_blocking("answers", "run", Invocation::new().set("do", serde_json::json!(what)), |_| {});
+        }
+        let mut cancelled = Invocation::new();
+        cancelled.cancel = capability::CancelToken::armed();
+        cancelled.cancel.cancel();
+        let _ = exec.run_blocking("answers", "run", cancelled, |_| {});
+        let _ = exec.run_blocking("unknown", "run", Invocation::new(), |_| {});
+        let served = exec.served();
+        assert_eq!(served.len(), 1, "a model that is not registered is not counted: {served:?}");
+        let answers = &served["answers"];
+        assert_eq!((answers.completed, answers.prompt_tokens, answers.completion_tokens, answers.cancelled), (2, 6, 10, 1));
+        assert_eq!(answers.refused, [("internal".to_string(), 1), ("unavailable".to_string(), 1)].into_iter().collect());
+        exec.shutdown();
+    }
+
+    /// A workload job is listed with its state, how long it waited for its device, and what it reports about itself
+    /// through its invocation's report, which the executor arms; it stays listed once it ended.
+    #[test]
+    fn a_workload_job_is_listed_with_its_wait_its_state_and_its_own_report() {
+        struct Trainer(Arc<Mutex<std::sync::mpsc::Receiver<()>>>);
+        struct TrainerInst(Arc<Mutex<std::sync::mpsc::Receiver<()>>>);
+        impl ResidentModel for Trainer {
+            fn manifest(&self) -> Manifest {
+                Manifest::new("trainer", "a workload", vec![ActionSpec::new("train", "train")])
+            }
+            fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+                InstanceKey::new("trainer", "default")
+            }
+            fn estimate(&self, _k: &InstanceKey) -> MemCost {
+                MemCost::new(4 * GB, 0)
+            }
+            fn transient(&self) -> bool {
+                true
+            }
+            fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+                Ok(Box::new(TrainerInst(self.0.clone())))
+            }
+        }
+        impl Instance for TrainerInst {
+            fn run(&mut self, _a: &str, inv: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+                let waited = inv.report.admitted_after().map(|d| d.as_secs_f64());
+                inv.report.publish(serde_json::json!({"step": 1, "waited": waited}));
+                let _ = self.0.lock().unwrap().recv_timeout(Duration::from_secs(30));
+                inv.report.publish(serde_json::json!({"step": 2, "waited": waited}));
+                Ok(Outcome::new())
+            }
+        }
+        let mut budgets = Budgets::new();
+        budgets.set(Device::Gpu(0), 24 * GB, 0);
+        let (finish, gate) = channel();
+        let exec = Executor::start(vec![Arc::new(Trainer(Arc::new(Mutex::new(gate))))], budgets, Policy::default());
+        let (tx, rx) = channel();
+        exec.submit(Job::new("trainer", "train", Invocation::new()).reply(move |r| {
+            let _ = tx.send(r);
+        }));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let running = loop {
+            let jobs = exec.workloads();
+            if let Some(job) = jobs.iter().find(|j| j.report.is_some()) {
+                break job.clone();
+            }
+            assert!(Instant::now() < deadline, "the job never reported: {jobs:?}");
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!((running.model.as_str(), running.action.as_str(), running.state), ("trainer", "train", crate::observe::WorkloadState::Running));
+        assert!(running.started_unix_ms.is_some_and(|t| t >= running.submitted_unix_ms) && running.ended_unix_ms.is_none());
+        assert!(running.report.as_ref().unwrap()["waited"].is_number(), "the executor told the job how long it waited: {:?}", running.report);
+        let seen = exec.observe();
+        let card = seen.cards.iter().find(|c| c.device == Device::Gpu(0)).unwrap();
+        assert_eq!((card.workload_reservation_bytes, card.serving_held), (4 * GB, true), "the running workload holds its card: {card:?}");
+        assert!(seen.lives.iter().all(|l| l.key.model != "trainer"), "a workload's instance is the job's record, not a life");
+        finish.send(()).unwrap();
+        rx.recv_timeout(Duration::from_secs(10)).expect("answered").expect("completed");
+        let ended = exec.workloads();
+        assert_eq!(ended.len(), 1);
+        assert_eq!(ended[0].state, crate::observe::WorkloadState::Completed);
+        assert!(ended[0].ended_unix_ms.is_some() && ended[0].wall >= ended[0].queued_for);
+        assert_eq!(ended[0].report.as_ref().unwrap()["step"], 2, "the last report stays readable after the job ended");
+        exec.shutdown();
     }
 }

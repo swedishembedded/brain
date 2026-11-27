@@ -142,6 +142,7 @@ impl ResidencyManager {
         self.charge_multi_host(&plan.cost, &plan.devices);
         self.multi_claims += 1;
         self.multi_residents.insert(key.clone(), MultiEntry { cost: plan.cost, devices: plan.devices.clone(), pinned: true, last_claimed: self.multi_claims });
+        self.life_building(&key);
         self.event(format!("promote {key} -> {:?} (building, {} cards)", plan.devices, plan.devices.len()));
         Ok((ClaimedMulti::Cards(m), plan.devices, key))
     }
