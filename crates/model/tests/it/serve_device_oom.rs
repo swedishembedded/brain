@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 
 use model::paged::{BlockAllocator, BlockTable};
-use model::serve::{PagedDecoder, RejectReason, Request, Scheduler};
+use model::serve::{PagedDecoder, PressureCause, RejectReason, Request, Scheduler, THROUGHPUT_WINDOW_SECS};
 
 const VOCAB: usize = 64;
 const BLOCK: u32 = 8;
@@ -373,4 +373,94 @@ fn under_a_stream_of_arrivals_the_running_width_tracks_the_room_the_card_has() {
     let mean = wide_again.iter().sum::<usize>() as f64 / wide_again.len() as f64;
     assert!(least >= 12 && mean >= 14.5, "from 50 iterations after the room came back the batch stays whole: mean {mean:.1}, least {least}");
     assert_eq!(sched.admitted_width(), 16);
+}
+
+// What a scheduler tells an observer about itself (`Scheduler::observe`): the back-off a device failure or a dry pool
+// set, its cause and time and how far it has recovered, and the tokens it decoded and prefilled, with their rate over
+// a window. A server publishes it per replica in its metrics document.
+
+/// Milliseconds since the Unix epoch now, for bracketing a recorded wall-clock time.
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
+}
+
+#[test]
+fn a_scheduler_says_why_and_since_when_it_admits_fewer_and_how_far_it_has_recovered() {
+    let mut sched = Scheduler::new(Toy::new(4096, 2), 8);
+    let calm = sched.observe();
+    assert_eq!((calm.backoff.limit, calm.backoff.cause, calm.backoff.last_device_oom_unix_ms, calm.backoff.last_pool_dry_unix_ms), (None, None, None, None), "a scheduler that never failed holds no back-off");
+    assert_eq!((calm.admitted_width, calm.max_width), (8, 8));
+    let before = unix_ms();
+    for i in 0..6 {
+        sched.submit(Request { prompt: prompt(10 + i), max_new: 400, stop: Vec::new() });
+    }
+    while sched.decoder_mut().failures == 0 {
+        sched.step();
+    }
+    let narrowed = sched.observe();
+    let after = unix_ms();
+    let backoff = narrowed.backoff;
+    assert_eq!(backoff.cause, Some(PressureCause::DeviceOutOfMemory), "a refused allocation is the card's limit");
+    assert!(backoff.limit.is_some_and(|l| l < 8), "the width is held under the batch: {backoff:?}");
+    assert_eq!(Some(narrowed.admitted_width), backoff.limit, "the admitted width is the limit");
+    assert!(backoff.failed_at_width.is_some());
+    assert!(backoff.last_device_oom_unix_ms.is_some_and(|t| (before..=after).contains(&t)), "the failure's wall-clock time: {backoff:?}");
+    assert_eq!(backoff.last_pool_dry_unix_ms, None);
+    let grows = backoff.grows_after_iterations.expect("a held limit says when it next grows");
+    assert!(backoff.calm_iterations < grows, "{backoff:?}");
+    assert!(backoff.next_limit.is_some_and(|n| n > backoff.limit.unwrap()), "the next limit is wider: {backoff:?}");
+    // Recovery progress moves with calm iterations, and a card with room gives the whole batch back.
+    sched.decoder_mut().slots = 8;
+    let (done, rejected) = drain(&mut sched);
+    assert!(rejected.is_empty() && done.len() == 6);
+    let recovered = sched.observe().backoff;
+    assert_eq!((recovered.limit, recovered.grows_after_iterations, recovered.next_limit), (None, None, None), "a drained scheduler holds no limit: {recovered:?}");
+    assert_eq!(recovered.last_device_oom_unix_ms, backoff.last_device_oom_unix_ms, "the time of the last failure stays readable");
+}
+
+#[test]
+fn a_dry_kv_pool_is_reported_as_its_own_cause_and_narrows_nothing() {
+    let mut toy = Toy::new(16, 16);
+    toy.phantom_free = 40;
+    let mut sched = Scheduler::new(toy, 8);
+    for i in 0..8 {
+        sched.submit(Request { prompt: prompt(40 + i), max_new: 4, stop: Vec::new() });
+    }
+    sched.step();
+    let backoff = sched.observe().backoff;
+    assert!(backoff.last_pool_dry_unix_ms.is_some(), "the dry pool is recorded: {backoff:?}");
+    assert_eq!(backoff.cause, Some(PressureCause::KvPoolDry));
+    assert_eq!((backoff.limit, backoff.last_device_oom_unix_ms), (None, None), "and narrows nothing: {backoff:?}");
+}
+
+#[test]
+fn a_scheduler_counts_the_tokens_it_decodes_and_prefills_and_their_rate_over_a_window() {
+    let now = std::sync::Arc::new(std::sync::Mutex::new(0.0f64));
+    let mut sched = Scheduler::new(Toy::new(4096, 8), 8);
+    let clock = now.clone();
+    sched.set_clock(Box::new(move || *clock.lock().unwrap()));
+    // Four requests of 10 prompt tokens and 6 reply tokens: 40 prompt tokens prefilled, 24 tokens decoded.
+    for _ in 0..4 {
+        sched.submit(Request { prompt: prompt(10), max_new: 6, stop: Vec::new() });
+    }
+    while sched.pending() {
+        *now.lock().unwrap() += 0.5;
+        sched.step();
+    }
+    let busy = sched.observe();
+    assert_eq!((busy.decoded_tokens, busy.prefilled_tokens), (24, 40));
+    let secs = *now.lock().unwrap();
+    assert!(secs <= THROUGHPUT_WINDOW_SECS, "the run fits one window: {secs} s");
+    // Everything happened inside the window: the rate is the tokens over the time the scheduler has existed.
+    assert!((busy.decode_tokens_per_s - 24.0 / secs).abs() < 1e-9, "{}", busy.decode_tokens_per_s);
+    assert!((busy.prefill_tokens_per_s - 40.0 / secs).abs() < 1e-9, "{}", busy.prefill_tokens_per_s);
+    assert_eq!((busy.running, busy.prefilling, busy.waiting, busy.swapped), (0, 0, 0, 0));
+    // A window later nothing was decoded in it: the rate is zero, the totals stay.
+    *now.lock().unwrap() += THROUGHPUT_WINDOW_SECS + 1.0;
+    let idle = sched.observe();
+    assert_eq!((idle.decode_tokens_per_s, idle.prefill_tokens_per_s), (0.0, 0.0));
+    assert_eq!((idle.decoded_tokens, idle.prefilled_tokens), (24, 40));
+    assert_eq!(idle.kv.block_tokens, BLOCK);
+    assert_eq!(idle.kv.total_blocks, 4096);
+    assert_eq!(idle.kv.free_blocks, 4096, "every block is back");
 }

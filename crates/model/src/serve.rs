@@ -27,6 +27,7 @@ mod budget;
 mod draw;
 mod embeds;
 mod fullrow;
+mod observe;
 mod round_rows;
 mod sampler;
 mod speculate;
@@ -38,6 +39,7 @@ pub use budget::{MixedLimits, StepCost};
 pub use draw::{draw_key, draw_list, draw_list_cut, draw_row, draw_row_supported, draw_row_traced, draw_row_whole, draw_rows_host, mix32, support_of_cut, token_gumbel, token_uniform, Drawn, RowDraw, Supported};
 pub use embeds::{ContentKey, PromptEmbeds};
 pub use fullrow::{best_candidates, sample_logits_row};
+pub use observe::{KvObservation, SchedulerObservation, THROUGHPUT_WINDOW_SECS};
 pub use round_rows::{prefill_round_rows_for, PREFILL_ROUND_ROWS, TENSOR_CORE_PREFILL_ROUND_ROWS};
 pub use sampler::{apply_processors, apply_processors_to_row, apply_processors_with, ngram_followers, DryParams, NoRepeatNgram, ProcessorState, SampleContext, ThinkingBudget, MAX_DRY_BREAKERS, MAX_NGRAM_ALLOW, MAX_THINK_CLOSE, MAX_THINK_LEAD};
 pub use taps::TapPool;
@@ -1347,6 +1349,63 @@ struct MemoryPressure {
     dry_pending: bool,
     /// Consecutive failures of a call that carried the only sequence in the scheduler.
     lone_failures: u32,
+    /// What the last failures were and when: kept when a drained scheduler forgets its limit, for an observer.
+    history: PressureHistory,
+}
+
+/// Why a scheduler last gave sequences back to its queue ([`Backoff::cause`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PressureCause {
+    /// The device refused an allocation: the card is full.
+    DeviceOutOfMemory,
+    /// The paged KV pool had no free block: the scheduler's block accounting was short ([`crate::paged::pool_ran_dry`]).
+    KvPoolDry,
+}
+
+impl PressureCause {
+    /// The cause's stable name in a metrics document.
+    pub fn slug(self) -> &'static str {
+        match self {
+            PressureCause::DeviceOutOfMemory => "device_out_of_memory",
+            PressureCause::KvPoolDry => "kv_pool_dry",
+        }
+    }
+}
+
+/// The failures [`MemoryPressure`] has seen, by kind and wall-clock time.
+#[derive(Clone, Copy, Debug, Default)]
+struct PressureHistory {
+    cause: Option<PressureCause>,
+    last_device_oom_unix_ms: Option<u64>,
+    last_pool_dry_unix_ms: Option<u64>,
+}
+
+/// A scheduler's back-off as an observer reads it ([`Scheduler::observe`]): whether it admits fewer sequences than its
+/// batch, why, since when, and how far it is on its way back ([`MemoryPressure`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Backoff {
+    /// The most sequences it admits at once while the card has shown it holds no more; `None` while it admits its
+    /// whole batch.
+    pub limit: Option<usize>,
+    /// The fewest sequences in flight at a failure since it last drained or the card gained room.
+    pub failed_at_width: Option<usize>,
+    /// What the last failure was; `None` until one.
+    pub cause: Option<PressureCause>,
+    /// Wall-clock time of the last refused device allocation, in milliseconds since the Unix epoch.
+    pub last_device_oom_unix_ms: Option<u64>,
+    /// Wall-clock time the KV pool last ran dry, in milliseconds since the Unix epoch.
+    pub last_pool_dry_unix_ms: Option<u64>,
+    /// Iterations with work in flight and no failure since the last failure or growth.
+    pub calm_iterations: u32,
+    /// The calm iterations after which the limit next grows; `None` without a limit.
+    pub grows_after_iterations: Option<u32>,
+    /// The limit after that growth, `None` when it is the whole batch again (or there is no limit).
+    pub next_limit: Option<usize>,
+}
+
+/// Milliseconds since the Unix epoch now: when a failure happened, for an observer on another machine.
+fn unix_ms_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
 impl MemoryPressure {
@@ -1365,6 +1424,14 @@ impl MemoryPressure {
     fn fail(&mut self, in_flight: usize, dry: bool) {
         self.failed_this_step = true;
         self.calm_steps = 0;
+        let now = Some(unix_ms_now());
+        if dry {
+            self.history.cause = Some(PressureCause::KvPoolDry);
+            self.history.last_pool_dry_unix_ms = now;
+        } else {
+            self.history.cause = Some(PressureCause::DeviceOutOfMemory);
+            self.history.last_device_oom_unix_ms = now;
+        }
         if dry && !self.dry_pending {
             self.dry_pending = true;
             return;
@@ -1380,6 +1447,33 @@ impl MemoryPressure {
         matches!((self.limit, self.failed_at), (Some(l), Some(f)) if l + 1 >= f)
     }
 
+    /// How the limit `limit` grows next under a batch of `max`: after how many calm iterations, and to what width
+    /// (`max` or more is the whole batch again).
+    fn growth(&self, limit: usize, max: usize) -> (u32, usize) {
+        if self.at_failed_width() {
+            (Self::PROBE_AFTER_STEPS, limit + (limit / 8).max(1))
+        } else {
+            let cap = self.failed_at.map_or(max, |f| f.saturating_sub(1).max(limit + 1));
+            (Self::GROW_AFTER_STEPS, (limit + (limit / 2).max(1)).min(cap))
+        }
+    }
+
+    /// The back-off as an observer reads it, under a batch of `max`.
+    fn report(&self, max: usize) -> Backoff {
+        let limit = self.limit.map(|l| l.min(max));
+        let growth = limit.map(|l| self.growth(l, max));
+        Backoff {
+            limit,
+            failed_at_width: self.failed_at,
+            cause: self.history.cause,
+            last_device_oom_unix_ms: self.history.last_device_oom_unix_ms,
+            last_pool_dry_unix_ms: self.history.last_pool_dry_unix_ms,
+            calm_iterations: self.calm_steps,
+            grows_after_iterations: growth.map(|(after, _)| after),
+            next_limit: growth.and_then(|(_, grown)| (grown < max).then_some(grown)),
+        }
+    }
+
     /// An iteration that had `in_flight` sequences ended; `max` is the scheduler's own ceiling; `free`: the device's
     /// free bytes now, asked only when [`Self::at_failed_width`].
     fn end_step(&mut self, in_flight: usize, max: usize, free: Option<u64>) {
@@ -1387,7 +1481,7 @@ impl MemoryPressure {
             return;
         }
         if in_flight == 0 {
-            *self = MemoryPressure::default();
+            *self = MemoryPressure { history: self.history, ..MemoryPressure::default() };
             return;
         }
         self.lone_failures = 0;
@@ -1399,13 +1493,7 @@ impl MemoryPressure {
             self.free_at_failure = None;
         }
         self.calm_steps += 1;
-        let fast = !self.at_failed_width();
-        let (after, grown) = if fast {
-            let cap = self.failed_at.map_or(max, |f| f.saturating_sub(1).max(limit + 1));
-            (Self::GROW_AFTER_STEPS, (limit + (limit / 2).max(1)).min(cap))
-        } else {
-            (Self::PROBE_AFTER_STEPS, limit + (limit / 8).max(1))
-        };
+        let (after, grown) = self.growth(limit, max);
         if self.calm_steps >= after {
             self.calm_steps = 0;
             self.limit = (grown < max).then_some(grown);
@@ -1925,6 +2013,8 @@ pub struct Scheduler<D: PagedDecoder> {
     block_rows: u32,
     /// The decoder's MoE calls while every admitted sequence records its routing ([`Scheduler::record_routing`]).
     routing_calls: Option<Vec<crate::routing::RouterCallShape>>,
+    /// Tokens decoded and prefilled, and their rate over a window ([`Self::observe`]).
+    throughput: observe::Throughput,
 }
 
 impl<D: PagedDecoder> Scheduler<D> {
@@ -1966,6 +2056,7 @@ impl<D: PagedDecoder> Scheduler<D> {
             oldest_credit: None,
             block_rows,
             routing_calls: None,
+            throughput: observe::Throughput::new(0.0),
         }
     }
 
@@ -2480,6 +2571,42 @@ impl<D: PagedDecoder> Scheduler<D> {
         self.pressure.limit.map_or(self.max_running, |l| l.min(self.max_running))
     }
 
+    /// Time the scheduler by `clock` (seconds since any fixed start) from now on: its cost models and its token rates
+    /// ([`Self::observe`]), whose window starts again. A test drives time by hand with it.
+    pub fn set_clock(&mut self, clock: Box<dyn Fn() -> f64 + Send>) {
+        self.clock = clock;
+        self.throughput.restart((self.clock)());
+    }
+
+    /// What the scheduler is doing now, for an observer: its pool, the sequences it holds, its back-off, and the
+    /// tokens it decoded and prefilled with their rate over the last [`THROUGHPUT_WINDOW_SECS`]. Cheap: no device work.
+    pub fn observe(&self) -> SchedulerObservation {
+        let block_tokens = self.block_rows;
+        let (claimable_tokens, total_tokens) = self.kv_pool;
+        let (decode_tokens_per_s, prefill_tokens_per_s) = self.throughput.rates((self.clock)());
+        SchedulerObservation {
+            kv: KvObservation {
+                block_tokens,
+                total_blocks: u32::try_from(total_tokens / u64::from(block_tokens.max(1))).unwrap_or(u32::MAX),
+                free_blocks: self.dec.free_blocks(),
+                prefix_cached_blocks: self.dec.prefix_stats().2,
+                claimable_tokens,
+                total_tokens,
+            },
+            running: self.running.len(),
+            prefilling: self.prefilling.len(),
+            waiting: self.waiting.len(),
+            swapped: self.swapped.len(),
+            admitted_width: self.admitted_width(),
+            max_width: self.max_running,
+            backoff: self.pressure.report(self.max_running),
+            decoded_tokens: self.throughput.decoded,
+            prefilled_tokens: self.throughput.prefilled,
+            decode_tokens_per_s,
+            prefill_tokens_per_s,
+        }
+    }
+
     /// Bring preempted sequences back onto the device, oldest demotion first,
     /// while the pool can hold them and the batch has room. A promote that
     /// cannot fit yet leaves the sequence demoted and stops the loop - the
@@ -2968,6 +3095,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         };
         let mut r = Running { id, table, adapter, generated: Vec::new(), logprobs: Vec::new(), whole: Some(Vec::new()), stop_whole: None, next_whole: first_whole, tops: (sample.trace_top > 0).then(Vec::new), stop_top: None, next_top: first_top, supports: reports_support.then(|| Ok(Vec::new())), stop_support: None, next_support: first_support, max_new, stop, next_input: first, context: prompt, spec: speculate::SeqSpec::new(), done: false, sample, think, procs: ProcessorState::default(), seed, rng, embeds, cached_tokens, stop_token: None, stop_logprob: None };
         accept_token(&mut r, first, first_logprob);
+        self.throughput.decoded += 1;
         report.admitted.push(id);
         self.running.push(r);
     }
@@ -3200,6 +3328,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         assert_eq!(progress.len(), takes.iter().filter(|&&t| t > 0).count(), "the prefill call answers every job");
         assert!(first.is_empty() || first.len() == progress.len(), "a decoder gives the first tokens of every job or of none");
         let mut finished = Vec::new();
+        let mut partial = 0u64;
         let mut answers = progress.into_iter().enumerate();
         let mut first = first.into_iter();
         for (idx, p) in self.prefilling.iter_mut().enumerate() {
@@ -3209,7 +3338,10 @@ impl<D: PagedDecoder> Scheduler<D> {
             let (_, answer) = answers.next().expect("one answer per job");
             let candidates = first.next().unwrap_or_default();
             match answer {
-                PrefillProgress::Partial { consumed } => p.done += consumed,
+                PrefillProgress::Partial { consumed } => {
+                    p.done += consumed;
+                    partial += consumed as u64;
+                }
                 PrefillProgress::Done(hidden) => finished.push((idx, hidden, candidates)),
             }
         }
@@ -3218,7 +3350,9 @@ impl<D: PagedDecoder> Scheduler<D> {
         for (idx, hidden, candidates) in finished.into_iter().rev() {
             starting.push((self.prefilling.remove(idx).expect("index just visited"), hidden, candidates));
         }
+        self.throughput.prefilled += partial;
         for (p, hidden, candidates) in starting.into_iter().rev() {
+            self.throughput.prefilled += self.rows_to_compute(&p) as u64;
             self.start_running(p, hidden, candidates, report);
         }
     }
@@ -3262,9 +3396,13 @@ impl<D: PagedDecoder> Scheduler<D> {
             answers[i] = Some(answer);
         }
         let mut finished = Vec::new();
+        let mut partial = 0u64;
         for (idx, (p, answer)) in self.prefilling.iter_mut().zip(answers.into_iter().map(|a| a.expect("one answer a job"))).enumerate() {
             match answer {
-                PrefillProgress::Partial { consumed } => p.done += consumed,
+                PrefillProgress::Partial { consumed } => {
+                    p.done += consumed;
+                    partial += consumed as u64;
+                }
                 PrefillProgress::Done(hidden) => finished.push((idx, hidden)),
             }
         }
@@ -3273,7 +3411,9 @@ impl<D: PagedDecoder> Scheduler<D> {
         for (idx, hidden) in finished.into_iter().rev() {
             starting.push((self.prefilling.remove(idx).expect("index just visited"), hidden));
         }
+        self.throughput.prefilled += partial;
         for (p, hidden) in starting.into_iter().rev() {
+            self.throughput.prefilled += self.rows_to_compute(&p) as u64;
             self.start_running(p, hidden, Vec::new(), report);
         }
     }
@@ -3357,6 +3497,7 @@ impl<D: PagedDecoder> Scheduler<D> {
         let in_flight = self.running.len() + self.prefilling.len() + completed.len();
         let free = if self.pressure.at_failed_width() { self.dec.device_free_bytes() } else { None };
         self.pressure.end_step(in_flight, self.max_running, free);
+        self.throughput.bank((self.clock)());
         completed
     }
 
@@ -3620,6 +3761,7 @@ impl<D: PagedDecoder> Scheduler<D> {
                 // occupies a real slot, it just isn't output text.
                 used += 1;
                 accept_token(r, next, logprob);
+                self.throughput.decoded += 1;
                 if r.done || forced.is_some() {
                     break;
                 }

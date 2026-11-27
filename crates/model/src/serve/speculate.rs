@@ -993,12 +993,6 @@ impl<D: PagedDecoder> Scheduler<D> {
         }
     }
 
-    /// Seconds on the clock the cost gate times steps with (default: wall time).
-    /// A test substitutes a virtual one.
-    pub fn set_clock(&mut self, clock: Box<dyn Fn() -> f64 + Send>) {
-        self.clock = clock;
-    }
-
     /// Per-sequence proposal budget for this step: `window` asks each sequence's wish (at most the decoder's maximum), bounded
     /// by what the sequence can still emit and by free KV blocks.
     fn draft_windows(&mut self, active: &[usize], mut window: impl FnMut(&mut Running) -> usize) -> Vec<usize> {

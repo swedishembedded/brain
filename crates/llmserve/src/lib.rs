@@ -930,6 +930,50 @@ fn admit_fresh<D: PagedDecoder>(group: &mut Group<'_, D>, inv: &Invocation, prog
     group.admit(inv, progress)
 }
 
+/// The metric under which a scheduler-backed instance reports [`observation_json`]: one object a server's metrics
+/// document carries per replica.
+pub const SCHEDULER_METRIC: &str = "scheduler";
+
+/// A scheduler's observation ([`model::serve::Scheduler::observe`]) as the `scheduler` object of a replica in a
+/// server's metrics document (`brain.server.metrics`): its KV pool, sequences, admission with its back-off,
+/// and throughput.
+pub fn observation_json(o: &model::serve::SchedulerObservation) -> serde_json::Value {
+    let b = &o.backoff;
+    serde_json::json!({
+        "kv": {
+            "block_tokens": o.kv.block_tokens,
+            "total_blocks": o.kv.total_blocks,
+            "free_blocks": o.kv.free_blocks,
+            "prefix_cached_blocks": o.kv.prefix_cached_blocks,
+            "claimable_tokens": o.kv.claimable_tokens,
+            "total_tokens": o.kv.total_tokens,
+        },
+        "sequences": {"running": o.running, "prefilling": o.prefilling, "waiting": o.waiting, "swapped": o.swapped},
+        "admission": {
+            "admitted_width": o.admitted_width,
+            "max_width": o.max_width,
+            "backoff": {
+                "limited": b.limit.is_some(),
+                "limit": b.limit,
+                "failed_at_width": b.failed_at_width,
+                "cause": b.cause.map(model::serve::PressureCause::slug),
+                "last_device_oom_unix_ms": b.last_device_oom_unix_ms,
+                "last_pool_dry_unix_ms": b.last_pool_dry_unix_ms,
+                "calm_iterations": b.calm_iterations,
+                "grows_after_iterations": b.grows_after_iterations,
+                "next_limit": b.next_limit,
+            },
+        },
+        "throughput": {
+            "window_secs": model::serve::THROUGHPUT_WINDOW_SECS,
+            "decode_tokens_per_s": o.decode_tokens_per_s,
+            "prefill_tokens_per_s": o.prefill_tokens_per_s,
+            "decoded_tokens": o.decoded_tokens,
+            "prefilled_tokens": o.prefilled_tokens,
+        },
+    })
+}
+
 /// The prefix-cache and speculation metrics every scheduler-backed resident
 /// reports through `Executor::stats().metrics`, and latent sparse attention's
 /// (`lsa_*`) where the decoder reads sparsely.
@@ -956,6 +1000,7 @@ pub fn scheduler_metrics<D: PagedDecoder>(sched: &Scheduler<D>) -> Vec<(String, 
         ("spec_accepted".to_string(), serde_json::json!(spec.accepted)),
         ("spec_accept_rate".to_string(), serde_json::json!(accept)),
         ("spec_tokens_per_round".to_string(), serde_json::json!(spec.tokens_per_round())),
+        (SCHEDULER_METRIC.to_string(), observation_json(&sched.observe())),
     ]
     .into_iter()
     .chain(sched.sparse_attention_stats().into_iter().flat_map(|s| s.metrics()).map(|(k, v)| (k.to_string(), serde_json::json!(v))))
