@@ -247,6 +247,8 @@ pub struct ResidencyManager {
     /// Counts multi-device claims, for [`MultiEntry::last_claimed`].
     multi_claims: u64,
     instances: HashMap<InstanceKey, InstanceHandle>,
+    /// Each built instance's metrics as [`Self::all_metrics`] last read them: what a busy instance reports.
+    last_metrics: HashMap<InstanceKey, Vec<(String, serde_json::Value)>>,
     /// Eviction/promotion audit log (most recent last) for reporting/tests.
     /// BOUNDED (a ring of the last [`Self::MAX_EVENTS`]): a long-lived server
     /// churning instances used to grow this Vec forever - an unbounded audit
@@ -291,6 +293,7 @@ impl ResidencyManager {
             multi_residents: HashMap::new(),
             multi_claims: 0,
             instances: HashMap::new(),
+            last_metrics: HashMap::new(),
             events: std::collections::VecDeque::new(),
             builds: 0,
             evictions: 0,
@@ -354,17 +357,37 @@ impl ResidencyManager {
 
     /// Every currently-built instance's own [`Instance::metrics`], keyed by
     /// `InstanceKey`. Polled by the DISPATCHER thread, so this must NEVER
-    /// block: a `try_lock` skips any instance a lane is mid-`run_batch` on
-    /// (its handle is locked for the whole batch - see `run_group`) rather
-    /// than stalling the dispatcher until that lane frees. A skipped
-    /// instance's metrics are simply stale until the next poll finds it
-    /// free, which is correct for best-effort observability and was NOT
-    /// correct as a blocking `.lock()` (confirmed live: it froze the
-    /// dispatcher for the length of a running job, reproduced by
-    /// `in_flight_reports_queued_and_running_jobs_with_monotonic_ids`
-    /// timing out instead of returning promptly).
-    pub fn all_metrics(&self) -> HashMap<InstanceKey, Vec<(String, serde_json::Value)>> {
-        self.instances.iter().filter_map(|(k, h)| h.try_lock().ok().map(|inst| (k.clone(), inst.metrics()))).collect()
+    /// block: a lane holds an instance's handle for the whole of a group (see
+    /// `run_group`), and a blocking `.lock()` froze the dispatcher for the
+    /// length of a running job (reproduced by
+    /// `in_flight_reports_queued_and_running_jobs_with_monotonic_ids`). An
+    /// instance that cannot be locked reports what it said when it last could,
+    /// overlaid with what its running group last `published`
+    /// ([`crate::JobFeed::publish`]). Skipping it instead hid exactly the
+    /// instances that were working: a loaded fleet's `/health` said every slot
+    /// was free and named no KV in every sample (knowledge #608).
+    pub fn all_metrics(&mut self, published: &HashMap<InstanceKey, Vec<(String, serde_json::Value)>>) -> HashMap<InstanceKey, Vec<(String, serde_json::Value)>> {
+        let instances = &self.instances;
+        self.last_metrics.retain(|k, _| instances.contains_key(k));
+        for (k, h) in &self.instances {
+            match h.try_lock() {
+                Ok(inst) => {
+                    self.last_metrics.insert(k.clone(), inst.metrics());
+                }
+                Err(_) => {
+                    if let Some(fresh) = published.get(k) {
+                        let last = self.last_metrics.entry(k.clone()).or_default();
+                        for (name, value) in fresh {
+                            match last.iter_mut().find(|(n, _)| n == name) {
+                                Some(slot) => slot.1 = value.clone(),
+                                None => last.push((name.clone(), value.clone())),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.last_metrics.clone()
     }
 
     pub fn register(&mut self, model: Arc<dyn ResidentModel>) {

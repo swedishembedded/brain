@@ -785,6 +785,102 @@ async fn health_reports_the_decode_slots_behind_the_key() {
     }
 }
 
+/// A model that decodes a continuous batch, as a scheduler-backed text model does: its open group publishes what the
+/// scheduler runs after each pass and holds its jobs until the test lets them finish. Its own `metrics` is what an idle
+/// scheduler says (nothing running, the whole pool free): what a reader got from it whenever it was not locked.
+struct Batching {
+    release: Arc<(Mutex<bool>, Condvar)>,
+}
+struct BatchingInst(Arc<(Mutex<bool>, Condvar)>);
+const BATCHING_SLOTS: usize = 8;
+const BATCHING_KV: u64 = 4096;
+impl ResidentModel for Batching {
+    fn manifest(&self) -> Manifest {
+        chat_manifest()
+    }
+    fn instance_key(&self, _a: &str, _i: &Invocation) -> InstanceKey {
+        InstanceKey::new("brain-chat", "default")
+    }
+    fn estimate(&self, _k: &InstanceKey) -> MemCost {
+        MemCost::default()
+    }
+    fn batch_limit(&self) -> Option<usize> {
+        Some(BATCHING_SLOTS)
+    }
+    fn activate(&self, _k: &InstanceKey, _d: Device) -> Result<Box<dyn Instance>, String> {
+        Ok(Box::new(BatchingInst(self.release.clone())))
+    }
+}
+impl Instance for BatchingInst {
+    fn run(&mut self, _a: &str, _i: &Invocation, _p: &mut dyn FnMut(Progress)) -> ActionResult {
+        Ok(Outcome::new())
+    }
+    fn run_open(&mut self, _a: &str, invs: &[Invocation], _p: &mut dyn FnMut(usize, Progress), feed: &mut dyn residency::JobFeed) -> bool {
+        let mut running = invs.len();
+        let (released, wake) = &*self.0;
+        loop {
+            running += feed.take(BATCHING_SLOTS - running).len();
+            feed.publish(vec![("running_sequences".into(), json!(running)), ("kv_free_tokens".into(), json!(BATCHING_KV - 512 * running as u64)), ("kv_total_tokens".into(), json!(BATCHING_KV))]);
+            let go = wake.wait_timeout(released.lock().unwrap(), Duration::from_millis(20)).unwrap().0;
+            if *go {
+                break;
+            }
+        }
+        for i in 0..running {
+            feed.finish(i, Ok(Outcome::new()));
+        }
+        while !feed.close() {
+            for _ in feed.take(BATCHING_SLOTS) {
+                feed.finish(running, Ok(Outcome::new()));
+                running += 1;
+            }
+        }
+        true
+    }
+    fn metrics(&self) -> Vec<(String, Value)> {
+        vec![("running_sequences".into(), json!(0)), ("kv_free_tokens".into(), json!(BATCHING_KV)), ("kv_total_tokens".into(), json!(BATCHING_KV))]
+    }
+}
+
+/// `/health` must tell a router the truth while the server is busy: a model decoding a batch holds its instance for
+/// the whole batch, and a health that read the instance only when it was free said every slot was free and named no
+/// KV in every sample of a loaded fleet (knowledge #608). The running group's published metrics count instead.
+#[tokio::test(flavor = "multi_thread")]
+async fn health_counts_the_sequences_a_busy_model_decodes() {
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let mut budgets = Budgets::new();
+    budgets.set(Device::Cpu, 8 << 30, 0);
+    let exec = Executor::start(vec![Arc::new(Batching { release: release.clone() })], budgets, Policy::default());
+    let key = "sk-brain-test-key".to_string();
+    let app = router(AppState::new(exec.clone(), key.clone(), Provider::OpenAI));
+    let answered = Arc::new(AtomicUsize::new(0));
+    for _ in 0..3 {
+        let answered = answered.clone();
+        exec.submit(residency::Job::new("brain-chat", "generate", Invocation::new()).reply(move |_| {
+            answered.fetch_add(1, Ordering::SeqCst);
+        }));
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let health = loop {
+        let health = get_json(&app, Provider::OpenAI, "/v1/health", &key).await;
+        if health["free_slots"] == json!(BATCHING_SLOTS - 3) || Instant::now() > deadline {
+            break health;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(health["decode_slots"], json!(BATCHING_SLOTS), "{health}");
+    assert_eq!(health["free_slots"], json!(BATCHING_SLOTS - 3), "three sequences run on the busy instance: {health}");
+    assert_eq!(health["kv_free_tokens"], json!(BATCHING_KV - 3 * 512), "{health}");
+    *release.0.lock().unwrap() = true;
+    release.1.notify_all();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while answered.load(Ordering::SeqCst) < 3 && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(answered.load(Ordering::SeqCst), 3);
+    exec.shutdown();
+}
+
 #[tokio::test]
 async fn unknown_path_is_404() {
     for p in ALL {

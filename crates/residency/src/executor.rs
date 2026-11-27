@@ -338,12 +338,15 @@ struct InboxState {
     late_slots: Vec<ReplySlot>,
     /// Jobs taken so far, for the group's `Done` accounting.
     taken: usize,
+    /// The instance's metrics as the running group last published them ([`crate::model::JobFeed::publish`]): what
+    /// the dispatcher reports for an instance it cannot lock because the group holds it.
+    published: Option<Vec<(String, serde_json::Value)>>,
 }
 
 impl Inbox {
     fn new(open: bool, room: usize, health: Option<&Arc<Health<Device>>>, devices: &[Device]) -> Arc<Inbox> {
         let wedge = health.map(|h| WedgeWatch { health: h.clone(), devices: devices.to_vec(), noted: std::sync::atomic::AtomicBool::new(false) });
-        Arc::new(Inbox { admits_late_jobs: open, state: Mutex::new(InboxState { open, room, jobs: Vec::new(), late_slots: Vec::new(), taken: 0 }), wedge })
+        Arc::new(Inbox { admits_late_jobs: open, state: Mutex::new(InboxState { open, room, jobs: Vec::new(), late_slots: Vec::new(), taken: 0, published: None }), wedge })
     }
 
     /// Called with each job's result before its caller is answered: the
@@ -1009,7 +1012,7 @@ fn dispatch_loop(rx: Receiver<Msg>, mut d: Dispatcher, capacity: Option<Capacity
     // a fresh HashMap of cloned keys/metrics under the stats lock after EVERY
     // dispatcher round was pure overhead on the scheduling thread (the D-Bus
     // stats stream itself only samples at ~2 Hz).
-    const METRICS_REFRESH: std::time::Duration = std::time::Duration::from_millis(250);
+    const METRICS_REFRESH: std::time::Duration = crate::model::METRICS_PUBLISH_INTERVAL;
     let mut last_metrics: Option<Instant> = None;
     /// How often the machine's real free VRAM is re-measured. Slower than
     /// [`IDLE_TICK`] because the probe is a subprocess, and fast enough that a
@@ -1120,8 +1123,11 @@ fn dispatch_loop(rx: Receiver<Msg>, mut d: Dispatcher, capacity: Option<Capacity
             }
         }
         if last_metrics.is_none_or(|t| t.elapsed() >= METRICS_REFRESH) {
+            // A running group holds its instance: what it last published stands for it.
+            let published: HashMap<InstanceKey, Vec<(String, serde_json::Value)>> = d.open_groups.iter().filter_map(|(k, g)| g.inbox.lock().published.clone().map(|m| (k.clone(), m))).collect();
+            let metrics = d.mgr.all_metrics(&published);
             if let Ok(mut s) = d.stats.lock() {
-                s.metrics = d.mgr.all_metrics();
+                s.metrics = metrics;
                 s.load = instance_loads(&d.queue, &d.running_jobs);
             }
             last_metrics = Some(Instant::now());
@@ -2376,6 +2382,10 @@ impl crate::model::JobFeed for GroupFeed {
         }
         st.open = false;
         true
+    }
+
+    fn publish(&mut self, metrics: Vec<(String, serde_json::Value)>) {
+        self.inbox.lock().published = Some(metrics);
     }
 }
 

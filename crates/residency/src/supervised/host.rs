@@ -649,5 +649,21 @@ impl crate::JobFeed for WorkerFeed<'_, '_> {
             None => true,
         }
     }
+
+    /// One `metrics` frame: the parent's feed keeps it for the dispatcher, which cannot ask the busy instance.
+    fn publish(&mut self, metrics: Vec<(String, serde_json::Value)>) {
+        if self.gone.get() {
+            return;
+        }
+        let mut fds = Vec::new();
+        let sent = match encode_control(&metrics, &mut fds) {
+            Ok(payload) => self.host.send_frame(self.id, "metrics", &payload, &fds),
+            Err(e) => {
+                eprintln!("brain worker: the metrics could not be sent: {e}");
+                return;
+            }
+        };
+        self.gone.set(sent.is_err());
+    }
 }
 

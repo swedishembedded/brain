@@ -91,7 +91,10 @@
 //! registered: they are not the group's), the worker's instance asks its own
 //! check of each, and `<id> refused <json>` (`{"refused": [{"job", "why"}]}`,
 //! `job` its index in that `waiting` frame; sent only when one is refused)
-//! has the parent's feed refuse each at once. A worker that dies mid-group
+//! has the parent's feed refuse each at once. `<id> metrics <json>`
+//! (`{"metrics": [...]}`, sent after a scheduler pass) is the instance's
+//! metrics as of now, which the parent's feed publishes for the dispatcher
+//! (`JobFeed::publish`). A worker that dies mid-group
 //! fails every job the group had not finished, the joined ones included,
 //! once.
 //!
@@ -117,7 +120,7 @@ use crate::multi::MultiDeviceResidentModel;
 use crate::{AdapterIdentity, Device, Instance, InstanceKey, JobFeed, MemCost, ResidentModel, Tier};
 
 /// The protocol version a worker and its parent must agree on (`hello`).
-pub const PROTOCOL: u32 = 5;
+pub const PROTOCOL: u32 = 6;
 
 mod adapters;
 #[cfg(unix)]
@@ -986,6 +989,11 @@ impl gpu_supervisor::Conversation for JobsTalk<'_> {
                 }
                 Ok(Vec::new())
             }
+            "metrics" => {
+                let metrics = codec::decode_control(payload, fds).map_err(|e| format!("the worker's metrics break the protocol ({e})"))?;
+                self.feed(kind)?.publish(metrics);
+                Ok(Vec::new())
+            }
             "close" => {
                 let closed = self.feed(kind)?.close();
                 Ok(vec![Outgoing::line(format!("closed {closed}"))])
@@ -994,7 +1002,7 @@ impl gpu_supervisor::Conversation for JobsTalk<'_> {
                 let (devices, blamed) = self.blame.ok_or("a fault frame for a group whose devices are not known")?;
                 blamed.note(devices, payload).map(|()| Vec::new())
             }
-            other => Err(format!("a group takes progress, take, done, screen, refused, close and fault frames, not {other:?}")),
+            other => Err(format!("a group takes progress, take, done, screen, refused, metrics, close and fault frames, not {other:?}")),
         }
     }
 

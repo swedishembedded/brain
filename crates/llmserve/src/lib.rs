@@ -879,6 +879,9 @@ pub fn run_open_scheduled<D: PagedDecoder>(
 ) {
     residency::log::info(&format!("{} open batch: {} request(s) admitted to the scheduler", front.label(), invs.len()));
     let mut group = Group::new(sched, front);
+    // The instance is locked while the group runs, so its metrics reach `/health` only as published here (knowledge
+    // #608): after a scheduler pass, at most every `METRICS_PUBLISH_INTERVAL`.
+    let mut published: Option<std::time::Instant> = None;
     for inv in invs {
         let (bi, immediate) = admit_fresh(&mut group, inv, progress, refresh);
         if let Some(result) = immediate {
@@ -908,6 +911,10 @@ pub fn run_open_scheduled<D: PagedDecoder>(
         }
         for (bi, result) in group.pump(progress) {
             feed.finish(bi, result);
+        }
+        if published.is_none_or(|at| at.elapsed() >= residency::METRICS_PUBLISH_INTERVAL) {
+            feed.publish(scheduler_metrics(group.sched));
+            published = Some(std::time::Instant::now());
         }
     }
 }
@@ -1055,6 +1062,9 @@ impl JobFeed for CountingFeed<'_> {
     }
     fn refuse(&mut self, ticket: u64, why: String) {
         self.inner.refuse(ticket, why)
+    }
+    fn publish(&mut self, metrics: Vec<(String, serde_json::Value)>) {
+        self.inner.publish(metrics)
     }
 }
 

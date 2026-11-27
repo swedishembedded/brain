@@ -329,6 +329,7 @@ impl Instance for TestInstance {
                 refreshes += 1;
             }
             jobs.extend(feed.take(4));
+            feed.publish(vec![("group_jobs".to_string(), json!(jobs.len()))]);
             feed.screen(&mut |inv| inv.params.get("never").map(|_| format!("job {} can never run here", inv.params["n"])));
             for (i, inv) in jobs.iter().enumerate().skip(finished) {
                 let mut step = Progress::step(1, 1, format!("job {i}"));
@@ -559,11 +560,13 @@ struct TestFeed {
     refused: Vec<(u64, String)>,
     /// Run at the first take: what the serving process does while the group runs.
     on_take: Option<Box<dyn FnOnce()>>,
+    /// The metrics the group published, in order.
+    published: Vec<Vec<(String, Value)>>,
 }
 
 impl TestFeed {
     fn new(rounds: Vec<Vec<Invocation>>, refuse_closes: usize) -> TestFeed {
-        TestFeed { rounds, refuse_closes, finished: Vec::new(), closes: 0, waiting: Vec::new(), refused: Vec::new(), on_take: None }
+        TestFeed { rounds, refuse_closes, finished: Vec::new(), closes: 0, waiting: Vec::new(), refused: Vec::new(), on_take: None, published: Vec::new() }
     }
 }
 
@@ -594,6 +597,10 @@ impl JobFeed for TestFeed {
         self.refused.push((ticket, why));
     }
 
+    fn publish(&mut self, metrics: Vec<(String, Value)>) {
+        self.published.push(metrics);
+    }
+
     fn close(&mut self) -> bool {
         self.closes += 1;
         if self.refuse_closes > 0 {
@@ -611,8 +618,9 @@ fn result_of(feed: &TestFeed, index: usize) -> &ActionResult {
 /// An open group runs in the worker's `run_open`: jobs that join while it
 /// runs cross as they are taken, each is finished through the parent's feed
 /// the moment it is done, a close the parent refuses (a job slipped in)
-/// keeps the group going, and a late job's cancellation reaches it. A model
-/// that only batches closed groups says so, having done nothing.
+/// keeps the group going, a late job's cancellation reaches it, and the
+/// metrics the group publishes reach the parent's feed. A model that only
+/// batches closed groups says so, having done nothing.
 fn an_open_group_takes_late_joiners_and_finishes_each_job_through_the_feed() {
     let health = health();
     let mut instance = hosted("m", &health, DEADLINES).activate(&InstanceKey::new("m", "default"), Device::Gpu(0)).expect("the worker opens");
@@ -632,6 +640,7 @@ fn an_open_group_takes_late_joiners_and_finishes_each_job_through_the_feed() {
     }
     assert_eq!(result_of(&feed, 3).as_ref().err().map(String::as_str), Some(failure::CANCELLED), "the late job asked to cancel was cancelled");
     assert_eq!(feed.closes, 2, "the refused close kept the group going");
+    assert_eq!(feed.published.last(), Some(&vec![("group_jobs".to_string(), json!(5))]), "what the busy instance publishes reaches the parent's feed");
 
     let mut feed = TestFeed::new(Vec::new(), 0);
     assert!(!instance.run_open("batch", &own, &mut |_, _| {}, &mut feed), "a model that only batches closed groups runs none open");

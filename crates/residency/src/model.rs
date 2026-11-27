@@ -327,7 +327,20 @@ pub trait JobFeed {
     /// waiting to be taken and the group must not end yet. After `true`, jobs
     /// for this key wait for the next group.
     fn close(&mut self) -> bool;
+
+    /// The instance's [`Instance::metrics`] as of now, published while the group runs. The instance is locked for
+    /// the whole group, so the dispatcher cannot read its metrics then; it reads the last published snapshot instead
+    /// (`ResidencyManager::all_metrics`), which is what keeps `/health`'s free slots and free KV true under load
+    /// (knowledge #608). A model calls it after a scheduler pass, at most every [`METRICS_PUBLISH_INTERVAL`]. The
+    /// default drops it.
+    fn publish(&mut self, metrics: Vec<(String, serde_json::Value)>) {
+        let _ = metrics;
+    }
 }
+
+/// How often a running group publishes its metrics ([`JobFeed::publish`]), and how often the dispatcher reads every
+/// instance's: fresh enough for a router probing every few seconds, rare enough to cost nothing beside a decode step.
+pub const METRICS_PUBLISH_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// A built, Hot model instance. Dropping it frees the device memory (RAII), so the
 /// manager demotes simply by dropping. Actions run on the manager's worker thread,
