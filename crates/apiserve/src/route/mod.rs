@@ -50,8 +50,8 @@
 //! - **A model goes where it is loaded, and spills only onto idle cards.** An upstream whose card says the model is not
 //!   `resident` there would load it, evicting what that card holds, so it takes the model's requests only (a) while
 //!   every upstream where it is has no free slot for it, or (b) as a spill: every upstream where the model is resident
-//!   already carries at least [`FleetConfig::spill_share`] of its slots for it (at least [`MIN_SPILL_LOAD`] requests),
-//!   and this one is idle, holding no request of the router's and reporting no job running or waiting, or holds only
+//!   already carries at least [`FleetConfig::spill_load`] requests for it (however many slots it advertises), and
+//!   this one is idle, holding no request of the router's and reporting no job running or waiting, or holds only
 //!   requests for this model (a spill already under way). An upstream busy with another model is never a spill target.
 //!   Spilling is thrash-free: a card changes model only while nothing runs on it and the model it gains has a real
 //!   batch elsewhere, and once loaded there the model is resident like any other. Without it a wide model (a 4B with
@@ -156,17 +156,16 @@ pub struct FleetConfig {
     pub stall_timeout: Duration,
     /// Where the served models' tokenizers are found, to key prompts by tokens; `None` keys them by text.
     pub tokenizers: Option<Arc<dyn TokenizerSource>>,
-    /// The share of its slots for a model each upstream where the model is resident must carry (and at least
-    /// [`MIN_SPILL_LOAD`] requests) before the model spills onto an idle upstream where it is not (see the module doc).
-    /// Above 1 a model never spills.
-    pub spill_share: f64,
+    /// The requests for a model each upstream where the model is resident must carry before the model spills onto an
+    /// idle upstream where it is not (see the module doc). `usize::MAX` never spills.
+    pub spill_load: usize,
 }
 
 impl FleetConfig {
     /// `upstreams` with the defaults: 5 s to connect, 31 min for an answer to start (a long prefill on a busy
     /// upstream), 10 min without progress before an upstream is stalled, health every 2 s, 256 prompts remembered per
     /// upstream, 1024 requests waiting at most, each for at most the serving surfaces' admit deadline, and a model
-    /// spilling onto idle upstreams at [`DEFAULT_SPILL_SHARE`] of its resident upstreams' slots.
+    /// spilling onto idle upstreams once its resident upstreams each carry [`DEFAULT_SPILL_LOAD`] requests of it.
     pub fn new(upstreams: Vec<UpstreamUrl>) -> FleetConfig {
         FleetConfig {
             upstreams,
@@ -181,11 +180,11 @@ impl FleetConfig {
             drain_deadline: Some(Duration::from_secs(300)),
             stall_timeout: DEFAULT_STALL_TIMEOUT,
             tokenizers: None,
-            spill_share: DEFAULT_SPILL_SHARE,
+            spill_load: DEFAULT_SPILL_LOAD,
         }
     }
-    pub fn with_spill_share(mut self, share: f64) -> FleetConfig {
-        self.spill_share = share;
+    pub fn with_spill_load(mut self, load: usize) -> FleetConfig {
+        self.spill_load = load;
         self
     }
     pub fn with_tokenizers(mut self, source: Option<Arc<dyn TokenizerSource>>) -> FleetConfig {
@@ -231,20 +230,13 @@ impl FleetConfig {
 /// so that alone does not read as a hang.
 pub const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// [`FleetConfig::spill_share`]'s default: an eighth of the model's slots on its card. A model carrying that much on
-/// every card it is loaded on has a batch that keeps another card's decode busy, so loading it on a card that does
-/// nothing pays back its load; below it, the one card it is loaded on serves it as one batch.
-pub const DEFAULT_SPILL_SHARE: f64 = 0.125;
-
-/// The fewest requests for a model every upstream where it is resident must carry before it spills: under that the
-/// model's demand is a handful of requests, too few to pay for loading it on another card and evicting what that holds.
-pub const MIN_SPILL_LOAD: usize = 8;
-
-/// The load at which a model holding `slots` slots on a resident upstream spills (see [`FleetConfig::spill_share`]).
-fn spill_load(share: f64, slots: usize) -> usize {
-    // Saturates for a huge share: an unreachable load, so the model never spills.
-    ((share * slots as f64).ceil() as usize).max(MIN_SPILL_LOAD)
-}
+/// [`FleetConfig::spill_load`]'s default: the small batch past which a cached prompt stops holding work on a busy
+/// replica against an idle one (`residency::affinity::MIN_BALANCE_SLACK`, knowledge #607), so a model spills onto an
+/// idle card where it is not loaded at the same load at which it would spread onto an idle card where it is. Under it
+/// the model's demand is a handful of requests, one batch on its card, too few to pay for loading it elsewhere and
+/// evicting what that card holds; past it an idle card is worth more. It is a count of requests, not a share of the
+/// card's `decode_slots`: those are what a server admits, often far more than its card decodes at speed.
+pub const DEFAULT_SPILL_LOAD: usize = residency::affinity::MIN_BALANCE_SLACK;
 
 /// What the last good probe of an upstream said.
 #[derive(Default)]
@@ -516,7 +508,7 @@ pub struct Fleet {
     stall_timeout: Duration,
     sessions: Mutex<Sessions>,
     tokens: Arc<key::Tokens>,
-    spill_share: f64,
+    spill_load: usize,
 }
 
 impl std::fmt::Debug for Fleet {
@@ -548,8 +540,8 @@ impl Fleet {
         if config.connect_timeout.is_zero() || config.response_timeout.is_zero() || config.health_interval.is_zero() || config.queue_deadline.is_zero() || config.stall_timeout.is_zero() {
             return Err("timeouts and the health interval are positive".into());
         }
-        if !(config.spill_share.is_finite() && config.spill_share > 0.0) {
-            return Err(format!("the spill share is a positive number, not {}", config.spill_share));
+        if config.spill_load == 0 {
+            return Err("the spill load is at least one request".into());
         }
         let members: Vec<Arc<Member>> = config.upstreams.into_iter().map(|url| Arc::new(Member::new(url))).collect();
         let directories = Mutex::new(members.iter().map(|_| PrefixDirectory::new(config.cached_prompts)).collect());
@@ -568,7 +560,7 @@ impl Fleet {
             stall_timeout: config.stall_timeout,
             sessions: Mutex::default(),
             tokens: Arc::new(key::Tokens::new(config.tokenizers)),
-            spill_share: config.spill_share,
+            spill_load: config.spill_load,
         }))
     }
 
@@ -821,7 +813,7 @@ impl Fleet {
             let resident = adv.resident.get(model).copied().unwrap_or(true);
             if resident {
                 residents += 1;
-                unpressed += usize::from(load < spill_load(self.spill_share, slots));
+                unpressed += usize::from(mine < self.spill_load);
             }
             if load < slots && total < adv.slots {
                 let namespace = format!("{model}\u{1f}{}", adv.adapter_digests.get(model).map_or("", String::as_str));

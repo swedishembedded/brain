@@ -1080,18 +1080,19 @@ async fn a_request_goes_where_its_model_is_resident() {
     }
 }
 
-/// Residency must not cost a fleet its cards: a model whose resident upstreams carry a real batch (at least an eighth
-/// of their slots for it) also goes to an upstream where it is not loaded once that upstream is completely idle, since
-/// loading it there only evicts a model nobody is using. An upstream busy with another model is never used for it,
+/// Residency must not cost a fleet its cards: a model whose resident upstreams carry a real batch (at least 8 requests
+/// for it, however many slots they advertise) also goes to an upstream where it is not loaded once that upstream is
+/// completely idle, since loading it there only evicts a model nobody is using. An upstream busy with another model is never used for it,
 /// whatever load the model's own upstreams carry: that would evict running work.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_loaded_model_spills_onto_an_idle_upstream_but_never_onto_a_busy_one() {
     let models = ["m1", "m2", "m3"];
-    let (a, ua) = mock("a", 64, 128, &models).await;
-    let (b, ub) = mock("b", 64, 128, &models).await;
-    let (c, uc) = mock("c", 64, 128, &models).await;
+    // Advertised slots are an admission figure, far more than a card decodes at speed: the bound must not read them.
+    let (a, ua) = mock("a", 3466, 4096, &models).await;
+    let (b, ub) = mock("b", 3466, 4096, &models).await;
+    let (c, uc) = mock("c", 3466, 4096, &models).await;
     for (mock, resident) in [(&a, "m1"), (&b, "m3"), (&c, "m2")] {
-        mock.card_extra.lock().unwrap().extend(models.iter().map(|m| (m.to_string(), json!({"decode_slots": 64, "resident": *m == resident}))));
+        mock.card_extra.lock().unwrap().extend(models.iter().map(|m| (m.to_string(), json!({"decode_slots": 3466, "resident": *m == resident}))));
     }
     let (addr, fleet, _stop) = router(&[ua, ub, uc]).await;
     let held = |model: &str, agent: usize| {
@@ -1102,7 +1103,7 @@ async fn a_loaded_model_spills_onto_an_idle_upstream_but_never_onto_a_busy_one()
     // `b` and `c` each run their own model.
     let mut running = vec![held("m3", 100), held("m2", 101)];
     until("b and c to run their own models", || b.count() == 1 && c.count() == 1).await;
-    // `m1` loads `a` to an eighth of its slots and past it: every upstream where it is not loaded is busy, so it stays.
+    // `m1` loads `a` to the spill load and past it: every upstream where it is not loaded is busy, so it stays.
     for agent in 0..9 {
         running.push(held("m1", agent));
         until("the m1 batch to reach a", || a.count() == agent + 1).await;
