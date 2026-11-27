@@ -726,6 +726,10 @@ fn flatten_message(m: &Value) -> Value {
     if let Some(id) = m.get("tool_call_id").and_then(|v| v.as_str()) {
         out["tool_call_id"] = json!(id);
     }
+    // An answer's `sampled` blob, as the reply gave it: the model replays the answer as those ids (`data::replay`).
+    if let Some(sampled) = m.get("sampled").filter(|v| role == "assistant" && v.is_object()) {
+        out["sampled"] = sampled.clone();
+    }
     if let Some(calls) = m.get("tool_calls").and_then(|v| v.as_array()).filter(|a| !a.is_empty()) {
         let flat: Vec<Value> = calls
             .iter()
@@ -857,6 +861,9 @@ fn non_stream_body(model: &str, co: &bridge::ChatOutcome, native: bool) -> Value
     }
     if !co.tool_calls.is_empty() {
         message["tool_calls"] = json!(openai_tool_calls(&co.tool_calls));
+    }
+    if let Some(sampled) = &co.sampled {
+        message["sampled"] = sampled.clone();
     }
     let mut choice = json!({
         "index": 0,
@@ -1445,6 +1452,7 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
         let mut final_text = String::new();
         let mut served = None;
         let mut captured = None;
+        let mut sampled = None;
         while let Some(msg) = src.next().await {
             match msg {
                 StreamMsg::Delta(piece) => {
@@ -1468,6 +1476,7 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
                     announce!();
                     let co = bridge::read_chat_outcome(&outcome);
                     served = co.served();
+                    sampled = co.sampled.clone();
                     let mut capture = json!({ "choices": [{}] });
                     attach_token_capture(&mut capture, &co);
                     captured = Some(capture);
@@ -1511,8 +1520,9 @@ fn render_chat_stream(mut src: bridge::EventStream, model: String, native: bool,
         if !announced {
             yield Ok(Event::default().data(chunk(&id, &model, json!({ "role": "assistant", "content": "" }), None, native).to_string()));
         }
-        // Terminal chunk: empty delta + finish_reason.
-        let mut last = chunk(&id, &model, json!({}), Some(&finish), native);
+        // Terminal chunk: finish_reason, and the answer's `sampled` blob as the last part of the message's delta.
+        let delta = sampled.map_or_else(|| json!({}), |sampled| json!({ "sampled": sampled }));
+        let mut last = chunk(&id, &model, delta, Some(&finish), native);
         if let Some(served) = served {
             last["brain"] = served;
         }

@@ -324,6 +324,11 @@ pub struct ChatOutcome {
     /// The model's policy trace (prompt ids, generated ids and their full-distribution log-probabilities), when the
     /// request asked ([`Self::policy_trace`] adds the policy that served it).
     pub trace: Option<serde_json::Value>,
+    /// What was sampled for the answer (`data::replay::Sampled`): the reply's assistant message carries it, for the
+    /// client to echo back so the next prompt holds the answer as these ids. `None` for a raw completion.
+    pub sampled: Option<serde_json::Value>,
+    /// Whether the prompt replayed every earlier answer as sampled (`data::replay::History`); `None` for a raw prompt.
+    pub history: Option<serde_json::Value>,
 }
 
 impl ChatOutcome {
@@ -394,6 +399,9 @@ impl ChatOutcome {
                 served.insert(key.into(), v.clone());
             }
         }
+        if let Some(history) = &self.history {
+            served.insert("history".into(), history.clone());
+        }
         (!served.is_empty()).then_some(serde_json::Value::Object(served))
     }
 }
@@ -415,7 +423,7 @@ pub fn read_chat_outcome(o: &Outcome) -> ChatOutcome {
     let numbers = |key: &str| o.outputs.get(key).and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|n| n.as_i64()).collect::<Vec<_>>());
     let logprobs = o.outputs.get("completion_logprobs").and_then(|v| v.as_array()).map(|a| a.iter().filter_map(|n| n.as_f64()).collect::<Vec<_>>());
     let text_of = |key: &str| o.outputs.get(key).and_then(|v| v.as_str()).map(str::to_string);
-    ChatOutcome { text, prompt_tokens, completion_tokens, reasoning_tokens: o.outputs.get("reasoning_tokens").and_then(|v| v.as_i64()).unwrap_or_default(), cached_tokens: o.outputs.get("cached_tokens").and_then(|v| v.as_i64()), finish, reasoning, tool_calls, seed, sampler: o.outputs.get("sampler").and_then(crate::sampling::echo), adapter, base_digest: text_of("base_digest"), backend: text_of("backend"), engine: text_of("engine"), prompt_token_ids: numbers("prompt_token_ids"), completion_token_ids: numbers("completion_token_ids"), logprobs, trace: o.outputs.get("policy_trace").cloned() }
+    ChatOutcome { text, prompt_tokens, completion_tokens, reasoning_tokens: o.outputs.get("reasoning_tokens").and_then(|v| v.as_i64()).unwrap_or_default(), cached_tokens: o.outputs.get("cached_tokens").and_then(|v| v.as_i64()), finish, reasoning, tool_calls, seed, sampler: o.outputs.get("sampler").and_then(crate::sampling::echo), adapter, base_digest: text_of("base_digest"), backend: text_of("backend"), engine: text_of("engine"), prompt_token_ids: numbers("prompt_token_ids"), completion_token_ids: numbers("completion_token_ids"), logprobs, trace: o.outputs.get("policy_trace").cloned(), sampled: o.outputs.get("sampled").cloned(), history: o.outputs.get("history").cloned() }
 }
 
 /// Map an executor reply error string to a provider-shaped [`ApiError`], through

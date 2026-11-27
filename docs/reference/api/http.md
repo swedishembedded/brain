@@ -212,6 +212,22 @@ launches a local qwen3 Anthropic surface and points Claude Code at it.
   non-streaming reply, the Anthropic stream's closing `message_delta` (which
   repeats `input_tokens`) and the OpenAI-shaped `usage` chunk carry the real
   numbers.
+- **Answers are replayed as they were sampled.** A chat reply's assistant
+  message (`choices[0].message.sampled`, or `choices[0].delta.sampled` in a
+  stream's terminal chunk) carries what the model sampled: `token_ids` (the
+  generated ids, the end-of-turn token included when one ended the answer),
+  `prefill_token_ids` (the generation prompt it continued), `finish`,
+  `tokenizer_digest`, `context_len` and `context_hash` (`sha256:` of the
+  prompt's ids as little-endian u32). Ids travel as text: each id an unsigned
+  LEB128 varint, the run base64-encoded. Send the object back unchanged on that
+  assistant message: the next prompt then holds the answer as those ids, and
+  the template renders only the other turns, so every request of a session
+  extends the previous one and its answer. An assistant message without it, or
+  with one that does not match (another tokenizer, an edited conversation), is
+  rendered by the chat template. Every chat reply reports
+  `brain.history: {append_only, diverged_turn, reason}`: whether every earlier
+  answer was replayed, else the index of the first message that was not and
+  why (`missing`, `malformed`, `tokenizer`, `prefill`, `context`, `template`).
 - **The request is held to the model's served spec.** Every chat route (OpenAI
   and OpenRouter chat, OpenAI completions, Anthropic messages; streamed or not)
   validates the call it builds against the model's `generate` action as

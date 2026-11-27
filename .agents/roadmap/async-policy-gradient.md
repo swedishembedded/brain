@@ -419,6 +419,16 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       no `rollout` key needed (the record is the whole rollout). Send with `pack_answers: true` and a `max_block` that
       holds the whole session; choose `loss_agg` `token-sum` to reproduce the per-call reference or `seq-mean` to weigh
       episodes alike.
+- [x] **Replay as generated** (lane args-verbatim, 2026-11-28; knowledge 620). An agent session was never
+      append-only in ids: the reply was parsed into a message, the runtime re-serialised it, the template re-rendered
+      it. Now every chat reply carries `sampled` (generated and generation-prompt ids, finish, tokenizer digest,
+      context length and hash; ids as varint+base64) and a prompt replays every echoed answer as its ids
+      (`data::replay`), template for the rest; `brain.history` reports where a prompt is not append-only. Standard
+      behaviour, no option; Qwen3.8's `preserve_thinking` removed. Oracles: `qwen3` `it::replay_sessions` (real
+      tokenizers, five checkpoints), `catalog` `it::replayed_sessions` (HTTP). Open: the agent runtime must echo
+      `sampled` unchanged, and a trainer read `sampled.token_ids` as the answer's ids; the prefix
+      cache indexes prompt blocks only, so the answer is prefilled again; a no-reasoning SFT on external data keeps
+      the official template.
 - [ ] **Group-prefix packing** (A42-A43): the rollouts of a group share their prompt, which every rollout's row
       forwards again. Packing a group into one row needs what no forward has yet: per-token position ids that restart
       at each branch and an attention mask that is a tree (each continuation sees the prefix and itself), in every

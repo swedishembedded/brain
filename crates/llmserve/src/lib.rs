@@ -186,12 +186,23 @@ struct Job {
     /// The sampler settings the scheduler was handed for the request, which it draws with unchanged; the reply echoes
     /// them ([`sampler_settings`]). `None` until the request is submitted.
     sample: Option<model::serve::SampleParams>,
+    /// The chat prompt the answer is generated after, which the reply's `sampled` blob names; `None` for a raw
+    /// prompt and until the request is submitted.
+    replay: Option<ReplayContext>,
+}
+
+/// What a chat reply's `sampled` blob says of its prompt ([`data::replay::Sampled`]), and the prompt's history.
+struct ReplayContext {
+    prefill: Vec<u32>,
+    context_len: usize,
+    context_hash: String,
+    history: serde_json::Value,
 }
 
 impl Job {
     /// A job slot that holds nothing: numbering filler, and the stand-in while a job's request is being submitted.
     fn placeholder() -> Job {
-        Job { invocation: Invocation::new(), seq: None, id: None, identity: None, capture: Capture::default(), base_digest: None, adapter: None, sample: None }
+        Job { invocation: Invocation::new(), seq: None, id: None, identity: None, capture: Capture::default(), base_digest: None, adapter: None, sample: None, replay: None }
     }
 }
 
@@ -415,7 +426,7 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
         let bi = self.jobs.len();
         // The job remembers the request's parameters and cancellation, not its payload: a page's pixels are tens of
         // megabytes, copied here on the thread that is decoding other requests.
-        let mut job = Job { invocation: inv.without_blobs(), seq: None, id: None, identity: None, capture: Capture::default(), base_digest: self.front.base_digest(), adapter: None, sample: None };
+        let mut job = Job { invocation: inv.without_blobs(), seq: None, id: None, identity: None, capture: Capture::default(), base_digest: self.front.base_digest(), adapter: None, sample: None, replay: None };
         // A request cancelled before admission is answered before it is parsed, encoded or queued.
         if let Err(e) = inv.cancel.check() {
             self.jobs.push(job);
@@ -460,6 +471,12 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
                 let max_new = req.bound_to(self.sched.sequence_capacity());
                 let seed = req.seed;
                 job.capture = Capture::of(&inv, &req.ids);
+                job.replay = req.history.as_ref().map(|history| ReplayContext {
+                    prefill: req.ids[req.ids.len() - req.prefill_len..].to_vec(),
+                    context_len: req.ids.len(),
+                    context_hash: data::replay::context_hash(&req.ids),
+                    history: history.to_json(),
+                });
                 // The decode steps report the top lists a trace asks for, where the draw is over the whole row.
                 let sample = model::serve::SampleParams { trace_top: job.capture.top, trace_support: job.capture.support, ..req.sampler };
                 if let Some(why) = Capture::trace_refusal(&inv, &sample, self.sched.scores_continuations(), self.sched.scores_top_log_probs(), self.sched.reports_sampler_supports()) {
@@ -581,7 +598,16 @@ impl<'a, D: PagedDecoder> Group<'a, D> {
     /// logged, so a reply that lost a tool call is visible on the server and not only in the outcome.
     #[allow(clippy::too_many_arguments)]
     fn conclude(job: &Job, label: &str, seq: SeqState, tok: &QwenBpe, tokens: &[u32], logprobs: &[f32], completion: model::serve::Completion, progress: &mut dyn FnMut(Progress)) -> ActionResult {
-        let outcome = Self::named(seq.finish(tok, tokens, progress)?, job);
+        let mut outcome = Self::named(seq.finish(tok, tokens, progress)?, job);
+        // A chat answer carries what was sampled, for the client to echo back on this message: the next prompt then
+        // holds the answer as these ids (`data::replay`).
+        if let Some(replay) = &job.replay {
+            let mut token_ids = tokens.to_vec();
+            token_ids.extend(completion.stop_token);
+            let finish = outcome.outputs.get("finish_reason").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let sampled = data::replay::Sampled { token_ids, prefill_token_ids: replay.prefill.clone(), finish, tokenizer_digest: tok.digest().map(str::to_string), context_len: replay.context_len, context_hash: replay.context_hash.clone() };
+            outcome = outcome.set("sampled", sampled.to_json()).set("history", replay.history.clone());
+        }
         if let Some(anomalies) = outcome.outputs.get("scan_anomalies") {
             residency::log::warn(&format!("{label}: a generation of {} tokens did not read as clean chat output: {anomalies}", tokens.len()));
         }

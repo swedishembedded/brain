@@ -191,3 +191,77 @@ fn a_missing_or_foreign_blob_renders_by_the_template_and_is_reported() {
         }
     }
 }
+
+/// What `sampled` costs a long agent session (Qwen3-4B's tokenizer and template): 60 calls, about 16k generated ids,
+/// tool outputs of 1-6 KB. Prints the bytes of each request and response with and without the blobs, the time to
+/// build the final request by replay against rendering and encoding it whole, and the size of the ids under each
+/// encoding considered. Run with `--ignored`.
+#[test]
+#[ignore = "measurement: prints the cost of sampled blobs on a 60-call session"]
+fn the_cost_of_sampled_blobs_on_a_long_session() {
+    let Some(m) = models().into_iter().find(|m| m.name == "Qwen3-4B") else { return };
+    let eot = end_of_turn(&m);
+    let mut messages = vec![json!({"role": "system", "content": "You are an agent. ".repeat(60)}), json!({"role": "user", "content": "Fix the failing test in the repository and report what you changed."})];
+    let strip = |msgs: &[Value]| -> Vec<Value> {
+        msgs.iter()
+            .map(|msg| {
+                let mut msg = msg.clone();
+                if let Some(o) = msg.as_object_mut() {
+                    o.remove("sampled");
+                }
+                msg
+            })
+            .collect()
+    };
+    let (mut generated_total, mut text_total, mut req_with, mut req_without, mut resp_with, mut resp_without) = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+    let (mut worst_req, mut worst_resp_blob) = (0usize, 0usize);
+    let mut json_ints = 0usize;
+    let mut le_u32_base64 = 0usize;
+    let mut varint_base64 = 0usize;
+    for k in 0..60 {
+        let req = parse(&m, &messages, false);
+        let body = |msgs: &[Value]| json!({"model": "m", "messages": msgs, "tools": serde_json::from_str::<Value>(TOOLS).unwrap()}).to_string().len();
+        let (with, without) = (body(&messages), body(&strip(&messages)));
+        req_with += with;
+        req_without += without;
+        worst_req = worst_req.max(with - without);
+        // About 267 generated ids: a sentence and a call whose arguments carry a few lines of code.
+        let code: String = (0..9).map(|i| format!("    let value_{k}_{i} = compute(&input[{i}..], {k}); // step {i}\\n")).collect();
+        let text = format!("I will update the helper so the loop stops at the last element (step {k}).\n<tool_call>\n{{\"name\": \"shell\", \"arguments\": {{\"cmd\": \"cat > src/lib.rs <<'EOF'\\n{code}EOF\"}}}}\n</tool_call>");
+        let mut generated = m.tok.encode(&text);
+        generated.push(eot);
+        generated_total += generated.len();
+        text_total += text.len();
+        json_ints += serde_json::to_string(&generated).unwrap().len();
+        le_u32_base64 += data::base64::encode(&generated.iter().flat_map(|id| id.to_le_bytes()).collect::<Vec<u8>>()).len();
+        varint_base64 += data::replay::encode_ids(&generated).len();
+        let reply = parse_reply_as(&m.format, &request(&m, &messages, false), &text).unwrap();
+        let calls: Vec<Value> = reply.outputs.get("tool_calls").and_then(|v| v.as_str().and_then(|s| serde_json::from_str(s).ok())).unwrap_or_default();
+        let sampled = Sampled::of(&req.ids, req.prefill_len, generated, "tool_calls", m.tok.digest()).to_json();
+        let mut answer = json!({"role": "assistant", "content": reply.outputs.get("text").cloned().unwrap_or(json!("")), "tool_calls": calls});
+        resp_without += answer.to_string().len();
+        answer["sampled"] = sampled.clone();
+        resp_with += answer.to_string().len();
+        worst_resp_blob = worst_resp_blob.max(sampled.to_string().len());
+        messages.push(answer);
+        let output = "test result: FAILED. 41 passed; 1 failed\n".repeat(30 + (k * 37) % 120);
+        messages.push(json!({"role": "tool", "tool_call_id": calls[0]["id"], "content": output}));
+    }
+    let time = |f: &dyn Fn() -> usize| {
+        let start = std::time::Instant::now();
+        let mut n = 0;
+        for _ in 0..5 {
+            n = f();
+        }
+        (start.elapsed().as_secs_f64() / 5.0 * 1e3, n)
+    };
+    let (replay_ms, replay_ids) = time(&|| parse(&m, &messages, false).ids.len());
+    let plain = strip(&messages);
+    let (template_ms, template_ids) = time(&|| m.tok.encode(&qwen3::chat::render_prompt_as(&m.format, &request(&m, &plain, false)).unwrap().text).len());
+    let last = parse(&m, &messages, false);
+    assert!(last.history.unwrap().append_only());
+    println!("generated ids {generated_total}, assistant text {text_total} bytes; ids as JSON integers {json_ints} B ({:.2} B/id), base64 of LE u32 {le_u32_base64} B ({:.2} B/id), varint+base64 (the standard) {varint_base64} B ({:.2} B/id)", json_ints as f64 / generated_total as f64, le_u32_base64 as f64 / generated_total as f64, varint_base64 as f64 / generated_total as f64);
+    println!("requests: {req_without} B without blobs, {req_with} B with ({:+.1}%); worst call +{worst_req} B", (req_with as f64 / req_without as f64 - 1.0) * 100.0);
+    println!("responses: {resp_without} B without blob, {resp_with} B with; worst blob {worst_resp_blob} B");
+    println!("final request: replay {replay_ms:.1} ms ({replay_ids} ids), template render+encode {template_ms:.1} ms ({template_ids} ids)");
+}

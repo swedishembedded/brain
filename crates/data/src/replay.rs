@@ -303,18 +303,34 @@ fn build(messages: &[Value], candidates: &[(usize, Sampled)], path: &PromptPath,
     let mut hasher = Sha256::new();
     let mut hashed = 0usize;
     let mut cursor = 0usize;
+    // Generation prompts the template wrote at earlier answers.
+    let mut prompts: Vec<Vec<u32>> = Vec::new();
     for (j, (at, s)) in candidates.iter().enumerate() {
         let before = (path.render)(&shown[..*at], thinking, false)?;
         if before.len() < cursor || !base.starts_with(&before) {
             return Ok(Err((j, Divergence::Template)));
         }
         ids.extend((path.encode)(&base[cursor..before.len()]));
-        let prompts = [thinking, !thinking].map(|t| -> Result<Vec<u32>, String> {
+        // The generation prompts the template writes here, with reasoning on and off. A template's generation prompt
+        // rarely depends on the conversation before it, so the ones already rendered at an earlier answer are tried
+        // first and only a blob that matches neither renders them again here.
+        let here = |t: bool| -> Result<Vec<u32>, String> {
             let open = (path.render)(&shown[..*at], t, true)?;
             let closed = if t == thinking { before.clone() } else { (path.render)(&shown[..*at], t, false)? };
             Ok(open.strip_prefix(closed.as_str()).map(|g| (path.encode)(g)).unwrap_or_default())
-        });
-        if !prompts.into_iter().any(|p| p.is_ok_and(|p| p == s.prefill_token_ids)) {
+        };
+        if !prompts.contains(&s.prefill_token_ids) {
+            for t in [thinking, !thinking] {
+                let p = here(t)?;
+                if !prompts.contains(&p) {
+                    prompts.push(p);
+                }
+                if prompts.contains(&s.prefill_token_ids) {
+                    break;
+                }
+            }
+        }
+        if !prompts.contains(&s.prefill_token_ids) {
             return Ok(Err((j, Divergence::Prefill)));
         }
         ids.extend(&s.prefill_token_ids);
