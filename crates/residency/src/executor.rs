@@ -980,8 +980,15 @@ impl Dispatcher {
     fn enforce_contract(&mut self, now: Instant) {
         let contract = self.policy.admission;
         let Dispatcher { queue, mgr, stats, running_jobs, open_groups, holds, health, .. } = self;
+        // A job that waited for memory its card holds now says so: the deadline is when it gave up, the shortage is why.
         let refusal = |p: &Pending, holds: &Holds| match contract.decide(&p.waiting(), now, holds) {
-            Decision::Refuse(why) => Some(why.message(&p.model, &p.action)),
+            Decision::Refuse(why) => {
+                let short = stats.lock().ok().and_then(|s| s.unservable.get(&p.key).cloned());
+                Some(match short {
+                    Some(short) => format!("{}; it waited for memory: {short}", why.message(&p.model, &p.action)),
+                    None => why.message(&p.model, &p.action),
+                })
+            }
             _ => None,
         };
         let mut expired: Vec<(Pending, String)> = Vec::new();
@@ -1634,8 +1641,17 @@ impl Dispatcher {
                     stalled.insert(key.clone());
                     continue;
                 }
-                Err(refused @ (ClaimError::TooLarge(_) | ClaimError::Starved(_) | ClaimError::Activate(_))) => {
-                    let too_large = matches!(refused, ClaimError::TooLarge(_) | ClaimError::Starved(_));
+                Err(ClaimError::Starved(e)) => {
+                    // The card could hold it but its memory is held now (another process, memory not yet returned):
+                    // also transient. The jobs wait, answered by their deadline at the latest and with this reason
+                    // (`enforce_contract`); the model is listed unservable meanwhile, so a router sends its requests
+                    // elsewhere, and every capacity measurement retries it.
+                    note_unservable(stats, &key, Some(&e));
+                    stalled.insert(key.clone());
+                    continue;
+                }
+                Err(refused @ (ClaimError::TooLarge(_) | ClaimError::Activate(_))) => {
+                    let too_large = matches!(refused, ClaimError::TooLarge(_));
                     let e = refused.to_string();
                     if too_large {
                         note_unservable(stats, &key, Some(&e));
@@ -4783,38 +4799,64 @@ mod tests {
         assert!(!exec.evict(InstanceKey::new("never-registered", "default")));
     }
 
-    /// A server that cannot place a model says so: the queued request fails with the
-    /// reason, the model is listed in `Stats::unservable`, and the entry clears once a
-    /// request is served again.
-    #[test]
-    fn a_starved_model_is_reported_unservable_and_cleared_when_it_runs() {
-        let free_gb = Arc::new(AtomicU32::new(19)); // 3 GB short of the 22 GB the model needs
+    /// The executor of a card measured `free_gb` GiB free (of 24 GiB, 2 GiB reserved), serving a 22 GiB model
+    /// `fills`, once the dispatcher has measured the card.
+    fn short_card(free_gb: &Arc<AtomicU32>, policy: Policy) -> Executor {
         let mut budgets = Budgets::new();
         budgets.set(Device::Gpu(0), 24 * GB, 2 * GB);
         let probe_free = free_gb.clone();
         let probe: CapacityProbe = Arc::new(move || vec![(Device::Gpu(0), u64::from(probe_free.load(Ordering::SeqCst)) * GB)]);
-        let exec = Executor::start_with_probe(Vec::new(), budgets, Policy::default(), Some(probe));
+        let exec = Executor::start_with_probe(Vec::new(), budgets, policy, Some(probe));
         // A registration is a message: the dispatcher measures the card right after it.
         exec.register(Arc::new(Slow { name: "fills".into(), vram: 22 * GB, ms: 1, builds: Arc::new(AtomicU32::new(0)) }));
-        let key = InstanceKey::new("fills", "default");
         // Submit only once the dispatcher has measured the short card, or the job races the first probe.
         let measured = Instant::now() + Duration::from_secs(10);
-        while exec.residency().budgets.iter().find(|b| b.device == Device::Gpu(0)).is_some_and(|b| b.total != 19 * GB) {
+        let want = u64::from(free_gb.load(Ordering::SeqCst)) * GB;
+        while exec.residency().budgets.iter().find(|b| b.device == Device::Gpu(0)).is_some_and(|b| b.total != want) {
             assert!(Instant::now() < measured, "the capacity probe never ran");
             std::thread::sleep(Duration::from_millis(5));
         }
+        exec
+    }
 
-        let err = exec.run_blocking("fills", "run", Invocation::new(), |_| {}).expect_err("the card is short");
-        assert!(err.contains("right now"), "the reason must say the shortage is current: {err}");
-        assert!(exec.stats().unservable.contains_key(&key), "the model must be listed unservable");
+    /// A card whose memory is held right now (another process, memory not yet returned) delays a request, it does not
+    /// refuse it: the request waits in the queue, the model is listed in `Stats::unservable` with the reason, and once
+    /// the memory returns the request is served and the entry clears.
+    #[test]
+    fn a_request_for_a_model_the_card_is_short_of_waits_and_is_served_when_the_memory_returns() {
+        let free_gb = Arc::new(AtomicU32::new(19)); // 3 GB short of the 22 GB the model needs
+        let exec = short_card(&free_gb, Policy::default());
+        let key = InstanceKey::new("fills", "default");
+
+        let (tx, rx) = channel();
+        exec.submit(Job::new("fills", "run", Invocation::new()).reply(move |r| {
+            let _ = tx.send(r);
+        }));
+        let listed = Instant::now() + Duration::from_secs(10);
+        while !exec.stats().unservable.contains_key(&key) {
+            assert!(Instant::now() < listed, "the model must be listed unservable while the card is short");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(exec.stats().unservable[&key].contains("right now"), "the reason must say the shortage is current: {}", exec.stats().unservable[&key]);
+        assert!(rx.recv_timeout(Duration::from_millis(300)).is_err(), "the request waits for the memory, it is not answered");
+        assert_eq!(exec.stats().queue_depth, 1, "the request is still queued");
 
         // The memory is back: the next measurement lets it run and clears the entry.
         free_gb.store(24, Ordering::SeqCst);
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while exec.run_blocking("fills", "run", Invocation::new(), |_| {}).is_err() {
-            assert!(Instant::now() < deadline, "never recovered after the memory returned");
-            std::thread::sleep(Duration::from_millis(200));
-        }
+        let served = rx.recv_timeout(Duration::from_secs(20)).expect("the request is answered once the memory returns");
+        assert!(served.is_ok(), "{served:?}");
         assert!(exec.stats().unservable.is_empty(), "{:?}", exec.stats().unservable);
+    }
+
+    /// A request that waited for memory until its queue deadline is refused then, and the refusal says what it waited
+    /// for, not only how long.
+    #[test]
+    fn a_request_still_short_of_memory_at_its_deadline_is_refused_with_the_shortage() {
+        let free_gb = Arc::new(AtomicU32::new(19));
+        let admission = crate::contract::Contract { queue_deadline: Duration::from_millis(400), ..crate::contract::Contract::default() };
+        let exec = short_card(&free_gb, Policy { admission, ..Policy::default() });
+        let err = exec.run_blocking("fills", "run", Invocation::new(), |_| {}).expect_err("the card stays short");
+        assert!(err.contains("queue deadline"), "it is refused at its deadline: {err}");
+        assert!(err.contains("right now"), "the refusal names the shortage it waited for: {err}");
     }
 }

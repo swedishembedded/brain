@@ -194,6 +194,11 @@ pub fn budgets_for(machine: &Machine, reserve: Reserve) -> residency::budget::Bu
     let mut budgets = residency::budget::Budgets::new();
     for &(i, total) in &machine.gpus {
         budgets.set(Device::Gpu(i), limits.clamp(Device::Gpu(i), total), reserve.card);
+        // What was free at start bounds what fits now; the card's size bounds what could ever fit, so memory another
+        // process still held at start delays work rather than refusing it for good.
+        if let Some(size) = machine.gpu_size(i) {
+            budgets.declare_size(Device::Gpu(i), limits.clamp(Device::Gpu(i), size));
+        }
     }
     budgets.set_activation_fallback(reserve.activation_fallback);
     // NPUs get their own budget + lane; a model advertising an NPU path (MemCost.npu > 0) is then auto-placed there
@@ -541,10 +546,18 @@ pub fn build_executor(machine: &Machine, reserve: Reserve, store: &catalog::Serv
     // Training is a workload of this same executor, so it takes cards from the models above and gives them back:
     // see `trainjob::resident` for the policy. One run per card that serving may use.
     if let Some(train) = train {
-        let largest = gpus.iter().map(|&(_, total)| total.saturating_sub(reserved)).max();
+        let largest = largest_card_bytes(machine, reserved);
         exec.register(trainjob::resident(trainjob::TrainConfig { models_dir: store.models_dir().map(std::path::Path::to_path_buf), store: train.artifact_store, work_root: trainjob::job::default_work_root(), largest_card_bytes: largest, devices: gpus.len().max(1), quotas: train.quotas, free_space: std::sync::Arc::new(trainjob::DiskFree), job_access: train.job_access, bank: train.bank }));
     }
     Serving { executor: exec, qwen, qwen_scanned, qwen35: qwen35_discovered, ricursive: ricursive_discovered, inkling2: inkling2_discovered }
+}
+
+/// The most one card of `machine` can give a training run: the largest card's size less `reserved`. A run is refused at
+/// the door only when it needs more than this; a card whose memory is held now (by serving residents, which are
+/// evicted for it, or by another process, which it waits for) is the placement's business, not the door's.
+fn largest_card_bytes(machine: &Machine, reserved: u64) -> Option<u64> {
+    let limits = memauth::limits();
+    machine.gpus.iter().filter_map(|&(i, _)| machine.gpu_size(i).map(|size| limits.clamp(Device::Gpu(i), size).saturating_sub(reserved))).max()
 }
 
 /// Whether any of `models` is a Wan resident, under whatever id it registered:
@@ -620,6 +633,27 @@ mod tests {
         let unrelated = ServedBase::new(root.join("elsewhere"), Some("v/none".into()));
         assert_eq!(checkpoint_base(&unrelated, &scanned), None, "a checkpoint the scan does not serve selects nothing");
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A fine-tune that fits the card was refused at the door ("this run needs about 46 GiB ... and the largest card
+    /// has ..."): the door's figure was what the card had free when the server started, and memory a previous server
+    /// had not yet returned made it a smaller card for the server's whole life. The door's bound and the placement's
+    /// ceiling are the card's size; what was free then bounds only what fits now.
+    #[test]
+    fn a_card_short_at_start_refuses_only_what_its_size_could_never_hold() {
+        use residency::place::{could_ever_fit, fits_when_empty};
+        use residency::MemCost;
+        const GB: u64 = 1 << 30;
+        let reserve = Reserve { card: 2 * GB, activation_fallback: 0 };
+        let machine = Machine { gpus: vec![(0, 30 * GB)], gpu_sizes: vec![(0, 96 * GB)], cpu_compute: false, pool_ram: 64 * GB, compute: "gpu0".into(), ..Machine::default() };
+        assert_eq!(largest_card_bytes(&machine, reserve.card), Some(94 * GB), "the door's bound is the card's size less its reserve");
+        let budgets = budgets_for(&machine, reserve);
+        let run = MemCost::new(46 * GB, 0).with_activation(0);
+        assert!(could_ever_fit(&run, &budgets), "46 GiB fits a 96 GiB card: never a permanent refusal");
+        assert!(!fits_when_empty(&run, &budgets), "but not the 28 GiB free now: it waits for the memory");
+        assert!(!could_ever_fit(&MemCost::new(95 * GB, 0).with_activation(0), &budgets), "more than the card holds is refused");
+        let no_size = Machine { gpu_sizes: Vec::new(), ..machine };
+        assert_eq!(largest_card_bytes(&no_size, reserve.card), Some(28 * GB), "a card of unknown size is sized by what is free");
     }
 
     /// `brain serve --training --device gpu3` refused `check_dataset` ("brain/train[host] (256 MiB) exceeds every

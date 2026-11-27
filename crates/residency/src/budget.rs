@@ -21,11 +21,10 @@ pub struct Budget {
     pub total: u64,
     pub reserved: u64,
     pub used: u64,
-    /// The largest `total` this device has ever had. A live measurement
-    /// ([`Self::measure`]) moves `total` both ways, so the current figure says
-    /// what is free NOW; this says what the device has been known to hold, which
-    /// is what separates "too large for this card" (permanent) from "the card is
-    /// short right now" (a neighbour, or memory this process leaked).
+    /// The most this device can hold: its declared size ([`Self::declare_size`]), or the largest `total` it has
+    /// had. A live measurement ([`Self::measure`]) moves `total` both ways, so the current figure says what is free
+    /// NOW; this says what the device could hold, which is what separates "too large for this card" (permanent) from
+    /// "the card is short right now" (a neighbour, or memory this or an earlier process has not returned).
     pub peak_total: u64,
 }
 
@@ -46,6 +45,12 @@ impl Budget {
     /// shown (peak total minus reserve), ignoring current use and current shortage.
     pub fn ceiling(&self) -> u64 {
         self.peak_total.saturating_sub(self.reserved)
+    }
+    /// Declare the device's size: what it holds with nothing on it. A budget is built from what is free when the
+    /// server starts, which is less than the size whenever something else held memory then; without the size that
+    /// shortfall read as a permanently smaller card.
+    pub fn declare_size(&mut self, size: u64) {
+        self.peak_total = self.peak_total.max(size);
     }
     /// Re-size the device from a live measurement of its capacity.
     pub fn measure(&mut self, total: u64) {
@@ -192,6 +197,13 @@ impl Budgets {
         self.devices.insert(device, Budget::new(total, reserved));
         self
     }
+    /// Declare `device`'s size ([`Budget::declare_size`]); a device with no budget is left alone.
+    pub fn declare_size(&mut self, device: Device, size: u64) -> &mut Self {
+        if let Some(b) = self.devices.get_mut(&device) {
+            b.declare_size(size);
+        }
+        self
+    }
     pub fn get(&self, device: Device) -> Option<&Budget> {
         self.devices.get(&device)
     }
@@ -293,6 +305,18 @@ mod tests {
     use super::*;
 
     const GB: u64 = 1 << 30;
+
+    /// A card that was short when the server started (another process had not yet returned its memory) is short
+    /// now, not small: its size bounds what could ever be placed on it, and what is free bounds what fits now.
+    #[test]
+    fn a_card_short_at_start_could_still_hold_what_its_size_holds() {
+        let mut bs = Budgets::new();
+        bs.set(Device::Gpu(0), 30 * GB, 2 * GB).declare_size(Device::Gpu(0), 96 * GB);
+        assert_eq!(bs.usable_on(Device::Gpu(0)), 28 * GB, "what fits now is what was free");
+        assert_eq!(bs.ceiling_on(Device::Gpu(0)), 94 * GB, "what could ever fit is the card's size less its reserve");
+        bs.declare_size(Device::Gpu(0), 50 * GB);
+        assert_eq!(bs.ceiling_on(Device::Gpu(0)), 94 * GB, "a smaller declaration never shrinks the ceiling");
+    }
 
     #[test]
     fn reserve_headroom_is_never_available() {

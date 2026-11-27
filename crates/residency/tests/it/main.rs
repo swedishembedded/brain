@@ -16,6 +16,7 @@ mod hosted_multi_model;
 mod hosted_tier_model;
 mod late_join_model;
 mod plan;
+mod recovery;
 mod sibling_models;
 mod supervision;
 mod supervisor_model;

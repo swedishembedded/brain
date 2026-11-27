@@ -17,6 +17,11 @@ use gpu_core::ComputeSet;
 pub struct Machine {
     /// `(index, free bytes)` per schedulable GPU.
     pub gpus: Vec<(u32, u64)>,
+    /// `(index, size bytes)` per schedulable GPU: what the card holds with nothing on it (the process's grant when it
+    /// has one). [`Self::gpus`] says what was free when the server started, which is less whenever another process
+    /// still held memory then; this says what the card could ever give. A card missing here is sized by its free
+    /// bytes.
+    pub gpu_sizes: Vec<(u32, u64)>,
     /// `(index, budget bytes)` per schedulable NPU. An NPU shares host RAM.
     pub npus: Vec<(u32, u64)>,
     /// The GPU indices among [`Self::gpus`] whose bytes ARE host RAM (an
@@ -51,7 +56,9 @@ impl Machine {
         // the scheduler's own accounting said the card was empty. Same probe the
         // one-shot placer uses (`gpu_core::capacity`), so the two halves of this
         // process can no longer disagree about the same card at the same instant.
-        let mut all_gpus = gpu_core::capacity::available_gpus();
+        let probed = gpu_core::capacity::probe_gpus();
+        let mut all_gpus: Vec<(u32, u64)> = probed.iter().map(|g| (g.index, g.available())).collect();
+        let gpu_sizes: Vec<(u32, u64)> = probed.iter().map(|g| (g.index, g.total)).collect();
         // No NVIDIA GPU, but the wgpu backend can drive an integrated GPU (e.g. Intel
         // Arc on Meteor Lake): budget it as a schedulable `Gpu` lane. Integrated GPUs
         // have no dedicated VRAM - they share system RAM - so size the budget like the
@@ -140,6 +147,7 @@ impl Machine {
             }
         }
     Machine {
+        gpu_sizes: gpu_sizes.into_iter().filter(|(i, _)| gpus.iter().any(|(g, _)| g == i)).collect(),
         gpus,
         npus,
         unified_gpus,
@@ -147,5 +155,11 @@ impl Machine {
         pool_ram: ram,
         compute: set.map(|s| s.to_string()).unwrap_or_else(|| "all".into()),
     }
+    }
+
+    /// The size of schedulable card `index` ([`Self::gpu_sizes`]), or its free bytes when its size is unknown.
+    pub fn gpu_size(&self, index: u32) -> Option<u64> {
+        let free = self.gpus.iter().find(|(i, _)| *i == index).map(|&(_, free)| free)?;
+        Some(self.gpu_sizes.iter().find(|(i, _)| *i == index).map_or(free, |&(_, size)| size.max(free)))
     }
 }

@@ -83,13 +83,14 @@ pub enum ClaimError {
     /// succeed never costs anything else its residency (see
     /// `place::could_ever_fit`).
     TooLarge(String),
-    /// The instance has fitted a device before, but the live capacity
-    /// measurement says it does not fit one now even with nothing resident: a
-    /// neighbouring process holds the memory, or this process leaked it (a device
-    /// that faulted is never destroyed). Evicting cannot help, so the executor
-    /// fails the queued jobs with that reason, reports the model unservable, and
-    /// the next request tries again - it recovers by itself when the memory
-    /// returns.
+    /// A device could hold the instance (its size, or the most it has had), but
+    /// the live capacity measurement says it does not fit one now even with
+    /// nothing resident: a neighbouring process holds the memory, an earlier
+    /// process has not returned it yet, or this process leaked it (a device that
+    /// faulted is never destroyed). Evicting cannot help, so the executor keeps
+    /// the jobs queued, reports the model unservable with this reason, and
+    /// claims again on every round and capacity measurement: the jobs run when
+    /// the memory returns, or are refused at their queue deadline naming it.
     Starved(String),
     /// The model/instance itself is unusable (unknown model, activation error).
     Activate(String),
@@ -832,7 +833,7 @@ impl ResidencyManager {
         }
         if !fits_when_empty(cost, &self.budgets) {
             return Err(ClaimError::Starved(format!(
-                "{key} ({mib} MiB) does not fit the memory this server can use right now ({}) even with nothing resident, though it has fitted before: another process holds the memory, or this process leaked it after a device fault; it is retried on every request and recovers when the memory returns",
+                "{key} ({mib} MiB) does not fit the memory this server can use right now ({}) even with nothing resident, though it has fitted before: another process holds the memory, or this process leaked it after a device fault; its requests wait for it and run when the memory returns",
                 self.usable_summary()
             )));
         }
@@ -1415,7 +1416,7 @@ impl ResidencyManager {
                         }
                         if self.budgets.usable_on(d) < need {
                             return Err(ClaimError::Starved(format!(
-                                "{key} ({} MiB on {d:?}) does not fit the memory this server can use right now ({}) even with nothing resident, though it has fitted before: another process holds the memory, or this process leaked it after a device fault; it is retried on every request and recovers when the memory returns",
+                                "{key} ({} MiB on {d:?}) does not fit the memory this server can use right now ({}) even with nothing resident, though it has fitted before: another process holds the memory, or this process leaked it after a device fault; its requests wait for it and run when the memory returns",
                                 need >> 20,
                                 self.usable_summary()
                             )));
@@ -1814,8 +1815,8 @@ impl ResidencyManager {
     /// any device needs (the instance's own process). `held` is what the key already holds on the host and gives back
     /// by moving. Checked before anything is charged; the first check also runs before any eviction, so a claim the
     /// host cannot take never costs another resident its place. Nothing is evicted for host memory, so a shortage
-    /// fails the claim now rather than leaving it queued: [`ClaimError::TooLarge`] when the host could never hold it,
-    /// else [`ClaimError::Starved`], retried on the next request.
+    /// fails the claim: [`ClaimError::TooLarge`] when the host could never hold it, else [`ClaimError::Starved`], which
+    /// leaves the job queued until the host memory frees or its deadline passes.
     fn refuse_host_short(&self, key: &InstanceKey, cost: &MemCost, device: Option<Device>, held: u64) -> Result<(), ClaimError> {
         let need = match device {
             Some(d) => host_part(&self.single_charges(cost, d)),
@@ -1830,7 +1831,7 @@ impl ResidencyManager {
             return Err(ClaimError::TooLarge(format!("{key} needs {mib} MiB of host memory beside its device, more than the host budget's {ceiling} MiB")));
         }
         Err(ClaimError::Starved(format!(
-            "{key} needs {mib} MiB of host memory beside its device and the host budget has {free} MiB free; nothing is evicted for host memory, so it is retried on the next request"
+            "{key} needs {mib} MiB of host memory beside its device and the host budget has {free} MiB free; nothing is evicted for host memory, so it waits for host memory to free"
         )))
     }
 
@@ -3055,7 +3056,7 @@ mod tests {
         mgr.refresh_accelerator_capacity(&[(Device::Gpu(0), 21 * GB)]);
         let err = mgr.claim("fills", "run", &Invocation::new(), 0, &no_exclude()).err().expect("no room now");
         assert!(matches!(err, ClaimError::Starved(_)), "expected Starved, got {err:?}");
-        assert!(err.to_string().contains("recovers when the memory returns"), "{err}");
+        assert!(err.to_string().contains("run when the memory returns"), "{err}");
         // A model that never fitted stays a permanent refusal.
         let err = mgr.claim("toobig", "run", &Invocation::new(), 0, &no_exclude()).err().expect("never fits");
         assert!(matches!(err, ClaimError::TooLarge(_)), "expected TooLarge, got {err:?}");
