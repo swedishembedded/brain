@@ -35,7 +35,9 @@
 //! # Prefix reuse
 //!
 //! An entry of the [`SnapshotPrefixCache`] is a snapshot slot, a copy of the whole fixed state (`slot_copy`) taken
-//! the moment a prompt's prefill ends, plus the payload ([`Resume`]): the prompt's last hidden row. The entry's
+//! the moment a prompt's prefill ends, plus the payload ([`Resume`]): the prompt's last hidden row. A sequence that
+//! finishes files its state too, after its prompt and the answer it was fed, with no hidden row (no step read the
+//! answer's last id): an agent's next call, which replays that answer, resumes after it. The entry's
 //! table carries only the KV namespace; it holds NO block, because there are no KV rows to retain. A prompt that
 //! extends a cached one copies the snapshot over its own slot and prefills only the rest; an exact repeat copies
 //! the snapshot and returns the stored hidden row without computing. A prefix is therefore reusable at one length
@@ -74,7 +76,8 @@ pub const MIN_CACHED_TOKENS: usize = 16;
 
 /// What resuming from a cached prompt needs beyond the snapshot slot.
 pub struct Resume {
-    /// The final-norm hidden row of the prompt's last token, so an exact repeat needs no compute.
+    /// The final-norm hidden row of the prompt's last token, so an exact repeat needs no compute; empty for the state a
+    /// finished sequence filed, which only resumes prompts that extend it.
     pub last_hidden: Vec<f32>,
 }
 
@@ -213,6 +216,11 @@ impl RingEngine {
         let hit = self.cache.lookup(table.kv_namespace(), prompt)?;
         let entry = self.cache.entry(hit);
         let rows = entry.tokens.len();
+        // An entry a finished sequence filed holds no hidden row (no step read its last id): it resumes prompts that
+        // extend it, and a repeat of it is prefilled.
+        if rows == prompt.len() && entry.payload.last_hidden.is_empty() {
+            return None;
+        }
         self.model.slot_copy(&self.pool, self.snapshot_slot(entry.snap_row), slot);
         table.mark_cached(rows as u32);
         (rows == prompt.len()).then(|| entry.payload.last_hidden.clone())
@@ -228,6 +236,18 @@ impl RingEngine {
         let Some(row) = row else { return };
         self.model.slot_copy(&self.pool, slot, self.snapshot_slot(row));
         let _retired = self.cache.insert(Entry::new(prompt.to_vec(), BlockTable::with_namespace(namespace), row, Resume { last_hidden: hidden.to_vec() }));
+    }
+
+    /// File the state `slot` holds after a finished sequence's prompt and fed answer, `tokens`, beside the prompt's
+    /// own entry (other samples of the prompt still resume from it), with no hidden row.
+    fn file_answer(&mut self, slot: u32, namespace: KvNamespace, tokens: &[u32]) {
+        if tokens.len() < MIN_CACHED_TOKENS || !self.cache.enabled() {
+            return;
+        }
+        let (row, _evicted) = self.cache.take_row_beside(namespace, tokens);
+        let Some(row) = row else { return };
+        self.model.slot_copy(&self.pool, slot, self.snapshot_slot(row));
+        let _retired = self.cache.insert(Entry::new(tokens.to_vec(), BlockTable::with_namespace(namespace), row, Resume { last_hidden: Vec::new() }).beside());
     }
 
     /// One decode step for `(table, input)` pairs, hidden block left on the device.
@@ -302,6 +322,16 @@ impl PagedDecoder for RingEngine {
         0
     }
     fn release_table(&mut self, t: &mut BlockTable) {
+        t.release(&mut self.alloc);
+    }
+    /// File the finished slot's state, which is exactly `tokens`' (its prompt and the answer it was fed), so the next
+    /// call that replays the answer resumes after it.
+    fn release_finished(&mut self, t: &mut BlockTable, tokens: &[u32]) {
+        if let Some(&slot) = t.blocks().first() {
+            if self.pool.position(slot) as usize == tokens.len() {
+                self.file_answer(slot, t.kv_namespace(), tokens);
+            }
+        }
         t.release(&mut self.alloc);
     }
     fn prefill(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32> {

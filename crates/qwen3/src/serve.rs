@@ -4915,6 +4915,16 @@ impl model::serve::PagedDecoder for Engine {
     fn release_table(&mut self, t: &mut BlockTable) {
         self.release_table(t)
     }
+    /// Index the full blocks of `tokens` before the sequence lets them go, in its own KV namespace. The blocks a
+    /// decode step wrote hold rows a cold prefill would compute at another row count, so under the exact-decode regime
+    /// only the prompt's blocks (indexed by the prefill) are kept.
+    fn release_finished(&mut self, t: &mut BlockTable, tokens: &[u32]) {
+        if self.exact.is_none() {
+            let full = tokens.len().min(t.len() as usize) / self.block_size as usize * self.block_size as usize;
+            self.prefix.insert_chain_in(t.kv_namespace(), &tokens[..full], t.blocks(), 0, &mut self.alloc);
+        }
+        self.release_table(t)
+    }
     /// One whole-sequence pass ([`Engine::score_positions`]) instead of a prefill per position.
     fn hidden_at(&mut self, prompt: &[u32], positions: &[usize]) -> Vec<Vec<f32>> {
         let mut table = BlockTable::new();

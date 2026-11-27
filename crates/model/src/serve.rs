@@ -198,6 +198,18 @@ pub trait PagedDecoder {
     /// Release a finished/cancelled sequence's blocks back to the pool.
     fn release_table(&mut self, t: &mut BlockTable);
 
+    /// Release a sequence that finished with `tokens` in its cache: the ids whose K/V (or state) the sequence's rows
+    /// hold, in position order - its prompt and the answer it was fed back, never the last sampled id, which no step
+    /// read. A decoder with a prefix cache keeps what those rows computed for a later prompt that starts with the same
+    /// ids (an agent's next call replays the answer as its sampled ids, so the next prompt is this one, its answer and
+    /// the turns after it): the cache takes its own reference on what it keeps, evictable like any cached prefix, and
+    /// the sequence's references go back as [`Self::release_table`] gives them. `tokens` never exceeds the rows the
+    /// table holds. The default keeps nothing.
+    fn release_finished(&mut self, t: &mut BlockTable, tokens: &[u32]) {
+        let _ = tokens;
+        self.release_table(t);
+    }
+
     /// Prefill a fresh prompt into `table`, returning the final hidden state
     /// (from which the caller samples the first token).
     fn prefill(&mut self, table: &mut BlockTable, prompt: &[u32]) -> Vec<f32>;
@@ -3677,7 +3689,10 @@ impl<D: PagedDecoder> Scheduler<D> {
         while i < self.running.len() {
             if self.running[i].done {
                 let mut r = self.running.remove(i);
-                self.dec.release_table(&mut r.table);
+                // The context's rows that hold K/V: a prompt with embedding rows is keyed by their content, which the
+                // ids alone do not name, so such a sequence keeps nothing.
+                let fed = if r.embeds.is_some() { 0 } else { r.context.len().min(r.table.len() as usize) };
+                self.dec.release_finished(&mut r.table, &r.context[..fed]);
                 if let Some(log) = r.table.take_routing_log() {
                     report.completed_routing.push((r.id, log));
                 }

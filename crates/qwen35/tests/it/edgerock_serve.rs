@@ -135,7 +135,7 @@ fn a_prefix_hit_reproduces_the_cold_run_and_prefills_only_the_suffix() {
     let (hits, looked_up, cached) = sched.prefix_stats();
     assert_eq!(hits as usize, first.len(), "exactly the cached prompt is reused; only the {} suffix tokens are prefilled", extended.len() - first.len());
     assert_eq!(looked_up as usize, first.len() + extended.len());
-    assert_eq!(cached, 1, "the longer prompt superseded the shorter entry");
+    assert_eq!(cached, 3, "the longer prompt superseded the shorter entry; each finished answer was filed beside its prompt");
     assert_eq!(warm, cold, "a prefix hit must reproduce the cold run's tokens");
 
     // An exact repeat is served from the entry alone.
@@ -143,6 +143,30 @@ fn a_prefix_hit_reproduces_the_cold_run_and_prefills_only_the_suffix() {
     let again = run_to_end(&mut sched).remove(&id3).unwrap();
     assert_eq!(sched.prefix_stats().0 as usize, first.len() + extended.len());
     assert_eq!(again, cold);
+}
+
+#[test]
+fn the_next_call_of_a_replayed_answer_resumes_after_the_answer() {
+    // An agent's next call is its prompt, the answer as sampled and the turns after it: the finished sequence's state
+    // is filed after the answer it was fed (all but its last id, which no step read), beside the prompt's own entry.
+    let gpu = Gpu::new_cpu(pipelines());
+    let first = tokens(5, 24);
+    let mut sched = Scheduler::new(engine_on(&gpu, PREFIX_SLOTS), 2);
+    let id = submit(&mut sched, &first, 4);
+    let answer = run_to_end(&mut sched).remove(&id).unwrap();
+    assert_eq!(sched.prefix_stats().2, 2, "the prompt and the prompt with its answer");
+    let mut next: Vec<u32> = first.iter().chain(&answer).copied().collect();
+    next.extend(tokens(6, 8));
+    let cold = {
+        let mut sched = Scheduler::new(engine_on(&gpu, PREFIX_SLOTS), 2);
+        let id = submit(&mut sched, &next, 6);
+        run_to_end(&mut sched).remove(&id).unwrap()
+    };
+    let before = sched.prefix_stats().0;
+    let id = submit(&mut sched, &next, 6);
+    let warm = run_to_end(&mut sched).remove(&id).unwrap();
+    assert_eq!((sched.prefix_stats().0 - before) as usize, first.len() + answer.len() - 1, "resumed after the prompt and the fed answer");
+    assert_eq!(warm, cold, "resuming after the answer reproduces the cold run");
 }
 
 #[test]

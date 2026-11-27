@@ -108,11 +108,13 @@ pub struct Entry<P> {
     /// A branch point ([`SnapshotPrefixCache::branch_point`]): a prefix
     /// different prompts continue, kept while they extend it.
     branch: bool,
+    /// Filed beside the prefixes it extends ([`Entry::beside`]): it replaces none of them.
+    beside: bool,
 }
 
 impl<P> Entry<P> {
     pub fn new(tokens: Vec<u32>, table: BlockTable, snap_row: u32, payload: P) -> Entry<P> {
-        Entry { tokens, content: Arc::new(ContentKey::none()), table, snap_row, payload, stamp: 0, branch: false }
+        Entry { tokens, content: Arc::new(ContentKey::none()), table, snap_row, payload, stamp: 0, branch: false, beside: false }
     }
 
     /// This entry as the prefix of a prompt with embedding rows `content` describes: only prompts with the same
@@ -128,6 +130,14 @@ impl<P> Entry<P> {
     /// leaves the cache only by recency.
     pub fn branch(mut self) -> Entry<P> {
         self.branch = true;
+        self
+    }
+
+    /// This entry filed beside the cached prefixes it extends instead of replacing them: the state after a prompt and
+    /// one sampled answer, which the next turn of that answer's conversation resumes from while other samples of the
+    /// same prompt still resume from the prompt. It is itself replaced by a turn that extends it, like any entry.
+    pub fn beside(mut self) -> Entry<P> {
+        self.beside = true;
         self
     }
 
@@ -268,11 +278,20 @@ impl<P> SnapshotPrefixCache<P> {
     /// The evicted entry's block table is returned for the caller to release;
     /// `None` row when every row is held by a prefill still in flight.
     pub fn take_row<'p>(&mut self, namespace: KvNamespace, prompt: impl Into<Prompt<'p>>) -> (Option<u32>, Option<BlockTable>) {
+        self.take_row_for(namespace, prompt.into(), false)
+    }
+
+    /// [`Self::take_row`] for an entry filed [`Entry::beside`] the prefixes it extends: a full cache gives up its
+    /// least recently used entry, never the prefix as a turn that replaces it.
+    pub fn take_row_beside<'p>(&mut self, namespace: KvNamespace, prompt: impl Into<Prompt<'p>>) -> (Option<u32>, Option<BlockTable>) {
+        self.take_row_for(namespace, prompt.into(), true)
+    }
+
+    fn take_row_for(&mut self, namespace: KvNamespace, prompt: Prompt<'_>, beside: bool) -> (Option<u32>, Option<BlockTable>) {
         if let Some(row) = self.free_rows.pop() {
             return (Some(row), None);
         }
-        let prompt = prompt.into();
-        let superseded = self.entries.iter().position(|e| e.superseded_by(namespace, prompt));
+        let superseded = if beside { None } else { self.entries.iter().position(|e| e.superseded_by(namespace, prompt)) };
         let victim = superseded.or_else(|| self.entries.iter().enumerate().min_by_key(|(_, e)| e.stamp).map(|(i, _)| i));
         match victim {
             Some(i) => {
@@ -291,7 +310,7 @@ impl<P> SnapshotPrefixCache<P> {
         let mut retired = Vec::new();
         let mut i = 0;
         while i < self.entries.len() {
-            if self.entries[i].superseded_by(entry.table.kv_namespace(), Prompt::new(&entry.tokens, &entry.content)) {
+            if !entry.beside && self.entries[i].superseded_by(entry.table.kv_namespace(), Prompt::new(&entry.tokens, &entry.content)) {
                 let e = self.entries.remove(i);
                 self.free_rows.push(e.snap_row);
                 retired.push(e.table);
@@ -414,6 +433,27 @@ mod tests {
         assert!(row.is_some() && evicted.is_some());
         assert_eq!(c.peek(BASE_KV_NAMESPACE, &[1, 2, 3, 4, 9]).map(|i| c.entry(i).tokens.len()), Some(4), "the conversation's own entry went, not the branch");
         assert_eq!(c.insert(entry(&[1, 2, 3, 4], row.unwrap()).branch()).len(), 1, "the same branch point filed twice is kept once");
+    }
+
+    /// A sampled answer is filed beside the prompt it extends: the prompt stays for the other samples, the answer's
+    /// next turn replaces the answer, and a full cache gives up its least recently used entry for it.
+    #[test]
+    fn an_answer_filed_beside_its_prompt_keeps_the_prompt() {
+        let mut c = SnapshotPrefixCache::<u32>::new(2);
+        let r = c.take_row(BASE_KV_NAMESPACE, &[]).0.unwrap();
+        c.insert(entry(&[1, 2, 3], r));
+        let r = c.take_row_beside(BASE_KV_NAMESPACE, &[1, 2, 3, 7, 8]).0.unwrap();
+        assert!(c.insert(entry(&[1, 2, 3, 7, 8], r).beside()).is_empty(), "the prompt is not retired");
+        assert_eq!(c.peek(BASE_KV_NAMESPACE, &[1, 2, 3, 9]).map(|i| c.entry(i).tokens.len()), Some(3));
+        assert_eq!(c.peek(BASE_KV_NAMESPACE, &[1, 2, 3, 7, 8, 9]).map(|i| c.entry(i).tokens.len()), Some(5));
+        c.lookup(BASE_KV_NAMESPACE, &[1, 2, 3, 9]);
+        let (row, evicted) = c.take_row_beside(BASE_KV_NAMESPACE, &[1, 2, 3, 9, 4, 4]);
+        assert!(row.is_some() && evicted.is_some(), "a full cache evicts by recency");
+        assert_eq!(c.peek(BASE_KV_NAMESPACE, &[1, 2, 3, 7, 8, 9]).map(|i| c.entry(i).tokens.len()), Some(3), "the older answer went, the prompt stayed");
+        c.insert(entry(&[1, 2, 3, 9, 4, 4], row.unwrap()).beside());
+        let r = c.take_row(BASE_KV_NAMESPACE, &[1, 2, 3, 9, 4, 4, 5]).0.unwrap();
+        c.insert(entry(&[1, 2, 3, 9, 4, 4, 5], r));
+        assert_eq!(c.stats().2, 1, "a turn extending the answer replaces it and the prompt");
     }
 
     /// A cache whose rows are backed as it fills grows without disturbing what it holds: the rows it already had are
