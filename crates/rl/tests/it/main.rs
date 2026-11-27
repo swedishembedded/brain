@@ -43,3 +43,5 @@ mod objective_fits;
 mod reader_learner;
 #[cfg(feature = "qwen3")]
 mod served_conformance;
+#[cfg(feature = "qwen3")]
+mod session_samples;
