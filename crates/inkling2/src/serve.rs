@@ -613,6 +613,12 @@ impl PagedDecoder for Engine {
     fn reclaim_prefix_keeping_embedded(&mut self, want: u32, prompt: &[u32], adapter: Option<AdapterId>, embeds: &PromptEmbeds) -> u32 {
         self.pool.reclaim_keeping(want, namespace(adapter), Prompt::new(prompt, &embeds.content_key()))
     }
+    /// File the finished sequence's state after its prompt and fed answer beside the prompt's entry, then release it.
+    fn release_finished(&mut self, t: &mut BlockTable, tokens: &[u32]) {
+        let g = self.m.ops().gpu();
+        self.pool.file_answer(g, t, tokens, Vec::new());
+        self.release_table(t);
+    }
     fn release_table(&mut self, t: &mut BlockTable) {
         // The drafter's cache slot is keyed by the state row: a finished sequence gives its blocks back now, and the
         // row's next sequence starts with an empty slot.

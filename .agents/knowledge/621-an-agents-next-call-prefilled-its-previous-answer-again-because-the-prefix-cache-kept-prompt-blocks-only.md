@@ -23,5 +23,7 @@ unread). Spec: `catalog` `it::replayed_sessions` (both routes), `qwen35`
 `it::edgerock_serve::the_next_call_of_a_replayed_answer_resumes_after_the_answer` (warm equals cold),
 `model` `snapshot_prefix::tests::an_answer_filed_beside_its_prompt_keeps_the_prompt`.
 
-Open: the snapshot engines that capture state during a prefill (the Qwen3.5 GGUF engine, ricursive, the looped
-`VisitPool` engines) keep the default (nothing past the prompt); each needs a state capture at release.
+The looped `VisitPool` engines (inkling2) and ricursive snapshot the sequence's state row at release the same way
+(`VisitPool::file_answer`; ricursive's `Filed::Answer`); a beside entry is never handed out for an exact repeat
+(`Entry::is_beside`). The served 27B's engine (`Qwen35GgufEngine`) files it in its paged layout only, and not under
+exact decode, where a resume inside a 64-token recurrent chunk rounds otherwise than a cold prefill.

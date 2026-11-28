@@ -301,3 +301,26 @@ fn the_memory_plan_charges_global_kv_per_token_and_rings_per_slot() {
     assert_eq!(rings, ricursive::ring_bytes_per_slot(&cfg, 8, KvTier::F32) * u64::from(serve.max_batch + serve.prefix_slots));
     assert_eq!(e.kv_pool_bytes(), global + rings);
 }
+
+/// An agent's next call is its prompt, the answer as sampled and the turns after it: the finished sequence's state is
+/// filed after the answer it was fed (all but its last id, which no step read), beside the prompt's own entry, and the
+/// next call resumes after it with the cold run's tokens.
+#[test]
+fn the_next_call_of_a_replayed_answer_resumes_after_the_answer() {
+    use model::serve::{Request, Scheduler};
+    let Some(dir) = tiny_dir() else { return };
+    let vocab = tiny_config(&dir).vocab_size as u32;
+    let first = stream(5, 24, vocab);
+    let mut sched = Scheduler::new(engine(&dir, 8, 4), 4);
+    let id = sched.submit(Request { prompt: first.clone(), max_new: 4, stop: Vec::new() });
+    let answer = sched.run().remove(&id).unwrap();
+    let mut next: Vec<u32> = first.iter().chain(&answer).copied().collect();
+    next.extend(stream(6, 8, vocab));
+    let before = sched.prefix_stats().0;
+    let id = sched.submit(Request { prompt: next.clone(), max_new: 6, stop: Vec::new() });
+    let warm = sched.run().remove(&id).unwrap();
+    assert_eq!((sched.prefix_stats().0 - before) as usize, first.len() + answer.len() - 1, "resumed after the prompt and the fed answer");
+    let mut cold = Scheduler::new(engine(&dir, 8, 4), 4);
+    let id = cold.submit(Request { prompt: next, max_new: 6, stop: Vec::new() });
+    assert_eq!(warm, cold.run().remove(&id).unwrap(), "resuming after the answer reproduces the cold run");
+}

@@ -141,6 +141,12 @@ impl<P> Entry<P> {
         self
     }
 
+    /// Whether this entry was filed [`Self::beside`] its prompt: the state after a sampled answer, which only resumes
+    /// prompts that extend it (no step read its last id, so it holds no result for a repeat of exactly its tokens).
+    pub fn is_beside(&self) -> bool {
+        self.beside
+    }
+
     /// Whether `self` is a cached prefix of `prompt` in `namespace` that a turn
     /// extending it replaces. A branch point is replaced only by the same prefix
     /// filed again (two prompts that left one document at once both file it).

@@ -327,6 +327,18 @@ impl LsaCharge {
     }
 }
 
+/// What a prefix entry is filed as.
+#[derive(Clone, Copy)]
+enum Filed {
+    /// A prompt, replaced by a later turn that extends it.
+    Prompt,
+    /// A prefix other prompts continue, taken mid-prefill: kept while they extend it.
+    Branch,
+    /// The state after a finished sequence's prompt and fed answer, filed beside the prompt's entry, with no hidden
+    /// row (no step read the answer's last id): it resumes prompts that extend it.
+    Answer,
+}
+
 /// What resuming from a cached prompt needs beyond its blocks and ring snapshot.
 struct Resume {
     /// The final-norm hidden row of the prompt's last token.
@@ -823,6 +835,11 @@ impl RicursiveEngine {
         };
         let bs = self.serve.block_size;
         let entry = self.cache.entry(hit);
+        if entry.is_beside() && entry.tokens.len() == prompt.len() {
+            // A finished answer's state holds no hidden row for a repeat of exactly its tokens: prefilled.
+            self.plan_branch(table, prompt, 0);
+            return None;
+        }
         let rows = entry.tokens.len() as u32;
         let (snap, shared, hidden) = (entry.snap_row, entry.table.blocks()[..rows.div_ceil(bs) as usize].to_vec(), entry.payload.last_hidden.clone());
         table.adopt_rows(&shared, rows, &mut self.alloc);
@@ -856,14 +873,15 @@ impl RicursiveEngine {
         }
     }
 
-    /// File the sequence of `table`, whose state is exactly `prompt`'s, as a prefix entry. `branch` marks a prefix other
-    /// prompts continue (taken mid-prefill, `prompt` being the prefix and `table` the sequence still prefilling): it is
-    /// kept while they extend it instead of being replaced by them.
-    fn file_prefix(&mut self, table: &BlockTable, prompt: &[u32], hidden: &[f32], branch: bool) {
+    /// File the sequence of `table`, whose state is exactly `prompt`'s, as a prefix entry of kind `kind`.
+    fn file_prefix(&mut self, table: &BlockTable, prompt: &[u32], hidden: &[f32], kind: Filed) {
         if prompt.len() < MIN_CACHED_TOKENS || !self.cache.enabled() {
             return;
         }
-        let (row, evicted) = self.cache.take_row(table.kv_namespace(), prompt);
+        let (row, evicted) = match kind {
+            Filed::Answer => self.cache.take_row_beside(table.kv_namespace(), prompt),
+            Filed::Prompt | Filed::Branch => self.cache.take_row(table.kv_namespace(), prompt),
+        };
         if let Some(mut gone) = evicted {
             self.drop_table(&mut gone);
         }
@@ -876,7 +894,11 @@ impl RicursiveEngine {
             s.binding.retain_pages(table, &mut shared).unwrap_or_else(|e| panic!("ricursive: latent sparse attention: {e}"));
         }
         let entry = Entry::new(prompt.to_vec(), shared, row, Resume { last_hidden: hidden.to_vec() });
-        let retired = self.cache.insert(if branch { entry.branch() } else { entry });
+        let retired = self.cache.insert(match kind {
+            Filed::Prompt => entry,
+            Filed::Branch => entry.branch(),
+            Filed::Answer => entry.beside(),
+        });
         for mut gone in retired {
             self.drop_table(&mut gone);
         }
@@ -1183,6 +1205,13 @@ impl PagedDecoder for RicursiveEngine {
         }
         self.alloc.free_blocks() - before
     }
+    /// File the finished sequence's state after its prompt and fed answer beside the prompt's entry, then release it.
+    fn release_finished(&mut self, t: &mut BlockTable, tokens: &[u32]) {
+        if t.state_row().is_some() && t.len() as usize == tokens.len() {
+            self.file_prefix(t, tokens, &[], Filed::Answer);
+        }
+        self.release_table(t);
+    }
     fn release_table(&mut self, t: &mut BlockTable) {
         if let Some(slot) = t.take_state_row() {
             self.branches.remove(&slot);
@@ -1255,7 +1284,7 @@ impl PagedDecoder for RicursiveEngine {
             if at_branch {
                 self.branches.remove(&slot);
                 let row = hidden.clone().expect("the slice before a branch point returns its last row");
-                self.file_prefix(table, &prompt[..to], &row, true);
+                self.file_prefix(table, &prompt[..to], &row, Filed::Branch);
             }
             at = to;
         }
@@ -1263,7 +1292,7 @@ impl PagedDecoder for RicursiveEngine {
             return PrefillProgress::Partial { consumed: end - done };
         }
         let hidden = hidden.expect("the last slice of a prompt returns its hidden state");
-        self.file_prefix(table, prompt, &hidden, false);
+        self.file_prefix(table, prompt, &hidden, Filed::Prompt);
         PrefillProgress::Done(hidden)
     }
     fn logits(&self, hidden: &[f32]) -> Vec<f32> {

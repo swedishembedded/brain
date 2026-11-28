@@ -446,3 +446,24 @@ fn speculation_with_the_released_drafter_equals_plain_greedy_on_the_released_wei
     );
     assert!(proposed > 0, "the drafter proposed");
 }
+
+/// An agent's next call is its prompt, the answer as sampled and the turns after it: the finished sequence's state is
+/// filed after the answer it was fed (all but its last id, which no step read), beside the prompt's own entry, and the
+/// next call resumes after it with the cold run's tokens.
+#[test]
+fn the_next_call_of_a_replayed_answer_resumes_after_the_answer() {
+    if tiny_dir().is_none() {
+        return;
+    }
+    let first: Vec<u32> = (0..24).map(|i| 3 + (i * 7 + i * i) % 23).collect();
+    let mut sched = Scheduler::new(tiny_engine(7), 4);
+    let id = sched.submit(Request { prompt: first.clone(), max_new: 4, stop: Vec::new() });
+    let answer = sched.run().remove(&id).unwrap();
+    let mut next: Vec<u32> = first.iter().chain(&answer).copied().collect();
+    next.extend((0..8).map(|i| 5 + (i * 3) % 19));
+    let before = sched.prefix_stats().0;
+    let id = sched.submit(Request { prompt: next.clone(), max_new: 6, stop: Vec::new() });
+    let warm = sched.run().remove(&id).unwrap();
+    assert_eq!((sched.prefix_stats().0 - before) as usize, first.len() + answer.len() - 1, "resumed after the prompt and the fed answer");
+    assert_eq!(warm, plain_greedy(&[next], 6)[0], "resuming after the answer reproduces the cold run");
+}

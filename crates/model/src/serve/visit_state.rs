@@ -493,6 +493,10 @@ impl<P: Clone> VisitPool<P> {
         }
         let Some(hit) = self.cache.lookup(table.kv_namespace(), prompt) else { return fresh };
         let entry = self.cache.entry(hit);
+        if entry.is_beside() && entry.tokens.len() == prompt.tokens.len() {
+            // A finished answer's state holds no result for a repeat of exactly its tokens: prefilled.
+            return fresh;
+        }
         let bs = self.sizing.block_size;
         let rows = entry.tokens.len() as u32;
         let (snap, shared) = (entry.snap_row, entry.table.blocks()[..rows.div_ceil(bs) as usize].to_vec());
@@ -561,6 +565,27 @@ impl<P: Clone> VisitPool<P> {
             None => entry,
         };
         for mut gone in self.cache.insert(entry) {
+            gone.release(&mut self.alloc);
+        }
+    }
+
+    /// File a finished sequence's state after `tokens`, its prompt and the answer it was fed (`table` holds exactly
+    /// those positions), beside the prompt's own entry: an agent's next call, which replays the answer, resumes after
+    /// it, and other samples of the prompt still resume from the prompt. Its blocks are shared with the entry and its
+    /// state row is snapshotted; `payload` is never handed out ([`Resumed::exact`] is not given for such an entry).
+    pub fn file_answer(&mut self, g: &Gpu, table: &BlockTable, tokens: &[u32], payload: P) {
+        if tokens.len() < self.min_cached || !self.cache.enabled() || table.len() as usize != tokens.len() {
+            return;
+        }
+        let Some(row) = table.state_row() else { return };
+        let (snap, evicted) = self.cache.take_row_beside(table.kv_namespace(), tokens);
+        if let Some(mut gone) = evicted {
+            gone.release(&mut self.alloc);
+        }
+        let Some(snap) = snap else { return };
+        self.copy_state(g, row, self.snapshot_row(snap));
+        let shared = table.fork(&mut self.alloc);
+        for mut gone in self.cache.insert(Entry::new(tokens.to_vec(), shared, snap, payload).beside()) {
             gone.release(&mut self.alloc);
         }
     }

@@ -432,8 +432,14 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       rows in the prefix cache through the answer it was fed (`PagedDecoder::release_finished`): the paged-KV engine
       indexes the full blocks, the ring engine files its state beside the prompt's entry. The second call of a
       replayed session: 72 of 111 prompt ids from cache on the tiny Qwen3 engine (64 before). The Anthropic route
-      carries and replays `sampled` as the OpenAI route does. Open: the Qwen3.5 GGUF, ricursive and looped
-      `VisitPool` engines keep nothing past the prompt yet.
+      carries and replays `sampled` as the OpenAI route does. The looped `VisitPool` engines (inkling2) and
+      ricursive file the state after the answer too (CPU: `it::serve::the_next_call_of_a_replayed_answer_resumes_after_the_answer`
+      in each, resumed after prompt 24 + answer 4 - 1 = 27 ids, warm equals cold). The fleet's Qwen3.8-27B-FP8 (a
+      Hugging Face directory of family `qwen35`) is served by `Qwen35GgufEngine` (`serving::model_dir::hf_qwen35_dir`
+      -> `catalog::resident_qwen35::gguf_resident_banked` -> `Qwen35GgufResident`), not the ring engine (EdgeRock
+      only). Its answer filing (paged layout, not under exact decode) is on branch `serve-followups-gguf`, unmerged:
+      its spec `gguf_conformance::the_next_call_of_a_replayed_answer_resumes_after_the_answer` is a card test this
+      CPU lane cannot run (`cargo test -p brain-qwen35 --test gguf_conformance -- --device gpu<N> --backend cuda`).
 - [x] **Stored versions on another server** (lane serve-followups, 2026-11-28; knowledge 622). `serve_adapter`
       serves an artifact-store adapter under an id the caller names, as the policy version it names, on any server of
       the same base with `--training`; `withdraw_adapter` takes it off. Evaluations of a stream's versions can run on
