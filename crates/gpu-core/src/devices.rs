@@ -262,7 +262,7 @@ pub fn select_gpus<'a>(all: &'a [DeviceId], set: &ComputeSet) -> Vec<&'a DeviceI
 }
 
 /// [`select_gpus`] over the machine's cards and the process's compute set
-/// (`--device` / `BRAIN_DEVICE`).
+/// (`--device`).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn schedulable_gpus() -> Vec<&'static DeviceId> {
     select_gpus(gpus(), ambient_compute_set())
@@ -334,7 +334,7 @@ std::thread_local! {
 }
 
 /// Run `f` with this thread building on the **CPU backend**, whatever the
-/// ambient `--device`/`BRAIN_DEVICE` selection says.
+/// ambient `--device` selection says.
 ///
 /// The host-tier counterpart of [`with_gpu`], and the thing that makes
 /// [`Home::Cpu`] mean anything. [`Homes::run`] used to match only
@@ -378,7 +378,7 @@ pub fn set_ambient_gpu(pin: Option<u32>) {
 /// The ambient canonical index (the `--device` pin), before any scoped override.
 pub fn ambient_gpu() -> Option<u32> {
     let pin = || *AMBIENT_PIN.lock().unwrap_or_else(|e| e.into_inner());
-    // `BRAIN_DEVICE` writes the pin when the ambient set resolves. With no pin
+    // The published `--device` set writes the pin when the ambient set resolves. With no pin
     // written yet, resolve it now, so a constructor that never asked for the
     // compute set (`Gpu::try_new_cuda` in a test binary) still lands on the
     // selected card. A pin already written (the CLI's `--device`, an explicit
@@ -1172,7 +1172,7 @@ pub fn npu_count() -> u32 {
 ///
 /// Note the `--device` grammar still accepts `vulkan`/`wgpu` as
 /// backend-setting device tokens. That overlap is deliberate and temporary:
-/// `BRAIN_DEVICE=vulkan` is load-bearing in the parity gate and documented as
+/// `--device vulkan` is documented as
 /// a performance instruction for cards without resizable BAR, so retiring the
 /// tokens is a change of its own, not a side effect of adding this flag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1305,7 +1305,7 @@ impl ComputeSet {
     /// The backend + ambient GPU pin half of [`Self::apply`] - side-effect
     /// light and safe to call from a library/test context (e.g. from
     /// [`ambient_compute_set`] when a plain `cargo test` binary lazily
-    /// resolves `BRAIN_DEVICE` with no CLI in the loop): it never touches
+    /// falls back to the CPU with no CLI in the loop): it never touches
     /// the process-wide rayon pool size or CPU affinity, so a library caller
     /// building a `Gpu` never triggers those as a side effect.
     ///
@@ -1371,7 +1371,7 @@ pub fn software_adapter_selected() -> bool {
     ambient_compute_set().software
 }
 
-/// The process's resolved `--device`/`BRAIN_DEVICE` compute set: published
+/// The process's resolved `--device` compute set: published
 /// explicitly by the CLI ([`publish_compute_set`]), or lazily resolved by
 /// [`ambient_compute_set`] on first use by any other caller. Exactly one
 /// `OnceLock`, so there is exactly one resolution no matter which path gets
@@ -1382,7 +1382,7 @@ static AMBIENT_COMPUTE: std::sync::OnceLock<ComputeSet> = std::sync::OnceLock::n
 /// Publish the CLI's resolved `--device` set as the process-wide ambient
 /// compute set. Called once by `crates/cli`'s `select_backend`, before any
 /// model is built, so [`ambient_compute_set`] returns exactly what the CLI
-/// resolved rather than re-deriving it from `BRAIN_DEVICE` a second time.
+/// resolved rather than falling back to the CPU.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn publish_compute_set(set: ComputeSet) {
     let _ = AMBIENT_COMPUTE.set(set);
@@ -1397,32 +1397,18 @@ pub fn published_compute_set() -> Option<&'static ComputeSet> {
     AMBIENT_COMPUTE.get()
 }
 
-/// The process's ambient compute set - the single source of truth every
-/// non-CLI caller (a test binary, a library caller that never goes through
-/// `crates/cli`) now resolves `--device`/`BRAIN_DEVICE` through, instead of
-/// re-deriving it with a second, weaker parser.
+/// The process's ambient compute set: the one [`publish_compute_set`] or [`select_compute`] recorded (the CLI's
+/// `--device`/`--backend`, a tool's own flags), else the CPU.
 ///
-/// Returns whatever [`publish_compute_set`] already recorded (the CLI path);
-/// otherwise resolves `BRAIN_DEVICE` through the exact same strong grammar
-/// `--device` uses ([`DeviceSpec::parse`] + [`DeviceSpec::resolve`] against
-/// [`Inventory::probe`]), applies only the backend/GPU-pin half
-/// ([`ComputeSet::apply_backend`] - never the CLI-only thread-pool/affinity
-/// side effects of [`ComputeSet::apply`]), and caches the result for the
-/// process lifetime (deliberately: one resolution per process).
-///
-/// # Panics
-/// When `BRAIN_DEVICE` fails to parse or to resolve against this machine's
-/// real hardware (an out-of-range `gpu99`, an NPU request on a box with
-/// none, …), when `BRAIN_BACKEND` names no backend or one the set cannot
-/// run, or when the backend cannot be applied: the process was asked for
-/// hardware it cannot have, and running on some other hardware instead
-/// would be a silent substitution.
+/// A process nothing configured (a test binary, a library caller) runs on the CPU. It reads no environment variable
+/// and probes no card to decide that: a device is asked for explicitly, by flag or by a caller's own placement, never
+/// guessed from what the shell exported. Only the backend half applies ([`ComputeSet::apply_backend`], never the
+/// CLI-only thread-pool and affinity side effects of [`ComputeSet::apply`]), once per process.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn ambient_compute_set() -> &'static ComputeSet {
     AMBIENT_COMPUTE.get_or_init(|| {
-        let set = resolve_ambient_compute_set().unwrap_or_else(|e| panic!("brain: {e}"));
-        // Only the backend/GPU-pin half applies here (see the doc above).
-        set.apply_backend().unwrap_or_else(|e| panic!("brain: the ambient compute set's backend: {e}"));
+        let set = DeviceSpec::parse("cpu").and_then(|spec| spec.resolve(&Inventory::probe_host())).expect("the CPU always resolves");
+        set.apply_backend().unwrap_or_else(|e| panic!("brain: the CPU backend: {e}"));
         set
     })
 }
@@ -1466,37 +1452,10 @@ pub fn open_target(token: &str, probe: &Inventory, ambient: &ComputeSet, current
     Err(format!("device {token:?} names no card and no CPU a handle can open"))
 }
 
-/// Resolve `BRAIN_DEVICE` and `BRAIN_BACKEND` into a fresh, unpublished
-/// [`ComputeSet`] - the body [`ambient_compute_set`] caches, which every
-/// caller goes through: resolving twice would re-read the environment and
-/// produce a second opinion, the failure mode
-/// `check-device-env-single-source.sh` exists to prevent.
-///
-/// `Err` - naming the variable and what it said - when either variable asks
-/// for something this machine cannot give; never a different set instead.
-#[cfg(not(target_arch = "wasm32"))]
-fn resolve_ambient_compute_set() -> Result<ComputeSet, String> {
-    let text = std::env::var("BRAIN_DEVICE").unwrap_or_default();
-    let mut set = DeviceSpec::parse(&text).and_then(|spec| spec.resolve_here()).map_err(|e| format!("BRAIN_DEVICE={text:?}: {e}"))?;
-    // `BRAIN_BACKEND` is `--backend` for processes with no CLI in the loop (a
-    // test binary, an embedding application): how the selected hardware is
-    // driven. The CLI layers its own flag on top of this, so a flag wins.
-    apply_backend_text(&mut set, &std::env::var("BRAIN_BACKEND").unwrap_or_default())?;
-    Ok(set)
-}
-
-/// The compute set of a brain CLI run given no `--device`: every device this machine has, whatever the environment says.
-/// The CLI is configured by its flags alone, so a `BRAIN_DEVICE` or `BRAIN_BACKEND` left in the environment does not
-/// change what it runs on; when one is set it says so once, so a script that relied on it learns the flag to pass.
-/// **CLI-only**: a process with no CLI in the loop resolves [`ambient_compute_set`].
+/// The compute set of a brain CLI run given no `--device`: every device this machine has. The CLI is configured by
+/// its flags alone. **CLI-only**: a process with no CLI in the loop runs on [`ambient_compute_set`], the CPU.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn resolve_cli_default_compute_set() -> ComputeSet {
-    let set = |v: Option<std::ffi::OsString>| v.is_some_and(|v| !v.is_empty());
-    for (var, flag, present) in [("BRAIN_DEVICE", "--device", set(std::env::var_os("BRAIN_DEVICE"))), ("BRAIN_BACKEND", "--backend", set(std::env::var_os("BRAIN_BACKEND")))] {
-        if present {
-            eprintln!("brain: {var} is ignored by the brain CLI (configuration is by flags); pass {flag} instead");
-        }
-    }
     DeviceSpec::default().resolve(&Inventory::probe()).expect("the empty/default device spec always resolves")
 }
 
@@ -1552,7 +1511,7 @@ pub fn device_flags(args: &[String]) -> Result<(Option<String>, Option<String>),
 /// The compute set a program with a command line (a profiling or check binary) runs on: its `--device` and `--backend`
 /// flags in the CLI's grammar, resolved and published by [`select_compute`], or with neither flag the machine's default
 /// as the brain CLI takes it ([`resolve_cli_default_compute_set`]). A tool with a command line is configured by its flags
-/// alone: `BRAIN_DEVICE`/`BRAIN_BACKEND` left in a shell no longer choose its hardware.
+/// alone.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn select_compute_from_args(args: &[String]) -> Result<ComputeSet, String> {
     match device_flags(args)? {
@@ -1623,20 +1582,8 @@ pub fn apply_requested_backend(set: &mut ComputeSet) -> Result<(), String> {
     }
 }
 
-/// Apply a `BRAIN_BACKEND` value to `set`. Empty means no override. Pure, so
-/// the grammar and its failures are testable without touching the process
-/// environment.
-#[cfg(not(target_arch = "wasm32"))]
-fn apply_backend_text(set: &mut ComputeSet, text: &str) -> Result<(), String> {
-    if text.trim().is_empty() {
-        return Ok(());
-    }
-    let backend = Backend::parse(text).map_err(|e| format!("BRAIN_BACKEND={text:?}: {e}"))?;
-    set.set_backend(backend).map_err(|e| format!("BRAIN_BACKEND={text:?}: {e}"))
-}
-
 /// How many GPUs a machine-shape decision may actually use RIGHT NOW - the
-/// `--device`/`BRAIN_DEVICE` restriction applied, not the machine's raw
+/// `--device` restriction applied, not the machine's raw
 /// physical card count ([`gpus`]/`visible_gpu_count`). Every "should this
 /// model shard across N GPUs, or fall back to a single-GPU streaming window"
 /// decision (`s3dit::pipeline::hifi_needs_window` and its siblings) must read
@@ -2007,8 +1954,7 @@ mod tests {
     // A separate axis from `--device`, over the `backend` field `ComputeSet`
     // has always carried. The `--device` grammar is deliberately untouched
     // here: `vulkan`/`wgpu` keep parsing as backend-setting device tokens
-    // (BRAIN_DEVICE=vulkan is load-bearing in the parity gate and documented
-    // as a performance instruction), and retiring them is its own change.
+    // (`--device vulkan` is documented as a performance instruction), and retiring them is its own change.
 
     #[test]
     fn backend_names_round_trip_the_flags_four_values() {
@@ -2024,18 +1970,6 @@ mod tests {
         let e = Backend::parse("rocm").unwrap_err();
         assert!(e.contains("rocm"), "the error must quote what was typed: {e}");
         assert!(e.contains("cuda"), "the error should teach the grammar: {e}");
-    }
-
-    /// `BRAIN_BACKEND` is the environment spelling of `--backend`: it picks how
-    /// the selected hardware is driven and leaves which hardware alone.
-    #[test]
-    fn the_backend_environment_text_overrides_how_work_runs() {
-        let mut set = resolve("gpu0", inv(2, 48, 0)).unwrap();
-        apply_backend_text(&mut set, "cuda").unwrap();
-        assert_eq!(set.backend, Backend::Cuda);
-        assert_eq!(set.gpus, vec![0], "the backend text must not change which card");
-        apply_backend_text(&mut set, "").unwrap();
-        assert_eq!(set.backend, Backend::Cuda, "an empty value is no override at all");
     }
 
     /// A device token a handle has no arm of its own for opens what the token
@@ -2062,17 +1996,6 @@ mod tests {
         assert!(e.contains("vulkan") && e.contains("wgpu"), "another backend than the process runs: {e}");
     }
 
-    /// A typo or an unsatisfiable request is an error that quotes what was
-    /// typed, never a silent run on some other backend.
-    #[test]
-    fn the_backend_environment_text_is_validated() {
-        let mut set = resolve("gpu0", inv(2, 48, 0)).unwrap();
-        let e = apply_backend_text(&mut set, "rocm").unwrap_err();
-        assert!(e.contains("rocm") && e.contains("BRAIN_BACKEND"), "{e}");
-        let mut cpu_only = resolve("cpu", inv(2, 48, 0)).unwrap();
-        let e = apply_backend_text(&mut cpu_only, "cuda").unwrap_err();
-        assert!(e.contains("needs a GPU"), "{e}");
-    }
 
     #[test]
     fn backend_overrides_how_work_runs_without_touching_which_hardware() {

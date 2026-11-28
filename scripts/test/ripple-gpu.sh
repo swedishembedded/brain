@@ -88,8 +88,7 @@ validate() {
 run_cargo() {
     mkdir -p "$OUT"
     local profile="${PROFILE:-fast}" failed=() entry label args filters rc log
-    export BRAIN_DEVICE="$DEVICE"
-    [ -z "$BACKEND" ] || export BRAIN_BACKEND="$BACKEND"
+    [ "$DEVICE" = cpu ] || die "--device $DEVICE: a test binary is no longer steered to a GPU by BRAIN_DEVICE/BRAIN_BACKEND (an unconfigured process runs on the CPU); this leg waits for the test-harness device seam (the brain ledger, engineering cleanup EC-4 step 2)"
     [ "$REQUIRE" != 1 ] || export BRAIN_REQUIRE_FIXTURES=1
     echo "ripple-gpu: cargo suites on --device $DEVICE${BACKEND:+ backend $BACKEND}, logs in $OUT/"
     for entry in "${SUITES[@]}"; do

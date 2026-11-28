@@ -53,6 +53,10 @@ for backend in "${backends[@]}"; do
             fi ;;
         *) echo "unknown backend '$backend' (cpu, vulkan or cuda)"; exit 2 ;;
     esac
+    if [ "$backend" != cpu ]; then
+        echo "=== perf floors: $backend: FAIL, not run: a test binary is no longer steered to a GPU by BRAIN_DEVICE/BRAIN_BACKEND (an unconfigured process runs on the CPU); this leg waits for the test-harness device seam (the brain ledger, engineering cleanup EC-4 step 2) ==="; echo
+        fail=1; continue
+    fi
     echo "=== perf floors: $backend on $device ==="
     log=$(mktemp)
     start=$SECONDS

@@ -21,7 +21,7 @@ pub enum Placement {
     /// A `--device`-shaped token: `gpu`, `gpu<i>`, `wgpu`, `cpu` (resolved by [`Gpu::open`]).
     Device(String),
     /// The compute set this brain process was configured with by its own `--device`/`--backend` flags (a served
-    /// model, a CLI action). Never for a library caller: a process without those flags has no configuration to use.
+    /// model, a CLI action); the CPU in a process nothing configured.
     Process,
 }
 
@@ -30,25 +30,13 @@ impl Placement {
     ///
     /// # Panics
     /// A [`Placement::Device`] token that does not parse or names hardware this machine does not have: running
-    /// somewhere else instead would be a silent substitution. [`Placement::Process`] in a process no flags
-    /// configured.
+    /// somewhere else instead would be a silent substitution.
     #[must_use]
     pub fn open(&self, kernels: &[(&str, &str)]) -> Gpu {
         match self {
             Placement::Cpu => Gpu::new_cpu(kernels),
             Placement::Device(token) => Gpu::open(Some(token), kernels),
-            Placement::Process => {
-                // Only a process its own flags configured has a compute set to build on; anywhere else the
-                // fallback would be a guess from the environment, which is exactly what this type replaces.
-                if gpu_core::devices::published_compute_set().is_none() {
-                    panic!(
-                        "a timeline model was asked to build on the process's configured device, but this process \
-                         was never configured with one (brain's --device/--backend, or devices::select_compute): \
-                         name a Placement instead"
-                    );
-                }
-                Gpu::new(kernels)
-            }
+            Placement::Process => Gpu::new(kernels),
         }
     }
 }

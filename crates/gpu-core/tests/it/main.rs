@@ -49,7 +49,7 @@ mod cuda_placement_tier;
 mod cuda_silu_mul_bf16;
 mod cuda_uninit_storage;
 mod device_churn;
-mod device_grammar;
+mod ambient_device;
 mod device_group;
 mod device_open;
 mod device_sharing;

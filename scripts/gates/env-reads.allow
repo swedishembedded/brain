@@ -315,15 +315,13 @@ crates/gpt2/tests/bench_train_p40.rs	BRAIN_GPT2_NAIVE_MM
 crates/gpt2/tests/cpu_reg_parity.rs	BRAIN_GPT2_NAIVE_MM
 crates/gpt2/tests/it/dp_parity.rs	SHARD_TEST_GPUS
 crates/gpt2/tests/it/shard_parity.rs	SHARD_TEST_GPUS
-crates/gpu-core/src/devices.rs	BRAIN_BACKEND
-crates/gpu-core/src/devices.rs	BRAIN_DEVICE
+crates/gpu-core/tests/it/ambient_device.rs	BRAIN_BACKEND
+crates/gpu-core/tests/it/ambient_device.rs	BRAIN_DEVICE
 crates/gpu-core/tests/it/bench_matmul.rs	BRAIN_BENCH_REPS
 crates/gpu-core/tests/it/bench_moe_grouped.rs	BRAIN_BENCH_TOKENS
 crates/gpu-core/tests/it/cuda_placement_tier.rs	BRAIN_COHERENT_TIER
 crates/gpu-core/tests/it/cuda_placement_tier.rs	BRAIN_LIMIT_RAM_TOTAL
 crates/gpu-core/tests/it/cuda_placement_tier.rs	BRAIN_LIMIT_VRAM_TOTAL
-crates/gpu-core/tests/it/device_grammar.rs	BRAIN_BACKEND
-crates/gpu-core/tests/it/device_grammar.rs	BRAIN_DEVICE
 crates/gpu-core/tests/it/i8_gemv_native_bench.rs	BRAIN_BENCH_M
 crates/gpu-core/tests/it/memory_limit.rs	BRAIN_LIMIT_RAM_TOTAL
 crates/gpu-core/tests/it/memory_limit.rs	BRAIN_LIMIT_VRAM_TOTAL

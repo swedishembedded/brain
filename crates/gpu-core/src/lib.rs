@@ -18,7 +18,7 @@
 //! ## Backend selection
 //!
 //! Native builds carry all three backends; a given `Gpu` uses exactly one, chosen
-//! by [`set_default_backend`] (the CLI's `--device` flag) or `BRAIN_DEVICE`. On
+//! by [`set_default_backend`] (the CLI's `--device` flag); a process nothing configured runs on the CPU. On
 //! wasm only the wgpu/WebGPU backend exists, so `Gpu` wraps it directly (no
 //! `dyn`, and async device init / read-back via `new_async` / `read_async`).
 
@@ -495,7 +495,7 @@ pub mod card_tests;
 pub mod testgpu {
     use super::{Gpu, WeakGpu};
 
-    /// The cards a test may open: the GPUs the process's selection names (`--device` / `BRAIN_DEVICE`, through the
+    /// The cards a test may open: the GPUs the process's selection names (`--device`, through the
     /// one ambient compute set), and none at all when the selected backend is the CPU. On a shared node the other cards
     /// belong to someone else; a test that enumerates "every GPU" opens these instead.
     #[cfg(not(target_arch = "wasm32"))]
@@ -510,14 +510,14 @@ pub mod testgpu {
     /// lacks, or `None` when it has a card it may open ([`cards`]): the reason a test hands
     /// `brain_testutil::gpu_unavailable` so it skips by name instead of panicking inside the adapter request. The
     /// selection decides, as for every device test: with the CPU backend selected (`--device cpu`,
-    /// `BRAIN_BACKEND=cpu`) or no card visible (no Vulkan ICD or wgpu adapter, no CUDA device), there is none.
+    /// `--backend cpu`) or no card visible (no Vulkan ICD or wgpu adapter, no CUDA device), there is none.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn missing_gpu() -> Option<String> {
         if !cards().is_empty() {
             return None;
         }
         Some(format!(
-            "a GPU adapter: this process may open none (backend '{}': the CPU selected with --device / BRAIN_BACKEND, or no Vulkan ICD, wgpu adapter or CUDA device visible)",
+            "a GPU adapter: this process may open none (backend '{}': the CPU selected with --device / --backend, or no Vulkan ICD, wgpu adapter or CUDA device visible)",
             crate::backend_name()
         ))
     }
@@ -535,7 +535,7 @@ pub mod testgpu {
     pub fn admit_cards(requested: Option<&[usize]>, n: usize, selected: &[u32]) -> Result<Vec<usize>, String> {
         if let Some(requested) = requested {
             if let Some(card) = requested.iter().find(|&&i| !selected.iter().any(|&s| s as usize == i)) {
-                return Err(format!("gpu{card} is not among the selected cards {selected:?} (BRAIN_DEVICE / --device)"));
+                return Err(format!("gpu{card} is not among the selected cards {selected:?} (--device)"));
             }
             return Ok(requested.to_vec());
         }
@@ -551,7 +551,7 @@ pub mod testgpu {
     pub fn card(index: u32) -> &'static crate::devices::DeviceId {
         cards().into_iter().find(|d| d.index == index).unwrap_or_else(|| {
             let selected: Vec<u32> = cards().iter().map(|d| d.index).collect();
-            panic!("gpu{index} is not among the cards this test may open {selected:?} (BRAIN_DEVICE / --device)")
+            panic!("gpu{index} is not among the cards this test may open {selected:?} (--device)")
         })
     }
     use std::collections::HashMap;
@@ -894,7 +894,7 @@ mod native_facade {
     /// this from its `--device` flag; it is a process entry point's choice, and
     /// code that shares its process with other work scopes its own choice with
     /// [`with_backend`] instead. When unset, the ambient compute set selects it
-    /// (`BRAIN_DEVICE`, else the detected hardware's default backend).
+    /// (the published compute set, else the CPU).
     pub fn set_default_backend(b: Backend) {
         DEFAULT_BACKEND.store(backend_code(b), Ordering::Relaxed);
     }
@@ -1024,7 +1024,7 @@ mod native_facade {
     /// [`build_target`] over its inputs: the backend `name` a build resolves to, whether this thread's
     /// [`with_backend`] scope asked for the CPU, the process's compute `set`, and whether the placer moved the work
     /// to the host tier. The CPU was asked for when a scope said so, when the set names it explicitly (`--device
-    /// cpu`, `BRAIN_DEVICE=cpu`), or when a CPU backend drives a set that has cards (`--backend cpu`); otherwise a
+    /// cpu`), or when a CPU backend drives a set that has cards (`--backend cpu`); otherwise a
     /// CPU build is a fallback, and the reason says which.
     pub(crate) fn classify_build(name: &'static str, scoped_cpu: bool, set: &crate::devices::ComputeSet, host_tier: bool) -> BuildTarget {
         if name != "cpu" {
@@ -1120,12 +1120,8 @@ mod native_facade {
     ///
     /// When no backend was explicitly selected via [`set_default_backend`]
     /// (the CLI's `--device` path), this goes through
-    /// [`crate::devices::ambient_compute_set`] - the single, strong-grammar
-    /// resolution of `BRAIN_DEVICE` shared with `--device`'s own parser -
-    /// rather than re-deriving a second, weaker interpretation here. See
-    /// `ambient_compute_set`'s doc for why: a bare env re-parse used to
-    /// understand only `"cpu"`/`"vulkan"` and silently mangled everything
-    /// else (`gpu0`, `npu`, `cpu0-7`, …) to "just use wgpu, ambient card".
+    /// [`crate::devices::ambient_compute_set`]: the published `--device` set, else
+    /// the CPU.
     fn resolve_backend_name() -> &'static str {
         // A thread's own explicit choice outranks everything the process decided for it.
         if let Some(b) = scoped_backend() {
@@ -1502,7 +1498,7 @@ mod native_facade {
             };
             out
         }
-        /// Build the default backend (see [`set_default_backend`] / `BRAIN_DEVICE`).
+        /// Build the default backend (see [`set_default_backend`] and [`crate::devices::ambient_compute_set`]).
         /// Vulkan falls back to wgpu when no Vulkan device/ICD is present, so the
         /// build stays usable everywhere.
         ///
@@ -1621,7 +1617,7 @@ mod native_facade {
 
         /// Build on the specific physical card `dev` - explicit placement, no
         /// ambient/env input consulted. Respects the selected backend *class*:
-        /// under `--device cpu` / `BRAIN_DEVICE=cpu` this still builds the CPU
+        /// under `--device cpu` this still builds the CPU
         /// backend (there is one CPU; the card is moot), so device-plumbing
         /// call sites work unchanged on CPU-only runs.
         pub fn new_on(dev: &crate::devices::DeviceId, kernels: &[(&str, &str)]) -> Gpu {
@@ -1667,7 +1663,7 @@ mod native_facade {
         /// `Shard`, or a config handed me" to a `Gpu`.
         ///
         /// `None` means *do not override*: it is exactly [`Gpu::new`], so the
-        /// ambient `--device`/`BRAIN_DEVICE` selection still decides. A
+        /// ambient `--device` selection still decides. A
         /// `Some(_)` token overrides that selection for this handle only.
         ///
         /// | token | handle |
@@ -1757,7 +1753,7 @@ mod native_facade {
 
         /// A fresh handle for `kernels` on this handle's backend, for a backend whose device cannot be shared (the CPU
         /// JIT compiles per kernel set). Never the ambient backend: a CPU handle's sibling built by [`Gpu::new`] landed
-        /// on CUDA under `BRAIN_BACKEND=cuda`, so a model built "on the CPU" from it ran on a card.
+        /// on CUDA under a CUDA ambient set, so a model built "on the CPU" from it ran on a card.
         fn fresh_like(&self, kernels: &[(&str, &str)]) -> Gpu {
             match self.kind() {
                 "cpu" => Gpu::new_cpu(kernels),
@@ -2028,6 +2024,15 @@ mod native_facade {
         /// Which memory pool this handle's allocations are charged to.
         pub fn memory_device(&self) -> memauth::Device {
             self.mem_device
+        }
+
+        /// The card this handle's allocations live on; `None` for a handle whose memory is the host's (the CPU
+        /// backend) or an NPU's.
+        pub fn card(&self) -> Option<u32> {
+            match self.mem_device {
+                memauth::Device::Gpu(i) => Some(i),
+                _ => None,
+            }
         }
 
         /// Bytes this handle currently holds against the process-wide ceiling.

@@ -411,7 +411,7 @@ test/slow:
 #
 # `test/parity` (bare, not `/strict`) is in this list for a different reason:
 # it is the ONLY target here that runs the gradcheck suite under
-# BRAIN_DEVICE=cpu. `test`/`test/gradcheck` run on the default (Vulkan) backend
+# BRAIN_DEVICE=cpu. `test`/`test/gradcheck` run on the CPU (an unconfigured process's device)
 # only, so a model whose CPU path silently diverges from its GPU path - a
 # kernel pairing that assumes a shared Params contract neither kernel actually
 # shares, two kernel table entries the CPU JIT's single function namespace
@@ -918,10 +918,9 @@ check/clippy: check/workspace
 # test/bench/example name or make target that a doc cites after "measured by/
 # with/via/using" (or "measured in/on") to exist in the tree - see
 # scripts/gates/measured-citations.py for the exact definition.
-# check-device-env-single-source.sh additionally requires BRAIN_DEVICE be read
-# via std::env::var in exactly one file (crates/gpu-core/src/devices.rs's
-# ambient_compute_set) rather than a second, independently-drifting parser -
-# see A4 in .agents/roadmap/dtype.md for the bug this keeps fixed.
+# check-device-env-unread.sh additionally requires that BRAIN_DEVICE and
+# BRAIN_BACKEND are read nowhere under crates/*/src: a device is asked for by
+# flag or placement, and a process nothing configured runs on the CPU.
 # check-arch-names.sh additionally requires every crates/arch architecture
 # row to name a real, correspondingly-named crate (bar an explicit, dated
 # exception list), the CLI's top-level dispatch to never hard-code an
@@ -954,7 +953,7 @@ check/scripts:
 	bash scripts/gates/check-no-doc-citations.sh
 	bash scripts/gates/check-no-perf-numbers.sh
 	bash scripts/gates/check-measured-citations.sh
-	bash scripts/gates/check-device-env-single-source.sh
+	bash scripts/gates/check-device-env-unread.sh
 	bash scripts/gates/check-arch-names.sh
 	bash scripts/gates/check-linear-history.sh
 	bash scripts/gates/check-golden-source.sh
@@ -1139,7 +1138,7 @@ ci/static: ci/static/scripts check/env-reads check/env-writes check/test-skips c
 # locally. `check-crate-layers.sh` runs here, where the registry is reachable.
 ## ci/static/scripts - the clean members of check/scripts (script syntax, env docs, citations, doc links, architecture, layering, kernel and format gates)
 ci/static/scripts:
-	@for gate in check-scripts check-env-docs check-no-doc-citations check-measured-citations check-device-env-single-source check-arch-names check-linear-history check-golden-source check-doc-links check-kernel-selection check-crate-layers check-placement-accounting check-training-capabilities check-model-flags check-adapter-naming check-format-logic check-tier-gemm check-whole-tensor-loads check-cancellable-actions check-no-perf-numbers check-multi-gpu-sharding; do \
+	@for gate in check-scripts check-env-docs check-no-doc-citations check-measured-citations check-device-env-unread check-arch-names check-linear-history check-golden-source check-doc-links check-kernel-selection check-crate-layers check-placement-accounting check-training-capabilities check-model-flags check-adapter-naming check-format-logic check-tier-gemm check-whole-tensor-loads check-cancellable-actions check-no-perf-numbers check-multi-gpu-sharding; do \
 	    bash scripts/gates/$$gate.sh || exit 1; \
 	done
 

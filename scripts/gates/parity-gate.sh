@@ -34,6 +34,12 @@ run() {
     if "$@"; then echo "  PASS: $desc"; else echo "  FAIL: $desc"; fail=1; fi
     echo
 }
+# A GPU leg cannot run until the device seam exists; it fails, never passes on the CPU in its place.
+gpu_leg() {
+    echo "=== $1 ==="
+    echo "  FAIL: not run: a test binary is no longer steered to a GPU by BRAIN_DEVICE/BRAIN_BACKEND (an unconfigured process runs on the CPU); this leg waits for the test-harness device seam (the brain ledger, engineering cleanup EC-4 step 2)" >&2
+    echo "  FAIL: $1"; fail=1; echo
+}
 
 run "gradcheck suite — CPU backend"    env BRAIN_DEVICE=cpu    cargo test --release -q -p brain-gradcheck
 # Vulkan line, one deliberate difference from the CPU line (knowledge #300):
@@ -43,15 +49,13 @@ run "gradcheck suite — CPU backend"    env BRAIN_DEVICE=cpu    cargo test --re
 # The shared-device race itself is tracked in .agents/roadmap/. The bf16
 # training gate runs here too since the Vulkan backend reports its bf16 storage
 # tier (knowledge #558).
-run "gradcheck suite — Vulkan backend (incl. CPU==GPU forward parity)" \
-                                       env BRAIN_DEVICE=vulkan cargo test --release -q -p brain-gradcheck --no-fail-fast -- --test-threads=1
+gpu_leg "gradcheck suite - Vulkan backend (incl. CPU==GPU forward parity)"
 
 # CUDA line: the whole suite, no skips (three tests that failed here were fixed or shown to be properties of the check;
 # see .agents/roadmap/cuda.md and knowledge 408).
 CUDA_DEVICE=$(cuda_device)
 if [ -n "$CUDA_DEVICE" ]; then
-    run "gradcheck suite - CUDA backend on $CUDA_DEVICE (incl. CPU==CUDA forward parity)" \
-        env BRAIN_DEVICE="$CUDA_DEVICE" BRAIN_BACKEND=cuda cargo test --release -q -p brain-gradcheck --no-fail-fast -- --test-threads=1
+    gpu_leg "gradcheck suite - CUDA backend on $CUDA_DEVICE (incl. CPU==CUDA forward parity)"
 else
     echo "=== gradcheck suite - CUDA backend: SKIP (no NVIDIA device on this machine) ==="; echo
 fi
@@ -64,12 +68,10 @@ fi
 # cannot see.
 run "model FD suites (MoE/ViT backward) — CPU backend" \
     env BRAIN_DEVICE=cpu    cargo test --release -q -p brain-model --test moe_block_gradcheck --test vit_block_gradcheck --test moe_sparse_bwd_parity
-run "model FD suites (MoE/ViT backward) — Vulkan backend" \
-    env BRAIN_DEVICE=vulkan cargo test --release -q -p brain-model --test moe_block_gradcheck --test vit_block_gradcheck --test moe_sparse_bwd_parity
+gpu_leg "model FD suites (MoE/ViT backward) - Vulkan backend"
 
 if [ -n "$CUDA_DEVICE" ]; then
-    run "model FD suites (MoE/ViT backward) - CUDA backend" \
-        env BRAIN_DEVICE="$CUDA_DEVICE" BRAIN_BACKEND=cuda cargo test --release -q -p brain-model --test moe_block_gradcheck --test vit_block_gradcheck --test moe_sparse_bwd_parity
+    gpu_leg "model FD suites (MoE/ViT backward) - CUDA backend"
 fi
 
 # REMAINING (audit F15, models batch): crates/moondream3, crates/nemotronasr and

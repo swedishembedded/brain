@@ -99,6 +99,7 @@ def run_crate(package: str, timeout: int, extra_env: dict) -> dict:
 
 
 def main() -> None:
+    sys.exit("cuda-matrix: a test binary is no longer steered to a GPU by BRAIN_DEVICE/BRAIN_BACKEND (an unconfigured process runs on the CPU); this leg waits for the test-harness device seam (the brain ledger, engineering cleanup EC-4 step 2)")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("crates", nargs="*", help="package names; default every workspace package")
     ap.add_argument("-o", "--output", default="cuda-matrix.json")

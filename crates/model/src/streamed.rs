@@ -151,8 +151,8 @@ impl StreamedStore {
             })
             .collect::<Result<_, String>>()?;
         specs.sort_by(|a, b| (a.layer(), &a.name).cmp(&(b.layer(), &b.name)));
+        let budget = ResidentBudget { capacity: Capacity::measured_for(gpu), others: &[], authorized: Authorized::none() };
         let dev = StoreDevice::new(gpu)?;
-        let budget = ResidentBudget { capacity: Capacity::measured(), others: &[], authorized: Authorized::none() };
         ResidentFullFt::new(&dev, cfg, specs, src, &budget)
     }
 

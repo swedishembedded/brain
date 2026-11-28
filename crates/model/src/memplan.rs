@@ -284,6 +284,18 @@ impl Capacity {
     pub fn measured() -> Capacity {
         Capacity { device_bytes: gpu_core::capacity::available_here().unwrap_or(u64::MAX), host_bytes: host_available_bytes().unwrap_or(u64::MAX) }
     }
+
+    /// What `gpu`'s own memory and the host can give right now: the free bytes of the card the handle lives on, or
+    /// for a handle whose memory is the host's, the host's. Never the process's selected card: a model built on the
+    /// CPU plans against the host and probes no card.
+    pub fn measured_for(gpu: &gpu_core::Gpu) -> Capacity {
+        let host = host_available_bytes();
+        let device = match gpu.card() {
+            Some(card) => gpu_core::capacity::available_for(card),
+            None => host,
+        };
+        Capacity { device_bytes: device.unwrap_or(u64::MAX), host_bytes: host.unwrap_or(u64::MAX) }
+    }
 }
 
 /// `MemAvailable` from `/proc/meminfo` in bytes; `None` off Linux or when it cannot be read.
