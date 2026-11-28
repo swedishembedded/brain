@@ -51,6 +51,7 @@ pub mod quota;
 pub mod request;
 pub mod resident;
 pub mod runs;
+pub mod serve_adapter;
 pub mod speech;
 pub mod surgery;
 pub mod store;

@@ -666,6 +666,15 @@ later job can start from it). `POST /v1/jobs/{id}/hold` with `{"version": N, "he
 past the retention while the client refers to it (an evaluation anchor), `"held": false` lets it go; holding a version
 no longer served is `409`.
 
+**A stored version on another server.** Any server that serves the same base with `--training` and reaches the
+artifact store serves a stored version too, so evaluations need not share the learner's server: `serve_adapter`
+(`POST /v1/run` or a job, model `brain/train`) with `{"adapter_digest": "<artifact_digest>", "id":
+"<vendor>/<repo>:<owner>:<name>:<tag>", "version": N}` fetches the file, verifies it against the served bases and
+serves it under `id` as policy version N (the file does not carry it), answering `{"id", "adapter_digest", "version"}`;
+it stays served beside any others until `withdraw_adapter` with `{"id": ...}` takes it off (requests already accepted
+finish). An `id` already served, an artifact the store does not hold, or an adapter whose base this server does not
+serve is refused; the adapter bank's capacity bounds how many are served at once.
+
 **Events.** Beside the `step` frames, whose `pg` object also carries `staleness_mean`, `staleness_max`,
 `policy_tokens`, `learner_wait_seconds` (the time the learner waited for the step's records), `queue_groups`,
 `queue_tokens`, `time_in_queue_seconds` (the step's groups' mean) and `dropped_stale`, the job reports:

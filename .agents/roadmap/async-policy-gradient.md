@@ -426,9 +426,18 @@ that drives this API; brain's packages are A03-A10, A16-A21, A25-A26, A28-A29, A
       (`data::replay`), template for the rest; `brain.history` reports where a prompt is not append-only. Standard
       behaviour, no option; Qwen3.8's `preserve_thinking` removed. Oracles: `qwen3` `it::replay_sessions` (real
       tokenizers, five checkpoints), `catalog` `it::replayed_sessions` (HTTP). Open: the agent runtime must echo
-      `sampled` unchanged, and a trainer read `sampled.token_ids` as the answer's ids; the prefix
-      cache indexes prompt blocks only, so the answer is prefilled again; a no-reasoning SFT on external data keeps
-      the official template.
+      `sampled` unchanged, and a trainer read `sampled.token_ids` as the answer's ids; a no-reasoning SFT on
+      external data keeps the official template.
+- [x] **Cache through the answer** (lane serve-followups, 2026-11-28; knowledge 621). A finished sequence keeps its
+      rows in the prefix cache through the answer it was fed (`PagedDecoder::release_finished`): the paged-KV engine
+      indexes the full blocks, the ring engine files its state beside the prompt's entry. The second call of a
+      replayed session: 72 of 111 prompt ids from cache on the tiny Qwen3 engine (64 before). The Anthropic route
+      carries and replays `sampled` as the OpenAI route does. Open: the Qwen3.5 GGUF, ricursive and looped
+      `VisitPool` engines keep nothing past the prompt yet.
+- [x] **Stored versions on another server** (lane serve-followups, 2026-11-28; knowledge 622). `serve_adapter`
+      serves an artifact-store adapter under an id the caller names, as the policy version it names, on any server of
+      the same base with `--training`; `withdraw_adapter` takes it off. Evaluations of a stream's versions can run on
+      servers of their own. Spec: `trainjob` `it::stream::a_stored_version_is_served_on_another_server_under_a_name_the_caller_chooses`.
 - [ ] **Group-prefix packing** (A42-A43): the rollouts of a group share their prompt, which every rollout's row
       forwards again. Packing a group into one row needs what no forward has yet: per-token position ids that restart
       at each branch and an attention mask that is a tree (each continuation sees the prefix and itself), in every

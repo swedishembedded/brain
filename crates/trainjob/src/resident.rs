@@ -115,6 +115,8 @@ impl TrainResident {
             timeline::ACTION => self.admit_timeline(inv),
             speech::ACTION => self.admit_speech(inv),
             surgery::ACTION => self.admit_surgery(inv),
+            crate::serve_adapter::ACTION => self.admit_serve(inv),
+            crate::serve_adapter::WITHDRAW_ACTION => Ok(Reservation::Host(0)),
             other => Err(format!("{} has no action '{other}'", request::MODEL)),
         }
     }
@@ -273,6 +275,15 @@ impl TrainResident {
         Ok(Reservation::Card(bytes, 1))
     }
 
+    fn admit_serve(&self, inv: &Invocation) -> Result<Reservation, String> {
+        let (_, digest) = crate::serve_adapter::Params::from_invocation(inv)?;
+        if self.env.store.is_none() {
+            return Err(format!("{}: this server has no artifact store (--artifact-store)", crate::serve_adapter::ACTION));
+        }
+        self.check_digests(&[digest])?;
+        Ok(Reservation::Host(0))
+    }
+
     fn admit_check(&self, inv: &Invocation) -> Result<Reservation, String> {
         let request = dryrun::Request::from_invocation(inv)?;
         match (&self.env.store, &request.dataset) {
@@ -341,10 +352,11 @@ fn card_key(config: &str) -> Option<(u64, usize)> {
 
 impl ResidentModel for TrainResident {
     fn manifest(&self) -> Manifest {
-        Manifest::new(request::MODEL, "fine-tune a chat model on the devices serving shares: a LoRA adapter (supervised, policy gradient or preference), every weight (`full_train`), or fold an adapter into its base (`merge`); create a model from nothing (`init_model`) and pretrain it on raw text (`pretrain`); datasets and results by blob or artifact digest, scheduled with the serving residents (see the trainjob crate)", vec![request::action_spec(), consolidate::full_spec(), consolidate::merge_spec(), create::spec(), pretrain::spec(), dryrun::spec(), timeline::spec(), speech::spec(), surgery::spec()])
+        Manifest::new(request::MODEL, "fine-tune a chat model on the devices serving shares: a LoRA adapter (supervised, policy gradient or preference), every weight (`full_train`), or fold an adapter into its base (`merge`); create a model from nothing (`init_model`) and pretrain it on raw text (`pretrain`); datasets and results by blob or artifact digest, scheduled with the serving residents (see the trainjob crate)", vec![request::action_spec(), consolidate::full_spec(), consolidate::merge_spec(), create::spec(), pretrain::spec(), dryrun::spec(), timeline::spec(), speech::spec(), surgery::spec(), crate::serve_adapter::spec(), crate::serve_adapter::withdraw_spec()])
     }
 
     fn instance_key(&self, action: &str, inv: &Invocation) -> InstanceKey {
+
         // `check_job` has already refused a job this cannot size; a model that vanished since reads as no room needed
         // and the run fails by name when it starts.
         let key = match self.admit(action, inv) {
@@ -419,6 +431,8 @@ impl Instance for TrainInstance {
             timeline::ACTION => &mut |progress| timeline::run(env, inv, progress),
             speech::ACTION => &mut |progress| speech::run(env, inv, &self.devices, progress),
             surgery::ACTION => &mut |progress| surgery::run(env, inv, progress),
+            crate::serve_adapter::ACTION => &mut |progress| crate::serve_adapter::run(env, inv, progress),
+            crate::serve_adapter::WITHDRAW_ACTION => &mut |_| crate::serve_adapter::withdraw(env, inv),
             other => return Err(format!("{} has no action '{other}'", request::MODEL)),
         };
         // A `full_train` that only checks its settings trains nothing: host work, never refused for a CPU placement.

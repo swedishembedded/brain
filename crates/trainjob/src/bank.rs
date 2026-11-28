@@ -49,6 +49,19 @@ pub trait PolicyBank: Send + Sync {
         let _ = (version, held);
         Err(format!("adapter {id}: this bank keeps no versions"))
     }
+
+    /// Serve the adapter in `file`, whatever its card names, under `name`, a model of its own with the release's
+    /// version and lineage, until [`Self::withdraw`]: a version another server published, served here by the artifact
+    /// it was stored as, as policy version `version` when given. Returns the identity it is served under.
+    fn serve_as(&self, name: &str, file: &Path, version: Option<u64>) -> Result<AdapterIdentity, String> {
+        let _ = (file, version);
+        Err(format!("adapter {name}: this bank serves no stored adapters"))
+    }
+
+    /// Withdraw what [`Self::serve_as`] serves under `name`; requests already accepted for it finish.
+    fn withdraw(&self, name: &str) {
+        let _ = name;
+    }
 }
 
 /// The id version `version` of the adapter published under `id` is served under when its versions are retained:
@@ -189,6 +202,26 @@ impl PolicyBank for ServingBank {
 
     fn identity(&self, id: &str) -> Option<AdapterIdentity> {
         self.hosts.iter().find_map(|(_, live)| live.identity(id))
+    }
+
+    fn serve_as(&self, name: &str, file: &Path, version: Option<u64>) -> Result<AdapterIdentity, String> {
+        if self.identity(name).is_some() {
+            return Err(format!("serving an adapter as {name}: {name} is served already"));
+        }
+        let bases: Vec<ServedBase> = self.hosts.iter().map(|(base, _)| base.clone()).collect();
+        let (host, mut loaded) = verify_adapter_among(file, &bases).map_err(|e| format!("serving an adapter as {name}: {e}"))?;
+        if let Some(version) = version {
+            loaded.version = version;
+        }
+        let live = &self.hosts[host].1;
+        live.serve_version(loaded, name).map_err(|e| format!("serving an adapter as {name}: {e}"))?;
+        live.identity(name).ok_or_else(|| format!("serving an adapter as {name}: the bank does not list it after offering it"))
+    }
+
+    fn withdraw(&self, name: &str) {
+        for (_, live) in &self.hosts {
+            live.retire(name);
+        }
     }
 }
 

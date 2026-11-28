@@ -463,3 +463,55 @@ fn a_retention_beyond_the_bound_is_refused() {
     assert_eq!(trainjob::stream::StreamRefs::parse(&doc(3)).unwrap().retain_versions, 3);
     assert!(trainjob::stream::StreamRefs::parse(&doc(trainjob::stream::MAX_RETAINED_VERSIONS + 1)).unwrap_err().contains("retain_versions"));
 }
+
+/// SPEC: a version one server's training run published and kept in its artifact store is served on another server of
+/// the same base, from the same artifact, under an id the caller names (`serve_adapter`), with the version it was
+/// published as, side by side with another such version, until it is withdrawn (`withdraw_adapter`).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stored_version_is_served_on_another_server_under_a_name_the_caller_chooses() {
+    let trainer = rig_stream("serve-stored-trainer");
+    let app = router(AppState::new(trainer.exec.clone(), KEY, Provider::OpenAI).with_training(true));
+    let sizes = sizes(&trainer);
+    let tokens = (sizes[0] + sizes[1]) as u64;
+    let stream = json!({"publish_adapter": ADAPTER, "publish_every": 1, "max_staleness": 4, "step_tokens": tokens, "queue_tokens": tokens, "retain_versions": 2});
+    let id = create(&app, stream_job(stream, json!({}))).await;
+    assert_eq!(served_version(&app, 1).await, 1);
+    assert_eq!(post(&app, &id, "", group(sizes, "g1", 1)).await.0, StatusCode::OK);
+    assert_eq!(served_version(&app, 2).await, 2);
+    let (status, _) = call(&app, Method::POST, &format!("/v1/jobs/{id}/finish"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (frames, _) = frames_until(&app, &id, 0, |_| false).await;
+    let artifacts: Vec<(u64, String)> = of_type(&frames, "published").iter().map(|f| (f["version"].as_u64().unwrap(), f["artifact_digest"].as_str().unwrap().to_string())).collect();
+    assert_eq!(artifacts.len(), 2, "{frames:?}");
+
+    // The evaluation server: the same base, its own store holding the trainer's artifacts (a shared store, or a copy).
+    let evaluator = rig_stream("serve-stored-evaluator");
+    for (_, artifact) in &artifacts {
+        let file = trainer.work_root.join(format!("{artifact}.safetensors"));
+        trainer.store.fetch(&trainjob::store::Digest::parse(artifact).unwrap(), &file, 1 << 30).unwrap();
+        assert_eq!(evaluator.store.publish(&file).unwrap().0.hex(), *artifact, "an artifact is named by its content");
+    }
+    let eval = router(AppState::new(evaluator.exec.clone(), KEY, Provider::OpenAI).with_training(true));
+    let serve = |artifact: &str, name: &str, version: u64| json!({"model": trainjob::MODEL, "action": trainjob::serve_adapter::ACTION, "params": {"adapter_digest": artifact, "id": name, "version": version}});
+    let (anchor, candidate) = ("org/eval:owner:policy:anchor", "org/eval:owner:policy:candidate");
+    let run = |body: Value| {
+        let eval = eval.clone();
+        async move { call(&eval, Method::POST, "/v1/run", Some(("application/json", body.to_string().into_bytes()))).await }
+    };
+    for (artifact, name) in [(&artifacts[0], anchor), (&artifacts[1], candidate)] {
+        let (status, served) = run(serve(&artifact.1, name, artifact.0)).await;
+        assert_eq!((status, served["outputs"]["version"].clone()), (StatusCode::OK, json!(artifact.0)), "{served}");
+    }
+    assert_eq!(version_of(&eval, anchor).await, Ok(artifacts[0].0), "the anchor is served with its published version");
+    assert_eq!(version_of(&eval, candidate).await, Ok(artifacts[1].0), "side by side with the candidate");
+    let (status, refused) = run(serve("0".repeat(64).as_str(), "org/eval:owner:policy:none", 1)).await;
+    assert!(status.is_client_error(), "an artifact the store does not hold is refused: {refused}");
+    let (status, taken) = run(serve(&artifacts[0].1, anchor, artifacts[0].0)).await;
+    assert!(!status.is_success(), "an id that is served already is refused: {taken}");
+
+    let withdraw = |name: &str| json!({"model": trainjob::MODEL, "action": trainjob::serve_adapter::WITHDRAW_ACTION, "params": {"id": name}});
+    let (status, _) = run(withdraw(anchor)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(version_of(&eval, anchor).await.is_err(), "a withdrawn adapter is no longer served");
+    assert_eq!(version_of(&eval, candidate).await, Ok(artifacts[1].0), "the other stays");
+}
