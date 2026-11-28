@@ -16,6 +16,7 @@ use horizon::encode::{encode, Encoded};
 use horizon::synthetic::drifting::{self, Gaps};
 use horizon::synthetic::{population_with_followup, CODES};
 use horizon::vocab::{FitOptions, Vocab};
+use horizon::placement::Placement;
 use horizon::{Horizon, HorizonConfig};
 
 use crate::{directional_check, elementwise_check, Report};
@@ -34,16 +35,16 @@ pub const SHARED: [&str; 7] = [
 /// A tiny model with a batch that exercises every loss term; `additive`
 /// selects the additive baseline in place of the set encoder, and the set
 /// encoder carries a forecast head scored on the follow-up measurements.
-pub fn fixture(seed: u64, additive: bool) -> Horizon {
-    build(seed, additive, false)
+pub fn fixture(seed: u64, additive: bool, placement: &Placement) -> Horizon {
+    build(seed, additive, false, placement)
 }
 
 /// [`fixture`] with a next-event group over the three codes, weighted 0.6.
-pub fn fixture_next_events(seed: u64) -> Horizon {
-    build(seed, false, true)
+pub fn fixture_next_events(seed: u64, placement: &Placement) -> Horizon {
+    build(seed, false, true, placement)
 }
 
-fn build(seed: u64, additive: bool, next_events: bool) -> Horizon {
+fn build(seed: u64, additive: bool, next_events: bool, placement: &Placement) -> Horizon {
     let (subjects, _) = population_with_followup(200, seed);
     let has = |code: &str| {
         subjects
@@ -88,14 +89,14 @@ fn build(seed: u64, additive: bool, next_events: bool) -> Horizon {
     assert!(additive || hb.value_state.contains(&1), "fixture hides an exact value");
     assert!(additive || hb.forecast_state.iter().any(|&s| s != 0), "fixture scores a forecast");
     let init = horizon::init_weights(&cfg, seed);
-    let model = Horizon::new(cfg, 4, &init, &horizon::placement::Placement::Process);
+    let model = Horizon::new(cfg, 4, &init, placement);
     model.set_batch(&hb);
     model
 }
 
 /// Directional checks over every tensor plus element-wise checks over [`SHARED`].
-pub fn check_horizon(seed: u64) -> Report {
-    let model = fixture(seed, false);
+pub fn check_horizon(seed: u64, placement: &Placement) -> Report {
+    let model = fixture(seed, false, placement);
     let mut report = directional_check(&model, 5e-3, 4, seed ^ 0x1234);
     for name in SHARED {
         report
@@ -107,8 +108,8 @@ pub fn check_horizon(seed: u64) -> Report {
 
 /// The set encoder with the next-event group in the hazard head: the weighted
 /// group likelihood must differentiate like the outcome codes'.
-pub fn check_horizon_next_events(seed: u64) -> Report {
-    let model = fixture_next_events(seed);
+pub fn check_horizon_next_events(seed: u64, placement: &Placement) -> Report {
+    let model = fixture_next_events(seed, placement);
     let mut report = directional_check(&model, 5e-3, 4, seed ^ 0x2468);
     for name in SHARED {
         report
@@ -120,8 +121,8 @@ pub fn check_horizon_next_events(seed: u64) -> Report {
 
 /// The additive baseline: every tensor directionally, and element-wise the
 /// tables its pooling sum and its per-subject fold share across rows.
-pub fn check_horizon_additive(seed: u64) -> Report {
-    let model = fixture(seed, true);
+pub fn check_horizon_additive(seed: u64, placement: &Placement) -> Report {
+    let model = fixture(seed, true, placement);
     let mut report = directional_check(&model, 5e-3, 4, seed ^ 0x4321);
     for name in [
         "tok.gamma",
@@ -141,17 +142,22 @@ pub fn check_horizon_additive(seed: u64) -> Report {
 /// A tiny model with a state across three visit slots, on subjects measured
 /// at irregular visits: one with more visits than slots, one with a single
 /// visit, one who dies, and an empty batch slot.
-pub fn fixture_visits(seed: u64, backbone: horizon::Backbone) -> Horizon {
-    visits_model(seed, 3, |cfg| cfg.backbone = backbone)
+pub fn fixture_visits(seed: u64, backbone: horizon::Backbone, placement: &Placement) -> Horizon {
+    visits_model(seed, 3, |cfg| cfg.backbone = backbone, placement)
 }
 
 /// [`fixture_visits`] with a stack of `blocks` blocks mixing as `mixer`, over
 /// `visits` visit slots (more than 16 slots make the delta rule's chunked
 /// recurrence span several chunks).
-pub fn fixture_stack(seed: u64, mixer: horizon::Mixer, blocks: u32, visits: u32) -> Horizon {
-    let model = visits_model(seed, visits, |cfg| {
-        cfg.backbone = horizon::Backbone::Stack(horizon::StackConfig::new(mixer, blocks));
-    });
+pub fn fixture_stack(seed: u64, mixer: horizon::Mixer, blocks: u32, visits: u32, placement: &Placement) -> Horizon {
+    let model = visits_model(
+        seed,
+        visits,
+        |cfg| {
+            cfg.backbone = horizon::Backbone::Stack(horizon::StackConfig::new(mixer, blocks));
+        },
+        placement,
+    );
     // The initial rates run from days to a century: at the fixture's gaps the
     // fast head forgets everything and the slow one nothing, so the loss
     // would not feel the rates at all. Start them where the gaps (0.5 to 3
@@ -165,7 +171,7 @@ pub fn fixture_stack(seed: u64, mixer: horizon::Mixer, blocks: u32, visits: u32)
     model
 }
 
-fn visits_model(seed: u64, slots: u32, configure: impl FnOnce(&mut HorizonConfig)) -> Horizon {
+fn visits_model(seed: u64, slots: u32, configure: impl FnOnce(&mut HorizonConfig), placement: &Placement) -> Horizon {
     let gaps = Gaps { last: (0.0, 2.0), between: (0.5, 3.0), visits: (1, 5) };
     let (subjects, _) = drifting::population(300, seed, &gaps, 6.0);
     let visits = |s: &horizon::timeline::Subject| s.observations.len();
@@ -186,7 +192,7 @@ fn visits_model(seed: u64, slots: u32, configure: impl FnOnce(&mut HorizonConfig
     assert!(hb.value_state.contains(&1), "fixture hides a value");
     assert!(hb.visit_dt.iter().any(|&g| g > 0.0), "fixture has a gap between visits");
     let init = horizon::init_weights(&cfg, seed);
-    let model = Horizon::new(cfg, 4, &init, &horizon::placement::Placement::Process);
+    let model = Horizon::new(cfg, 4, &init, placement);
     model.set_batch(&hb);
     model
 }
@@ -194,8 +200,8 @@ fn visits_model(seed: u64, slots: u32, configure: impl FnOnce(&mut HorizonConfig
 /// The state across visits: every tensor directionally, and element-wise the
 /// tables shared across rows and the per-channel rates and population state
 /// every subject's scan reads.
-pub fn check_horizon_visits(seed: u64) -> Report {
-    let model = fixture_visits(seed, horizon::Backbone::State);
+pub fn check_horizon_visits(seed: u64, placement: &Placement) -> Report {
+    let model = fixture_visits(seed, horizon::Backbone::State, placement);
     let mut report = directional_check(&model, 5e-3, 4, seed ^ 0x7777);
     for name in ["tok.gamma", "tok.beta", "value_bins.weight", "time_bins.weight", "visit.state", "visit.in.bias", "hazard.code.bias"] {
         report.checks.extend(elementwise_check(&model, name, 1e-2).checks);
@@ -206,8 +212,8 @@ pub fn check_horizon_visits(seed: u64) -> Report {
 /// The attention arm across visits: every tensor directionally, and
 /// element-wise the shared tables and the one query embedding every subject
 /// reads.
-pub fn check_horizon_attention(seed: u64) -> Report {
-    let model = fixture_visits(seed, horizon::Backbone::Attention);
+pub fn check_horizon_attention(seed: u64, placement: &Placement) -> Report {
+    let model = fixture_visits(seed, horizon::Backbone::Attention, placement);
     let mut report = directional_check(&model, 5e-3, 4, seed ^ 0x7a7a);
     for name in ["tok.gamma", "tok.beta", "visit.query", "visit.attn.qkv.bias", "visit.attn.out.bias", "hazard.code.bias"] {
         report.checks.extend(elementwise_check(&model, name, 1e-2).checks);
@@ -233,10 +239,10 @@ fn stack_shared(model: &Horizon) -> Vec<String> {
     names
 }
 
-fn check_stack(seed: u64, mixer: horizon::Mixer, blocks: u32, visits: &[u32], salt: u64) -> Report {
+fn check_stack(seed: u64, mixer: horizon::Mixer, blocks: u32, visits: &[u32], salt: u64, placement: &Placement) -> Report {
     let mut report = Report { checks: Vec::new() };
     for &v in visits {
-        let model = fixture_stack(seed, mixer, blocks, v);
+        let model = fixture_stack(seed, mixer, blocks, v, placement);
         report.checks.extend(directional_check(&model, 5e-3, 4, seed ^ salt).checks);
         for name in stack_shared(&model) {
             report.checks.extend(elementwise_check(&model, &name, 1e-2).checks);
@@ -248,13 +254,13 @@ fn check_stack(seed: u64, mixer: horizon::Mixer, blocks: u32, visits: &[u32], sa
 /// Gated DeltaNet blocks over the visits: every tensor directionally, and
 /// element-wise the tables and the per-head rates every row shares, with the
 /// recurrence in one chunk (3 visit slots) and across two (20 slots).
-pub fn check_horizon_gdn(seed: u64) -> Report {
-    check_stack(seed, horizon::Mixer::GatedDeltaNet, 2, &[3, 20], 0x6d6e)
+pub fn check_horizon_gdn(seed: u64, placement: &Placement) -> Report {
+    check_stack(seed, horizon::Mixer::GatedDeltaNet, 2, &[3, 20], 0x6d6e, placement)
 }
 
 /// The 3:1 hybrid stack (three Gated DeltaNet blocks, then one attention
 /// block): every tensor of both mixers directionally, and element-wise the
 /// shared tables and rates.
-pub fn check_horizon_hybrid(seed: u64) -> Report {
-    check_stack(seed, horizon::Mixer::Hybrid, 4, &[3], 0x6879)
+pub fn check_horizon_hybrid(seed: u64, placement: &Placement) -> Report {
+    check_stack(seed, horizon::Mixer::Hybrid, 4, &[3], 0x6879, placement)
 }

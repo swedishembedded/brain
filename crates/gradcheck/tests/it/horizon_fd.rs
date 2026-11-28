@@ -1,14 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! Gradient-check gate for `horizon`'s training graph, on whichever backend
-//! `BRAIN_DEVICE` selects (run it under both `cpu` and the GPU).
+//! Gradient-check gate for `horizon`'s training graph, on the device the test
+//! harness names (`BRAIN_TEST_DEVICE`; run it under both `cpu` and a GPU).
 
 use gradcheck::horizon::{
     check_horizon, check_horizon_additive, check_horizon_attention, check_horizon_gdn,
     check_horizon_hybrid, check_horizon_next_events, check_horizon_visits,
 };
 use gradcheck::Report;
+
+/// The harness's device, named to the model.
+fn placement() -> horizon::placement::Placement {
+    horizon::placement::Placement::Device(brain_testutil::device::device().device.clone())
+}
 
 const ATOL: f32 = 4e-3;
 const RTOL: f32 = 8e-2;
@@ -40,7 +45,7 @@ fn horizon_analytic_grads_match_finite_differences() {
         return;
     }
     for seed in [3u64, 11] {
-        gate(check_horizon(seed), &format!("set encoder, seed {seed}"));
+        gate(check_horizon(seed, &placement()), &format!("set encoder, seed {seed}"));
     }
 }
 
@@ -51,7 +56,7 @@ fn horizon_next_event_group_analytic_grads_match_finite_differences() {
     }
     for seed in [3u64, 11] {
         gate(
-            check_horizon_next_events(seed),
+            check_horizon_next_events(seed, &placement()),
             &format!("next-event group, seed {seed}"),
         );
     }
@@ -64,7 +69,7 @@ fn horizon_additive_analytic_grads_match_finite_differences() {
     }
     for seed in [3u64, 11] {
         gate(
-            check_horizon_additive(seed),
+            check_horizon_additive(seed, &placement()),
             &format!("additive, seed {seed}"),
         );
     }
@@ -77,7 +82,7 @@ fn horizon_visits_analytic_grads_match_finite_differences() {
     }
     for seed in [3u64, 11] {
         gate(
-            check_horizon_visits(seed),
+            check_horizon_visits(seed, &placement()),
             &format!("state across visits, seed {seed}"),
         );
     }
@@ -90,7 +95,7 @@ fn horizon_attention_analytic_grads_match_finite_differences() {
     }
     for seed in [3u64, 11] {
         gate(
-            check_horizon_attention(seed),
+            check_horizon_attention(seed, &placement()),
             &format!("attention across visits, seed {seed}"),
         );
     }
@@ -103,7 +108,7 @@ fn horizon_gated_deltanet_analytic_grads_match_finite_differences() {
     }
     for seed in [3u64, 11] {
         gate(
-            check_horizon_gdn(seed),
+            check_horizon_gdn(seed, &placement()),
             &format!("gated deltanet stack, seed {seed}"),
         );
     }
@@ -116,7 +121,7 @@ fn horizon_hybrid_analytic_grads_match_finite_differences() {
     }
     for seed in [3u64, 11] {
         gate(
-            check_horizon_hybrid(seed),
+            check_horizon_hybrid(seed, &placement()),
             &format!("3:1 hybrid stack, seed {seed}"),
         );
     }
