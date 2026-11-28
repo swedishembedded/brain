@@ -421,6 +421,15 @@ pub fn current_gpu() -> Option<u32> {
 /// physical card exists (backend default / software fallback applies). Panics
 /// on an out-of-range explicit selection - never a silent clamp.
 pub fn selected_device() -> Option<&'static DeviceId> {
+    // A process whose compute set schedules no card (the CPU: the default of a process nothing configured) has no card
+    // to select, and probes none to find that out, unless a scope names one explicitly.
+    #[cfg(not(target_arch = "wasm32"))]
+    if SCOPED.with(|s| s.borrow().is_empty()) {
+        let set = ambient_compute_set();
+        if set.gpus.is_empty() && !set.software {
+            return None;
+        }
+    }
     let devs = gpus();
     match current_gpu() {
         Some(i) => {

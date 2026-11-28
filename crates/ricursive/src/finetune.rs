@@ -117,7 +117,7 @@ fn build_run(cfg: TrainConfig, opts: &FitOpts, src: &dyn TensorSource, train_opt
         Some(r) => crate::train::stage_costs(&cfg, std::slice::from_ref(sh), b, t, r).map_or(u64::MAX, |c| c[0].device()),
         None => crate::train::estimate_stage_bytes(&cfg, sh, &train_opts.tiers, b, t),
     };
-    let shards = model::plan_stage_layout::<Ripple>("ricursive finetune", &cfg, b, t, gpu_core::devices::gpus().len(), opts.stages, stage_bytes, place).map_err(|e| invalid(base, e))?;
+    let shards = model::plan_stage_layout::<Ripple>("ricursive finetune", &cfg, b, t, gpu_core::devices::ambient_compute_set().gpus.len(), opts.stages, stage_bytes, place).map_err(|e| invalid(base, e))?;
     if resident.is_some_and(|r| r.window.is_some()) && shards.len() > 1 {
         return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "ricursive: a layer window and several pipeline stages do not compose: a streamed stage runs its backward inside its update, while the pipeline hands the gradient of the boundary from stage to stage; give weights= without window= for a pipeline"));
     }

@@ -278,11 +278,15 @@ pub struct Capacity {
 }
 
 impl Capacity {
-    /// What the selected device and the host can give right now: the device's free bytes and the kernel's
-    /// `MemAvailable`. A quantity the platform does not report is unbounded here (the planner then cannot refuse on
-    /// it), never invented.
+    /// What the device a model built on the process's compute set lands on, and the host, can give right now: the
+    /// selected card's free bytes, or the host's for a process that runs on the CPU (which probes no card), and the
+    /// kernel's `MemAvailable`. A quantity the platform does not report is unbounded here (the planner then cannot
+    /// refuse on it), never invented. A caller holding the model's handle measures it with [`Self::measured_for`].
     pub fn measured() -> Capacity {
-        Capacity { device_bytes: gpu_core::capacity::available_here().unwrap_or(u64::MAX), host_bytes: host_available_bytes().unwrap_or(u64::MAX) }
+        let host = host_available_bytes();
+        let set = gpu_core::devices::ambient_compute_set();
+        let device = if set.gpus.is_empty() && !set.software { host } else { gpu_core::capacity::available_here() };
+        Capacity { device_bytes: device.unwrap_or(u64::MAX), host_bytes: host.unwrap_or(u64::MAX) }
     }
 
     /// What `gpu`'s own memory and the host can give right now: the free bytes of the card the handle lives on, or

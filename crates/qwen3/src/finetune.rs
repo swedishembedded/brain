@@ -521,7 +521,7 @@ pub fn build_trainer(cfg: QwenConfig, opts: &FitOpts, init: &dyn TensorSource, d
         return build_for_training(cfg, opts, init, dt).map(|m| Trained::Single(Box::new(m)));
     }
     let place = |needs: &[Need]| gpu_core::devices::place(needs).map(|homes| homes.parts().iter().map(|(_, home)| *home).collect());
-    let shards = plan_lora_layout(&cfg, opts.batch_size, opts.block_size, dt, gpu_core::devices::gpus().len(), place).map_err(std::io::Error::other)?;
+    let shards = plan_lora_layout(&cfg, opts.batch_size, opts.block_size, dt, gpu_core::devices::ambient_compute_set().gpus.len(), place).map_err(std::io::Error::other)?;
     if let [whole] = shards.as_slice() {
         if whole.gpu_index == Shard::ANY_GPU {
             return build_for_training(cfg, opts, init, dt).map(|m| Trained::Single(Box::new(m)));
