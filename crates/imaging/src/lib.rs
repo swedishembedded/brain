@@ -162,3 +162,7 @@ pub use tiling::{BlendPlan, BlendSpec, BlendTile, Tile, TilePlan, TileSpec};
 /// The workspace's NCHW shape type, re-exported so callers need not also depend
 /// on `brain-vision` to name an image's dimensions.
 pub use vision::Shape;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

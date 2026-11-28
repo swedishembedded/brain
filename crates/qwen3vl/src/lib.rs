@@ -43,3 +43,7 @@ pub use model::Qwen3Vl;
 pub use text_tower::TextTower;
 
 pub use config::{Qwen3VlConfig, VisionConfig};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

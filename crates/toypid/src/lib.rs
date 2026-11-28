@@ -19,3 +19,7 @@ pub mod model;
 pub mod train;
 
 pub use model::*;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

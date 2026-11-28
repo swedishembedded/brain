@@ -29,3 +29,7 @@ pub mod supervision;
 pub use executor::{budgets_for, build_executor, Reserve, ServeKnobs, Serving, TrainKnobs};
 pub use machine::Machine;
 pub use supervision::{serve_supervision, ServeSupervision};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

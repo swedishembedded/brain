@@ -34,3 +34,7 @@ pub mod train;
 pub use config::{Timesfm3Config, Param, QUANTILES};
 pub use forecaster::Timesfm3Forecaster;
 pub use model::Timesfm3;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

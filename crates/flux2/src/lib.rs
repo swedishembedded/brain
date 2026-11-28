@@ -51,3 +51,7 @@ pub use model::{position_ids, position_ids_tile, Flux2Model, Precision, Sample, 
 pub use refcond::JointLayout;
 pub use pipeline::{AdapterSpec, Anchor, BatchRequest, GenOpts, Paths, Pipeline, Sizing, Tile, Tiling};
 pub use weights::{DitWeights, PendingLora};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

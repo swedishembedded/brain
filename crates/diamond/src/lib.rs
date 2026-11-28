@@ -33,3 +33,7 @@ pub mod worldrun;
 pub use config::DiamondConfig;
 pub use model::{DiamondUNet, Tensors};
 pub use play::DiamondWorldModel;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

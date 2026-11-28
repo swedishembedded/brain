@@ -27,3 +27,7 @@ pub mod vision;
 pub use config::{Family, Inkling2Config, LayerKind};
 pub use model::{kernels, Inkling2, Probe};
 pub use train::{Inkling2Train, TrainConfig};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

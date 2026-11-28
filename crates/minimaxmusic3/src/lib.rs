@@ -152,3 +152,7 @@ pub type ProgressSink<'a> = &'a mut dyn FnMut(u32, u32, &str) -> bool;
 pub fn ignore_progress() -> impl FnMut(u32, u32, &str) -> bool {
     |_, _, _| true
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

@@ -962,3 +962,7 @@ mod tests {
         assert!(s.writes - w0 <= 2, "lr_mult must not add per-step writes");
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

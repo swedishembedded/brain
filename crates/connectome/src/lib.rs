@@ -649,3 +649,7 @@ impl Connectome {
         (mean, d[d.len() / 2], d[(d.len() as f64 * 0.99) as usize], *d.last().unwrap())
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

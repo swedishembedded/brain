@@ -12,3 +12,7 @@ pub mod model;
 
 pub use init::init_weights;
 pub use model::{Autoencoder, AutoencoderConfig};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

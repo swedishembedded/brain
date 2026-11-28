@@ -17,3 +17,7 @@ pub mod model;
 pub use config::SpeakerConfig;
 pub use import::import;
 pub use model::SpeakerEncoder;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

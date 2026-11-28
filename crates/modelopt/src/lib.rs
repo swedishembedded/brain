@@ -51,3 +51,7 @@ pub use prune::{channel_importance, measure_pruned, plan_prune, pruned_weights, 
 pub use search::{search_weights, Baseline, Budget, FrontierPoint, LatencyLimit, Progress, Report, SearchRequest, SiteReport, Timer, Timing};
 pub use sensitivity::{sensitivity, Choice, SiteChoices};
 pub use solve::{assign, policy_of, Assignment, Limits, Plan};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

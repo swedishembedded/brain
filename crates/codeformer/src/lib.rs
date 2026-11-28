@@ -48,3 +48,7 @@ pub use config::{CodeFormerConfig, FuseTap, FUSE_TAPS};
 pub use import::Import;
 pub use model::{CodeFormer, Restoration, KERNELS};
 pub use train::{CodeTransformerTrainer, TRAIN_PIPELINES};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

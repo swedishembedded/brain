@@ -1093,3 +1093,7 @@ mod tests {
         assert!(refs.contains(&"Qwen/Qwen3-0.6B:swedishembedded-com:generic-sft:latest".to_string()));
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

@@ -54,3 +54,7 @@ pub use import::Import;
 pub use model::{Codebook, Reconstruction, Vqgan, KERNELS};
 pub use objective::{Losses, Objective, ReconstructionLoss, StepOptions};
 pub use train::{VqganTrainer, TRAIN_KERNELS, TRAIN_PIPELINES};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

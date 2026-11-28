@@ -82,3 +82,7 @@ pub mod shard;
 pub use config::DeepseekV2Config;
 pub use init::init_weights;
 pub use model::{DeepseekV2, Sizes, ADAM, IGNORE, PIPELINES};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

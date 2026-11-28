@@ -62,3 +62,7 @@ mod tests {
         assert_eq!(YoloConfig::yolov8n().nc, 80);
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

@@ -266,3 +266,7 @@ mod tests {
         assert_eq!(rgb, vec![0, 128, 255]);
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

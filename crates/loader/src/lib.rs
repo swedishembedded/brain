@@ -46,3 +46,7 @@ pub mod supply;
 pub use placement::{install_default_placer, BudgetPlacer};
 pub use resolver::{resolve_structured, try_resolve, ResolveFailure, AMBIGUOUS_EXIT, MISSING_EXIT};
 pub use supply::{ensure_default_weights, DefaultWeights, DownloadPolicy};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

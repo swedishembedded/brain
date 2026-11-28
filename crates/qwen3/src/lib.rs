@@ -46,3 +46,7 @@ pub use gpu_core::select::Dtype;
 /// Generic multi-GPU training (see [`::model`]); use as `Pipeline::<Qwen>::new(..)`
 /// / `DataParallel::<Qwen>::new(..)`.
 pub use ::model::{DataParallel, Pipeline, PipelineModel};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

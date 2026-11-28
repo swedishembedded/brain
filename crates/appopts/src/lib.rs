@@ -91,3 +91,7 @@ pub trait Options: Sized {
 pub fn help_of(groups: &[&str]) -> String {
     groups.join("\n")
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

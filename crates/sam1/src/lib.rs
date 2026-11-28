@@ -58,3 +58,7 @@ pub mod resample;
 pub use config::SamViTConfig;
 pub use init::{init_dense, init_weights};
 pub use model::{SamEncoder, PIPELINES};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

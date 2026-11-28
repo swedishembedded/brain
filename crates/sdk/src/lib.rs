@@ -518,3 +518,7 @@ pub use vlm::{VisionLanguagePipeline, VisionLanguagePipelineBuilder, VlmOptions}
 /// This crate's one `Result` alias -- every fallible public entry point
 /// returns it.
 pub type Result<T> = std::result::Result<T, Error>;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

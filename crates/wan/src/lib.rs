@@ -56,3 +56,7 @@ pub use gguf_src::WanGgufSource;
 pub use model::WanDit;
 pub use pipeline::{generate, generate_hot, DitKey, GenOpts, HotDit, Paths, Solver, Timings, Video};
 pub use vae3d::{WanVaeConfig, WanVaeDecoder, WanVaeEncoder};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

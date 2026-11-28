@@ -135,22 +135,59 @@ independently. EC-4 is incremental, by class. EC-5 and EC-6 any time.
   - Consequence: until step 2, the GPU legs that steered a test binary through these variables fail loudly and do
     not run. This covers `parity-gate.sh` (Vulkan and CUDA), `perf-floor-gate.sh` (Vulkan and CUDA),
     `scripts/test/cuda-matrix.py` and `scripts/test/ripple-gpu.sh` off the CPU.
-- **Work list (steps 2 to 5), in order:**
-  2. Give the test binaries a device seam. A `brain_testutil::device()` helper set by the harness (argv after
-     `--`, or a cfg feature per backend suite) needs a decision first. Then re-enable the legs listed above, the
-     Makefile CPU and CUDA suites (about line 1156) and the remaining callers of `cuda-device.sh`.
-  3. Rewrite the tests that read device variables themselves to take the seam and ask for a GPU by name under
-     `--ignored`:
-     - `BRAIN_DEV_GPU`: `wan` (`device_train`, `dev_grad`, `dev_lora_train`), `s3dit` (`dev_parity`,
-       `shard_parity`, `device_train`, `dev_grad`, `model_trait`, `shard_2card`, `lora_train`), `flux2`
-       (`int8_base_grads`, `variant_widths`);
-     - `BRAIN_VAE_DEVICE`: `vae` (`flux2_parity`, `encode_parity`, `sdxl_decode_parity`, `decode_parity`);
-     - `BRAIN_BACKEND`: `huginn` (`serve`, `decode`, `parity`), `ouro` (`forward`);
-     - `BRAIN_DEVICE`: `chronos2` (`timing`), `backend-cuda` (`tensormap_template`), `wan` (`gguf_direct_real`).
-     Until then, the ones that ask through `BRAIN_DEVICE`/`BRAIN_BACKEND` run on the CPU.
-  4. Give `brain-gradcheck`'s horizon cases a placement from the seam (`Placement::Process`, now the CPU).
-  5. Check the other model crates for the same probe that `Capacity::measured` was. `qwen35`, `qwen3` and
-     `ricursive` finetune call it on the selected card.
+- **Steps 2 to 5 done (2026-11-28).**
+  - The test harness names a test binary's device in `BRAIN_TEST_DEVICE`, in the `--device[:--backend]` grammar.
+    `brain_testutil::device::device()` is its one reader; it passes the device to the library through
+    `gpu_core::select_compute`.
+  - Every integration test binary, and the unit tests of every crate above layer 2, take it when they load
+    (`brain_testutil::configure_test_binary!()`).
+  - Binaries that select their own device by `--device` keep their flags instead.
+  - `select_compute` refuses a second, different compute set rather than returning a set the process does not run on.
+  - `check-test-device-seam.sh` holds the variable to that one function, and brain-testutil to a dev-dependency.
+  - The gates set it: `parity-gate.sh`, `perf-floor-gate.sh`, `forecast-parity-gate.sh`, `cuda-device.sh`,
+    `cuda-matrix.py`, `ripple-gpu.sh`, and the Makefile CPU suite.
+  - The perf gates pass `--device` to the brain binary (`FORECAST_PERF_DEVICE`, `QWEN_SERVING_PERF_DEVICE`); the train
+    runs pass `--backend`.
+  - `make test` runs on the CPU. No rule or note requires another backend; the Makefile had run it on Vulkan by
+    default only through the environment. `make test/vulkan` and `make test/cuda` are the explicit GPU suites.
+  - The tests that read `BRAIN_DEV_GPU`, `BRAIN_VAE_DEVICE`, `BRAIN_BACKEND` or `BRAIN_DEVICE` take the harness's
+    device instead, 21 allowlisted reads fewer.
+  - The gradcheck horizon cases take a placement from their test.
+  - `Capacity::measured`, `selected_device` and the qwen3 LoRA and ricursive stage layouts probe no card in a process
+    that runs on the CPU.
+- **Validated with every card hidden** (`CUDA_VISIBLE_DEVICES=` and `VK_ICD_FILENAMES=/dev/null`).
+  - Passing:
+    - `parity-gate.sh`'s CPU legs (gradcheck, model FD suites, the qwen serve suite);
+    - `perf-floor-gate.sh cpu`;
+    - `forecast-parity-gate.sh`;
+    - `BRAIN_TEST_DEVICE=cpu` on a crate's test binaries and unit tests.
+  - Failing at load, naming `BRAIN_TEST_DEVICE` and the device:
+    - the Vulkan and CUDA legs of `parity-gate.sh` and `perf-floor-gate.sh`;
+    - `cuda-matrix.py`;
+    - `BRAIN_TEST_DEVICE=vulkan` and `=gpu0:cuda` on a test binary.
+  - Refusing the hidden cards: `ripple-gpu.sh cargo` with `DEVICE=gpu0`.
+  - The NPU leg of `parity-gate.sh` fails on this aarch64 node (OpenVINO is x86 only), as before.
+- **Needs a card to validate fully:**
+  - `make test/parity`;
+  - `make test/perf` (and `/vulkan`, `/cuda`);
+  - `make test/cuda-matrix`;
+  - `make test/vulkan` and `make test/cuda`;
+  - `scripts/test/ripple-gpu.sh cargo` with `DEVICE=gpu0`;
+  - `make test/gpu/ripple/...`;
+  - `QWEN_SERVING_PERF_DEVICE=gpu0 scripts/gates/qwen-serving-perf-gate.sh` and the forecast perf gate on a GPU.
+- **Left, not done:**
+  - Tests that pick a card from nvidia-smi themselves, outside the harness's selection: `cli` (`worker_hosted_lfm`),
+    `gpu-core` (`vram_overhead`), `model` (`flash_gqa_train`), `mirage` (`serving`), `qwen3` (`integration_qwen3`),
+    `wan` (`gguf_direct_real`).
+  - Tests that still set `BRAIN_DEVICE=cpu`, now a no-op that follows the harness: `fastvlm` (`parity`,
+    `train_smoke`), `qwen3vl` (`parity`, `train_smoke`), `catalog` (`resident_llm`), `deepseek2ocr`/`deepseekocr2`
+    (`real_vision`), `sam1` (`parity`), `clip` (`deepseek_ocr_real`). Each should build on the CPU explicitly, or
+    ask the harness.
+  - `vae`'s `footprint::the_encode_estimate_brackets_what_the_encode_really_allocates` over-reports at 512x512 (1883
+    against 1192 MiB). It failed before this change too; it now runs only on a card the harness names.
+  - `horizon`'s `lifecycle::train_eval_calibrate_predict_through_the_capability_layer` and
+    `recovery::a_trained_model_recovers_the_true_cumulative_incidence` failed once each under a loaded
+    full-package run and passed alone twice: random-seeded training outcomes.
 
 ## EC-5 The training-records contract, published by version (S, open)
 

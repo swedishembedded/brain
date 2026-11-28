@@ -1495,3 +1495,7 @@ fn probe_actuator_joints(model: &Model, data: &mut Data) -> Vec<usize> {
     data.reset(model);
     out
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

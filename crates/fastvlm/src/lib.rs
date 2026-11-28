@@ -28,3 +28,7 @@ mod parity;
 mod train_smoke;
 
 pub use config::{FastVitHdConfig, FastVlmConfig};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

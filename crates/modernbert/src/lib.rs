@@ -40,3 +40,7 @@ pub use import::{import_dir, import_dir_split, LayaCheckpoint};
 pub use laya::{LayaConfig, LayaHead};
 pub use model::ModernBert;
 pub use sequence::{build_sequence, build_sequence_report, state_fit, temp_bucket, write_json, Built, OrderedJson, QType, Question, State, StateFit};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

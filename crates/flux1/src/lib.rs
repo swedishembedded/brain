@@ -38,3 +38,7 @@ pub use config::Flux1Config;
 pub use import::{import_bfl, import_diffusers, truncate_to_depth, Tensors};
 pub use inject::{BlockInject, InjectSite};
 pub use model::{position_ids, Flux1Model, Precision, Trace, KERNELS};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

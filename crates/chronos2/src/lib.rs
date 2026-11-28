@@ -35,3 +35,7 @@ pub use config::{Chronos2Config, Param, QUANTILES};
 pub use forecaster::Chronos2Forecaster;
 pub use model::Chronos2;
 pub use preprocess::{context_features, future_features, instance_norm, instance_norm_inverse, LocScale};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

@@ -170,3 +170,7 @@ pub(crate) fn stage_time(name: &str, since: std::time::Instant) {
 /// `Gpu::new`. Passing four `Gpu` handles positionally instead would make the
 /// call sites unreadable and the ORDER load-bearing.
 pub type DeviceFactory<'a> = &'a dyn Fn(&'static [(&'static str, &'static str)]) -> gpu_core::Gpu;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

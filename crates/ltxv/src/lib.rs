@@ -159,3 +159,7 @@ pub use devplan::{DevicePlan, Placement};
 pub use dit::{load_tiny_weights, AvDitTaps, DitBatch, DitTaps, LtxAvDit, LtxDit};
 pub use pipeline::{GenOpts, Paths};
 pub use vae3d::{LtxVaeConfig, LtxVaeDecoder, LtxVaeEncoder};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

@@ -37,3 +37,7 @@ pub use forecaster::{KronosForecaster, KronosSampling};
 pub use generate::{GenOpts, KronosModel};
 pub use preprocess::{denormalize, indices_to_bipolar, normalize, quantized_to_indices, Norm};
 pub use tokenizer::KronosTokenizer;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

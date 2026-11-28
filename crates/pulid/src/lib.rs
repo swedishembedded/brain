@@ -71,3 +71,7 @@ pub use adapter::PulidAdapter;
 pub use config::{PulidConfig, Site, Stream};
 pub use import::{import, read, PulidWeights, Tensors};
 pub use model::{joint_kernels, IdFormer, PulidCa, KERNELS};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

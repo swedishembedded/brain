@@ -797,3 +797,7 @@ mod tests {
         capability_mock::cancellation::certify("imgpipe run", &Invocation::new, &run, capability_mock::cancellation::Bound::ONE_STEP);
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

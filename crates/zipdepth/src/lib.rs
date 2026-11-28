@@ -36,3 +36,7 @@ pub use predict::Predictor;
 pub use quant::{collect_activation_stats, collect_activation_stats_sized, ActStatsCollector, CalibImage, LayerReport};
 pub use effects::{depth_blur, fog};
 pub use stereo::{autostereogram, autostereogram_textured, stereo_pair, StereoOpts};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

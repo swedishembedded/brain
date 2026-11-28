@@ -274,3 +274,7 @@ impl std::fmt::Display for InstanceKey {
         write!(f, "{}[{}]", self.model, self.config)
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

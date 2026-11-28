@@ -38,3 +38,7 @@ pub use dev::{DitI8Cache, ZImageDit, ZImageDitI8, ZImageDitShard, ZImageDitWindo
 
 pub use block::{BlockDims, Tensors, ZImageBlock};
 pub use model::{ZImageConfig, ZImageModel};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

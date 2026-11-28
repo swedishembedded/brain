@@ -48,3 +48,7 @@ pub use tiled::{
     decoder_device_bytes_for_pixels_planned, decoder_device_bytes_tiled, encoder_device_bytes_for_pixels_planned,
     encoder_device_bytes_tiled, Tiling, VaeTiledDecoder, VaeTiledEncoder,
 };
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

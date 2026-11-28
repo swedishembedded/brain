@@ -91,3 +91,7 @@ pub mod witness;
 /// design: an evaluation metric reports how wrong a probability was up to
 /// `27.63` nats, the training reward stops counting at `9.21`.
 pub const PROB_FLOOR: f64 = 1e-12;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

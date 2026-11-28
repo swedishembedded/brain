@@ -298,3 +298,7 @@ fn print_table(outcomes: &[Outcome], benches: &[&dyn Benchmark]) {
     }
     println!();
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

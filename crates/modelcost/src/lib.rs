@@ -796,3 +796,7 @@ mod tests {
         assert_eq!(config_hash(&a), config_hash(&b));
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

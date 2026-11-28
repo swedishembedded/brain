@@ -232,3 +232,7 @@ pub fn serve(executor: Executor, opts: DbusOpts, serve_opts: ServeOpts) -> anyho
 pub fn serve(_executor: Executor, _opts: DbusOpts, _serve_opts: ServeOpts) -> anyhow::Result<()> {
     anyhow::bail!(UNSUPPORTED)
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

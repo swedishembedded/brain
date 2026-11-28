@@ -53,3 +53,7 @@ pub use import::{gemma4_tensor_manifest, import_gemma4};
 pub use block::Precision;
 pub use model::{forward_streamed, load_layer_tensors, load_tiny_weights, AggregateEmbed, Gemma4Model, Gemma4Output};
 pub use tokenizer::{extract_tokenizer_json_bytes, load_tokenizer};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

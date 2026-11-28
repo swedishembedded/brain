@@ -19,3 +19,7 @@ pub use yolov8::{detection, detection_report};
 
 pub mod asr;
 pub mod tts;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

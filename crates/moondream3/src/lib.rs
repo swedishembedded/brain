@@ -16,3 +16,7 @@ pub mod preprocess;
 pub mod shard;
 pub mod vision;
 pub mod kernels_check;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

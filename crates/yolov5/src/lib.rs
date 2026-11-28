@@ -50,3 +50,7 @@ pub use graph::{ConvOp, Epilogue, Graph, Node, Op};
 pub use imaging::nms::Detection;
 pub use model::{HeadOutputs, Yolov5};
 pub use weights::{Checkpoint, Weights};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

@@ -62,3 +62,7 @@ pub fn encode_model(model: &onnx::ModelProto) -> Vec<u8> {
     use prost::Message;
     model.encode_to_vec()
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

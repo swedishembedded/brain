@@ -20,3 +20,7 @@ pub use train::{train, train_distributed, TrainOpts};
 /// Generic multi-GPU pipeline sharding (see [`::model::Pipeline`]); use as
 /// `Pipeline::<Gpt>::new(..)`.
 pub use ::model::Pipeline;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

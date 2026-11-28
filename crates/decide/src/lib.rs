@@ -48,3 +48,7 @@ pub type Tensors = std::collections::HashMap<String, Vec<f32>>;
 pub use config::EncoderConfig;
 pub use decide::{Decide, Example, Limits};
 pub use model::Encoder;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

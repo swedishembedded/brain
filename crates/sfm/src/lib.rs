@@ -59,3 +59,7 @@ mod tests {
         assert_eq!(ransac_iterations(0.5, 8, 50_000), 1765);
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

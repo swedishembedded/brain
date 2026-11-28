@@ -320,3 +320,7 @@ mod tests {
         assert!(!out.contains("ok:ok2"), "must not process after a panic");
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

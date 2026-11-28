@@ -380,3 +380,7 @@ pub fn decode_from(path: &Path, first: u64, on_frame: &mut dyn FnMut(Frame) -> b
     emit(pics, &mut times, &mut index);
     Ok(Decoded { info, units_decoded: decoded })
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

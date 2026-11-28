@@ -31,3 +31,7 @@ use brain_testutil::testdata;
 /// `Path::new(&format!("{ckpt}/…")).exists()` skip checks stay correct.
 #[cfg(test)]
 use brain_testutil::model_dir;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

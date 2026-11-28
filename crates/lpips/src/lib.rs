@@ -30,3 +30,7 @@ pub mod spec;
 
 pub use config::Trunk;
 pub use model::{Distance, Lpips, GRAD_PIPELINES, PIPELINES};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

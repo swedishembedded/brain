@@ -125,3 +125,7 @@ mod tests {
         assert!((b[0] - d).abs() > 1e-5, "the two normalisations must differ");
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

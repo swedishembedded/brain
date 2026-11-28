@@ -48,3 +48,7 @@ pub mod vocab;
 pub use config::{Backbone, BlockMixer, Clocks, HorizonConfig, Mixer, StackConfig};
 pub use init::init_weights;
 pub use model::{Horizon, PIPELINES};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

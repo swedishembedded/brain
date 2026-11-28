@@ -29,3 +29,7 @@ pub mod streaming;
 pub use config::{CodecConfig, EncoderConfig};
 pub use import::import;
 pub use model::{Codec, PIPELINES};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

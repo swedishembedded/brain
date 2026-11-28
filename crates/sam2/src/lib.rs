@@ -62,3 +62,7 @@ pub use import::{import, import_scoped, ImportReport, Scope, Tensors};
 pub use model::{Decoded, Encoded, Prompt, Sam2, PIPELINES};
 pub use train::{FrozenEncode, MaskDecoderTrainer, MaskTargets};
 pub use video::{MemoryEntry, TrackStep, Tracker, VideoConsts};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

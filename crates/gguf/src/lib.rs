@@ -61,3 +61,7 @@ pub use kv::{architecture, ArchKv};
 pub use leaf::{role, Role};
 pub use route::{route, route_path, Route};
 pub use upload::{held_tier, held_tier_of, upload_fused_weight, upload_weight};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

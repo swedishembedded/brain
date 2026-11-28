@@ -38,3 +38,7 @@ pub use config::{DraftKind, Dflash2Config, DsparkShape, LayerKind, LayerSpec};
 pub use drafter::{DraftHost, DraftRequest, Dflash2Drafter, TapRows};
 pub use model::{pipelines, BlockJob, Dflash2, DraftCache};
 pub use source::{DraftSource, GgufDraft, HfDraft, Leaf, Tensor};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

@@ -32,3 +32,7 @@ pub mod talker_generate;
 pub mod talker_prompt;
 pub mod thinker;
 pub mod thinker_plan;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

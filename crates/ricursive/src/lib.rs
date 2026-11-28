@@ -54,3 +54,7 @@ pub use policy::POLICY;
 pub use train::{Ripple, TrainConfig, TrainOpts};
 pub use serve::{global_kv_bytes_per_token, lsa_device_bytes, ring_bytes_per_slot, LsaCharge, ring_rows, check_draft_fits, DraftSizing, RicursiveEngine, ServeConfig};
 pub use weights::{linear_names, resolve_tiers, WeightReport};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

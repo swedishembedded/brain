@@ -47,3 +47,7 @@ pub use flowsolvers::{
     FlowUniPcScheduler,
 };
 pub use scheduler::{default_z_image_sigmas, flow_shift, FlowMatchConfig, FlowMatchEulerScheduler};
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();
