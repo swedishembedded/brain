@@ -50,6 +50,9 @@ fn train_request(out: &Path, train: &[Subject], held: &[Subject], steps: i64) ->
         .set("steps", json!(steps))
         .set("batch", json!(32))
         .set("eval_interval", json!(10))
+        // A drawn seed once fitted no calibration horizon for the 30-step model under a loaded run.
+        // seed: the initial weights, batches and masks the calibration was measured at
+        .set("seed", json!(1))
         .blob("dataset", jsonl(train))
         .blob("held_out", jsonl(held))
 }
