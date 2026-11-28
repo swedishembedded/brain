@@ -16,3 +16,6 @@ mod resize_reference;
 mod save_formats;
 mod untrusted_clip;
 mod video_stream;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

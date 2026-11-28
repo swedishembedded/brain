@@ -206,3 +206,6 @@ fn non_finite_inputs_are_not_measured() {
         survival::compare::cluster_bootstrap(&[1.0, f64::NAN], &[1.0, 1.0], &[1, 2], 10, 0.95, 1);
     assert!(none.is_none());
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

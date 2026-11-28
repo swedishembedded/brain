@@ -20,3 +20,6 @@ mod tiny_parity;
 mod training;
 mod vision;
 mod vision_train;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

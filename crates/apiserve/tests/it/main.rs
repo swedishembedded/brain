@@ -40,3 +40,6 @@ pub fn chat_contract(spec: ActionSpec) -> ActionSpec {
     ];
     CONTRACT.into_iter().fold(spec, |spec, (name, ty)| if spec.params.iter().any(|p| p.name == name) { spec } else { spec.param(ParamSpec::new(name, ty, "the chat contract")) })
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

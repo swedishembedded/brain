@@ -239,3 +239,6 @@ fn a_batch_embeds_each_utterance_as_it_embeds_alone() {
     }
     assert!(batch.windows(2).all(|p| p[0] != p[1]), "the fixture is degenerate: two utterances embed alike");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

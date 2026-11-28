@@ -40,3 +40,6 @@ fn matches_naive_matmul_bitwise() {
         assert_eq!(a, b, "mismatch at m={m} k={k} n={n}");
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

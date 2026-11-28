@@ -439,8 +439,8 @@ flags and targets.
 ```bash
 make build/debug                  # debug build, native default-members
 make build/release                # optimized ./target/release/brain
-make test                   # full suite (MOE_SKIP_GPU_TESTS=1 with no GPU;
-                            # BRAIN_DEVICE=cpu runs the whole suite GPU-free)
+make test                   # full suite, on the CPU (BRAIN_TEST_DEVICE=vulkan or
+                            # gpu0:cuda runs it on that GPU; make test/vulkan, test/cuda)
 make test/gradcheck              # finite-difference backprop gate
 make test/parity                 # cross-backend parity gate: CPU == Vulkan == NPU
 make generate/kernels/registry          # after adding/removing a crates/kernels/wgsl/*.wgsl

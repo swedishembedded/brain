@@ -232,3 +232,6 @@ fn clip_class_token_row_is_the_imported_class_embd() {
     println!("  clip_input_cls   cos {cos:.10}  max_abs {max_abs:.3e}  n={}", want.len());
     assert_eq!(max_abs, 0.0, "the class token must be the imported tensor verbatim");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

@@ -20,3 +20,6 @@ mod lora_runtime_dev;
 mod lora_train;
 mod overfit;
 mod recompute;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

@@ -37,6 +37,10 @@ fn mib(b: u64) -> f64 {
 /// default in a bare test binary is card 0 whether or not anything else is
 /// already living there.
 fn card_with_room(want_mib: u64) -> Option<String> {
+    // Only a card the harness named (BRAIN_TEST_DEVICE): the others belong to someone else on a shared node.
+    if !brain_testutil::device::device().is_gpu() {
+        return None;
+    }
     let out = std::process::Command::new("nvidia-smi")
         .args(["--query-gpu=index,memory.free", "--format=csv,noheader,nounits"])
         .output()

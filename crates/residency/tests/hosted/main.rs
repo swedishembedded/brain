@@ -18,3 +18,6 @@ fn main() {
     #[cfg(not(target_os = "linux"))]
     println!("test result: ok. 0 passed; the hosted tests need Linux (memfds, process groups) and were not run");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

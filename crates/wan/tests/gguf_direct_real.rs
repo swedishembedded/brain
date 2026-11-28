@@ -251,18 +251,11 @@ fn random_inputs(cfg: &WanConfig, f: u32, h: u32, w: u32) -> RandomInputs {
     }
 }
 
-/// Force the ambient ([`WanDtype::gpu_device`]'s `None`) ONE TIME, before the
-/// first GPU build in this process, to `BRAIN_DEVICE=vulkan` -
-/// `crate::devices::ambient_compute_set` in `gpu-core` reads `BRAIN_DEVICE`
-/// through a `OnceLock`, so this only has an effect if called before that
-/// first read. See [`gpu_device`]'s doc for why this matters at 14B.
+/// The ambient device ([`WanDtype::gpu_device`]'s `None`) must be a GPU for a quantized 14B build: the harness
+/// names it (`BRAIN_TEST_DEVICE=vulkan`, which this binary takes when it loads). See [`gpu_device`]'s doc for why
+/// this matters at 14B.
 fn force_vulkan_backend_once() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        if std::env::var_os("BRAIN_DEVICE").is_none() {
-            std::env::set_var("BRAIN_DEVICE", "vulkan");
-        }
-    });
+    let _ = brain_testutil::device::gpu();
 }
 
 /// The device string a quantized (int8/int4) GPU build must use: `None`
@@ -609,3 +602,6 @@ fn wan_gguf_int8_and_int4_dit_match_fp32_and_degrade_smoothly_with_depth() {
         }
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

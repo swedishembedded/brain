@@ -95,3 +95,6 @@ fn kto_gradients_match_finite_differences_for_desirable_and_undesirable_examples
         assert!(report.dead_gradients().is_empty(), "KTO (desirable {desirable}): dead gradients {:?}", report.dead_gradients());
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

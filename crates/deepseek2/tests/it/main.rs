@@ -23,3 +23,6 @@ mod serve_fast;
 mod shard_parity;
 mod streamed_construction;
 mod weight_read_order_bench;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

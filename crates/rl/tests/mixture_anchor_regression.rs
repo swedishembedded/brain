@@ -109,3 +109,6 @@ fn mixing_in_the_anchor_keeps_held_out_anchor_loss_from_degrading_as_much_as_pri
         "expected the Mixture branch's anchor loss ({mixture_anchor_loss}) to be measurably lower than training on the primary objective alone ({primary_only_anchor_loss})"
     );
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

@@ -15,3 +15,6 @@ mod recompute;
 mod tensor_core;
 mod wgpu_block_count_corruption;
 mod wgpu_real_weight_parity;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

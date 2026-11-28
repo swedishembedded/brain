@@ -237,3 +237,6 @@ fn a_quantization_is_named_by_the_reference_grammars_own_suffix() {
     assert_eq!(t.artifact, None, "a quant suffix names a quantization, not a file path");
     assert!(parse_pull_arg("unsloth/FLUX.2-klein-9B-GGUF:Q8_0").is_err(), "the colon form is the adapter grammar and must not be reinterpreted");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

@@ -21,3 +21,6 @@ mod named_moments;
 mod offload_parity;
 mod parallel_update;
 mod streamed_state;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

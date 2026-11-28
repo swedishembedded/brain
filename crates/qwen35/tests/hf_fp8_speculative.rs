@@ -195,3 +195,6 @@ gpu_core::card_tests!(
     one_mixed_verify_forward_matches_a_prefill_round_and_a_verify_step,
     one_mixed_verify_forward_over_bf16_pools_matches_a_prefill_round_and_a_verify_step
 );
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

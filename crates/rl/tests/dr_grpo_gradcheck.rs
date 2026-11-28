@@ -20,3 +20,6 @@ fn dr_grpo_adapter_gradients_match_finite_differences() {
     let regime = pg_regime::Regime { name: "dr-grpo", norm: AdvantageNorm::MeanCentered, band: ClipBand::symmetric(0.2), kl_beta: 0.0, loss_agg: LossAgg::ConstantLength(pg_regime::T as u32) };
     pg_regime::check(regime, [1.0, 0.25]);
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

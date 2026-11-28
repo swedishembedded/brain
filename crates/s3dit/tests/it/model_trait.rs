@@ -6,7 +6,7 @@
 //! optimiser (`model::DdpOptimizer`, reducing through a `Collective`) drives it to
 //! convergence — i.e. Z-Image now rides the same training machinery as every other
 //! brain model, so multi-GPU / multi-machine / federated come for free. Needs a
-//! GPU: `BRAIN_DEV_GPU=1`.
+//! GPU: `BRAIN_TEST_DEVICE=gpu`.
 
 use model::{Collective, DdpOptimizer, HostCollective, Model};
 use s3dit::modelgrad::{Cfg, ModelWeights};
@@ -68,8 +68,8 @@ fn batch(c: &Cfg, r: &mut impl FnMut() -> f64) -> Batch {
 
 #[test]
 fn zimage_is_a_model_and_trains_via_ddp_optimizer() {
-    if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
-        brain_testutil::skip_unavailable("set BRAIN_DEV_GPU=1 (needs a GPU) for the Z-Image Model-trait test");
+    if !brain_testutil::device::device().is_gpu() {
+        brain_testutil::skip_unavailable("set BRAIN_TEST_DEVICE=gpu (needs a GPU) for the Z-Image Model-trait test");
         return;
     }
     let c = cfg();
@@ -113,8 +113,8 @@ fn zimage_is_a_model_and_trains_via_ddp_optimizer() {
 /// Spec: Z-Image's host-side AdamW holds its moments in the run's state format through the generic precision path.
 #[test]
 fn zimage_trains_with_narrow_host_optimizer_state() {
-    if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
-        brain_testutil::skip_unavailable("set BRAIN_DEV_GPU=1 (needs a GPU) for the Z-Image host optimizer test");
+    if !brain_testutil::device::device().is_gpu() {
+        brain_testutil::skip_unavailable("set BRAIN_TEST_DEVICE=gpu (needs a GPU) for the Z-Image host optimizer test");
         return;
     }
     let c = cfg();
@@ -134,8 +134,8 @@ fn zimage_trains_with_narrow_host_optimizer_state() {
 /// `activations=recompute` as what it already does and refuses keeping every layer by name.
 #[test]
 fn zimage_always_recomputes() {
-    if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
-        brain_testutil::skip_unavailable("set BRAIN_DEV_GPU=1 (needs a GPU) for the Z-Image recompute test");
+    if !brain_testutil::device::device().is_gpu() {
+        brain_testutil::skip_unavailable("set BRAIN_TEST_DEVICE=gpu (needs a GPU) for the Z-Image recompute test");
         return;
     }
     let c = cfg();

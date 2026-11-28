@@ -747,3 +747,6 @@ async fn a_jobs_input_is_its_owners_alone_and_a_job_that_reads_none_says_so() {
     let (status, _) = call(&rig.app, Method::POST, &format!("/v1/jobs/{id}/records"), "alice", None).await;
     assert_eq!(status, StatusCode::GONE, "a cancelled job takes no input");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

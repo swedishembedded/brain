@@ -17,3 +17,6 @@ mod outcome_report;
 mod rejection;
 mod sampling_defaults;
 mod score;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

@@ -43,3 +43,6 @@ fn the_real_tokenizer_encodes_like_the_reference() {
         assert_eq!(tok.decode(want), text, "{want:?}");
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

@@ -21,3 +21,6 @@ mod sibling_models;
 mod supervision;
 mod supervisor_model;
 mod workload_cards;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

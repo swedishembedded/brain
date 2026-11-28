@@ -19,3 +19,6 @@ mod recompute;
 mod reverse_memory;
 mod sdxl_decode_parity;
 mod tiled_parity;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

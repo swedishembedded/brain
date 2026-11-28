@@ -32,3 +32,6 @@ fn cpu_register_equals_cpu_naive() {
         assert!(maxd < 1e-4, "cpu register-gemm routing differs from naive (max-abs {maxd})");
     })
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

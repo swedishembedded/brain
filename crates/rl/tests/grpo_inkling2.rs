@@ -113,3 +113,6 @@ fn grpo_replays_each_completions_recorded_routing_on_inkling2() {
     let (gap, replayed) = (st.serve_gap.expect("measured"), st.serve_gap_replayed.expect("measured with replay"));
     assert_ne!(gap.gap_mean, replayed.gap_mean, "a record with other experts is applied");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

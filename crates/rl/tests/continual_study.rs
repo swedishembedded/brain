@@ -739,3 +739,6 @@ fn reduced_ablation_of_the_ratio_basis_and_dynamic_sampling() {
     println!("decision rule (B > A on every seed): {}   (C > B on every seed: {})", if b_beats_a { "MET" } else { "NOT MET" }, c_beats_b);
     assert!(acc.iter().flatten().all(|v| v.is_finite()), "a study produced a non-finite ACC: {acc:?}");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

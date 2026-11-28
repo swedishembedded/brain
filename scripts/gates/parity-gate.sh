@@ -14,8 +14,8 @@
 #      NPU == CPU for inference. Runs on the OpenVINO CPU device, over the model store's
 #      Qwen3-TTS codec, with the OpenVINO runtime of the active virtualenv.
 #   4. The same gradcheck suite and the model FD suites on the CUDA backend
-#      (BRAIN_BACKEND=cuda on the card `cuda-device.sh` picks; BRAIN_DEVICE=gpuN
-#      chooses it) - CPU == Vulkan == CUDA. Skipped with a message where no
+#      (BRAIN_TEST_DEVICE=gpuN:cuda on the card `cuda-device.sh` picks;
+#      BRAIN_TEST_DEVICE=gpuN chooses it) - CPU == Vulkan == CUDA. Skipped with a message where no
 #      NVIDIA device exists.
 #   5. The CUDA backend's native (tuned) kernels agree with the WGSL
 #      reference provider on the same device - CUDA's second implementation of
@@ -34,14 +34,8 @@ run() {
     if "$@"; then echo "  PASS: $desc"; else echo "  FAIL: $desc"; fail=1; fi
     echo
 }
-# A GPU leg cannot run until the device seam exists; it fails, never passes on the CPU in its place.
-gpu_leg() {
-    echo "=== $1 ==="
-    echo "  FAIL: not run: a test binary is no longer steered to a GPU by BRAIN_DEVICE/BRAIN_BACKEND (an unconfigured process runs on the CPU); this leg waits for the test-harness device seam (the brain ledger, engineering cleanup EC-4 step 2)" >&2
-    echo "  FAIL: $1"; fail=1; echo
-}
 
-run "gradcheck suite — CPU backend"    env BRAIN_DEVICE=cpu    cargo test --release -q -p brain-gradcheck
+run "gradcheck suite - CPU backend"    env BRAIN_TEST_DEVICE=cpu    cargo test --release -q -p brain-gradcheck
 # Vulkan line, one deliberate difference from the CPU line (knowledge #300):
 # --test-threads=1: concurrent tests on the one shared Vulkan device give
 # wrong results (cross-group leaks) and ERROR_DEVICE_LOST, at the baseline
@@ -49,13 +43,15 @@ run "gradcheck suite — CPU backend"    env BRAIN_DEVICE=cpu    cargo test --re
 # The shared-device race itself is tracked in .agents/roadmap/. The bf16
 # training gate runs here too since the Vulkan backend reports its bf16 storage
 # tier (knowledge #558).
-gpu_leg "gradcheck suite - Vulkan backend (incl. CPU==GPU forward parity)"
+run "gradcheck suite - Vulkan backend (incl. CPU==GPU forward parity)" \
+                                       env BRAIN_TEST_DEVICE=vulkan cargo test --release -q -p brain-gradcheck --no-fail-fast -- --test-threads=1
 
 # CUDA line: the whole suite, no skips (three tests that failed here were fixed or shown to be properties of the check;
 # see .agents/roadmap/cuda.md and knowledge 408).
 CUDA_DEVICE=$(cuda_device)
 if [ -n "$CUDA_DEVICE" ]; then
-    gpu_leg "gradcheck suite - CUDA backend on $CUDA_DEVICE (incl. CPU==CUDA forward parity)"
+    run "gradcheck suite - CUDA backend on $CUDA_DEVICE (incl. CPU==CUDA forward parity)" \
+        env BRAIN_TEST_DEVICE="$CUDA_DEVICE:cuda" cargo test --release -q -p brain-gradcheck --no-fail-fast -- --test-threads=1
 else
     echo "=== gradcheck suite - CUDA backend: SKIP (no NVIDIA device on this machine) ==="; echo
 fi
@@ -66,12 +62,14 @@ fi
 # provably on both. Same discipline, both backends:
 # backend-specific silent-zero gradients are exactly what one-backend FD runs
 # cannot see.
-run "model FD suites (MoE/ViT backward) — CPU backend" \
-    env BRAIN_DEVICE=cpu    cargo test --release -q -p brain-model --test moe_block_gradcheck --test vit_block_gradcheck --test moe_sparse_bwd_parity
-gpu_leg "model FD suites (MoE/ViT backward) - Vulkan backend"
+run "model FD suites (MoE/ViT backward) - CPU backend" \
+    env BRAIN_TEST_DEVICE=cpu    cargo test --release -q -p brain-model --test moe_block_gradcheck --test vit_block_gradcheck --test moe_sparse_bwd_parity
+run "model FD suites (MoE/ViT backward) - Vulkan backend" \
+    env BRAIN_TEST_DEVICE=vulkan cargo test --release -q -p brain-model --test moe_block_gradcheck --test vit_block_gradcheck --test moe_sparse_bwd_parity
 
 if [ -n "$CUDA_DEVICE" ]; then
-    gpu_leg "model FD suites (MoE/ViT backward) - CUDA backend"
+    run "model FD suites (MoE/ViT backward) - CUDA backend" \
+        env BRAIN_TEST_DEVICE="$CUDA_DEVICE:cuda" cargo test --release -q -p brain-model --test moe_block_gradcheck --test vit_block_gradcheck --test moe_sparse_bwd_parity
 fi
 
 # REMAINING (audit F15, models batch): crates/moondream3, crates/nemotronasr and
@@ -81,9 +79,9 @@ fi
 
 # int8 paged KV is the serving default (qwen::serve): translation to the CPU
 # JIT is NOT execution, and the serving perf gate itself
-# runs on BRAIN_DEVICE=cpu, so this must be green before the default flips.
+# runs on the CPU, so this must be green before the default flips.
 run "qwen serve suite — CPU backend (int8 KV is the serving default)" \
-                                       env BRAIN_DEVICE=cpu    cargo test --release -q -p brain-qwen3 --lib serve::
+                                       env BRAIN_TEST_DEVICE=cpu    cargo test --release -q -p brain-qwen3 --lib serve::
 
 # The CUDA backend's native kernels are a SECOND implementation of
 # operators the WGSL catalogue already implements, so "CPU == Vulkan" is no

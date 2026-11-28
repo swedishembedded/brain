@@ -55,3 +55,6 @@ mod shard_parity;
 mod streamed_vs_eager_real;
 mod upsampler_parity;
 mod upscale;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

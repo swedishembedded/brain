@@ -20,6 +20,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+brain-testutil.workspace = true
 # The JSON-format test parses each emitted line back, rather than
 # string-matching it - a line that only "looks like" JSON is exactly the
 # defect the --trace-format json option exists to avoid.

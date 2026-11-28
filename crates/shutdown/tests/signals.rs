@@ -84,3 +84,6 @@ fn sigterm_stops_a_process_whose_stderr_reader_is_gone() {
 fn sigint_stops_a_process_whose_stderr_reader_is_gone() {
     assert_eq!(signal_child_with_closed_stderr(libc::SIGINT), Some(FIRED_EXIT), "SIGINT must fire the shutdown even when logging it fails");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

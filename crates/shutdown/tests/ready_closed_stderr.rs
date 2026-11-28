@@ -55,3 +55,6 @@ fn bound_creates_the_marker_when_the_stderr_reader_is_gone() {
     assert!(status.success(), "Gate::bound must not panic when stderr is closed (child: {status})");
     assert!(created, "the readiness marker must exist");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

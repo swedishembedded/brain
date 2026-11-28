@@ -33,3 +33,6 @@ mod talker_onnx;
 mod upscale_onnx;
 mod vae_onnx;
 mod wm_onnx;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

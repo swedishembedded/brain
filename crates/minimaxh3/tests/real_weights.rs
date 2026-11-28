@@ -409,3 +409,6 @@ gpu_core::card_tests!(
     int8_weight_rounding_by_linear_kind_and_group,
     int8_weight_rounding_on_real_generation_inputs,
 );
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

@@ -92,3 +92,6 @@ fn the_fused_query_key_backward_matches_the_host_pipeline() {
 }
 
 gpu_core::card_tests!(the_fused_query_key_backward_matches_the_host_pipeline,);
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

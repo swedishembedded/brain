@@ -134,3 +134,6 @@ fn attention_throughput_against_the_fma_peak() {
 }
 
 gpu_core::card_tests!(attention_throughput_against_the_fma_peak);
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

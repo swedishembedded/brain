@@ -8,7 +8,7 @@
 //! matmul_dw_reg, rms_inv_eps/rmsnorm_dw/rmsnorm_dx_eps, attn_bwd_*_bidir,
 //! interleaved-RoPE-via-negated-sin, silu_bwd_* — reproduces those gradients.
 //! Matching the gradchecked host to fp32 tolerance transitively validates the
-//! device gradients. Needs a GPU: `BRAIN_DEV_GPU=1`.
+//! device gradients. Needs a GPU: `BRAIN_TEST_DEVICE=gpu`.
 
 use s3dit::grad::{backward, forward, Dims, Grads, Weights};
 
@@ -47,8 +47,8 @@ fn rel_l2(a: &[f64], b: &[f64]) -> f64 {
 
 #[test]
 fn device_block_backward_matches_host() {
-    if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
-        brain_testutil::skip_unavailable("set BRAIN_DEV_GPU=1 (needs a GPU) for the device block-backward parity test");
+    if !brain_testutil::device::device().is_gpu() {
+        brain_testutil::skip_unavailable("set BRAIN_TEST_DEVICE=gpu (needs a GPU) for the device block-backward parity test");
         return;
     }
     // A tile-friendly small config: dim 128 (1 tile), 4 heads (hd 32), 16 tokens.

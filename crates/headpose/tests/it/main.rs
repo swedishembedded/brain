@@ -26,3 +26,6 @@ pub fn rotation(yaw: f64, pitch: f64, roll: f64) -> [f64; 9] {
     let rz = [cr, -sr, 0.0, sr, cr, 0.0, 0.0, 0.0, 1.0];
     mm(&ry, &mm(&rx, &rz))
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

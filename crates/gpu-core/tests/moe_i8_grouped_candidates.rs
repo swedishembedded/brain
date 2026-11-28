@@ -59,3 +59,6 @@ fn every_candidate_keeps_its_promise_on_the_rounds_it_serves() {
         assert!(n > 0, "{name} served none of the rounds: the gate checked nothing of it");
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

@@ -50,3 +50,6 @@ fn the_native_attention_tracks_the_generated_tier() {
     assert!(err > 0.0, "identical output means the native kernel did not run");
     assert!(err <= 1e-2 * scale, "fp16 attention drifted {err} from the generated tier (scale {scale})");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

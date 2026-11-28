@@ -33,3 +33,6 @@ fn sdl_texture_roundtrip_is_pixel_faithful() {
     let back = win.captured().expect("the presented frame was captured");
     assert_eq!(back, rgb, "SDL texture path altered pixels (format/pitch bug)");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

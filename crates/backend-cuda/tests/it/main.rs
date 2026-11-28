@@ -18,3 +18,6 @@ mod wgsl_cuda_bounds;
 mod wgsl_cuda_golden;
 mod wgsl_cuda_structs;
 mod wgsl_cuda_vectors;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

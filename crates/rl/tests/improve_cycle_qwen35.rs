@@ -74,3 +74,6 @@ fn an_improve_cycle_runs_on_qwen35() {
         assert_eq!(st.card().expect("a model card").family, "qwen35");
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

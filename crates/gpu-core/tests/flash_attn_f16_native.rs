@@ -282,3 +282,6 @@ gpu_core::card_tests!(
     the_served_sam_shapes_match,
     the_packed_kernel_matches_the_f64_oracle,
 );
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

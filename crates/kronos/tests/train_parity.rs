@@ -209,3 +209,6 @@ fn training_forward_matches_the_reference() {
     let dl = (loss as f64 - ref_loss).abs() / ref_loss.abs();
     assert!(dl < TOL, "TR: the training objective diverges (brain {loss} vs ref {ref_loss}, rel {dl:.3e})");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

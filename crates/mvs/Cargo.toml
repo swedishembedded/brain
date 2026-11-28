@@ -30,6 +30,7 @@ brain-splat.workspace = true
 brain-sfm.workspace = true
 
 [dev-dependencies]
+brain-testutil.workspace = true
 # `data::rng::Lcg` - the one deterministic test PRNG (synthetic textures).
 brain-data.workspace = true
 # `imaging::{load, save}` - photographs in and visualisations out, in the

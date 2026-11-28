@@ -430,3 +430,6 @@ fn an_adapter_model_that_trains_base_tensors_fails_the_trainable_audit() {
     let err = model::conformance_trainable::trainable_set_matches_declaration(&subject, 41).expect_err("the adapter model trains base tensors");
     assert!(err.contains("qwen3") && err.contains("not an adapter tensor"), "{err}");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

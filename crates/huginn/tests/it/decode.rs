@@ -63,10 +63,7 @@ fn one_token_at_a_time_matches_the_full_forward_at_every_position() {
 /// The backend the test binary actually got, not the one the run intended.
 #[test]
 fn the_model_runs_on_the_backend_the_run_requested() {
-    let want = std::env::var("BRAIN_BACKEND").unwrap_or_default().trim().to_ascii_lowercase();
-    if want.is_empty() {
-        return;
-    }
+    let want = brain_testutil::device::device().set.backend.name();
     let cfg = HuginnConfig::tiny();
     let w = init_weights(&cfg, 17);
     let model = Huginn::new(cfg, 1, 2, &w);

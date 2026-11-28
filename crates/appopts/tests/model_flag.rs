@@ -58,3 +58,6 @@ fn a_missing_model_is_an_error_with_the_flag_named_in_it() {
 fn the_help_names_the_flag() {
     assert!(ModelChoice::help().contains("--model"));
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

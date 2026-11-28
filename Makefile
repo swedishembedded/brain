@@ -411,7 +411,7 @@ test/slow:
 #
 # `test/parity` (bare, not `/strict`) is in this list for a different reason:
 # it is the ONLY target here that runs the gradcheck suite under
-# BRAIN_DEVICE=cpu. `test`/`test/gradcheck` run on the CPU (an unconfigured process's device)
+# BRAIN_TEST_DEVICE=cpu. `test`/`test/gradcheck` run on the CPU (an unconfigured process's device)
 # only, so a model whose CPU path silently diverges from its GPU path - a
 # kernel pairing that assumes a shared Params contract neither kernel actually
 # shares, two kernel table entries the CPU JIT's single function namespace
@@ -491,9 +491,20 @@ test/rl:
 test/conformance:
 	$(CARGO_TEST) -p brain-rl --features qwen3 --test conformance
 
-# Every workspace crate's tests on the CUDA backend (BRAIN_BACKEND=cuda), one
+# Every workspace crate's tests on the CUDA backend (BRAIN_TEST_DEVICE=gpu:cuda), one
 # crate at a time, as a per-crate JSON report. Slow: a build and a run of the
 # whole workspace. `make test/cuda-matrix CRATES="qwen3 gpt2"` runs a few.
+# The fast lane on a GPU: the same tests with every test binary told the device (BRAIN_TEST_DEVICE). `make test`
+# runs on the CPU, the device of a test binary nothing configured. TEST_CUDA_DEVICE picks the card.
+TEST_CUDA_DEVICE ?= gpu
+## test/vulkan - the fast lane with every test binary on the Vulkan backend (BRAIN_TEST_DEVICE=vulkan)
+test/vulkan:
+	BRAIN_TEST_DEVICE=vulkan $(MAKE) test
+
+## test/cuda - the fast lane with every test binary on the CUDA backend (BRAIN_TEST_DEVICE=$(TEST_CUDA_DEVICE):cuda)
+test/cuda:
+	BRAIN_TEST_DEVICE=$(TEST_CUDA_DEVICE):cuda $(MAKE) test
+
 ## test/cuda-matrix - every workspace crate's tests on the CUDA backend, one at a time (CRATES="a b" for a few)
 test/cuda-matrix:
 	scripts/test/cuda-matrix.py -o cuda-matrix.json $(CRATES)
@@ -508,7 +519,7 @@ test/parity:
 # Per-backend performance floors: the hot ops of serving timed on each backend
 # this machine has (CPU, Vulkan, CUDA) by one focused test binary, compared with
 # the rates recorded per device class in scripts/gates/perf-floors/. A couple of
-# minutes, not a model run. BRAIN_DEVICE=gpuN picks the CUDA card; PERF_FLOOR_TOLERANCE
+# minutes, not a model run. BRAIN_TEST_DEVICE=gpuN picks the CUDA card; PERF_FLOOR_TOLERANCE
 # (default 0.25) is the fraction a rate may fall below its floor.
 ## test/perf - default: per-backend hot-op performance floors on every available backend
 ##   (test/perf/cpu, /vulkan, /cuda run one backend; test/perf/record re-records the floors)
@@ -921,6 +932,9 @@ check/clippy: check/workspace
 # check-device-env-unread.sh additionally requires that BRAIN_DEVICE and
 # BRAIN_BACKEND are read nowhere under crates/*/src: a device is asked for by
 # flag or placement, and a process nothing configured runs on the CPU.
+# check-test-device-seam.sh additionally requires that BRAIN_TEST_DEVICE is read
+# only by brain_testutil::device::device() and that brain-testutil stays a
+# dev-dependency.
 # check-arch-names.sh additionally requires every crates/arch architecture
 # row to name a real, correspondingly-named crate (bar an explicit, dated
 # exception list), the CLI's top-level dispatch to never hard-code an
@@ -954,6 +968,7 @@ check/scripts:
 	bash scripts/gates/check-no-perf-numbers.sh
 	bash scripts/gates/check-measured-citations.sh
 	bash scripts/gates/check-device-env-unread.sh
+	bash scripts/gates/check-test-device-seam.sh
 	bash scripts/gates/check-arch-names.sh
 	bash scripts/gates/check-linear-history.sh
 	bash scripts/gates/check-golden-source.sh
@@ -1138,7 +1153,7 @@ ci/static: ci/static/scripts check/env-reads check/env-writes check/test-skips c
 # locally. `check-crate-layers.sh` runs here, where the registry is reachable.
 ## ci/static/scripts - the clean members of check/scripts (script syntax, env docs, citations, doc links, architecture, layering, kernel and format gates)
 ci/static/scripts:
-	@for gate in check-scripts check-env-docs check-no-doc-citations check-measured-citations check-device-env-unread check-arch-names check-linear-history check-golden-source check-doc-links check-kernel-selection check-crate-layers check-placement-accounting check-training-capabilities check-model-flags check-adapter-naming check-format-logic check-tier-gemm check-whole-tensor-loads check-cancellable-actions check-no-perf-numbers check-multi-gpu-sharding; do \
+	@for gate in check-scripts check-env-docs check-no-doc-citations check-measured-citations check-device-env-unread check-test-device-seam check-arch-names check-linear-history check-golden-source check-doc-links check-kernel-selection check-crate-layers check-placement-accounting check-training-capabilities check-model-flags check-adapter-naming check-format-logic check-tier-gemm check-whole-tensor-loads check-cancellable-actions check-no-perf-numbers check-multi-gpu-sharding; do \
 	    bash scripts/gates/$$gate.sh || exit 1; \
 	done
 
@@ -1152,7 +1167,7 @@ ci/cpu: ci/cpu/unit ci/cpu/e2e
 
 ## ci/cpu/unit - unit and integration tests of CI_CPU_CRATES on the CPU backend, no skips allowed
 ci/cpu/unit:
-	$(call ci_suite,BRAIN_DEVICE=cpu $(CARGO_TEST) $(addprefix -p ,$(CI_CPU_CRATES)) --lib --bins --tests -- --test-threads=$(TEST_THREADS),cpu-unit,cargo)
+	$(call ci_suite,BRAIN_TEST_DEVICE=cpu $(CARGO_TEST) $(addprefix -p ,$(CI_CPU_CRATES)) --lib --bins --tests -- --test-threads=$(TEST_THREADS),cpu-unit,cargo)
 
 ## ci/cpu/e2e - the end-to-end bats suites that serve the weight-free mock model
 ci/cpu/e2e: ci/cpu/e2e/api-conformance ci/cpu/e2e/video-api ci/cpu/e2e/shutdown ci/cpu/e2e/ready
@@ -1777,7 +1792,7 @@ _train/need-wrapper:
 define train_run
 @mkdir -p $(TRAIN_RUN_DIR)
 @set -o pipefail; \
-	BRAIN_BACKEND=$(TRAIN_BACKEND) BRAIN_PROFILE=1 $(GPU_WRAPPER) --exclusive $(1) 2>&1 | tee $(TRAIN_RUN_DIR)/$(2).log
+	BRAIN_PROFILE=1 $(GPU_WRAPPER) --exclusive $(1) --backend $(TRAIN_BACKEND) 2>&1 | tee $(TRAIN_RUN_DIR)/$(2).log
 @python3 scripts/perf/group-kernels.py $(TRAIN_RUN_DIR)/$(2).log | tee $(TRAIN_RUN_DIR)/$(2)-components.txt
 endef
 
@@ -2390,7 +2405,7 @@ help:
         environment environment/requirements environment/full environment/openvino \
         npu npu/diagnose \
         test test/nextest test/one test/package test/doc test/slow test/full test/times test/capability-report \
-        test/gradcheck test/rl test/conformance test/cuda-matrix \
+        test/gradcheck test/rl test/conformance test/cuda-matrix test/vulkan test/cuda \
         test/parity test/parity/strict test/parity/forecast test/parity/wan \
         test/e2e test/e2e/api-conformance test/e2e/video-api test/e2e/shutdown test/e2e/samples test/e2e/ready test/e2e/ripple \
         test/gpu test/gpu/ripple test/gpu/ripple/suites test/gpu/ripple/cargo test/gpu/ripple/e2e \

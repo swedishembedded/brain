@@ -99,7 +99,7 @@ fn sdxl_vae_decode_matches_diffusers() {
     assert_eq!(lshape, &vec![1, 4, 16, 16], "latent shape");
     let (h, w) = (lshape[2] as u32, lshape[3] as u32);
 
-    let device = std::env::var("BRAIN_VAE_DEVICE").unwrap_or_else(|_| "cpu".to_string());
+    let device = brain_testutil::device::device().device.clone();
     let dec = VaeDecoder::from_diffusers(cfg, &weights, h, w, Some(&device));
     let got = dec.decode(latent);
 

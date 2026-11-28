@@ -16,3 +16,6 @@ mod llm_parity;
 mod lm_overfit;
 mod lm_recompute;
 mod pipeline_e2e;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

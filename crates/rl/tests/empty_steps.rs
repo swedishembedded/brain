@@ -117,3 +117,6 @@ fn a_token_id_past_the_models_vocabulary_stops_the_run() {
     let example = DistillExample { prompt: vec![1, 2], completion: vec![3], teacher: vec![rl::objective::distill::TopK { ids: vec![vocab + 1], probs: vec![1.0] }] };
     assert_malformed_record_aborts_before_any_update(1, DistillTopK::from_examples(DistillConfig { seq_len: SEQ_LEN }, vec![example]), "vocabulary");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

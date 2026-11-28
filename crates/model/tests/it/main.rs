@@ -189,3 +189,6 @@ mod vit_windowed;
 mod weight_round_trip;
 mod zero_job;
 mod zero_shard;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

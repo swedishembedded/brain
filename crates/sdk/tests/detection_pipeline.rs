@@ -226,3 +226,6 @@ fn the_real_yolov5s_relu_checkpoint_detects_what_onnxruntime_detects() {
         assert!((g.confidence - w[4]).abs() < 1e-3 && (g.x1 - w[0]).abs() < 0.1 && (g.y1 - w[1]).abs() < 0.1 && (g.x2 - w[2]).abs() < 0.1 && (g.y2 - w[3]).abs() < 0.1, "{g:?} vs {w:?}");
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

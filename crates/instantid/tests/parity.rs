@@ -243,3 +243,6 @@ fn decoupled_attention_matches_the_reference() {
     assert!(widths.len() >= 2, "only width(s) {widths:?} gated — SDXL has two, and heads = hidden/64 differs");
     eprintln!("Decoupled attention: {checked} comparisons over widths {widths:?}, 0 failed");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

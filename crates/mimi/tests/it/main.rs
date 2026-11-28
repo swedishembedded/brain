@@ -14,3 +14,6 @@ mod decode_stream_parity;
 mod encode;
 mod encode_batch;
 mod long_form_window;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

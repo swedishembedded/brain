@@ -5,7 +5,7 @@
 //! both P40s (front + main[0,cut) on card 0, main[cut,end) on card 1, head on
 //! host), streaming each stage's layers so neither card nor RAM can overflow. We
 //! check (1) its gradients match the single-device path and (2) it overfits a
-//! batch — trained across two cards. Needs 2 GPUs: `BRAIN_DEV_GPU=1`.
+//! batch, trained across two cards. Needs 2 GPUs: `BRAIN_TEST_DEVICE=gpu`.
 
 use s3dit::modelgrad::{Cfg, ModelGradsF32, ModelWeights};
 use s3dit::shard::ShardTrainer;
@@ -98,8 +98,8 @@ static DEVICE_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[test]
 fn two_card_pipeline_matches_single_device() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
-        brain_testutil::skip_unavailable("set BRAIN_DEV_GPU=1 (needs 2 GPUs) for the 2-card pipeline test");
+    if !brain_testutil::device::device().is_gpu() {
+        brain_testutil::skip_unavailable("set BRAIN_TEST_DEVICE=gpu (needs 2 GPUs) for the 2-card pipeline test");
         return;
     }
     let c = cfg();
@@ -127,8 +127,8 @@ fn two_card_pipeline_matches_single_device() {
 #[test]
 fn gpipe_microbatched_matches_summed_grads() {
     let _serial = DEVICE_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
-        brain_testutil::skip_unavailable("set BRAIN_DEV_GPU=1 (needs 2 GPUs) for the GPipe microbatch test");
+    if !brain_testutil::device::device().is_gpu() {
+        brain_testutil::skip_unavailable("set BRAIN_TEST_DEVICE=gpu (needs 2 GPUs) for the GPipe microbatch test");
         return;
     }
     let c = cfg();

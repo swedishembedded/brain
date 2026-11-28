@@ -330,3 +330,6 @@ fn vit_block_gradcheck_trunk() {
 fn vit_block_gradcheck_dino() {
     gradcheck(false, true, 0xd1a0, "dino");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

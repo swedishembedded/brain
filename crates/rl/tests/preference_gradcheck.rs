@@ -104,3 +104,6 @@ fn check_ipo_simpo_orpo_qwen3() {
         assert!(report.dead_gradients().is_empty(), "{}: dead gradients {:?}", loss.name(), report.dead_gradients());
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

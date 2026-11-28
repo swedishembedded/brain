@@ -584,3 +584,6 @@ gpu_core::card_tests!(
     the_biased_forward_is_within_the_bound_and_exact_on_integer_data,
     the_vae_3x3_convs_take_the_direct_kernel_bit_identical_to_the_implicit_gemm,
 );
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

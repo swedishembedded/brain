@@ -13,6 +13,8 @@ name = "brain_testutil"
 path = "src/lib.rs"
 
 [dependencies]
+# `device` passes the harness's device to the library, as a tool passes its flags.
+brain-gpu-core.workspace = true
 brain-modelref.workspace = true
 brain-modelstore.workspace = true
 # `parity::Report::against` reads goldens as `checkpoint::safetensors::StTensor`.

@@ -35,3 +35,6 @@ mod train_schedule;
 mod training_matches_deployment;
 mod unpaired_training_unchanged;
 mod variant_widths;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

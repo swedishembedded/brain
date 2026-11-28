@@ -512,3 +512,6 @@ gpu_core::card_tests!(
     the_tuned_cuda_matmul_clears_every_shared_parity_case,
     a_starved_tile_grid_runs_the_skinny_kernel_and_agrees_with_an_f64_oracle,
 );
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

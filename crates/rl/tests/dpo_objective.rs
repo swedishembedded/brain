@@ -172,3 +172,6 @@ fn the_logged_margin_is_the_margin_an_independent_forward_measures() {
     }
     assert!(moved > 1e-2, "the steps moved the margin ({moved}), so the comparison is not of zeros");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

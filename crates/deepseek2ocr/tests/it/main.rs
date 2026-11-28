@@ -18,3 +18,6 @@ mod real_weight_long_context;
 mod recompute;
 mod serve_real;
 mod tiny_ref;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

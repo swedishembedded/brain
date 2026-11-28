@@ -340,3 +340,6 @@ fn wan_vae_import_covers_the_shipped_checkpoint() {
         .unwrap_err();
     assert!(e.contains("unused source tensors"), "{e}");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

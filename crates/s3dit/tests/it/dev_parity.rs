@@ -50,9 +50,9 @@ fn zimage_dev_matches_reference_golden() {
         }
     }
 
-    // Backend: CPU by default; BRAIN_DEV_GPU=1 validates the reused-scratch +
+    // Backend: CPU by default; BRAIN_TEST_DEVICE=gpu validates the reused-scratch +
     // double-buffered residual + register-GEMM path on the GPU (wgpu WAR barriers).
-    let dev = if std::env::var("BRAIN_DEV_GPU").as_deref() == Ok("1") { "gpu" } else { "cpu" };
+    let dev = if brain_testutil::device::device().is_gpu() { "gpu" } else { "cpu" };
     let dit = ZImageDit::build(small_cfg(), weights, 1, 16, 8, 32, Some(dev));
     let got = dit.forward(&input["latent"], &input["cap"], input["t"][0]);
     let want = &input["out"];

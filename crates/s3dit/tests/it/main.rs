@@ -22,3 +22,6 @@ mod model_trait;
 mod real_parity;
 mod shard_2card;
 mod shard_parity;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

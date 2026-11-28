@@ -132,3 +132,6 @@ fn fit_weighted_embeds_itos_in_its_output_checkpoint() {
         .collect();
     assert_eq!(saved, itos, "fit_weighted must embed the dataset's exact char vocab in its checkpoint");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

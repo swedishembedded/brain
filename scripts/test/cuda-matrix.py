@@ -9,7 +9,7 @@
 
 """Run every workspace crate's tests on the CUDA backend and record the result.
 
-Each crate is run on its own with `BRAIN_BACKEND=cuda`, so a crate that cannot
+Each crate is run on its own with `BRAIN_TEST_DEVICE=gpu:cuda`, so a crate that cannot
 build, hangs, or fails is reported by name rather than hiding the rest. The
 output is one JSON document: per crate a status (`ok`, `failed`, `timeout`,
 `build-failed`), the count of passed, failed and ignored tests, and the names of
@@ -66,7 +66,7 @@ def workspace_crates() -> list[str]:
 
 
 def run_crate(package: str, timeout: int, extra_env: dict) -> dict:
-    env = {**os.environ, "BRAIN_BACKEND": "cuda", **extra_env}
+    env = {**os.environ, "BRAIN_TEST_DEVICE": "gpu:cuda", **extra_env}
     started = time.monotonic()
     try:
         proc = subprocess.run(
@@ -99,7 +99,6 @@ def run_crate(package: str, timeout: int, extra_env: dict) -> dict:
 
 
 def main() -> None:
-    sys.exit("cuda-matrix: a test binary is no longer steered to a GPU by BRAIN_DEVICE/BRAIN_BACKEND (an unconfigured process runs on the CPU); this leg waits for the test-harness device seam (the brain ledger, engineering cleanup EC-4 step 2)")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("crates", nargs="*", help="package names; default every workspace package")
     ap.add_argument("-o", "--output", default="cuda-matrix.json")

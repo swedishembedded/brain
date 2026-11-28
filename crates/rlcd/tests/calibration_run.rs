@@ -149,3 +149,6 @@ fn an_rlcd_run_with_the_fine_tuning_settings_is_calibrated_on_held_out_data() {
 fn a_pure_policy_gradient_rlcd_run_is_calibrated_on_held_out_data() {
     run_is_calibrated("pure policy gradient", |progress| RlcdObjective::pretrain().at(anneal(1.0, 0.3, progress)));
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

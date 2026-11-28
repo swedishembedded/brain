@@ -4,7 +4,7 @@
 //! LoRA training mechanism: with the base **frozen**, training only the low-rank
 //! adapters (A,B) via the gradchecked device trainer drives the flow-matching
 //! loss down, and the adapter round-trips through save/load. Needs a GPU:
-//! `BRAIN_DEV_GPU=1` (uses the real `DeviceTrainer` path, ModelGradsF32).
+//! `BRAIN_TEST_DEVICE=gpu` (uses the real `DeviceTrainer` path, ModelGradsF32).
 
 use std::collections::HashMap;
 
@@ -69,8 +69,8 @@ fn batch(c: &Cfg, r: &mut impl FnMut() -> f64) -> Batch {
 
 #[test]
 fn lora_only_overfits_with_base_frozen() {
-    if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
-        brain_testutil::skip_unavailable("set BRAIN_DEV_GPU=1 (needs a GPU) for the LoRA training test");
+    if !brain_testutil::device::device().is_gpu() {
+        brain_testutil::skip_unavailable("set BRAIN_TEST_DEVICE=gpu (needs a GPU) for the LoRA training test");
         return;
     }
     let c = cfg();

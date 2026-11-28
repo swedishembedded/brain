@@ -23,3 +23,6 @@ mod t3_dpt_tiny;
 mod t6_pos_interp;
 mod t8_multiframe_tiny;
 mod t9_caps_matches_direct;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

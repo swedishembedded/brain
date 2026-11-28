@@ -91,11 +91,7 @@ fn the_embedding_is_applied_once_not_per_pass() {
 /// so a green suite on a GPU box proves nothing unless this holds.
 #[test]
 fn the_model_runs_on_the_backend_the_run_requested() {
-    let want = std::env::var("BRAIN_BACKEND").unwrap_or_default();
-    let want = want.trim().to_ascii_lowercase();
-    if want.is_empty() {
-        return;
-    }
+    let want = brain_testutil::device::device().set.backend.name();
     let cfg = OuroConfig::tiny();
     let w = init_weights(&cfg, 17);
     let _model = Ouro::new_inference(cfg, 1, 2, &w);

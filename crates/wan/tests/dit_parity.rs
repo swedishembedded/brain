@@ -475,3 +475,6 @@ fn wan_dit_1_3b_reference_forward_matches() {
     }
     report("host out (vs the reference)", &out, fx.get("out"), 0.99999, 1e-3);
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

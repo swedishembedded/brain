@@ -69,3 +69,6 @@ fn brain_onnx_runs_on_the_intel_npu() {
     }
     eprintln!("NPU OK: brain-built ONNX compiled and ran on {} with correct output", sess.device());
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

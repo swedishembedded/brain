@@ -26,7 +26,7 @@
 //! the activation term still has to be measured separately.
 //!
 //! Skip-if-absent: needs `BRAIN_FLUX2_DIT` (a klein GGUF/safetensors) and
-//! `BRAIN_DEV_GPU=1`. Ignored by default - it reads gigabytes off disk.
+//! `BRAIN_TEST_DEVICE=gpu`. Ignored by default - it reads gigabytes off disk.
 
 use flux2::devgrad::{BlockDev, DoubleDev, N_SITES};
 use flux2::grad::{Dims, Mod};
@@ -90,8 +90,8 @@ fn int8_round_trip(w: &[f32], out: usize, inn: usize) -> Vec<f32> {
 #[test]
 #[ignore = "reads the real checkpoint off disk; run explicitly"]
 fn an_int8_frozen_base_and_its_effect_on_adapter_gradients() {
-    if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
-        brain_testutil::skip_unavailable("set BRAIN_DEV_GPU=1 (needs a GPU) for the int8 frozen-base measurement");
+    if !brain_testutil::device::device().is_gpu() {
+        brain_testutil::skip_unavailable("set BRAIN_TEST_DEVICE=gpu (needs a GPU) for the int8 frozen-base measurement");
         return;
     }
     let Ok(dit) = std::env::var("BRAIN_FLUX2_DIT") else {

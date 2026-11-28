@@ -470,3 +470,6 @@ fn hifi_override_still_reaches_a_real_build_attempt() {
     let err = with_models_dir(&root, || brain::ImagePipeline::builder("local/s3dit-sdk-test").hifi(true).load().unwrap_err());
     assert!(matches!(err, brain::Error::Backend(_)), "expected a clean Error::Backend from incomplete DiT construction, got {err:?}");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

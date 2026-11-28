@@ -305,3 +305,6 @@ gpu_core::card_tests!(
     a_failed_lower_is_recorded_on_the_choice_not_only_warned,
     ; host: a_policy_tuned_op_resolved_to_generated_is_a_violation, the_same_op_resolved_to_a_tuned_impl_satisfies_the_policy, the_portable_reference_does_not_satisfy_a_tuned_requirement_either, a_policy_entry_does_not_apply_below_the_compute_capability_it_names, every_skipped_provider_records_why_it_declined, the_shipped_policy_is_backed_by_the_shipped_cuda_registry,
 );
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

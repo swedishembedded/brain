@@ -10,3 +10,6 @@
 mod gguf_parity;
 mod int8_tier;
 mod vision_tower_parity;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

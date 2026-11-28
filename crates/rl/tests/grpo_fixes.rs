@@ -873,3 +873,6 @@ fn a_step_over_a_guard_bound_is_skipped_and_logged_in_online_grpo() {
     assert!(matches!(v.last(), Some(StepVerdict::Abort(_))), "every step over the bound: the run ends instead of idling: {v:?}");
     assert_eq!(skipped, MAX_CONSECUTIVE_GUARD_SKIPS as usize);
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

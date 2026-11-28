@@ -30,3 +30,6 @@ serde_json.workspace = true
 name = "hosted"
 path = "tests/hosted/main.rs"
 harness = false
+
+[dev-dependencies]
+brain-testutil.workspace = true

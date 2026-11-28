@@ -112,3 +112,6 @@ fn bench_forward_p40() {
     // The whole point: the register GEMM makes the GPU forward faster than CPU.
     assert!(gpu_reg_ms < cpu_ms, "gpu-reg forward ({gpu_reg_ms:.1}ms) not faster than cpu ({cpu_ms:.1}ms)");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

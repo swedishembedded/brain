@@ -630,3 +630,6 @@ gpu_core::card_tests!(
     ; ignored: sweep_tile_configurations, sweep_skinny_tile_configurations,
     sweep_decode_tile_configurations, sweep_prefill_configurations, prefill_selection_report,
 );
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

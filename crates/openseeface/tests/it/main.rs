@@ -67,3 +67,6 @@ pub fn gate(label: &str, got: &[f32], want: &[f32], min_cos: f32, max_abs: f32) 
     println!("  {label:<28} cos {cos:.7}  max_abs {abs:.3e}  (n={})", got.len());
     assert!(cos >= min_cos && abs <= max_abs, "{label}: cos {cos} (need >= {min_cos}), max_abs {abs} (need <= {max_abs})");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

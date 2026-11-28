@@ -19,3 +19,6 @@ brain-seed.workspace = true
 # what makes --device here mean exactly what --device means on the CLI: the
 # same parser and the same resolution, not a second grammar that agrees today.
 brain-gpu-core.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

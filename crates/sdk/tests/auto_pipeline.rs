@@ -128,3 +128,6 @@ fn from_pretrained_names_no_known_architecture_when_the_store_is_empty() {
         other => panic!("expected Error::Backend or Error::Missing, got {other:?}"),
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

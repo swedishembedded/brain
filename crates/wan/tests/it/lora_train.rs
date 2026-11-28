@@ -211,7 +211,7 @@ fn mean_loss(tcfg: &Cfg, base: &ModelWeights<f32>, adapter: &LoraAdapter, sample
 // `#[ignore]`, not just the model-store gate: this imports an 11GB bf16
 // umT5-XXL checkpoint (22.72GB as the fp32 this crate trains in) on the CPU
 // backend, unlike its siblings in dev_lora_train.rs/finetune_ab.rs, which
-// require an EXTRA opt-in (BRAIN_DEV_GPU=1 or their own #[ignore]) beyond
+// require an EXTRA opt-in (BRAIN_TEST_DEVICE=gpu or their own #[ignore]) beyond
 // just having the checkpoint. Without this, any machine holding a Wan
 // checkpoint (a real-weight validation box, a CI profile) gets this test
 // running unattended under a bare `cargo test`/`make test`.

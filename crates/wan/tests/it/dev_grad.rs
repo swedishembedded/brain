@@ -12,7 +12,7 @@
 //! gradchecked host transitively validates the device ones.
 //!
 //! Runs on the CPU backend by default (so it is always exercised) and on the
-//! real GPU with `BRAIN_DEV_GPU=1`.
+//! real GPU with `BRAIN_TEST_DEVICE=gpu`.
 
 use wan::devgrad::block_backward_device;
 use wan::grad::{block_backward, block_forward, BlockGrads, BlockW, Dims, Lin};
@@ -139,9 +139,9 @@ fn rel_l2(host: &[f64], dev: &[f64]) -> f64 {
     diff / n.max(1e-9)
 }
 
-/// `"gpu"` under `BRAIN_DEV_GPU=1`, else the CPU JIT backend.
+/// `"gpu"` under `BRAIN_TEST_DEVICE=gpu`, else the CPU JIT backend.
 fn device() -> &'static str {
-    if std::env::var("BRAIN_DEV_GPU").as_deref() == Ok("1") {
+    if brain_testutil::device::device().is_gpu() {
         "gpu"
     } else {
         "cpu"

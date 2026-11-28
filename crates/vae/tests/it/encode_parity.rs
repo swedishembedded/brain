@@ -11,7 +11,7 @@
 //! `<something>_encode` counterpart does not exist in this repo. This VAE has no
 //! `quant_conv`, so the posterior parameters are exactly the encoder `conv_out`
 //! that brain's `VaeEncoder` returns. Weights gated on `BRAIN_S3DIT_VAE` (skips
-//! if absent). CPU backend by default; `BRAIN_VAE_DEVICE=gpu` runs it on wgpu.
+//! if absent). CPU backend by default; `BRAIN_TEST_DEVICE=gpu` runs it on wgpu.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -73,7 +73,7 @@ fn zimage_vae_encode_matches_diffusers() {
     let (h, w) = (ishape[2] as u32, ishape[3] as u32);
     let (lh, lw) = (mshape[2] as u32, mshape[3] as u32);
 
-    let device = std::env::var("BRAIN_VAE_DEVICE").unwrap_or_else(|_| "cpu".to_string());
+    let device = brain_testutil::device::device().device.clone();
     let enc = VaeEncoder::from_diffusers(cfg.clone(), &weights, h, w, Some(&device));
     let got = enc.encode(image); // [32, lh, lw] moments
 

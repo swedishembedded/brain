@@ -55,3 +55,6 @@ fn zimage_freqs_match_closed_form() {
         close(t.sin[base + j], 0.0, "tok1.axis12.sin");
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

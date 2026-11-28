@@ -273,3 +273,6 @@ gpu_core::card_tests!(
     positions_that_are_not_a_shift_are_read,
     a_text_sequence_and_an_embedded_one_share_a_batch
 );
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

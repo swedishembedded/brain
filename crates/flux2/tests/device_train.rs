@@ -299,3 +299,6 @@ gpu_core::card_tests!(
     a_two_card_split_is_the_same_step_as_one_card,
     turning_the_frozen_qk_gain_gradient_off_changes_no_adapter_gradient,
 );
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

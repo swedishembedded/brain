@@ -72,3 +72,6 @@ fn glm_reg3_matches_naive_and_cpu() {
     // CPU vs GPU reduction order.
     assert!(cr < 5e-3, "glm gpu forward diverges from cpu (rel {cr:.2e})");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

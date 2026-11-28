@@ -138,3 +138,6 @@ fn mixed_iterations_keep_the_prefix_cache_and_in_flight_sharing() {
 }
 
 gpu_core::card_tests!(mixed_iterations_keep_the_prefix_cache_and_in_flight_sharing, mixed_iterations_give_the_tokens_separate_passes_give, one_mixed_forward_matches_a_prefill_round_and_a_decode_step);
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

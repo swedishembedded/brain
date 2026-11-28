@@ -348,3 +348,6 @@ fn the_error_strings_other_crates_match_on_are_part_of_the_interface() {
     let (need, capacity) = rest.split_once(" tokens, engine capacity is ").expect("the phrase apiserve parses");
     assert_eq!((need.parse::<u64>().unwrap(), capacity.trim().parse::<u64>().unwrap()), (9000, 4096));
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

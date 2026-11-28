@@ -98,3 +98,6 @@ fn the_native_kernel_is_bit_identical_to_the_wgsl_tier() {
 }
 
 gpu_core::card_tests!(the_native_kernel_is_selected_by_column_count, the_native_kernel_is_bit_identical_to_the_wgsl_tier);
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

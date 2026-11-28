@@ -81,8 +81,8 @@ fn zimage_vae_decode_matches_diffusers() {
     let (h, w) = (lshape[2] as u32, lshape[3] as u32);
 
     // Backend selectable for cross-backend parity (default CPU: deterministic,
-    // needs no GPU). `BRAIN_VAE_DEVICE=gpu` runs it on wgpu/Vulkan (the P40s).
-    let device = std::env::var("BRAIN_VAE_DEVICE").unwrap_or_else(|_| "cpu".to_string());
+    // needs no GPU). `BRAIN_TEST_DEVICE=gpu` runs it on wgpu/Vulkan (the P40s).
+    let device = brain_testutil::device::device().device.clone();
     let dec = VaeDecoder::from_diffusers(cfg, &weights, h, w, Some(&device));
     let got = dec.decode(latent);
 

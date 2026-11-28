@@ -7,7 +7,7 @@
 //! gate for training the full 6B pipeline-parallel: it proves (a) the boundary
 //! slab is complete — only `[uni ‖ c]` crosses each cut — and (b) the two halves
 //! are independent, so each can stream its layer slice on its own card with
-//! weights in RAM (the memory-safe path). Needs a GPU: `BRAIN_DEV_GPU=1`.
+//! weights in RAM (the memory-safe path). Needs a GPU: `BRAIN_TEST_DEVICE=gpu`.
 
 use s3dit::modelgrad::{Cfg, ModelGradsF32, ModelWeights};
 use s3dit::train::{Batch, DeviceTrainer};
@@ -86,8 +86,8 @@ fn rel_l2(a: &[f64], b: &[f64]) -> f64 {
 
 #[test]
 fn pipeline_cut_matches_single_device() {
-    if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
-        brain_testutil::skip_unavailable("set BRAIN_DEV_GPU=1 (needs a GPU) for the pipeline-sharding parity test");
+    if !brain_testutil::device::device().is_gpu() {
+        brain_testutil::skip_unavailable("set BRAIN_TEST_DEVICE=gpu (needs a GPU) for the pipeline-sharding parity test");
         return;
     }
     let c = cfg();

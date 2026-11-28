@@ -59,11 +59,10 @@ fn device_npu_out_of_range_index_reports_clear_diagnostic_and_exits_nonzero() {
 }
 
 /// The brain CLI is configured by its flags alone: a `BRAIN_DEVICE` left in the environment does not choose its devices -
-/// here an out-of-range `npu5`, which `--device npu5` would refuse - and the CLI says it ignored it, so a script that
-/// relied on the variable learns the flag to pass. `brain npu ...` is the subcommand to check it on: its own `--device`
+/// here an out-of-range `npu5`, which `--device npu5` would refuse. Nothing in brain reads the variable. `brain npu ...` is the subcommand to check it on: its own `--device`
 /// is a deprecated alias of `--ov-device`, so the variable used to be the only way to reach brain's device grammar there.
 #[test]
-fn the_cli_ignores_brain_device_in_the_environment_and_says_so() {
+fn the_cli_ignores_brain_device_in_the_environment() {
     let output = Command::new(bin())
         .args(["npu", "check"])
         .env("BRAIN_DEVICE", "npu5")
@@ -71,7 +70,6 @@ fn the_cli_ignores_brain_device_in_the_environment_and_says_so() {
         .expect("run brain npu check with BRAIN_DEVICE=npu5 in the environment");
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("BRAIN_DEVICE is ignored by the brain CLI"), "the CLI must say it ignored BRAIN_DEVICE, got stderr: {stderr}");
     assert!(!stderr.contains("npu5 requested but this machine has"), "BRAIN_DEVICE must not reach the device grammar, got stderr: {stderr}");
     assert!(output.status.code().is_some(), "must not be killed by a signal (a panic/abort): {:?}", output.status);
 }

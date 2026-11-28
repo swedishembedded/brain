@@ -195,3 +195,6 @@ fn real_mmproj_clip_forward_on_the_reference_tokens_is_sane() {
     // does NOT certify correctness and is not presented as if it did.
     assert!(lo > -1e4 && hi < 1e4, "tower output range [{lo}, {hi}] is not a plausible hidden state");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

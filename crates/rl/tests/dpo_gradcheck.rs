@@ -118,3 +118,6 @@ fn check_dpo_qwen3() {
     assert!(failures.is_empty(), "DPO gradcheck failed: {failures:?}");
     assert!(report.dead_gradients().is_empty(), "DPO gradcheck found dead (all-zero analytic, nonzero numeric) gradients: {:?}", report.dead_gradients());
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

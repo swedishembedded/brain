@@ -80,3 +80,6 @@ fn real_speech_tokenizer_v2_matches_the_onnx_reference_exactly() {
     assert_eq!(got.len(), want.len(), "s3tokenizer[real]: token count {} vs golden {}", got.len(), want.len());
     assert_eq!(got, want, "s3tokenizer[real]: {} of {} tokens mismatched", mismatches.len(), got.len());
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

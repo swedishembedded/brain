@@ -186,3 +186,6 @@ fn a_streamed_answer_stops_when_its_token_fires() {
     assert_eq!(out.finish_reason, "cancelled");
     assert!(pieces <= 2, "at most the piece in flight follows the cancel, got {pieces}");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

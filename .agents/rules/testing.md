@@ -51,13 +51,13 @@ thread with `gpu_core::with_backend` or `model::block::with_tile_budget_words`;
 candidate pins it for its own thread with `gpu_core::pin_candidate` (a guard);
 `gpu_core::force_candidate` and `clear_forced_candidates` are the CLI's, and a
 test's clear once took the bf16 form from the gdn test running beside it.
-A test opens only the cards the selection names (`BRAIN_DEVICE` / `--device`):
+A test opens only the cards the selection names (`BRAIN_TEST_DEVICE`, see below):
 it counts and picks them with `gpu_core::testgpu::cards`, `stage_cards` (a
 multi-card test) and `card` (one by index, refused when unselected), never
 `devices::gpus()` or a card count, which name cards that belong to someone else
 on a shared node; with the CPU backend selected there are none, and the test
 skips by name. A test that spawns the `brain` binary (`crates/cli/tests`) is not
-bound by that selection: the CLI ignores `BRAIN_DEVICE`/`BRAIN_BACKEND` and opens
+bound by that selection: the CLI reads no device variable and opens
 every card it sees unless the test passes `--device`, so on a node whose cards
 serve other work run that suite with the cards hidden (`CUDA_VISIBLE_DEVICES=""`
 and a Vulkan ICD list that names none, e.g. `VK_ICD_FILENAMES=/nonexistent.json`). A fixture under the temporary directory is a
@@ -271,14 +271,14 @@ ever touches the real session/system bus.
 ### Validating GPU kernels without a GPU (software Vulkan)
 
 On a node whose cards belong to other jobs, the CPU JIT skips every
-workgroup-barrier kernel by name. `--device software` (or `BRAIN_DEVICE=software`
-in a test binary) builds on Mesa lavapipe through wgpu instead: no CUDA context,
+workgroup-barrier kernel by name. `--device software` (or `BRAIN_TEST_DEVICE=software`
+for a test binary) builds on Mesa lavapipe through wgpu instead: no CUDA context,
 no NVIDIA driver, no card index, and `DeviceCaps::workgroup_reductions` true.
 
 ```bash
 source ~/project/shared/containers/lavapipe/env.sh   # lavapipe ICD, CUDA_VISIBLE_DEVICES=""
-BRAIN_DEVICE=software make test/one P=brain-ricursive T=it ARGS="lsa --test-threads=1"
-BRAIN_DEVICE=software cargo test --profile fast -p brain-model --lib -- lsa paged_sparse
+BRAIN_TEST_DEVICE=software make test/one P=brain-ricursive T=it ARGS="lsa --test-threads=1"
+BRAIN_TEST_DEVICE=software cargo test --profile fast -p brain-model --lib -- lsa paged_sparse
 ```
 
 Check the `adapter: llvmpipe ... (Cpu, Vulkan)` line. lavapipe caps one storage
@@ -294,7 +294,12 @@ skip cleanly when its prerequisite isn't present, or so a benchmark can be
 tuned from the environment instead of a recompile.
 
 **Device / GPU selection for tests:**
-- `BRAIN_DEV_GPU` - selects/forces a GPU device for a test run.
+- `BRAIN_TEST_DEVICE` - the device a test binary runs on, in `--device[:--backend]` grammar (`cpu`, `vulkan`,
+  `gpu0:cuda`, `software`); unset is the CPU. Read only by `brain_testutil::device::device()`, which every test
+  binary takes when it loads (`brain_testutil::configure_test_binary!()` at its root) and passes to the library through
+  `gpu_core::select_compute`. A device the machine cannot give stops the binary naming it. The library reads no
+  device variable: a process nothing configured runs on the CPU, and a binary takes `--device`/`--backend`. A test
+  that needs a GPU calls `brain_testutil::device::gpu()`, which fails unless the harness named one.
 - `BRAIN_NPU_DEVICE` - selects the NPU device for npu-crate tests.
 - `BRAIN_OV_PROBE`, `BRAIN_NPU_AVAILABLE` - turn on the npu-crate tests that need an OpenVINO
   runtime. With no NPU, `BRAIN_NPU_DEVICE=CPU` runs every export's parity check on OpenVINO's CPU

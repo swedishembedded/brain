@@ -107,3 +107,6 @@ fn the_native_elementwise_kernels_are_bit_identical_to_the_reference() {
 gpu_core::card_tests!(
     the_native_elementwise_kernels_are_bit_identical_to_the_reference,
 );
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

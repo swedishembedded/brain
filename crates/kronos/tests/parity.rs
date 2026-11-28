@@ -251,3 +251,6 @@ fn check_s1(logits: &[f32], t: usize, vocab: usize, tail: usize, ids_p: &Path, t
     assert_eq!(ids, ref_ids, "{label}: per-position argmax s1 must be integer-exact");
     assert!(r < TOL, "{label}: s1 logits diverge (rel {r:.3e})");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

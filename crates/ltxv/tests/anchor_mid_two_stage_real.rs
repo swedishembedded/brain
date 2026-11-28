@@ -120,3 +120,6 @@ fn a_start_frame_anchor_survives_a_mid_frame_anchor_under_two_stage_refinement()
         "frame 0 does not reproduce the start-frame still with a mid-frame anchor present AND two-stage refinement forced on: mean absolute pixel delta {delta:.2} (bound {MAX_FRAME0_DELTA:.2})."
     );
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

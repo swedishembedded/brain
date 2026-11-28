@@ -380,3 +380,6 @@ gpu_core::card_tests!(
     every_yolov8n_batchnorm_is_within_the_fp32_summation_bound_of_an_f64_oracle,
     the_native_bn_elementwise_passes_are_bit_identical_to_the_reference,
 );
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

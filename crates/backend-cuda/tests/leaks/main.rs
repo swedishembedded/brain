@@ -603,3 +603,6 @@ fn objects_outlive_the_handle_that_made_them() {
         .expect("dropping a graph or module after its handle hung the driver");
     assert_eq!(live_resources(), base, "an object dropped after its handle was not freed");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

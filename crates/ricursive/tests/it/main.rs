@@ -31,3 +31,6 @@ mod train_resident;
 mod train_saved;
 mod train_real_lora;
 mod train_tiers;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

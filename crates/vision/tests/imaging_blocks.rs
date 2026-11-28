@@ -894,3 +894,6 @@ fn squeeze_excite_matches_its_definition_for_both_gates_and_every_sample() {
         close(&got, &want, 2e-5, &format!("squeeze-excite with {gate:?}"));
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

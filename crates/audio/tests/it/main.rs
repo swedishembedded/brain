@@ -17,3 +17,6 @@ mod resample_rational;
 mod resample_torchaudio;
 mod snake_kernels;
 mod weight_norm;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

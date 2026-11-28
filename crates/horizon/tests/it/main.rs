@@ -30,3 +30,6 @@ mod streamed_construction;
 mod support;
 mod units;
 mod streamed_load;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

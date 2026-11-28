@@ -177,3 +177,6 @@ fn int8_forward_matches_fp32_and_reference() {
     assert!(cos_fp32 >= 0.998, "int8 vs fp32 cosine {cos_fp32:.6} < 0.998");
     assert!(cos_ref >= 0.998, "int8 vs golden cosine {cos_ref:.6} < 0.998");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

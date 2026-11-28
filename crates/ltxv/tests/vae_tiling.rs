@@ -516,3 +516,6 @@ mod real_1080p {
         assert!(worst <= 6.0 * med.max(1e-8), "a tile boundary is a gradient outlier ({worst:.5} vs median {med:.5}) - that is a visible seam");
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

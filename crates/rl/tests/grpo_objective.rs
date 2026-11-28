@@ -166,3 +166,6 @@ fn an_external_rollout_is_synced_on_schedule_and_its_logprobs_are_recomputed() {
     assert!(syncs.iter().all(|s| *s == want), "the payload is the trainable tensors: {:?}", syncs[0]);
     assert!(want.iter().all(|n| n.contains(".lora_")), "{want:?}");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

@@ -278,3 +278,6 @@ fn a_chat_footprint_is_read_from_the_checkpoint_config_alone() {
     assert_eq!(brain::chat_footprint_bytes(&root.join("absent"), 4096), None);
     std::fs::remove_dir_all(&root).ok();
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

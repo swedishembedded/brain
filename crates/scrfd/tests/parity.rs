@@ -218,3 +218,6 @@ fn scrfd_decode_and_nms_reproduce_the_reference_detections() {
         assert!(ck.max_abs < 0.5, "photo{p}: kps drifted by {:.3e} px", ck.max_abs);
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

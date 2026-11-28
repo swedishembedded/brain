@@ -6,7 +6,7 @@
 //! batch on the GPU. This is the end-to-end device training loop — the DiT block
 //! stack on the GPU (persistent BlockDev engine) wrapped by the host timestep
 //! MLP / embedders / final layer / flow-matching loss. Needs a GPU:
-//! `BRAIN_DEV_GPU=1`.
+//! `BRAIN_TEST_DEVICE=gpu`.
 
 use s3dit::grad::{Grads, Weights};
 use s3dit::modelgrad::{self, Cfg, ModelGrads, ModelWeights};
@@ -101,8 +101,8 @@ fn df(g: &s3dit::modelgrad::ModelGradsF32) -> Vec<Vec<f64>> {
 
 #[test]
 fn device_grads_match_host() {
-    if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
-        brain_testutil::skip_unavailable("set BRAIN_DEV_GPU=1 (needs a GPU) for the device full-model training test");
+    if !brain_testutil::device::device().is_gpu() {
+        brain_testutil::skip_unavailable("set BRAIN_TEST_DEVICE=gpu (needs a GPU) for the device full-model training test");
         return;
     }
     let c = cfg();
@@ -138,8 +138,8 @@ fn device_grads_match_host() {
 
 #[test]
 fn device_model_overfits() {
-    if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
-        brain_testutil::skip_unavailable("set BRAIN_DEV_GPU=1 for the device overfit test");
+    if !brain_testutil::device::device().is_gpu() {
+        brain_testutil::skip_unavailable("set BRAIN_TEST_DEVICE=gpu for the device overfit test");
         return;
     }
     let c = cfg();

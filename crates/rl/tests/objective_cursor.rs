@@ -182,3 +182,6 @@ fn a_resumed_grpo_run_continues_its_rollout_stream() {
 fn a_resumed_distillation_run_continues_its_example_stream() {
     assert_resume_continues_the_stream("distill", 1, || DistillTopK::from_examples(DistillConfig { seq_len: SEQ_LEN }, examples()));
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

@@ -702,3 +702,6 @@ fn compacted_declared_experts_match_the_dense_declared_path() {
         assert!((a - b).abs() <= 1e-5 * a.abs().max(1e-3), "d_x[{i}]: compact {b} vs dense {a}");
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

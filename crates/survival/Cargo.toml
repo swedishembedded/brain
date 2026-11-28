@@ -13,4 +13,5 @@ name = "survival"
 path = "src/lib.rs"
 
 [dev-dependencies]
+brain-testutil.workspace = true
 serde_json.workspace = true

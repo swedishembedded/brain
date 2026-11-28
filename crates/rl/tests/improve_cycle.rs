@@ -311,3 +311,6 @@ fn improve_cycle_rejects_a_deliberately_worse_candidate_and_retains_the_incumben
     assert!(outcome.adapter_path.is_none(), "a rejected cycle must not produce a new adapter - the incumbent is retained");
     assert!(!adapter_dir_2.exists() || std::fs::read_dir(&adapter_dir_2).unwrap().next().is_none(), "no adapter file may appear in the out dir for a rejected cycle");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

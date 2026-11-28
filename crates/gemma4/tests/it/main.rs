@@ -12,3 +12,6 @@ mod int8_layer;
 mod parity;
 mod real_weight_parity;
 mod st_source;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

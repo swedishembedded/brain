@@ -82,3 +82,6 @@ fn the_fused_rmsnorm_kernels_match_the_f64_reference() {
 }
 
 gpu_core::card_tests!(the_fused_rmsnorm_kernels_match_the_f64_reference,);
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

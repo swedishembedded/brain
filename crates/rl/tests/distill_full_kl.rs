@@ -92,3 +92,6 @@ fn distill_topk_at_k_equals_vocab_reproduces_exact_kl() {
 
     assert!((realized - reference).abs() < 1e-2, "K=vocab realized KL {realized} != reference KL {reference} (teacher seed {seed})");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

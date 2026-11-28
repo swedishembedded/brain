@@ -69,3 +69,6 @@ fn train_step_speed() {
     assert!(rel < 1e-4, "tiled backward changes gradients (rel {rel:.2e})");
     assert!(reg_ms < naive_ms, "tiled backward not faster");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

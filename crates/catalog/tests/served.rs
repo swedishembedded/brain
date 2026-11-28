@@ -234,3 +234,6 @@ fn rrdbnets_eager_provider_reads_the_assembly() {
     assert!(!err.contains("unknown model"), "{err}");
     assert!(err.contains("brain-catalog-test-weights"), "the failure must name the assembly's path: {err}");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

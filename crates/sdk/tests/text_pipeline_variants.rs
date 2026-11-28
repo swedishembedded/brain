@@ -122,3 +122,6 @@ fn deepseek_r1_by_its_hub_id_reasons_and_stops_on_its_own_end_token() {
     assert!(reply.text.contains("42"), "{reply:?}");
     assert_eq!(reply.finish_reason.as_str(), "stop", "ends on its own end token, not the budget");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

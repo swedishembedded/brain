@@ -21,7 +21,7 @@ const TEMPLATE_COLS: u64 = 256;
 
 /// The ordinal of the device whose context the encoding borrows: the one the suite is pointed at (`BRAIN_DEVICE=gpu1`), else the first.
 fn device_ordinal() -> i32 {
-    std::env::var("BRAIN_DEVICE").ok().and_then(|d| d.strip_prefix("gpu").and_then(|n| n.parse().ok())).unwrap_or(0)
+    brain_testutil::device::device().device.strip_prefix("gpu").and_then(|n| n.parse().ok()).unwrap_or(0)
 }
 
 /// Encode the template with the driver's own `cuTensorMapEncodeTiled`.

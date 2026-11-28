@@ -134,3 +134,6 @@ fn the_gradient_is_the_gradient_of_the_reported_loss() {
     let failures = report.failures(4e-3, 8e-2);
     assert!(failures.is_empty(), "the distillation gradient is not the gradient of its reported loss: {failures:?}");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

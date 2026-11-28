@@ -111,3 +111,6 @@ fn cached_matches_uncached_and_is_faster() {
         assert!(dt_c < dt_u, "release: cached ({dt_c:.2}s) should beat uncached ({dt_u:.2}s)");
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

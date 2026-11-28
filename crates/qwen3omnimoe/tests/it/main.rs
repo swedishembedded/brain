@@ -32,3 +32,6 @@ mod thinker_int8_parity;
 mod thinker_layer_parity;
 mod video_generate_e2e;
 mod vision_parity;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

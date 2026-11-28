@@ -77,3 +77,6 @@ fn initializer_shape_mismatch_panics() {
     let mut g = GraphBuilder::new("bad");
     g.init_f32("w", &[2, 2], vec![1.0, 2.0, 3.0]); // 3 != 4
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

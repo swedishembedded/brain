@@ -700,6 +700,7 @@ version = "7.0.0"
 dependencies = [
  "brain-gpu-core",
  "brain-seed",
+ "brain-testutil",
 ]
 
 [[package]]
@@ -871,6 +872,7 @@ dependencies = [
 name = "brain-camera"
 version = "7.0.0"
 dependencies = [
+ "brain-testutil",
  "serde_json",
 ]
 
@@ -890,6 +892,7 @@ dependencies = [
 name = "brain-capability"
 version = "7.0.0"
 dependencies = [
+ "brain-testutil",
  "libc",
  "serde_json",
 ]
@@ -1481,6 +1484,7 @@ name = "brain-dit"
 version = "7.0.0"
 dependencies = [
  "brain-model",
+ "brain-testutil",
 ]
 
 [[package]]
@@ -1872,6 +1876,7 @@ dependencies = [
  "brain-camera",
  "brain-data",
  "brain-sfm",
+ "brain-testutil",
  "serde",
  "serde_json",
 ]
@@ -2441,6 +2446,7 @@ dependencies = [
  "brain-seed",
  "brain-sfm",
  "brain-splat",
+ "brain-testutil",
  "serde_json",
 ]
 
@@ -2469,6 +2475,7 @@ dependencies = [
  "brain-data",
  "brain-gpu-core",
  "brain-kernels",
+ "brain-testutil",
 ]
 
 [[package]]
@@ -2534,6 +2541,7 @@ dependencies = [
 name = "brain-onnx"
 version = "7.0.0"
 dependencies = [
+ "brain-testutil",
  "prost",
 ]
 
@@ -2889,6 +2897,7 @@ dependencies = [
  "brain-gpu-core",
  "brain-gpu-supervisor",
  "brain-memauth",
+ "brain-testutil",
  "serde",
  "serde_json",
 ]
@@ -2962,6 +2971,7 @@ name = "brain-rlcd"
 version = "7.0.0"
 dependencies = [
  "brain-data",
+ "brain-testutil",
 ]
 
 [[package]]
@@ -3112,6 +3122,7 @@ name = "brain-search"
 version = "7.0.0"
 dependencies = [
  "brain-data",
+ "brain-testutil",
  "serde",
  "serde_json",
 ]
@@ -3128,6 +3139,7 @@ dependencies = [
  "brain-fcbench",
  "brain-forecast",
  "brain-runtime",
+ "brain-testutil",
  "serde_json",
 ]
 
@@ -3183,12 +3195,14 @@ dependencies = [
  "brain-camera",
  "brain-data",
  "brain-imaging",
+ "brain-testutil",
 ]
 
 [[package]]
 name = "brain-shutdown"
 version = "7.0.0"
 dependencies = [
+ "brain-testutil",
  "libc",
  "tokio",
 ]
@@ -3204,6 +3218,7 @@ dependencies = [
  "brain-optim",
  "brain-paramstore",
  "brain-seed",
+ "brain-testutil",
  "bytemuck",
  "serde_json",
 ]
@@ -3276,6 +3291,7 @@ dependencies = [
 name = "brain-survival"
 version = "7.0.0"
 dependencies = [
+ "brain-testutil",
  "serde_json",
 ]
 
@@ -3301,6 +3317,7 @@ version = "7.0.0"
 dependencies = [
  "blake3",
  "brain-checkpoint",
+ "brain-gpu-core",
  "brain-modelref",
  "brain-modelstore",
  "serde",
@@ -3402,6 +3419,7 @@ dependencies = [
 name = "brain-trace"
 version = "7.0.0"
 dependencies = [
+ "brain-testutil",
  "serde_json",
  "tracing",
  "tracing-subscriber",
@@ -3489,6 +3507,7 @@ dependencies = [
  "brain-kernels",
  "brain-model",
  "brain-paramstore",
+ "brain-testutil",
  "bytemuck",
 ]
 

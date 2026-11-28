@@ -55,7 +55,7 @@
 # Usage: scripts/gates/forecast-parity-gate.sh
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
-export BRAIN_DEVICE="${BRAIN_DEVICE:-cpu}"
+export BRAIN_TEST_DEVICE="${BRAIN_TEST_DEVICE:-cpu}"
 
 fail=0
 run() { local desc="$1"; shift; echo "=== $desc ==="; if "$@"; then echo "  PASS: $desc"; else echo "  FAIL: $desc"; fail=1; fi; echo; }

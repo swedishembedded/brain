@@ -34,7 +34,8 @@ BIN=./target/release/brain
 BASE=scripts/gates/qwen-serving-perf-baselines
 FLOOR="${QWEN_SERVING_PERF_FLOOR:-0.5}"
 SHAPE="${QWEN_SERVING_PERF_SHAPE:-28x1024x16x151936}" # Qwen3-0.6B's real shape
-export BRAIN_DEVICE="${BRAIN_DEVICE:-cpu}"
+# The device the run is measured on, passed as brain's --device (the binary reads no device variable).
+DEVICE="${QWEN_SERVING_PERF_DEVICE:-cpu}"
 
 [ -x "$BIN" ] || { echo "build first: make build/release"; exit 2; }
 if [ -z "${QWEN_TOKENIZER:-}" ]; then
@@ -43,7 +44,7 @@ if [ -z "${QWEN_TOKENIZER:-}" ]; then
 fi
 
 update=0; [ "${1:-}" = "--update" ] && update=1
-name="qwen-synth-${SHAPE}-${BRAIN_DEVICE}"
+name="qwen-synth-${SHAPE}-${DEVICE}"
 cand="$(mktemp)"
 source scripts/gates/perf-gate-seed.sh
 seed_args=(); [ "$update" -eq 1 ] || baseline_seed_args seed_args "$BASE/$name.json"
@@ -53,7 +54,7 @@ seed_args=(); [ "$update" -eq 1 ] || baseline_seed_args seed_args "$BASE/$name.j
 # stay fast without tripping that refusal. Concurrency 2, not 1: the exact
 # shape the concurrent-request-batching investigation cared about (does a
 # second concurrent request cost far less than a second solo run).
-if ! "$BIN" perf run serve --target "http:qwen-synth:${SHAPE}:${QWEN_TOKENIZER}" \
+if ! "$BIN" --device "$DEVICE" perf run serve --target "http:qwen-synth:${SHAPE}:${QWEN_TOKENIZER}" \
     --workload chat --input 24 --output 12 --requests 2 --warmup 1 --concurrency 2 "${seed_args[@]}" --out "$cand" >/dev/null 2>&1; then
   echo "FAIL $name (perf run itself failed)"; rm -f "$cand"; exit 1
 fi

@@ -166,3 +166,6 @@ fn from_pretrained_resolves_a_real_fixture_at_its_own_named_path_with_no_store_l
     let pipe = with_models_dir(&root, || brain::DepthPipeline::from_pretrained("skchen1993/ZipDepth"));
     pipe.expect("a real checkpoint at exactly its own model_id's path must resolve with no Store::local shortcut and no network access");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

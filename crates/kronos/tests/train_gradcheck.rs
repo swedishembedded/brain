@@ -483,3 +483,6 @@ fn batched_step_equals_mean_of_singles() {
     }
     eprintln!("batch-parity OK (b={b}, t={t}): loss {loss_batch:.6} vs mean {loss_mean:.6}; grads allclose (worst margin {worst:.2e})");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

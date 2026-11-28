@@ -84,3 +84,6 @@ fn the_data_root_override_outranks_the_environment_and_clearing_it_restores_it()
     assert_eq!(explicit_models_root(), Some(PathBuf::from("/flag/brain/models")));
     publish_data_root(None);
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

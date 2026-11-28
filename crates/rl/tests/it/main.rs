@@ -46,3 +46,6 @@ mod reader_learner;
 mod served_conformance;
 #[cfg(feature = "qwen3")]
 mod session_samples;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

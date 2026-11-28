@@ -204,3 +204,6 @@ fn a_llava_repo_in_the_layout_the_loader_reads_pulls_and_resolves() {
     let Resolution::Resolved(assembly) = resolve_under(st.root(), "llava", &records, &specs, &BTreeMap::new()) else { panic!("a pulled llava checkpoint must resolve") };
     assert_eq!(assembly.roles["weights"], st.repo_dir(&reference));
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

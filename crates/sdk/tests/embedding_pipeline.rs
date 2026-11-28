@@ -328,3 +328,6 @@ fn lfm2_backend_refuses_the_instruction_option() {
         other => panic!("expected Error::Backend naming 'instruction', got {other:?}"),
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

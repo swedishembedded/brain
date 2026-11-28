@@ -33,3 +33,6 @@ mod p5_viz;
 mod p6_calib;
 mod p6_calib_transform;
 mod recompute;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

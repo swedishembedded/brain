@@ -223,10 +223,7 @@ fn a_shorter_ring_shares_planes_and_still_generates() {
 /// The backend the test binary actually got, not the one the run intended.
 #[test]
 fn the_model_runs_on_the_backend_the_run_requested() {
-    let want = std::env::var("BRAIN_BACKEND").unwrap_or_default().trim().to_ascii_lowercase();
-    if want.is_empty() {
-        return;
-    }
+    let want = brain_testutil::device::device().set.backend.name();
     let cfg = HuginnConfig::tiny();
     let w = init_weights(&cfg, 17);
     let _eng = Engine::from_source(cfg, 1, &w, 8, 2);

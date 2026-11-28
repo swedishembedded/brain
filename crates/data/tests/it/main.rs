@@ -32,3 +32,6 @@ mod t5xxl_precompiled_parity;
 mod tokenizer_identity_real;
 mod umt5_tokenizer_parity;
 mod wordpiece_parity;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

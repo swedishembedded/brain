@@ -209,3 +209,6 @@ fn a_kto_reference_scored_on_first_draw_is_the_start_of_runs() {
     let floor = brain_testutil::training::step_bound(BLOCK + 2 * STEP as usize);
     step_parity::assert_parity("kto lazy reference", &old, &old_again, &new, floor);
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

@@ -96,3 +96,6 @@ fn streamed_step_heap_is_independent_of_parameter_count() {
     assert!(large <= small + 4096, "heap peak grew with parameter count: {small} -> {large}");
     assert!(large <= 4096, "a step must not allocate beyond its pre-allocated workspace, got {large}");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

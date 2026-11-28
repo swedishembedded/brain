@@ -20,7 +20,7 @@ fn forecast_timing() {
     }
     let ctx: usize = std::env::var("CTX").ok().and_then(|s| s.parse().ok()).unwrap_or(512);
     let horizon: usize = std::env::var("H").ok().and_then(|s| s.parse().ok()).unwrap_or(24);
-    let dev = std::env::var("BRAIN_DEVICE").unwrap_or_else(|_| "gpu".into());
+    let dev = brain_testutil::device::device().device.clone();
 
     let model = Chronos2::load_on(gpu_core::testgpu::dev(chronos2::model::PIPELINES), &weights).expect("load chronos2.safetensors");
     let context: Vec<f32> = (0..ctx).map(|i| 100.0 + 10.0 * (i as f32 * 0.03).sin()).collect();

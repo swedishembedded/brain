@@ -18,3 +18,6 @@ mod global_llm_int8_tier;
 mod global_llm_parity;
 mod vocoder_parity;
 mod vocoder_real_chunk;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

@@ -76,11 +76,7 @@ fn tiny_checkpoint_matches_the_reference_at_every_step() {
 /// so a green suite on a GPU box proves nothing unless this holds.
 #[test]
 fn the_model_runs_on_the_backend_the_run_requested() {
-    let want = std::env::var("BRAIN_BACKEND").unwrap_or_default();
-    let want = want.trim().to_ascii_lowercase();
-    if want.is_empty() {
-        return;
-    }
+    let want = brain_testutil::device::device().set.backend.name();
     let cfg = huginn::config::HuginnConfig::tiny();
     let w = huginn::init::init_weights(&cfg, 17);
     let _model = Huginn::new(cfg, 1, 2, &w);

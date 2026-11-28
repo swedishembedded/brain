@@ -44,3 +44,6 @@ fn no_optimiser_step_runs_on_an_empty_batch_on_qwen35() {
     let s = seed();
     grpo_common::assert_no_step_on_an_empty_batch(&mut lora_model(s), s);
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

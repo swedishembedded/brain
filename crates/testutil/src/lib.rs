@@ -22,6 +22,7 @@
 //! thing every goldens test copy-pastes: the cosine/max_abs stage report.
 
 pub mod adapters;
+pub mod device;
 pub mod fd;
 pub mod golden;
 pub mod hfquant;

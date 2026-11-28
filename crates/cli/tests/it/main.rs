@@ -39,3 +39,6 @@ mod worker_hosted_lfm;
 mod worker_hosted_qwen3;
 mod yolov8_eval;
 mod zipdepth_smoke;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

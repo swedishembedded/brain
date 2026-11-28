@@ -9,7 +9,7 @@
 //! DiT latent `latent_packed_norm` `[128,32,32]`, the decode `decoded`
 //! `[3,512,512]`, and the checkpoint's `bn_running_{mean,var}` + `bn_eps`.
 //! Weights gated on `BRAIN_FLUX2_VAE` (the `vae/` dir or the safetensors file;
-//! skips if unset/absent). CPU backend by default; `BRAIN_VAE_DEVICE=gpu` runs
+//! skips if unset/absent). CPU backend by default; `BRAIN_TEST_DEVICE=gpu` runs
 //! it on wgpu.
 
 use std::collections::HashMap;
@@ -79,7 +79,7 @@ fn flux2_vae_parity() {
     let (lh, lw) = (mshape[1], mshape[2]);
     assert_eq!(mshape[0], 2 * cfg.latent_channels as usize, "moments channels");
 
-    let device = std::env::var("BRAIN_VAE_DEVICE").unwrap_or_else(|_| "cpu".to_string());
+    let device = brain_testutil::device::device().device.clone();
 
     // 1) Encode: image → posterior moments (encoder conv_out + quant_conv).
     {

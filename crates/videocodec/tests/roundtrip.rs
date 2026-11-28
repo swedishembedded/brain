@@ -218,3 +218,6 @@ fn default_settings_force_no_key_frame_into_a_shot() {
     packets.extend(enc.finish().expect("the last units"));
     assert!(packets.iter().filter(|p| p.key).count() >= n / 60, "an asked-for interval is honoured");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

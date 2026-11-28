@@ -17,3 +17,6 @@ path = "src/lib.rs"
 serde_json.workspace = true
 # `scratch::private_dir`: the effective uid a private directory must belong to.
 libc.workspace = true
+
+[dev-dependencies]
+brain-testutil.workspace = true

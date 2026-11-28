@@ -12,12 +12,12 @@
 #   cuda_device   prints the `--device` spelling (gpuN) of the CUDA card the
 #                 gates should use, and nothing when this machine has none.
 #
-# An explicit BRAIN_DEVICE=gpuN wins. Otherwise the card with the least memory
+# An explicit BRAIN_TEST_DEVICE=gpuN[:backend] wins. Otherwise the card with the least memory
 # in use is chosen, so a gate run does not queue behind a served model on the
 # card its neighbour is using. The name is the NVIDIA index, which is the
 # order `--device` numbers CUDA cards in.
 cuda_device() {
-    case "${BRAIN_DEVICE:-}" in gpu[0-9]*) echo "$BRAIN_DEVICE"; return ;; esac
+    case "${BRAIN_TEST_DEVICE:-}" in gpu[0-9]*) echo "${BRAIN_TEST_DEVICE%%:*}"; return ;; esac
     command -v nvidia-smi >/dev/null 2>&1 || return 0
     local idx
     idx=$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits 2>/dev/null \

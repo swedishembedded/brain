@@ -12,3 +12,6 @@ mod klein_schedule;
 mod ltxv_schedule_parity;
 mod scheduler;
 mod wan_schedule_parity;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

@@ -18,3 +18,6 @@ mod gn_fd;
 mod gn_multigroup;
 mod l2norm_scale;
 mod worldmodel_trait;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

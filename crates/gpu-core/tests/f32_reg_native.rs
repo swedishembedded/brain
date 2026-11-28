@@ -324,3 +324,6 @@ gpu_core::card_tests!(
     the_input_gradient_is_redirected_and_bit_identical,
     the_weight_gradient_is_redirected_and_bit_identical,
 );
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

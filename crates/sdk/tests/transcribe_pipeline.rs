@@ -231,3 +231,6 @@ fn features_of_several_clips_are_those_of_each_in_order() {
     }
     assert_eq!((many[0].rows, many[1].rows), (13, 33));
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

@@ -7,22 +7,38 @@
 //! for explicitly: by the CLI's `--device`/`--backend`, a tool's own flags (`select_compute`), or a caller's own
 //! placement.
 //!
-//! `ambient_compute_set()` is resolved once per process, so each case runs in a fresh child of this test binary.
+//! `ambient_compute_set()` is resolved once per process, so each case runs in a fresh child of this test binary. The
+//! harness names a device in `BRAIN_TEST_DEVICE` (`brain_testutil::device`), which this binary takes when it loads.
 
 use std::process::Command;
 
 /// This test binary re-run as a child that prints its ambient compute set and the backend `Gpu::new` would build
 /// on, with `env` set (and every GPU hidden from CUDA, so a regression cannot reach a card): `(set, backend)`.
 fn ambient_in_child(env: &[(&str, &str)]) -> (String, String) {
+    child(env, None)
+}
+
+/// [`ambient_in_child`], expecting the child to refuse to start, naming `refused`.
+fn refused_in_child(env: &[(&str, &str)], refused: &str) {
+    child(env, Some(refused));
+}
+
+fn child(env: &[(&str, &str)], refusal: Option<&str>) -> (String, String) {
     let exe = std::env::current_exe().expect("current_exe");
     let mut cmd = Command::new(exe);
     cmd.args(["--exact", "ambient_device::print_ambient", "--ignored", "--nocapture", "--test-threads=1"]);
-    cmd.env_remove("BRAIN_DEVICE").env_remove("BRAIN_BACKEND").env("CUDA_VISIBLE_DEVICES", "");
+    cmd.env_remove("BRAIN_DEVICE").env_remove("BRAIN_BACKEND").env_remove("BRAIN_TEST_DEVICE").env("CUDA_VISIBLE_DEVICES", "").env("VK_ICD_FILENAMES", "/dev/null");
     for (k, v) in env {
         cmd.env(k, v);
     }
     let out = cmd.output().expect("spawn the child");
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    if let Some(refused) = refusal {
+        assert!(!out.status.success(), "the child ran:\n{stdout}");
+        assert!(stderr.contains("BRAIN_TEST_DEVICE") && stderr.contains(refused), "the refusal names the variable and the device:\n{stderr}");
+        return (String::new(), String::new());
+    }
     assert!(out.status.success(), "the child failed:\n{stdout}\n{}", String::from_utf8_lossy(&out.stderr));
     let field = |marker: &str| {
         stdout
@@ -62,4 +78,14 @@ fn the_environment_chooses_no_device() {
     ] {
         assert_eq!(ambient_in_child(env), (cpu_set(), "cpu".to_string()), "{env:?} is ignored");
     }
+}
+
+/// The harness names the device in `BRAIN_TEST_DEVICE`; the CPU is the CPU, a GPU this machine cannot give (here every
+/// card is hidden) stops the binary naming the variable, never runs on the CPU in its place.
+#[test]
+fn the_harness_names_the_device_and_a_missing_gpu_is_refused() {
+    assert_eq!(ambient_in_child(&[("BRAIN_TEST_DEVICE", "cpu")]), (cpu_set(), "cpu".to_string()));
+    refused_in_child(&[("BRAIN_TEST_DEVICE", "gpu0:cuda")], "gpu0:cuda");
+    refused_in_child(&[("BRAIN_TEST_DEVICE", "vulkan")], "vulkan");
+    refused_in_child(&[("BRAIN_TEST_DEVICE", "gpu0:cuda:x")], "gpu0:cuda:x");
 }

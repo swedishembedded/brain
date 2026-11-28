@@ -13,3 +13,6 @@ mod sfm_geometry;
 mod sfm_georef;
 mod sfm_global;
 mod sfm_pipeline;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

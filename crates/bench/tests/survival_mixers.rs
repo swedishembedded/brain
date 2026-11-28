@@ -56,3 +56,6 @@ fn mixer_ablation_on_informative_visit_times() {
 fn mixer_ablation_on_a_hidden_state_seen_through_noisy_measurements() {
     ablate(MixerData::Longitudinal);
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

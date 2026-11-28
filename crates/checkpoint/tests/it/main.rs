@@ -18,3 +18,6 @@ mod quantize_to_gguf;
 mod renamed_view;
 mod torch_hf_dir;
 mod torchpt;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

@@ -287,3 +287,6 @@ fn hot_ops_rates_on_this_backend() {
     }
     assert!(!out.0.is_empty(), "no op was timed on this backend");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

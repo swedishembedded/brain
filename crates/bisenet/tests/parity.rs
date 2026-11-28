@@ -163,3 +163,6 @@ fn align_and_mask_match_the_reference_chain() {
     report.check("masked_512", &masked, &want_masked.data);
     report.finish("align_and_mask");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

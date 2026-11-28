@@ -38,7 +38,7 @@
 //! memory, which is a lot to take from a shared box. Run them with
 //!
 //! ```text
-//! BRAIN_DEV_GPU=1 BRAIN_DEVICE=gpu<i> cargo test -p brain-flux2 --release \
+//! BRAIN_TEST_DEVICE=gpu<i> cargo test -p brain-flux2 --release \
 //!     --test variant_widths -- --ignored --nocapture
 //! ```
 
@@ -96,8 +96,8 @@ fn rel_l2(dev: &[f32], host: &[f32]) -> f64 {
 }
 
 fn skip() -> bool {
-    if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
-        brain_testutil::skip_unavailable("set BRAIN_DEV_GPU=1 (needs a GPU) for the FLUX.2 variant-width gates");
+    if !brain_testutil::device::device().is_gpu() {
+        brain_testutil::skip_unavailable("set BRAIN_TEST_DEVICE=gpu (needs a GPU) for the FLUX.2 variant-width gates");
         return true;
     }
     false

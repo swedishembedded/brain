@@ -138,3 +138,6 @@ fn span_context_reaches_json_output() {
     assert_eq!(v["span"]["name"], "denoise");
     assert_eq!(v["span"]["steps"], 8);
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

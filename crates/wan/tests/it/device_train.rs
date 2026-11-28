@@ -10,13 +10,13 @@
 //! through the persistent [`wan::BlockDev`] engine, wrapped by the host
 //! patch embedding, text MLP, timestep path, modulated head and flow-matching
 //! loss. Runs on the CPU backend by default and on the real GPU with
-//! `BRAIN_DEV_GPU=1`.
+//! `BRAIN_TEST_DEVICE=gpu`.
 
 use wan::modelgrad::{self, grad_views, grads, init_model, make_flow_batch, params_mut, Batch, Cfg};
 use wan::train::DeviceTrainer;
 
 fn device() -> &'static str {
-    if std::env::var("BRAIN_DEV_GPU").as_deref() == Ok("1") {
+    if brain_testutil::device::device().is_gpu() {
         "gpu"
     } else {
         "cpu"

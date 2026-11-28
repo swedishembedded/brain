@@ -4,7 +4,6 @@ crates/backend-cpu/src/fast_conv.rs	BRAIN_WINOGRAD
 crates/backend-cpu/src/lib.rs	BRAIN_NO_FASTCONV
 crates/backend-cuda/src/nvrtc.rs	<ENV_CUDA_PATH>
 crates/backend-cuda/tests/catalogue_coverage.rs	BRAIN_CUDA_COVERAGE_OUT
-crates/backend-cuda/tests/it/tensormap_template.rs	BRAIN_DEVICE
 crates/backend-cuda/tests/leaks/mem_pool.rs	BRAIN_PRINT_POOL_BENCH
 crates/backend-vulkan/src/lib.rs	BRAIN_VK_NO_SERIAL
 crates/backend-vulkan/src/lib.rs	BRAIN_VK_SERIAL
@@ -34,7 +33,6 @@ crates/chronos2/tests/it/kf_parity.rs	CHRONOS2_WEIGHTS
 crates/chronos2/tests/it/mv_parity.rs	CHRONOS2_WEIGHTS
 crates/chronos2/tests/it/t0_param_layout.rs	CHRONOS2_CKPT
 crates/chronos2/tests/it/t5_parity.rs	CHRONOS2_WEIGHTS
-crates/chronos2/tests/it/timing.rs	BRAIN_DEVICE
 crates/chronos2/tests/it/timing.rs	CHRONOS2_WEIGHTS
 crates/chronos2/tests/it/timing.rs	CTX
 crates/chronos2/tests/it/timing.rs	H
@@ -161,7 +159,6 @@ crates/flux2/tests/it/e2e_parity.rs	BRAIN_FLUX2_TRANSFORMER
 crates/flux2/tests/it/e2e_parity.rs	BRAIN_FLUX2_VAE
 crates/flux2/tests/it/import_real.rs	BRAIN_FLUX2_GGUF
 crates/flux2/tests/it/import_real.rs	BRAIN_FLUX2_TRANSFORMER
-crates/flux2/tests/it/int8_base_grads.rs	BRAIN_DEV_GPU
 crates/flux2/tests/it/int8_base_grads.rs	BRAIN_FLUX2_DIT
 crates/flux2/tests/it/int8_base_grads.rs	BRAIN_FLUX2_TRAIN_VARIANT
 crates/flux2/tests/it/lora_external.rs	BRAIN_FLUX2_LOKR
@@ -169,7 +166,6 @@ crates/flux2/tests/it/lora_external.rs	BRAIN_FLUX2_LORA
 crates/flux2/tests/it/model_smoke.rs	SMOKE_DBL
 crates/flux2/tests/it/model_smoke.rs	SMOKE_SGL
 crates/flux2/tests/it/step_time.rs	BRAIN_FLUX2_STEP_COLLECT
-crates/flux2/tests/it/variant_widths.rs	BRAIN_DEV_GPU
 crates/fly/examples/activity_sweep.rs	BRAIN_CONNECTOME_DIR
 crates/fly/examples/adhesion_check.rs	<name>
 crates/fly/examples/adhesion_check.rs	BRAIN_CONNECTOME_DIR
@@ -317,6 +313,7 @@ crates/gpt2/tests/it/dp_parity.rs	SHARD_TEST_GPUS
 crates/gpt2/tests/it/shard_parity.rs	SHARD_TEST_GPUS
 crates/gpu-core/tests/it/ambient_device.rs	BRAIN_BACKEND
 crates/gpu-core/tests/it/ambient_device.rs	BRAIN_DEVICE
+crates/gpu-core/tests/it/ambient_device.rs	BRAIN_TEST_DEVICE
 crates/gpu-core/tests/it/bench_matmul.rs	BRAIN_BENCH_REPS
 crates/gpu-core/tests/it/bench_moe_grouped.rs	BRAIN_BENCH_TOKENS
 crates/gpu-core/tests/it/cuda_placement_tier.rs	BRAIN_COHERENT_TIER
@@ -326,10 +323,7 @@ crates/gpu-core/tests/it/i8_gemv_native_bench.rs	BRAIN_BENCH_M
 crates/gpu-core/tests/it/memory_limit.rs	BRAIN_LIMIT_RAM_TOTAL
 crates/gpu-core/tests/it/memory_limit.rs	BRAIN_LIMIT_VRAM_TOTAL
 crates/horizon/tests/it/calibration_measure.rs	<name>
-crates/huginn/tests/it/decode.rs	BRAIN_BACKEND
-crates/huginn/tests/it/parity.rs	BRAIN_BACKEND
 crates/huginn/tests/it/parity_real.rs	BRAIN_HUGINN_DIR
-crates/huginn/tests/it/serve.rs	BRAIN_BACKEND
 crates/instantid/tests/parity.rs	BRAIN_INSTANTID
 crates/januspro/tests/it/t2i_tuned_real.rs	JANUS_TUNED_DIR
 crates/januspro/tests/it/t2i_tuned_real.rs	JANUS_TUNED_IMAGE
@@ -440,7 +434,6 @@ crates/npu/tests/it/wm_onnx.rs	BRAIN_OV_PROBE
 crates/openvino-rt/src/real.rs	<k>
 crates/openvino-rt/src/real.rs	LD_LIBRARY_PATH
 crates/openvino-rt/src/real.rs	VIRTUAL_ENV
-crates/ouro/tests/it/forward.rs	BRAIN_BACKEND
 crates/ouro/tests/it/parity.rs	BRAIN_OURO_DIR
 crates/perf/src/env.rs	<f>
 crates/pulid/tests/it/parity.rs	<var>
@@ -568,19 +561,12 @@ crates/runtime/src/tts.rs	BRAIN_QWEN3TTS_CKPT
 crates/runtime/src/tts.rs	BRAIN_QWEN3TTS_WEIGHTS
 crates/s3dit/src/bin/zimage_bench.rs	BRAIN_S3DIT_DIT
 crates/s3dit/src/bin/zimage_bench.rs	BRAIN_S3DIT_LAYERS
-crates/s3dit/tests/it/dev_grad.rs	BRAIN_DEV_GPU
-crates/s3dit/tests/it/dev_parity.rs	BRAIN_DEV_GPU
-crates/s3dit/tests/it/device_train.rs	BRAIN_DEV_GPU
 crates/s3dit/tests/it/gguf_import_real.rs	BRAIN_S3DIT_GGUF
 crates/s3dit/tests/it/gguf_import_real.rs	BRAIN_S3DIT_GGUF_OUT
 crates/s3dit/tests/it/int8_matmul.rs	BRAIN_INT8_TEST
-crates/s3dit/tests/it/lora_train.rs	BRAIN_DEV_GPU
-crates/s3dit/tests/it/model_trait.rs	BRAIN_DEV_GPU
 crates/s3dit/tests/it/real_parity.rs	BRAIN_S3DIT_DIT
 crates/s3dit/tests/it/real_parity.rs	BRAIN_S3DIT_I8
 crates/s3dit/tests/it/real_parity.rs	BRAIN_S3DIT_SHARD
-crates/s3dit/tests/it/shard_2card.rs	BRAIN_DEV_GPU
-crates/s3dit/tests/it/shard_parity.rs	BRAIN_DEV_GPU
 crates/s3tokenizer/tests/s3tokenizer_parity.rs	BRAIN_S3TOKENIZER_V2
 crates/sam1/tests/parity.rs	BRAIN_DEVICE
 crates/sdk/src/chat_tokens.rs	QWEN_TOKENIZER
@@ -640,6 +626,7 @@ crates/t5encoder/tests/it/umt5_parity.rs	<var>
 crates/t5encoder/tests/it/umt5_parity.rs	BRAIN_WAN_T5
 crates/t5encoder/tests/it/umt5_parity.rs	BRAIN_WAN_T5_FORCE_GPU
 crates/t5encoder/tests/it/umt5_parity.rs	BRAIN_WAN_TOKENIZER
+crates/testutil/src/device.rs	BRAIN_TEST_DEVICE
 crates/testutil/src/golden.rs	<k>
 crates/testutil/src/golden.rs	BRAIN_REQUIRE_GOLDEN_SOURCE
 crates/testutil/src/lib.rs	BRAIN_CAPABILITY_LEDGER
@@ -657,14 +644,10 @@ crates/vae/src/blocks3d.rs	BRAIN_VAE3D_NOPOOL
 crates/vae/src/blocks3d.rs	BRAIN_VAE3D_SPLIT_NORM
 crates/vae/src/decoder.rs	BRAIN_VAE_TAPS
 crates/vae/tests/it/decode_parity.rs	BRAIN_S3DIT_VAE
-crates/vae/tests/it/decode_parity.rs	BRAIN_VAE_DEVICE
 crates/vae/tests/it/encode_parity.rs	BRAIN_S3DIT_VAE
-crates/vae/tests/it/encode_parity.rs	BRAIN_VAE_DEVICE
 crates/vae/tests/it/flux2_parity.rs	BRAIN_FLUX2_VAE
-crates/vae/tests/it/flux2_parity.rs	BRAIN_VAE_DEVICE
 crates/vae/tests/it/sdxl_decode_parity.rs	BRAIN_SDXL
 crates/vae/tests/it/sdxl_decode_parity.rs	BRAIN_TESTDATA
-crates/vae/tests/it/sdxl_decode_parity.rs	BRAIN_VAE_DEVICE
 crates/vae/tests/it/tiled_parity.rs	BRAIN_FLUX2_VAE
 crates/vision/src/blocks.rs	BRAIN_CONV_GEMM
 crates/vision/src/blocks.rs	BRAIN_CONV_GEMM_MIN
@@ -681,12 +664,8 @@ crates/wan/src/block.rs	BRAIN_WAN_ATTN
 crates/wan/src/vae3d.rs	BRAIN_WAN_VAE_TAPS
 crates/wan/tests/dit_parity.rs	BRAIN_MODELS_DIR
 crates/wan/tests/dit_parity.rs	BRAIN_WAN_DIT
-crates/wan/tests/gguf_direct_real.rs	BRAIN_DEVICE
 crates/wan/tests/gguf_direct_real.rs	BRAIN_WAN_GGUF
 crates/wan/tests/gguf_direct_real.rs	BRAIN_WAN_GGUF_OUT
-crates/wan/tests/it/dev_grad.rs	BRAIN_DEV_GPU
-crates/wan/tests/it/dev_lora_train.rs	BRAIN_DEV_GPU
-crates/wan/tests/it/device_train.rs	BRAIN_DEV_GPU
 crates/wan/tests/it/device_train.rs	BRAIN_WAN_DEV_BENCH
 crates/wan/tests/it/finetune_ab.rs	BRAIN_CLIP_DIR
 crates/wan/tests/it/gguf_import_real.rs	BRAIN_WAN_GGUF

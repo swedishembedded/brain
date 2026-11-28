@@ -337,3 +337,6 @@ gpu_core::card_tests!(
     klein_4b_paired_1024_one_single_block_flash,
     klein_9b_caption_512_two_cards,
 );
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

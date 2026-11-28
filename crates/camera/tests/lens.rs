@@ -170,3 +170,6 @@ fn a_coefficient_that_is_not_a_number_is_refused() {
         assert!(err.contains("'k'"), "{err}");
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

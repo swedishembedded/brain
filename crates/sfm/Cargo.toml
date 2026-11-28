@@ -24,5 +24,6 @@ brain-data.workspace = true
 brain-camera.workspace = true
 
 [dev-dependencies]
+brain-testutil.workspace = true
 # `imaging::load` - JPEG decoding for the `sfm_folder` example.
 brain-imaging.workspace = true

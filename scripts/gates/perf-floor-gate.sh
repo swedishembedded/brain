@@ -22,7 +22,7 @@
 # this one's numbers; an op that has a floor and no line fails.
 #
 # A backend that is not present is skipped with a message naming it. The CUDA
-# card is BRAIN_DEVICE=gpuN when set, else the one with least memory in use.
+# card is the gpuN of BRAIN_TEST_DEVICE when set, else the one with least memory in use.
 #
 # Usage: scripts/gates/perf-floor-gate.sh [--record] [cpu|vulkan|cuda ...]
 #   --record   write the measured rates as the floors of each device class
@@ -40,7 +40,7 @@ mkdir -p "$floors_dir"
 
 fail=0
 for backend in "${backends[@]}"; do
-    device="${BRAIN_DEVICE:-}"
+    device=""
     case "$backend" in
         cpu) device=cpu ;;
         vulkan|cuda)
@@ -53,14 +53,10 @@ for backend in "${backends[@]}"; do
             fi ;;
         *) echo "unknown backend '$backend' (cpu, vulkan or cuda)"; exit 2 ;;
     esac
-    if [ "$backend" != cpu ]; then
-        echo "=== perf floors: $backend: FAIL, not run: a test binary is no longer steered to a GPU by BRAIN_DEVICE/BRAIN_BACKEND (an unconfigured process runs on the CPU); this leg waits for the test-harness device seam (the brain ledger, engineering cleanup EC-4 step 2) ==="; echo
-        fail=1; continue
-    fi
     echo "=== perf floors: $backend on $device ==="
     log=$(mktemp)
     start=$SECONDS
-    if ! BRAIN_DEVICE="$device" BRAIN_BACKEND="$backend" cargo test --release -q -p brain-gpu-core --test perf_floor \
+    if ! BRAIN_TEST_DEVICE="$device:$backend" cargo test --release -q -p brain-gpu-core --test perf_floor \
         -- --ignored --nocapture --test-threads=1 >"$log" 2>&1; then
         echo "  FAIL: the timing binary failed on $backend"; sed 's/^/    /' "$log" | tail -20
         fail=1; rm -f "$log"; continue

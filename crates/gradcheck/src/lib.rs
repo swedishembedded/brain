@@ -3063,3 +3063,7 @@ mod tests {
         assert_grad_gate(&report, "model");
     }
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before the unit tests run.
+#[cfg(test)]
+brain_testutil::configure_test_binary!();

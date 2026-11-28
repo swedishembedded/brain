@@ -273,3 +273,6 @@ gpu_core::card_tests!(
     random_shapes_and_windows_are_bit_identical,
     the_model_shapes_are_bit_identical,
 );
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

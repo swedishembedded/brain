@@ -190,3 +190,6 @@ fn gated_backward_matches_dense_bit_for_bit() {
     // (every row is routed somewhere by router_gate's top_k > 0 contract).
     assert!(dx_gated.iter().any(|&v| v.abs() > 1e-9), "dx is all-zero -- the test shape routes nothing");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

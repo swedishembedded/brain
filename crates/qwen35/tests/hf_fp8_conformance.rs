@@ -74,3 +74,6 @@ fn the_hf_fp8_engine_conforms_speculating_with_its_own_mtp_head() {
 }
 
 gpu_core::card_tests!(the_hf_fp8_engine_conforms, the_hf_fp8_engine_conforms_speculating_with_its_own_mtp_head);
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

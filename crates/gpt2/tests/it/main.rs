@@ -22,3 +22,6 @@ mod shard_parity;
 mod sharded_training;
 mod streamed_construction;
 mod warm_start;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

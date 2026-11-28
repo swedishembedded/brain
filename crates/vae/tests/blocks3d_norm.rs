@@ -138,3 +138,6 @@ fn the_fused_channel_norm_is_bit_identical_to_the_composed_form() {
 fn the_fused_channel_norm_is_bit_identical_on_the_cpu_backend() {
     both_arms_agree(Some("cpu"), "cpu backend");
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

@@ -53,3 +53,6 @@ fn qwen_train_step() {
     println!("  grad parity (dW gate): max-abs {maxd:.2e} rel {rel:.2e}");
     assert!(rel < 1e-4 && rm < nm);
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

@@ -9,3 +9,6 @@
 
 mod parity;
 mod recompute;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

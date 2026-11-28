@@ -428,3 +428,6 @@ gpu_core::card_tests!(
     prompts_sharing_a_document_resume_from_where_they_part,
     questions_arriving_together_prefill_their_document_once
 );
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

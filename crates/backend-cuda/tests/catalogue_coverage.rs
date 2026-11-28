@@ -119,3 +119,6 @@ fn every_catalogue_kernel_is_runnable_or_refused_by_name() {
     let refused: Vec<_> = outcomes.iter().filter(|o| o.state == "refused").map(|o| format!("{}: {}", o.name, o.detail)).collect();
     assert!(refused.is_empty(), "{} catalogue kernel(s) the generator refuses:\n{}", refused.len(), refused.join("\n"));
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

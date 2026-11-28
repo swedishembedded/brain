@@ -11,3 +11,6 @@ mod gen_train;
 mod reference_parity;
 mod t2i_real;
 mod t2i_tuned_real;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

@@ -110,3 +110,6 @@ fn a_replayed_decode_step_gives_the_candidates_of_the_step_built_the_ordinary_wa
 }
 
 gpu_core::card_tests!(a_replayed_decode_step_gives_the_candidates_of_the_step_built_the_ordinary_way);
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

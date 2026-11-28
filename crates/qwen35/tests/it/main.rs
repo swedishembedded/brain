@@ -117,3 +117,6 @@ mod vision_train;
 mod vision_train_streamed;
 mod vl;
 mod yarn_rope_scaling;
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();

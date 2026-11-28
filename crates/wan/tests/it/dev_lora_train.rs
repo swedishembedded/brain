@@ -6,7 +6,7 @@
 //! flow-matching loss down, and the adapter is an exact no-op at init.
 //!
 //! Runs on the CPU backend by default and on the real GPU with
-//! `BRAIN_DEV_GPU=1`. The second test is the real-weight version of the same
+//! `BRAIN_TEST_DEVICE=gpu`. The second test is the real-weight version of the same
 //! comparison `tests/lora_train.rs` runs on the host: a concept-only adapter
 //! must lower a HELD-OUT concept clip's loss more than a distractor's. It needs
 //! the Wan checkpoint in the model store and skips loudly without it.
@@ -22,7 +22,7 @@ use wan::modelgrad::{make_flow_batch, Batch, Cfg, ModelWeights};
 use wan::train::DeviceTrainer;
 
 fn device() -> &'static str {
-    if std::env::var("BRAIN_DEV_GPU").as_deref() == Ok("1") {
+    if brain_testutil::device::device().is_gpu() {
         "gpu"
     } else {
         "cpu"
@@ -353,8 +353,8 @@ fn mean_loss(
 
 #[test]
 fn a_gpu_trained_concept_lora_lowers_held_out_concept_loss_more_than_distractor_loss() {
-    if std::env::var("BRAIN_DEV_GPU").as_deref() != Ok("1") {
-        brain_testutil::skip_unavailable("set BRAIN_DEV_GPU=1 (needs a GPU) for the real-weight device LoRA gate");
+    if !brain_testutil::device::device().is_gpu() {
+        brain_testutil::skip_unavailable("set BRAIN_TEST_DEVICE=gpu (needs a GPU) for the real-weight device LoRA gate");
         return;
     }
     let Some(paths) = real_paths() else { return };

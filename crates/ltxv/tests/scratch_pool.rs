@@ -197,3 +197,6 @@ fn the_scratch_arena_changes_no_bit_of_a_real_weight_forward() {
         "the scratch arena changed a REAL-weight forward's output - it only changes WHEN device memory is allocated, never what any kernel reads"
     );
 }
+
+// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
+brain_testutil::configure_test_binary!();
