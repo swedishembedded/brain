@@ -1482,6 +1482,11 @@ pub fn select_compute(device: &str, backend: Option<&str>) -> Result<ComputeSet,
         let b = Backend::parse(b).map_err(|e| format!("--backend {b:?}: {e}"))?;
         set.set_backend(b)?;
     }
+    // The process runs on one compute set: a second, different choice would leave the caller believing it runs on
+    // a device the process does not use.
+    if let Some(chosen) = published_compute_set().filter(|chosen| **chosen != set) {
+        return Err(format!("--device {device:?}: the process already runs on {chosen}; it cannot also run on {set}"));
+    }
     set.apply_backend()?;
     publish_compute_set(set.clone());
     Ok(set)

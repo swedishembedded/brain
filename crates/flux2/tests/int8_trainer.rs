@@ -226,6 +226,3 @@ fn an_int8_base_trains_the_gradients_of_its_dequantised_weights() {
 gpu_core::card_tests!(
     an_int8_base_trains_the_gradients_of_its_dequantised_weights,
 );
-
-// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
-brain_testutil::configure_test_binary!();

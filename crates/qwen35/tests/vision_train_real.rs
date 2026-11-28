@@ -64,6 +64,3 @@ fn the_training_forward_reads_a_picture_as_the_reference_does() {
 }
 
 gpu_core::card_tests!(the_training_forward_reads_a_picture_as_the_reference_does);
-
-// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
-brain_testutil::configure_test_binary!();

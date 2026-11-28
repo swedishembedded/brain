@@ -427,6 +427,3 @@ gpu_core::card_tests!(
     a_card_list_opens_each_stage_on_its_own_card;
     ignored: sparse_attention_time_at_a_real_shape,
 );
-
-// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
-brain_testutil::configure_test_binary!();

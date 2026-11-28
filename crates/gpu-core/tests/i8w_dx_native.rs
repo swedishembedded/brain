@@ -131,6 +131,3 @@ gpu_core::card_tests!(
     the_int8_weight_input_gradient_matches_an_f64_oracle,
     shapes_it_does_not_serve_are_declined,
 );
-
-// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
-brain_testutil::configure_test_binary!();

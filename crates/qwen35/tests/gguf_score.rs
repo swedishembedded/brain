@@ -152,6 +152,3 @@ gpu_core::card_tests!(
     an_adapter_slot_scores_the_whole_record_under_the_adapter,
     scoring_drops_the_prompts_the_engine_had_cached
 );
-
-// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
-brain_testutil::configure_test_binary!();

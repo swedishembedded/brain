@@ -102,6 +102,3 @@ fn a_served_step_is_fully_priced_and_costs_what_the_portable_step_costs() {
 }
 
 gpu_core::card_tests!(a_served_step_is_fully_priced_and_costs_what_the_portable_step_costs);
-
-// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
-brain_testutil::configure_test_binary!();

@@ -199,6 +199,3 @@ fn the_encoder_shapes_match() {
 }
 
 gpu_core::card_tests!(the_kernel_is_offered_for_head_dim_128_only, matches_the_oracle_and_the_chain, the_encoder_shapes_match);
-
-// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
-brain_testutil::configure_test_binary!();

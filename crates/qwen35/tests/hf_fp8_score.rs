@@ -304,6 +304,3 @@ gpu_core::card_tests!(
     a_trace_reproduces_the_decode_time_log_probabilities_of_an_untruncated_draw;
     ignored: measure_the_gap_each_kv_tier_adds, measure_whether_a_decode_depends_on_its_co_batch, measure_what_separates_the_trace_from_the_decode, measure_the_decode_tape_between_sampler_and_trace,
 );
-
-// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
-brain_testutil::configure_test_binary!();

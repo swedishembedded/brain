@@ -293,6 +293,3 @@ gpu_core::card_tests!(
     the_tensor_core_chunk_forward_matches_the_f64_reference,
     the_token_major_chunk_forward_matches_the_host_pipeline,
 );
-
-// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
-brain_testutil::configure_test_binary!();

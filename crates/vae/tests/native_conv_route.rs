@@ -126,6 +126,3 @@ gpu_core::card_tests!(
     a_decoder_takes_the_native_conv_and_matches_the_reference,
     an_encoder_lowers_only_the_convs_the_native_kernel_does_not_serve,
 );
-
-// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
-brain_testutil::configure_test_binary!();

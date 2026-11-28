@@ -231,6 +231,3 @@ gpu_core::card_tests!(
     random_shapes_match,
     the_model_shapes_match,
 );
-
-// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
-brain_testutil::configure_test_binary!();

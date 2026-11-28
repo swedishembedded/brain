@@ -217,6 +217,3 @@ fn matches_the_f64_oracle_and_the_generated_tier() {
 }
 
 gpu_core::card_tests!(the_native_kernel_serves_head_dim_128, matches_the_f64_oracle_and_the_generated_tier,);
-
-// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
-brain_testutil::configure_test_binary!();

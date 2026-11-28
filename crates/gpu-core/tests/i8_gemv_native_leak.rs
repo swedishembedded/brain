@@ -90,6 +90,3 @@ fn handles_that_dispatch_the_native_kernel_return_every_byte_they_took() {
 }
 
 gpu_core::card_tests!(handles_that_dispatch_the_native_kernel_return_every_byte_they_took);
-
-// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
-brain_testutil::configure_test_binary!();

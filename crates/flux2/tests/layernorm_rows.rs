@@ -88,6 +88,3 @@ fn both_kernels_match_an_f64_layernorm() {
 }
 
 gpu_core::card_tests!(both_kernels_match_an_f64_layernorm; host: the_dit_registers_the_row_kernel);
-
-// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
-brain_testutil::configure_test_binary!();

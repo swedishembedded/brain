@@ -131,6 +131,3 @@ fn reads_a_picture(tier: Option<gpu_core::select::Dtype>, cosine: f64, rel_l2: f
 }
 
 gpu_core::card_tests!(fp8_release_reads_a_picture_as_the_reference_does, bf16_decoded_release_reads_a_picture_as_the_reference_does);
-
-// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
-brain_testutil::configure_test_binary!();

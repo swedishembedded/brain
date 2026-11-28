@@ -400,6 +400,3 @@ gpu_core::card_tests!(
     device_flash_single_block_backward_matches_host,
     ; host: cpu_backend_double_block_backward_matches_host, cpu_backend_single_block_backward_matches_host,
 );
-
-// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
-brain_testutil::configure_test_binary!();

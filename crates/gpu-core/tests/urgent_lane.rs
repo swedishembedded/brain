@@ -212,6 +212,3 @@ gpu_core::card_tests!(
     retiring_an_invalidated_graph_in_the_urgent_lane_does_not_wait_for_the_normal_lane;
     ignored: decode_latency_beside_a_prefill,
 );
-
-// The device the test harness asks for (BRAIN_TEST_DEVICE), selected before any test runs.
-brain_testutil::configure_test_binary!();
