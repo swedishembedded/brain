@@ -287,18 +287,32 @@ impl<P> SnapshotPrefixCache<P> {
         self.take_row_for(namespace, prompt.into(), false)
     }
 
-    /// [`Self::take_row`] for an entry filed [`Entry::beside`] the prefixes it extends: a full cache gives up its
-    /// least recently used entry, never the prefix as a turn that replaces it.
+    /// [`Self::take_row`] for an entry filed [`Entry::beside`] the prefixes it extends: a free row, else the least
+    /// recently used answer's; `None` when every row holds a prompt, which an answer never displaces, or when the
+    /// answer's ids are an entry's already.
     pub fn take_row_beside<'p>(&mut self, namespace: KvNamespace, prompt: impl Into<Prompt<'p>>) -> (Option<u32>, Option<BlockTable>) {
         self.take_row_for(namespace, prompt.into(), true)
     }
 
     fn take_row_for(&mut self, namespace: KvNamespace, prompt: Prompt<'_>, beside: bool) -> (Option<u32>, Option<BlockTable>) {
+        // An answer that adds no id to a cached prefix (a reply of one token, which no step fed back) is that prefix
+        // already: filing it would shadow the entry a repeat resumes from with one that cannot answer it.
+        if beside && self.entries.iter().any(|e| e.tokens.len() == prompt.tokens.len() && e.is_prefix_of(namespace, prompt)) {
+            return (None, None);
+        }
         if let Some(row) = self.free_rows.pop() {
             return (Some(row), None);
         }
-        let superseded = if beside { None } else { self.entries.iter().position(|e| e.superseded_by(namespace, prompt)) };
-        let victim = superseded.or_else(|| self.entries.iter().enumerate().min_by_key(|(_, e)| e.stamp).map(|(i, _)| i));
+        // An answer takes a free row or another answer's, the least recently used: never a prompt's, which a repeat
+        // of the prompt (another sample of a group, the same request again) resumes from.
+        // Answers live in the rows prompts leave free: a prompt filed into a full cache takes an answer's row first.
+        let oldest_answer = self.entries.iter().enumerate().filter(|(_, e)| e.beside).min_by_key(|(_, e)| e.stamp).map(|(i, _)| i);
+        let victim = if beside {
+            oldest_answer
+        } else {
+            let superseded = self.entries.iter().position(|e| e.superseded_by(namespace, prompt));
+            superseded.or(oldest_answer).or_else(|| self.entries.iter().enumerate().min_by_key(|(_, e)| e.stamp).map(|(i, _)| i))
+        };
         match victim {
             Some(i) => {
                 let e = self.entries.remove(i);
@@ -460,6 +474,35 @@ mod tests {
         let r = c.take_row(BASE_KV_NAMESPACE, &[1, 2, 3, 9, 4, 4, 5]).0.unwrap();
         c.insert(entry(&[1, 2, 3, 9, 4, 4, 5], r));
         assert_eq!(c.stats().2, 1, "a turn extending the answer replaces it and the prompt");
+    }
+
+    /// An answer whose ids are a cached prompt's (a one-token reply, nothing fed back) is not filed: it would shadow
+    /// the prompt's entry, which a repeat resumes from, with one that holds no hidden row.
+    #[test]
+    fn an_answer_that_adds_nothing_is_not_filed() {
+        let mut c = SnapshotPrefixCache::<u32>::new(4);
+        let r = c.take_row(BASE_KV_NAMESPACE, &[1, 2, 3]).0.unwrap();
+        c.insert(entry(&[1, 2, 3], r));
+        let (row, evicted) = c.take_row_beside(BASE_KV_NAMESPACE, &[1, 2, 3]);
+        assert!(row.is_none() && evicted.is_none());
+    }
+
+    /// Answers live in the rows prompts leave free: an answer never takes a prompt's row, and a prompt filed into a
+    /// full cache takes an answer's before another prompt's, so the cache holds as many prompts as it did before
+    /// answers were filed (a prompt repeated later, the next sample of a group, still resumes from its entry).
+    #[test]
+    fn answers_never_cost_a_prompt_its_entry() {
+        let mut c = SnapshotPrefixCache::<u32>::new(2);
+        let r = c.take_row(BASE_KV_NAMESPACE, &[1, 2, 3]).0.unwrap();
+        c.insert(entry(&[1, 2, 3], r));
+        let r = c.take_row_beside(BASE_KV_NAMESPACE, &[1, 2, 3, 7, 8]).0.unwrap();
+        c.insert(entry(&[1, 2, 3, 7, 8], r).beside());
+        let r = c.take_row(BASE_KV_NAMESPACE, &[4, 5, 6]).0.unwrap();
+        c.insert(entry(&[4, 5, 6], r));
+        assert!(c.peek(BASE_KV_NAMESPACE, &[1, 2, 3]).is_some(), "the second prompt took the answer's row");
+        let (row, evicted) = c.take_row_beside(BASE_KV_NAMESPACE, &[4, 5, 6, 7, 8]);
+        assert!(row.is_none() && evicted.is_none(), "a cache of prompts files no answer");
+        assert!(c.peek(BASE_KV_NAMESPACE, &[1, 2, 3]).is_some() && c.peek(BASE_KV_NAMESPACE, &[4, 5, 6]).is_some());
     }
 
     /// A cache whose rows are backed as it fills grows without disturbing what it holds: the rows it already had are
