@@ -41,7 +41,7 @@ use brain_testutil::read_f32;
             brain_testutil::skip("Qwen3-VL decoder reference not present (run tools/goldens/qwen3vl_decoder_dump_reference.py)");
             return;
         };
-        std::env::set_var("BRAIN_DEVICE", "cpu");
+        let _cpu = gpu_core::backend_scope(gpu_core::Backend::Cpu);
         let tokens: Vec<u32> = tok_raw.as_chunks::<4>().0.iter().map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]) as u32).collect();
 
         // Stream the shards one at a time, keeping only embed/norm + the first N blocks.

@@ -81,7 +81,7 @@ fn real_weight_composite_forward() {
         brain_testutil::skip("real checkpoints or the vision fixture are missing");
         return;
     }
-    pin_cpu_backend();
+    let _cpu = pin_cpu_backend();
     let golden = load(&fixture);
     mem("start");
 

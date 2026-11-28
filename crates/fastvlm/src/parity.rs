@@ -39,7 +39,7 @@ use brain_testutil::{read_f32, read_i32};
         };
         // The tied vocab table (151936×896×4 ≈ 544 MB) exceeds a typical GPU storage-
         // buffer binding limit, so run the decoder on the CPU-JIT backend.
-        std::env::set_var("BRAIN_DEVICE", "cpu");
+        let _cpu = gpu_core::backend_scope(gpu_core::Backend::Cpu);
         let Ok(tensors) = checkpoint::safetensors::read(&CKPT) else {
             brain_testutil::skip("FastVLM checkpoint not present");
             return;
@@ -127,7 +127,7 @@ use brain_testutil::{read_f32, read_i32};
             brain_testutil::skip("FastVLM checkpoint not present");
             return;
         };
-        std::env::set_var("BRAIN_DEVICE", "cpu");
+        let _cpu = gpu_core::backend_scope(gpu_core::Backend::Cpu);
         use crate::encoder::{ctx as ectx, Encoder, PIPELINES};
         use crate::vision_import::build_vision_weights;
         use gpu_core::Gpu;
@@ -178,7 +178,7 @@ use brain_testutil::{read_f32, read_i32};
             brain_testutil::skip("FastVLM checkpoint not present");
             return;
         };
-        std::env::set_var("BRAIN_DEVICE", "cpu");
+        let _cpu = gpu_core::backend_scope(gpu_core::Backend::Cpu);
         use crate::encoder::{ctx as ectx, kidx, Encoder, PIPELINES};
         use crate::import::{map_decoder, map_projector};
         use crate::vision_import::build_vision_weights;
@@ -274,7 +274,7 @@ use brain_testutil::{read_f32, read_i32};
             brain_testutil::skip("FastVLM checkpoint not present");
             return;
         };
-        std::env::set_var("BRAIN_DEVICE", "cpu");
+        let _cpu = gpu_core::backend_scope(gpu_core::Backend::Cpu);
         let (pre_len, post_len) = (layout[0] as usize, layout[1] as usize);
         let n_img = embeds.len() / 896;
         assert_eq!(ids.len(), pre_len + post_len);

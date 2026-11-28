@@ -920,14 +920,24 @@ mod native_facade {
     /// device built after it, in every other test, onto its backend. Scopes nest, and the outer choice returns when
     /// `f` ends or unwinds.
     pub fn with_backend<R>(b: Backend, f: impl FnOnce() -> R) -> R {
-        struct Restore(u8);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                SCOPED_BACKEND.with(|s| s.set(self.0));
-            }
-        }
-        let _restore = Restore(SCOPED_BACKEND.with(|s| s.replace(backend_code(b))));
+        let _scope = backend_scope(b);
         f()
+    }
+
+    /// [`with_backend`] for the rest of the caller's scope: every `Gpu::new` on this thread builds on `b` until the
+    /// returned guard drops, when the outer choice returns.
+    #[must_use = "the backend applies only while the guard lives"]
+    pub fn backend_scope(b: Backend) -> BackendScope {
+        BackendScope(SCOPED_BACKEND.with(|s| s.replace(backend_code(b))))
+    }
+
+    /// The guard of [`backend_scope`].
+    pub struct BackendScope(u8);
+
+    impl Drop for BackendScope {
+        fn drop(&mut self) {
+            SCOPED_BACKEND.with(|s| s.set(self.0));
+        }
     }
 
     thread_local! {
@@ -3638,7 +3648,7 @@ pub enum BuildTarget {
 
 pub use native_facade::{
     adapter_info, backend_name, backend_selected, build_target, device_caps, discrete_gpu_count,
-    available_gpu_backends, selected_backend, set_default_backend, visible_gpu_count, with_backend, wgpu_visible_gpus, Backend, Gpu, PassScope, ScratchMark,
+    available_gpu_backends, selected_backend, set_default_backend, visible_gpu_count, with_backend, backend_scope, BackendScope, wgpu_visible_gpus, Backend, Gpu, PassScope, ScratchMark,
     ScratchScope, TapeRecording, WeakGpu,
 };
 #[cfg(not(target_arch = "wasm32"))]

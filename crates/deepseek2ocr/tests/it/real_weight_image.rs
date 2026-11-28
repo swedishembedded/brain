@@ -65,7 +65,7 @@ use real_vision::{mem_available_gib, synthetic_page, DECODER_GIB, SRC_H, SRC_W};
 #[test]
 fn real_weight_real_image_forward() {
     let Some(mmproj) = real_vision::mmproj_path() else { return };
-    real_vision::pin_cpu_backend();
+    let _cpu = real_vision::pin_cpu_backend();
     mem("start");
 
     let cfg = DeepseekOcrConfig::deepseek_ocr(1);

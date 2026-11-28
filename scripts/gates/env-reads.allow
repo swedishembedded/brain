@@ -24,7 +24,6 @@ crates/capability/src/lib.rs	BRAIN_TEST_HOST_OVERRIDE
 crates/capability/src/lib.rs	BRAIN_TEST_HOST_SERVED
 crates/capability/src/lib.rs	BRAIN_TEST_HOST_UNSET
 crates/capability/src/lib.rs	BRAIN_TEST_HOST_WEIGHTS
-crates/catalog/src/resident_llm.rs	BRAIN_DEVICE
 crates/catalog/src/resident_llm.rs	QWEN_TOKENIZER
 crates/catalog/src/resident_qwen35.rs	QWEN_TOKENIZER
 crates/checkpoint/src/gguf.rs	BRAIN_GGUF_TESTFILE
@@ -70,7 +69,6 @@ crates/cli/tests/it/serve_cli.rs	BRAIN_DEVICE
 crates/cli/tests/it/serve_cli.rs	BRAIN_MODELS_DIR
 crates/cli/tests/it/serve_cli.rs	BRAIN_QWEN_WEIGHTS
 crates/cli/tests/it/zipdepth_smoke.rs	ZIPDEPTH_PTH
-crates/clip/tests/deepseek_ocr_real.rs	BRAIN_DEVICE
 crates/clip/tests/it/parity.rs	<var>
 crates/clip/tests/it/parity.rs	BRAIN_EVA_CLIP
 crates/clip/tests/it/parity.rs	BRAIN_SDXL
@@ -113,16 +111,12 @@ crates/decide/src/bin/salesconv_embed.rs	BRAIN_MINILM_DIR
 crates/decide/src/bin/salesconv_embed.rs	HOME
 crates/deepseek2/tests/common/real_lm.rs	BRAIN_DEEPSEEK_OCR_LM_ST
 crates/deepseek2/tests/it/shard_parity.rs	SHARD_TEST_GPUS
-crates/deepseek2ocr/tests/common/real_vision.rs	BRAIN_DEVICE
-crates/deepseekocr2/tests/common/real_vision.rs	BRAIN_DEVICE
 crates/diamond/tests/it/graph_snapshot.rs	WM_SNAPSHOT_DUMP
 crates/diamond/tests/it/parity.rs	WM_DUMP_TAPS
 crates/diamond/tests/it/parity.rs	WM_FIXTURE_DIR
 crates/diffusion/tests/it/discrete_parity.rs	BRAIN_TESTDATA
 crates/eval/src/tts.rs	BRAIN_QWEN3TTS_SPEAKER
 crates/fastvlm/src/captioner.rs	BRAIN_FASTVLM_WEIGHTS
-crates/fastvlm/src/parity.rs	BRAIN_DEVICE
-crates/fastvlm/src/train_smoke.rs	BRAIN_DEVICE
 crates/fincast/tests/it/parity.rs	FINCAST_CKPT
 crates/fincast/tests/it/t0_param_layout.rs	FINCAST_CKPT
 crates/florence2/src/tokenizer.rs	FLORENCE2_DIR
@@ -551,8 +545,6 @@ crates/qwen3tts/tests/it/asr_roundtrip.rs	BRAIN_NEMOTRONASR
 crates/qwen3vl/src/bin/qwen3vl_bench.rs	BRAIN_QWEN3VL_WEIGHTS
 crates/qwen3vl/src/caps.rs	BRAIN_QWEN3VL_WEIGHTS
 crates/qwen3vl/src/captioner.rs	BRAIN_QWEN3VL_WEIGHTS
-crates/qwen3vl/src/parity.rs	BRAIN_DEVICE
-crates/qwen3vl/src/train_smoke.rs	BRAIN_DEVICE
 crates/qwen3vl/tests/it/gguf_parity.rs	BRAIN_QWEN3VL_GGUF
 crates/qwen3vl/tests/it/int8_tier.rs	BRAIN_QWEN3VL_WEIGHTS
 crates/rrdbnet/tests/it/parity.rs	BRAIN_ESRGAN
@@ -568,7 +560,6 @@ crates/s3dit/tests/it/real_parity.rs	BRAIN_S3DIT_DIT
 crates/s3dit/tests/it/real_parity.rs	BRAIN_S3DIT_I8
 crates/s3dit/tests/it/real_parity.rs	BRAIN_S3DIT_SHARD
 crates/s3tokenizer/tests/s3tokenizer_parity.rs	BRAIN_S3TOKENIZER_V2
-crates/sam1/tests/parity.rs	BRAIN_DEVICE
 crates/sdk/src/chat_tokens.rs	QWEN_TOKENIZER
 crates/sdk/tests/auto_pipeline.rs	BRAIN_MODELS_DIR
 crates/sdk/tests/depth_pipeline.rs	BRAIN_HUB_ENDPOINT

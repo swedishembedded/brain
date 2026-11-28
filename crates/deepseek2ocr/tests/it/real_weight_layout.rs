@@ -93,7 +93,7 @@ fn real_weight_full_row_layout() {
         brain_testutil::skip(&format!("{} absent (the tokenizer lives in its KV block)", lm.display()));
         return;
     }
-    real_vision::pin_cpu_backend();
+    let _cpu = real_vision::pin_cpu_backend();
     mem("start");
 
     let cfg = DeepseekOcrConfig::deepseek_ocr(1);

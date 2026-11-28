@@ -15,7 +15,7 @@ mod tests {
 
     #[test]
     fn vlm_finetune_overfits_image_caption() {
-        std::env::set_var("BRAIN_DEVICE", "cpu");
+        let _cpu = gpu_core::backend_scope(gpu_core::Backend::Cpu);
         let cfg = QwenConfig::tiny(); // vocab 23, d_model 16, 2 layers
         let init = init_weights(&cfg, 1);
         let (t, n_img, d) = (8u32, 3u32, cfg.d_model);

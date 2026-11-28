@@ -2706,11 +2706,8 @@ mod tests {
             brain_testutil::skip("pull the Qwen/Qwen3-0.6B brain checkpoint into the model store to run this test");
             return;
         };
-        // SAFETY: this test is `#[ignore]`d (never runs under the default
-        // `TEST_THREADS=8` fast lane) and is invoked alone, single-threaded,
-        // for exactly this measurement -- see the module doc's OOM-budget
-        // discipline (never build a real-shape engine alongside other tests).
-        unsafe { std::env::set_var("BRAIN_DEVICE", "cpu") };
+        // On the CPU, where the pool is the host's memory this test measures.
+        let _cpu = gpu_core::backend_scope(gpu_core::Backend::Cpu);
 
         let cfg = qwen3::config::QwenConfig::qwen3_0_6b();
         let card = checkpoint::st::ModelCard::new("brain/qwen3", "qwen");

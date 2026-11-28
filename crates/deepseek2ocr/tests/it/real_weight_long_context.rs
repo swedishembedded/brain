@@ -70,7 +70,7 @@ fn chunked_and_batched_composites_agree_at_real_scale() {
         brain_testutil::skip_unavailable(&format!("MemAvailable {avail:.1} GiB < {DECODER_GIB} GiB (the composite peaks near 24 GiB)"));
         return;
     }
-    pin_cpu_backend();
+    let _cpu = pin_cpu_backend();
     mem("start");
 
     let cfg = DeepseekOcrConfig::deepseek_ocr(1);

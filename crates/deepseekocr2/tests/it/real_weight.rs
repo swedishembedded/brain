@@ -57,7 +57,7 @@ fn lap(t0: &std::time::Instant, label: &str) {
 #[test]
 fn real_weight_composite_forward_global_view() {
     let Some(files) = real_files() else { return };
-    pin_cpu_backend();
+    let _cpu = pin_cpu_backend();
     let t0 = std::time::Instant::now();
     mem("start");
 

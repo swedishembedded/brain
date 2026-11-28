@@ -32,7 +32,7 @@ mod tests {
 
     #[test]
     fn lora_finetune_loop_decreases_loss_over_several_captioned_images() {
-        std::env::set_var("BRAIN_DEVICE", "cpu");
+        let _cpu = gpu_core::backend_scope(gpu_core::Backend::Cpu);
 
         let vcfg = VisionConfig {
             depth: 2,

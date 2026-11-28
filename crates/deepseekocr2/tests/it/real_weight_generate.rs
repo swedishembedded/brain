@@ -60,7 +60,7 @@ fn argmax(v: &[f32]) -> usize {
 #[test]
 fn real_weight_composite_greedy_decode_global_view() {
     let Some(files) = real_files() else { return };
-    pin_cpu_backend();
+    let _cpu = pin_cpu_backend();
     mem("start");
 
     let decoder_cfg = DeepseekV2Config::deepseek_ocr(1);

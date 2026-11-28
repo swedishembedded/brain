@@ -52,16 +52,9 @@ fn mmproj() -> Option<std::path::PathBuf> {
     p.exists().then_some(p)
 }
 
-/// See `crates/sam1/tests/parity.rs`'s "Backend" section: the wgpu path
-/// corrupts large multi-block graphs on this class of device. A 24-block CLIP-L
-/// is squarely in that regime, and an unreliable "is it finite" answer is worse
-/// than no answer.
-///
-/// # Safety
-/// Single-threaded at this point; no other test in this binary touches
-/// `BRAIN_DEVICE`.
-fn pin_cpu_backend() {
-    unsafe { std::env::set_var("BRAIN_DEVICE", "cpu") };
+/// Every device this thread builds until the guard drops is on the CPU.
+fn pin_cpu_backend() -> gpu_core::BackendScope {
+    gpu_core::backend_scope(gpu_core::Backend::Cpu)
 }
 
 #[test]
@@ -120,7 +113,7 @@ fn real_mmproj_clip_forward_on_the_reference_tokens_is_sane() {
             fixture.display()
         ));
     };
-    pin_cpu_backend();
+    let _cpu = pin_cpu_backend();
     let golden = brain_testutil::parity::load(&fixture);
 
     let mg = MmapGguf::open(path.to_str().expect("utf-8 path")).expect("open mmproj");

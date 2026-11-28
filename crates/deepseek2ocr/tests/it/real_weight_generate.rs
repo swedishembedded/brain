@@ -81,7 +81,7 @@ fn real_weight_composite_greedy_decode() {
         brain_testutil::skip(&format!("{} absent (run crates/deepseekv2's parity test first, it builds the expansion)", expanded.display()));
         return;
     }
-    pin_cpu_backend();
+    let _cpu = pin_cpu_backend();
     let golden = load(&fixture);
     mem("start");
 

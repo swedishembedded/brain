@@ -25,13 +25,9 @@
 #[allow(unused_imports)]
 pub use deepseekocr2::import::{Files, LM, LM_EXPANDED, MMPROJ, VISION_EXPANDED};
 
-/// Pin the CPU backend.
-///
-/// # Safety
-/// Call before any device exists and while single-threaded; no test in these
-/// binaries touches `BRAIN_DEVICE` afterwards.
-pub fn pin_cpu_backend() {
-    unsafe { std::env::set_var("BRAIN_DEVICE", "cpu") };
+/// Every device this thread builds until the guard drops is on the CPU.
+pub fn pin_cpu_backend() -> gpu_core::BackendScope {
+    gpu_core::backend_scope(gpu_core::Backend::Cpu)
 }
 
 const REPO: &str = "deepseek-ai/DeepSeek-OCR-2";

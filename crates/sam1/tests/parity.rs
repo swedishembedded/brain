@@ -112,14 +112,9 @@ const MMPROJ: &str = "ggml-org/DeepSeek-OCR-GGUF";
 /// it) rather than a rubber stamp.
 const FLOOR: f64 = 0.999;
 
-/// Pin the CPU backend - see the module header's "Backend" section. Called
-/// before any device is built.
-///
-/// # Safety
-/// Single-threaded at this point in the test binary; no other test in this
-/// crate reads or writes `BRAIN_DEVICE`.
-fn pin_cpu_backend() {
-    unsafe { std::env::set_var("BRAIN_DEVICE", "cpu") };
+/// Every device this thread builds until the guard drops is on the CPU.
+fn pin_cpu_backend() -> gpu_core::BackendScope {
+    gpu_core::backend_scope(gpu_core::Backend::Cpu)
 }
 
 fn mmproj_path() -> Option<std::path::PathBuf> {
@@ -139,7 +134,7 @@ fn real_mmproj_sam_tower_matches_llamacpp() {
         brain_testutil::skip(&format!("sam1 parity: {MMPROJ} mmproj not in the model store"));
         return;
     };
-    pin_cpu_backend();
+    let _cpu = pin_cpu_backend();
     let golden = load(&fixture);
 
     // ---- import (two-way coverage over the whole 476-tensor mmproj) ----
