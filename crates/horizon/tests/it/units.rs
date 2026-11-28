@@ -37,7 +37,7 @@ fn model(train: &[Subject]) -> Saved {
     cfg.d_ff = 32;
     cfg.rank = 8;
     cfg.knots = vec![0.0, 2.0, 5.0, 10.0];
-    let model = Horizon::new(cfg.clone(), 64, &horizon::init_weights(&cfg, 3));
+    let model = Horizon::new(cfg.clone(), 64, &horizon::init_weights(&cfg, 3), &horizon::placement::Placement::Cpu);
     Saved::new(model, vocab)
 }
 
@@ -50,7 +50,7 @@ fn a_mismatched_unit_is_rejected_by_name_and_survives_save_and_load() {
     let saved = model(&with_units(train, Some("mmol/L")));
     let dir = std::env::temp_dir().join(format!("horizon-units-{}", std::process::id()));
     saved.save(&dir).unwrap();
-    let loaded = Saved::load(&dir).unwrap();
+    let loaded = Saved::load(&dir, &horizon::placement::Placement::Cpu).unwrap();
     std::fs::remove_dir_all(&dir).ok();
     assert_eq!(loaded.vocab.units.get("x1").map(String::as_str), Some("mmol/L"));
 

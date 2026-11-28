@@ -63,6 +63,7 @@ pub struct TrainSpec {
     backbone: Option<Backbone>,
     next_events: Option<(Vec<String>, f32)>,
     activations: Option<model::saved::SavedPolicy>,
+    placement: crate::placement::Placement,
 }
 
 impl TrainSpec {
@@ -91,7 +92,13 @@ impl TrainSpec {
             backbone: None,
             next_events: None,
             activations: None,
+            placement: crate::placement::Placement::Cpu,
         }
+    }
+    /// Where the model trains; the CPU unless named.
+    pub fn placement(mut self, placement: crate::placement::Placement) -> Self {
+        self.placement = placement;
+        self
     }
     /// What the backward keeps of the forward; absent leaves the build's own choice. A policy the encoder cannot
     /// run fails the training before its first step.
@@ -353,7 +360,7 @@ pub fn train_with_vocab(
     let enc_train: Vec<Encoded> = train.iter().map(|s| encode(s, &vocab, &cfg)).collect();
     let enc_held: Vec<Encoded> = held_out.iter().map(|s| encode(s, &vocab, &cfg)).collect();
     let truncated_tokens = enc_train.iter().chain(&enc_held).map(|e| e.truncated).sum();
-    let model = Horizon::new(cfg.clone(), spec.batch, &crate::init_weights(&cfg, spec.seed));
+    let model = Horizon::new(cfg.clone(), spec.batch, &crate::init_weights(&cfg, spec.seed), &spec.placement);
     let opts = model::FitOpts {
         steps: spec.steps,
         batch_size: spec.batch,

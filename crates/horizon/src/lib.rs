@@ -36,6 +36,7 @@ pub mod history;
 pub mod init;
 pub mod lifecycle;
 pub mod model;
+pub mod placement;
 pub mod saved;
 pub mod support;
 pub mod survival;

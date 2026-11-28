@@ -219,7 +219,7 @@ impl Saved {
     }
 
     /// Load the model [`Saved::save`] wrote into `dir`.
-    pub fn load(dir: &Path) -> Result<Saved, String> {
+    pub fn load(dir: &Path, placement: &crate::placement::Placement) -> Result<Saved, String> {
         let weights = dir.join(WEIGHTS_FILE);
         if !weights.is_file() {
             return Err(format!(
@@ -254,7 +254,7 @@ impl Saved {
                 }
             }
         }
-        let model = Horizon::load(utf8(&weights)?, PREDICT_BATCH)?;
+        let model = Horizon::load(utf8(&weights)?, PREDICT_BATCH, placement)?;
         Ok(Saved {
             model,
             vocab,

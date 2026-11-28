@@ -480,7 +480,7 @@ impl Action for PredictAction {
             .ok_or("horizon: missing required param 'weights'")?;
         self.hot.try_get(
             dir.clone(),
-            || Loaded::load(Path::new(&dir)).map_err(|e| format!("horizon: {e}")),
+            || Loaded::load(Path::new(&dir), &crate::placement::Placement::Process).map_err(|e| format!("horizon: {e}")),
             |loaded| {
                 progress(Progress::step(1, 1, "predict"));
                 predict(loaded, inv)
@@ -511,7 +511,7 @@ impl Action for EvalAction {
     fn run(&self, inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> ActionResult {
         inv.cancel.check()?;
         let dir = inv.get_str("weights").ok_or("horizon: missing required param 'weights'")?;
-        let loaded = Loaded::load(Path::new(&dir)).map_err(|e| format!("horizon: {e}"))?;
+        let loaded = Loaded::load(Path::new(&dir), &crate::placement::Placement::Process).map_err(|e| format!("horizon: {e}"))?;
         lifecycle::eval(&loaded, inv, progress)
     }
 }

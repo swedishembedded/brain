@@ -32,7 +32,7 @@ fn each_subjects_nll_equals_scoring_it_alone_and_averages_to_the_total() {
         })
         .collect();
     // Batches of 16 over 40 subjects: a short last batch with padded slots.
-    let model = Horizon::new(cfg.clone(), 16, &horizon::init_weights(&cfg, 3));
+    let model = Horizon::new(cfg.clone(), 16, &horizon::init_weights(&cfg, 3), &horizon::placement::Placement::Cpu);
     let each = event_nll_each(&model, &enc);
     assert_eq!(each.len(), enc.len());
     assert!(each.iter().all(|x| x.is_finite() && *x >= 0.0));

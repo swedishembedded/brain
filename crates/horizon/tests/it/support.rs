@@ -32,7 +32,7 @@ fn model(train: &[Subject]) -> Saved {
     cfg.d_ff = 32;
     cfg.rank = 8;
     cfg.knots = vec![0.0, 2.0, 5.0, 10.0];
-    let model = Horizon::new(cfg.clone(), 64, &horizon::init_weights(&cfg, 3));
+    let model = Horizon::new(cfg.clone(), 64, &horizon::init_weights(&cfg, 3), &horizon::placement::Placement::Cpu);
     let mut saved = Saved::new(model, vocab);
     saved.fit_support(train).unwrap();
     saved
@@ -193,7 +193,7 @@ fn an_unsupported_subject_gets_no_probability_and_the_support_travels_with_the_m
     assert!(action.run(&request(&subjects, Some(0.0), &dir), &mut |_| {}).is_err(), "a threshold must be positive");
 
     // The support survives the reload: same verdicts.
-    let loaded = Saved::load(&dir).unwrap();
+    let loaded = Saved::load(&dir, &horizon::placement::Placement::Cpu).unwrap();
     let a = loaded.assess(&subjects, &AssessOptions::default()).unwrap();
     let b = saved.assess(&subjects, &AssessOptions::default()).unwrap();
     assert_eq!(a[1].warnings, b[1].warnings);
@@ -202,7 +202,7 @@ fn an_unsupported_subject_gets_no_probability_and_the_support_travels_with_the_m
     // A model directory without support.json reports support UNKNOWN: neither
     // supported nor unsupported, and nothing is withheld.
     std::fs::remove_file(dir.join("support.json")).unwrap();
-    let old = Saved::load(&dir).unwrap();
+    let old = Saved::load(&dir, &horizon::placement::Placement::Cpu).unwrap();
     let verdict = old.assess(&subjects, &AssessOptions::default()).unwrap();
     assert!(verdict.iter().all(|a| a.supported.is_none() && a.ood_score.is_none() && a.warnings.is_empty()));
     // (A new provider: the first one keeps the model it loaded for the directory.)
@@ -219,11 +219,11 @@ fn an_unsupported_subject_gets_no_probability_and_the_support_travels_with_the_m
     saved.save(&dir).unwrap();
     let other = scratch("other");
     let mut moved = model(&train);
-    moved.model = Horizon::new(moved.model.cfg.clone(), 64, &horizon::init_weights(&moved.model.cfg, 8));
+    moved.model = Horizon::new(moved.model.cfg.clone(), 64, &horizon::init_weights(&moved.model.cfg, 8), &horizon::placement::Placement::Cpu);
     moved.support = None;
     moved.save(&other).unwrap();
     std::fs::copy(dir.join("support.json"), other.join("support.json")).unwrap();
-    assert!(Saved::load(&other).err().unwrap().contains("different model"));
+    assert!(Saved::load(&other, &horizon::placement::Placement::Cpu).err().unwrap().contains("different model"));
     std::fs::remove_dir_all(&dir).ok();
     std::fs::remove_dir_all(&other).ok();
 }

@@ -33,8 +33,8 @@ fn host_peak_of_a_streamed_load() {
     let file = write(&path, &HorizonConfig { d_model: 512, n_layers: 4, n_heads: 8, d_ff: 2048, ..HorizonConfig::tiny(4096, 64) });
     // The device, its driver libraries and kernels first, from a load of the same layout a few KB in size.
     write(&warm, &HorizonConfig::tiny(32, 8));
-    drop(horizon::model::Horizon::load(warm.to_str().unwrap(), 1).unwrap());
-    let growth = brain_testutil::load_peak::host_peak_growth(|| drop(horizon::model::Horizon::load(path.to_str().unwrap(), 1).unwrap()));
+    drop(horizon::model::Horizon::load(warm.to_str().unwrap(), 1, &horizon::placement::Placement::Cpu).unwrap());
+    let growth = brain_testutil::load_peak::host_peak_growth(|| drop(horizon::model::Horizon::load(path.to_str().unwrap(), 1, &horizon::placement::Placement::Cpu).unwrap()));
     println!("file {:.1} MB, host peak growth {:.1} MB", file as f64 / 1e6, growth as f64 / 1e6);
     // On a CPU device the f32 weights and the trainable build's device state (its AdamW moments) are host memory:
     // about twice the file. A whole-model f32 read and its clone add twice the file on top.

@@ -246,7 +246,9 @@ fn train_settings(inv: &Invocation, train: &[Subject]) -> Result<TrainSpec, Stri
     if codes.is_empty() {
         return Err("horizon: no outcome codes: the dataset has no event after any subject's entry; name them with 'codes'".into());
     }
+    // An action runs in a brain process its own flags configured.
     let mut spec = TrainSpec::new(codes, list(inv.get_str("absorbing")))
+        .placement(crate::placement::Placement::Process)
         .steps(count(inv, "steps", i64::from(DEFAULT_STEPS))?)
         .batch(count(inv, "batch", i64::from(DEFAULT_BATCH))?)
         .eval_interval(count(inv, "eval_interval", i64::from(DEFAULT_EVAL_INTERVAL))?)
@@ -470,7 +472,7 @@ pub fn calibrate(inv: &Invocation, progress: &mut dyn FnMut(Progress)) -> Action
     if Ensemble::is_dir(dir) {
         return Err("horizon: calibrate takes a single model, not an ensemble".into());
     }
-    let mut saved = Saved::load(dir).map_err(|e| format!("horizon: {e}"))?;
+    let mut saved = Saved::load(dir, &crate::placement::Placement::Process).map_err(|e| format!("horizon: {e}"))?;
     let (calibration, outcome) = fit_calibration(&saved, inv, progress)?;
     match out {
         Some(out) => {

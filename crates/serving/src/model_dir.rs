@@ -1811,7 +1811,7 @@ mod tests {
         cfg.d_ff = 32;
         cfg.rank = 8;
         cfg.knots = vec![0.0, 2.0, 5.0, 10.0];
-        Saved::new(Horizon::new(cfg.clone(), 8, &horizon::init_weights(&cfg, 3)), vocab).save(&repo_dir).unwrap();
+        Saved::new(Horizon::new(cfg.clone(), 8, &horizon::init_weights(&cfg, 3), &horizon::placement::Placement::Cpu), vocab).save(&repo_dir).unwrap();
         let manifest = brain_modelstore::CompoundManifest { id: "local/risk".into(), family: "horizon".into(), roles: [("weights".to_string(), ".".to_string())].into() };
         std::fs::write(repo_dir.join(brain_modelstore::MANIFEST_FILE), serde_json::to_vec(&manifest).unwrap()).unwrap();
 

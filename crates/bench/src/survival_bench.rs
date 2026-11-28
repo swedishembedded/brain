@@ -205,7 +205,8 @@ impl Fitted {
         let enc = |s: &[Subject]| -> Vec<Encoded> { s.iter().map(|x| encode(x, &vocab, &cfg)).collect() };
         let (enc_train, enc_held) = (enc(train), enc(held_out));
         let batch = 256;
-        let model = Horizon::new(cfg.clone(), batch, &horizon::init_weights(&cfg, seed));
+        // A benchmark runs in the brain process its `--device` configured.
+        let model = Horizon::new(cfg.clone(), batch, &horizon::init_weights(&cfg, seed), &horizon::placement::Placement::Process);
         let opts = ::model::FitOpts {
             steps: spec.steps,
             batch_size: batch,

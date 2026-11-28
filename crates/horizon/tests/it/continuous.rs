@@ -56,7 +56,7 @@ fn train(
         |s: &[Subject]| -> Vec<Encoded> { s.iter().map(|x| encode(x, vocab, &cfg)).collect() };
     let (enc_train, enc_held) = (enc(train), enc(held));
     let b = 256;
-    let model = Horizon::new(cfg.clone(), b, &horizon::init_weights(&cfg, 7));
+    let model = Horizon::new(cfg.clone(), b, &horizon::init_weights(&cfg, 7), &horizon::placement::Placement::Cpu);
     let opts = model::FitOpts {
         steps: 2000,
         batch_size: b,

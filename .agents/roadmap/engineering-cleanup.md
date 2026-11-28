@@ -110,6 +110,48 @@ independently. EC-4 is incremental, by class. EC-5 and EC-6 any time.
   is deleted), argv on the binaries. The allowlist shrinks with each class; class 5 stays listed with its reason.
 - **Safety net.** The env-read gate itself; per class, the tests that set the variable today rewritten to pass the
   parameter, run on CPU and CUDA.
+- **Progress (2026-11-28, class 1, the timeline models).**
+  - Done: `horizon` builds every model on an explicit `horizon::placement::Placement`. It is a parameter of
+    `Horizon::new`/`load`, `Saved::load`, `Ensemble::load`, `Loaded::load` and `TrainSpec::placement`, with the CPU
+    as the default.
+  - The SDK's `TimelineModel::load`/`TimelineEnsemble::load` load on the CPU, and `load_on` takes a placement.
+  - A capability action, a served model and the generic trainer build on `Placement::Process`, the set the
+    process's own `--device`/`--backend` published. A process nothing configured is refused by name; it never
+    falls back to the environment.
+  - The GPU parity test asks for a GPU by name and runs under `--ignored`.
+- **Remaining, measured.** A bare test binary still reaches the GPUs. With `CUDA_VISIBLE_DEVICES`, `BRAIN_DEVICE`
+  and `BRAIN_BACKEND` unset, the CPU-placed horizon tests opened a device on a card (nvidia-smi listed the
+  `brain-horizon` `it` binary for about 6 s), and 11 of its 59 tests failed. With `BRAIN_DEVICE=cpu
+  BRAIN_BACKEND=cpu` the same tests all pass, so code beside the model's own handle still resolves the ambient
+  set: `gpu_core::devices::ambient_compute_set` reads both variables when nothing was published, and resolving it
+  probes every card. Its callers in this path are not traced yet (`model::shard::compute_set(None)`, the device
+  registry, the memory-placement policy and `Gpu::wrap` are the candidates).
+- **Work list, in order:**
+  1. Make `ambient_compute_set` with nothing published the CPU, without probing or reading the environment, and
+     delete `resolve_ambient_compute_set`. `BRAIN_DEVICE` and `BRAIN_BACKEND` then have one reader left,
+     `resolve_cli_default_compute_set`'s warning, which can go with them.
+  2. Give the test binaries that steer devices through the environment an explicit seam. A
+     `brain_testutil::device()` helper set by the harness (argv after `--`, or a cfg feature per backend suite)
+     needs a decision first. The current steering is:
+     - the `Makefile` CPU suite (`BRAIN_DEVICE=cpu`, about line 1156) and the CUDA suite (`BRAIN_BACKEND`);
+     - `scripts/gates/parity-gate.sh` (gradcheck and `brain-model` gradchecks per backend);
+     - `perf-floor-gate.sh`, `forecast-parity-gate.sh`, `forecast-perf-gate.sh`, `qwen-serving-perf-gate.sh`,
+       `cuda-device.sh`;
+     - `scripts/test/ripple-gpu.sh`.
+  3. Rewrite the tests that read device variables themselves to take the seam and ask for a GPU by name under
+     `--ignored`:
+     - `BRAIN_DEV_GPU`: `wan` (`device_train`, `dev_grad`, `dev_lora_train`), `s3dit` (`dev_parity`,
+       `shard_parity`, `device_train`, `dev_grad`, `model_trait`, `shard_2card`, `lora_train`), `flux2`
+       (`int8_base_grads`, `variant_widths`);
+     - `BRAIN_VAE_DEVICE`: `vae` (`flux2_parity`, `encode_parity`, `sdxl_decode_parity`, `decode_parity`);
+     - `BRAIN_BACKEND`: `huginn` (`serve`, `decode`, `parity`), `ouro` (`forward`);
+     - `BRAIN_DEVICE`: `chronos2` (`timing`), `backend-cuda` (`tensormap_template`), `wan` (`gguf_direct_real`).
+  4. Give `brain-gradcheck`'s horizon cases a placement from the seam. They take `Placement::Process` for now,
+     like every other model it checks.
+  5. Then prove it: a bare `cargo test -p brain-horizon -p brain` (timeline and ensemble) and the client's timeline
+     tests show no process of theirs in nvidia-smi.
+  - Pre-existing and unrelated: `brain-catalog` `edgerock_served` and `ricursive_served` fail their prefix-cache
+    assertion on origin/main, and `make check/scripts` fails on origin/main.
 
 ## EC-5 The training-records contract, published by version (S, open)
 

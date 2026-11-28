@@ -28,10 +28,10 @@ fn predict_serves_what_the_saved_model_predicts() {
     cfg.d_ff = 32;
     cfg.rank = 8;
     cfg.knots = vec![0.0, 2.0, 5.0, 10.0];
-    let model = Horizon::new(cfg.clone(), 64, &horizon::init_weights(&cfg, 3));
+    let model = Horizon::new(cfg.clone(), 64, &horizon::init_weights(&cfg, 3), &horizon::placement::Placement::Cpu);
     let dir = std::env::temp_dir().join(format!("horizon-caps-{}", std::process::id()));
     Saved::new(model, vocab).save(&dir).unwrap();
-    let saved = Saved::load(&dir).unwrap();
+    let saved = Saved::load(&dir, &horizon::placement::Placement::Cpu).unwrap();
 
     let some = &subjects[..5];
     let jsonl: String = some
@@ -99,10 +99,10 @@ fn saved_in(name: &str, unit: &str) -> (std::path::PathBuf, Saved) {
     cfg.d_ff = 32;
     cfg.rank = 8;
     cfg.knots = vec![0.0, 2.0, 5.0, 10.0];
-    let model = Horizon::new(cfg.clone(), 64, &horizon::init_weights(&cfg, 3));
+    let model = Horizon::new(cfg.clone(), 64, &horizon::init_weights(&cfg, 3), &horizon::placement::Placement::Cpu);
     let dir = std::env::temp_dir().join(format!("horizon-caps-{name}-{}", std::process::id()));
     Saved::new(model, vocab).save(&dir).unwrap();
-    (dir.clone(), Saved::load(&dir).unwrap())
+    (dir.clone(), Saved::load(&dir, &horizon::placement::Placement::Cpu).unwrap())
 }
 
 const HISTORY: &str = r#"{"id": "p1", "as_of": 55.0, "calendar": 2000.5, "events": [

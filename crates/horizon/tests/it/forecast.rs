@@ -39,7 +39,7 @@ fn the_forecast_head_recovers_a_known_trajectory() {
     };
     let (enc_train, enc_held, enc_test) = (enc(&train), enc(&held_out), enc(&test));
     let b = 256;
-    let model = Horizon::new(cfg.clone(), b, &horizon::init_weights(&cfg, 5));
+    let model = Horizon::new(cfg.clone(), b, &horizon::init_weights(&cfg, 5), &horizon::placement::Placement::Cpu);
     let opts = model::FitOpts {
         steps: 3000,
         batch_size: b,

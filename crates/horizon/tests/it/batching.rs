@@ -35,7 +35,7 @@ fn saved(subjects: &[Subject]) -> Saved {
     cfg.d_ff = 32;
     cfg.rank = 8;
     cfg.knots = vec![0.0, 2.0, 5.0, 10.0];
-    let model = Horizon::new(cfg.clone(), BATCH, &horizon::init_weights(&cfg, 3));
+    let model = Horizon::new(cfg.clone(), BATCH, &horizon::init_weights(&cfg, 3), &horizon::placement::Placement::Cpu);
     Saved::new(model, vocab)
 }
 

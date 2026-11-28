@@ -154,7 +154,7 @@ fn a_trained_model_recovers_the_true_first_event_distribution() {
     let enc = |s: &[Subject]| -> Vec<Encoded> { s.iter().map(|s| encode(s, &vocab, &cfg)).collect() };
     let (enc_train, enc_test, enc_held) = (enc(&train), enc(&test), enc(&held_out));
     let b = 256;
-    let model = Horizon::new(cfg.clone(), b, &horizon::init_weights(&cfg, 7));
+    let model = Horizon::new(cfg.clone(), b, &horizon::init_weights(&cfg, 7), &horizon::placement::Placement::Cpu);
     let opts = model::FitOpts {
         steps: 2500,
         batch_size: b,

@@ -239,7 +239,7 @@ impl Ensemble {
     /// another format, a member directory other than `members/<index>`, a
     /// member whose weights do not match the recorded digest and members that
     /// do not share a vocabulary.
-    pub fn load(dir: &Path) -> Result<Ensemble, String> {
+    pub fn load(dir: &Path, placement: &crate::placement::Placement) -> Result<Ensemble, String> {
         let path = dir.join(MANIFEST_FILE);
         let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let manifest: Manifest = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -265,7 +265,7 @@ impl Ensemble {
                     record.weights_sha256
                 ));
             }
-            members.push(Saved::load(&member_dir)?);
+            members.push(Saved::load(&member_dir, placement)?);
         }
         let shared = serde_json::to_string(&members[0].vocab).map_err(|e| e.to_string())?;
         for (i, m) in members.iter().enumerate().skip(1) {
@@ -338,11 +338,11 @@ pub enum Loaded {
 
 impl Loaded {
     /// Load the model or ensemble in `dir`.
-    pub fn load(dir: &Path) -> Result<Loaded, String> {
+    pub fn load(dir: &Path, placement: &crate::placement::Placement) -> Result<Loaded, String> {
         if Ensemble::is_dir(dir) {
-            Ensemble::load(dir).map(Loaded::Ensemble)
+            Ensemble::load(dir, placement).map(Loaded::Ensemble)
         } else {
-            Saved::load(dir).map(Loaded::Single)
+            Saved::load(dir, placement).map(Loaded::Single)
         }
     }
 

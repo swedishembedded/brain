@@ -385,9 +385,9 @@ pub struct Horizon {
 }
 
 impl Horizon {
-    /// Build on the device `BRAIN_DEVICE` selects.
-    pub fn new(cfg: HorizonConfig, b: u32, init: &dyn checkpoint::TensorSource) -> Horizon {
-        Horizon::new_on(Gpu::new(&optim::with_moment_kernels(PIPELINES)), cfg, b, init)
+    /// Build on `placement`.
+    pub fn new(cfg: HorizonConfig, b: u32, init: &dyn checkpoint::TensorSource, placement: &crate::placement::Placement) -> Horizon {
+        Horizon::new_on(placement.open(&optim::with_moment_kernels(PIPELINES)), cfg, b, init)
     }
 
     /// Build on an existing device handle (created with [`PIPELINES`]).
@@ -1598,12 +1598,12 @@ impl Horizon {
         checkpoint::save(path, self.cfg.to_json(), &tensors);
     }
 
-    /// Load a checkpoint sized for batches of `b`.
+    /// Load a checkpoint sized for batches of `b`, built on `placement`.
     /// Streamed from the file's mapping one tensor at a time, never a whole-model host copy.
-    pub fn load(path: &str, b: u32) -> Result<Horizon, String> {
+    pub fn load(path: &str, b: u32, placement: &crate::placement::Placement) -> Result<Horizon, String> {
         let reader = checkpoint::weightio::WeightReader::open(path).map_err(|e| format!("horizon: open {path}: {e}"))?;
         let cfg = HorizonConfig::from_json(&reader.config())?;
-        Ok(Horizon::new(cfg, b, &reader))
+        Ok(Horizon::new(cfg, b, &reader, placement))
     }
 }
 
@@ -1653,11 +1653,12 @@ impl model::Model for Horizon {
 
     type Config = HorizonConfig;
 
+    // The generic trainer builds a model inside a brain process its flags configured.
     fn new(cfg: HorizonConfig, b: u32, _t: u32, init: &HashMap<String, Vec<f32>>) -> Self {
-        Horizon::new(cfg, b, init)
+        Horizon::new(cfg, b, init, &crate::placement::Placement::Process)
     }
     fn new_resident(cfg: HorizonConfig, b: u32, _t: u32, init: &HashMap<String, Vec<f32>>, resident: &model::resident_ft::ResidentFtConfig) -> Result<Self, String> {
-        Horizon::new_resident_on(Gpu::new(&optim::with_moment_kernels(PIPELINES)), cfg, b, init, resident)
+        Horizon::new_resident_on(crate::placement::Placement::Process.open(&optim::with_moment_kernels(PIPELINES)), cfg, b, init, resident)
     }
     fn init_weights(cfg: &HorizonConfig, seed: u64) -> HashMap<String, Vec<f32>> {
         crate::init::init_weights(cfg, seed)

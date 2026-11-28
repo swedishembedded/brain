@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
 //! Where one training step of the timeline model spends its time, on the
-//! device `BRAIN_BACKEND` selects: batch assembly on the host, the upload,
+//! device `--device` names (the CPU without it): batch assembly on the host, the upload,
 //! forward, backward and the optimiser step, each timed to completion, then
 //! (under `--kernel-profile`) the per-kernel table.
 //!
@@ -12,7 +12,7 @@
 //! synthetic population gives the device cost of real data.
 //!
 //! ```text
-//! cargo run --release -p brain-horizon --example step_profile [-- STEPS]
+//! cargo run --release -p brain-horizon --example step_profile [-- STEPS] [--device gpu0]
 //! ```
 
 use std::time::Instant;
@@ -25,10 +25,10 @@ use horizon::vocab::{FitOptions, Vocab};
 use horizon::{Horizon, HorizonConfig};
 
 fn main() {
-    let steps: usize = std::env::args()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(50);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let steps: usize = args.first().and_then(|s| s.parse().ok()).unwrap_or(50);
+    let (device, _) = gpu_core::devices::device_flags(&args).unwrap_or_else(|e| panic!("{e}"));
+    let placement = device.map_or(horizon::placement::Placement::Cpu, horizon::placement::Placement::Device);
     let (subjects, _) = population(4096, 1);
     let codes: Vec<String> = CODES.iter().map(|c| c.to_string()).collect();
     let vocab = Vocab::fit(&subjects, &codes, &codes[..2], &FitOptions::default()).expect("vocab");
@@ -37,7 +37,7 @@ fn main() {
     cfg.knots = (0..=20).map(|k| k as f32).collect();
     let b = 256u32;
     let enc: Vec<Encoded> = subjects.iter().map(|s| encode(s, &vocab, &cfg)).collect();
-    let model = Horizon::new(cfg.clone(), b, &horizon::init_weights(&cfg, 1));
+    let model = Horizon::new(cfg.clone(), b, &horizon::init_weights(&cfg, 1), &placement);
     let mut rng = Rng::new(7);
     let (mut host, mut upload, mut fwd, mut bwd, mut opt) = (0.0, 0.0, 0.0, 0.0, 0.0);
     for step in 0..steps {

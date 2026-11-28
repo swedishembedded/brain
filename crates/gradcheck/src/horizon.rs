@@ -88,7 +88,7 @@ fn build(seed: u64, additive: bool, next_events: bool) -> Horizon {
     assert!(additive || hb.value_state.contains(&1), "fixture hides an exact value");
     assert!(additive || hb.forecast_state.iter().any(|&s| s != 0), "fixture scores a forecast");
     let init = horizon::init_weights(&cfg, seed);
-    let model = Horizon::new(cfg, 4, &init);
+    let model = Horizon::new(cfg, 4, &init, &horizon::placement::Placement::Process);
     model.set_batch(&hb);
     model
 }
@@ -186,7 +186,7 @@ fn visits_model(seed: u64, slots: u32, configure: impl FnOnce(&mut HorizonConfig
     assert!(hb.value_state.contains(&1), "fixture hides a value");
     assert!(hb.visit_dt.iter().any(|&g| g > 0.0), "fixture has a gap between visits");
     let init = horizon::init_weights(&cfg, seed);
-    let model = Horizon::new(cfg, 4, &init);
+    let model = Horizon::new(cfg, 4, &init, &horizon::placement::Placement::Process);
     model.set_batch(&hb);
     model
 }

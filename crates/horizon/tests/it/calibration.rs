@@ -30,7 +30,7 @@ fn model(seed: u64, vocab: Vocab) -> Saved {
     cfg.d_ff = 32;
     cfg.rank = 8;
     cfg.knots = vec![0.0, 2.0, 5.0, 10.0];
-    let model = Horizon::new(cfg.clone(), 64, &horizon::init_weights(&cfg, seed));
+    let model = Horizon::new(cfg.clone(), 64, &horizon::init_weights(&cfg, seed), &horizon::placement::Placement::Cpu);
     Saved::new(model, vocab)
 }
 
@@ -74,7 +74,7 @@ fn a_calibration_survives_save_and_load_and_is_served() {
     let dir = scratch("roundtrip");
     saved.save(&dir).unwrap();
     assert!(dir.join("calibration.json").is_file());
-    let loaded = Saved::load(&dir).unwrap();
+    let loaded = Saved::load(&dir, &horizon::placement::Placement::Cpu).unwrap();
     let back = loaded.calibration.clone().expect("the calibration loads");
     assert_eq!(back.weights_sha256, cal.weights_sha256);
     let curves = loaded.predict(&validation[..40]).unwrap();
@@ -131,7 +131,7 @@ fn a_calibration_of_other_weights_is_refused_and_an_old_directory_loads_uncalibr
     let b = model(4, v);
     b.save(&dir_b).unwrap();
     std::fs::copy(dir_a.join("calibration.json"), dir_b.join("calibration.json")).unwrap();
-    let err = Saved::load(&dir_b).err().expect("refused");
+    let err = Saved::load(&dir_b, &horizon::placement::Placement::Cpu).err().expect("refused");
     assert!(err.contains("different model"), "{err}");
     // A model whose weights changed cannot be saved with the old calibration.
     let mut moved = model(4, vocab(&validation));
@@ -141,7 +141,7 @@ fn a_calibration_of_other_weights_is_refused_and_an_old_directory_loads_uncalibr
 
     // Without the file the directory is a valid, uncalibrated model.
     std::fs::remove_file(dir_b.join("calibration.json")).unwrap();
-    let old = Saved::load(&dir_b).unwrap();
+    let old = Saved::load(&dir_b, &horizon::placement::Placement::Cpu).unwrap();
     assert!(old.calibration.is_none());
     let inv = Invocation::new()
         .set("weights", json!(dir_b.to_string_lossy()))
@@ -200,7 +200,7 @@ fn a_logistic_calibration_survives_save_and_load_and_is_served_without_an_interv
     saved.save(&dir).unwrap();
     let file: Value = serde_json::from_slice(&std::fs::read(dir.join("calibration.json")).unwrap()).unwrap();
     assert_eq!(file["kind"], "logistic", "the kind is recorded in the file");
-    let back = Saved::load(&dir).unwrap().calibration.clone().expect("the calibration loads");
+    let back = Saved::load(&dir, &horizon::placement::Placement::Cpu).unwrap().calibration.clone().expect("the calibration loads");
     assert_eq!(back.kind, Kind::Logistic);
     let curves = saved.predict(&validation[..40]).unwrap();
     let jsonl: String = validation[..5].iter().map(|s| serde_json::to_string(s).unwrap() + "\n").collect();

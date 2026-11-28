@@ -28,11 +28,11 @@ fn round_trip(name: &str, configure: impl Fn(&mut HorizonConfig)) {
     cfg.rank = 8;
     cfg.knots = vec![0.0, 2.0, 5.0, 10.0];
     configure(&mut cfg);
-    let model = Horizon::new(cfg.clone(), 32, &horizon::init_weights(&cfg, 11));
+    let model = Horizon::new(cfg.clone(), 32, &horizon::init_weights(&cfg, 11), &horizon::placement::Placement::Cpu);
     let saved = Saved::new(model, vocab);
     let dir = std::env::temp_dir().join(format!("horizon-saved-{name}-{}", std::process::id()));
     saved.save(&dir).unwrap();
-    let loaded = Saved::load(&dir).unwrap();
+    let loaded = Saved::load(&dir, &horizon::placement::Placement::Cpu).unwrap();
     assert_eq!(loaded.model.cfg, saved.model.cfg, "{name}: the configuration travels with the weights");
 
     let enc = saved.encode(&subjects[..40]).unwrap();

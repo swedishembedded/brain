@@ -74,7 +74,7 @@ impl ResidentModel for HorizonResident {
     }
 
     fn activate(&self, _key: &InstanceKey, device: Device) -> Result<Box<dyn Instance>, String> {
-        let loaded = residency::on_device(device, || Loaded::load(&self.dir))??;
+        let loaded = residency::on_device(device, || Loaded::load(&self.dir, &horizon::placement::Placement::Process))??;
         Ok(Box::new(HorizonInstance { loaded }))
     }
 }
@@ -171,7 +171,7 @@ mod tests {
         cfg.d_ff = 32;
         cfg.rank = 8;
         cfg.knots = vec![0.0, 2.0, 5.0, 10.0];
-        let model = Horizon::new(cfg.clone(), 8, &horizon::init_weights(&cfg, 3));
+        let model = Horizon::new(cfg.clone(), 8, &horizon::init_weights(&cfg, 3), &horizon::placement::Placement::Cpu);
         let dir = std::env::temp_dir().join(format!("catalog-horizon-{}", std::process::id()));
         Saved::new(model, vocab).save(&dir).unwrap();
 

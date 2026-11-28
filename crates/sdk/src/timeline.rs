@@ -48,6 +48,7 @@ pub use horizon::forecast::{
     RiskStatus, DISCLAIMER,
 };
 pub use horizon::history::{HistoryWarning, PatientHistory};
+pub use horizon::placement::Placement;
 pub use horizon::saved::ModelIdentity;
 pub use horizon::support::{AssessOptions, Assessment, Support, Warning, DEFAULT_MAX_OOD_SCORE};
 pub use horizon::timeline::{AtRisk, Event, Observation, Subject, Value};
@@ -197,10 +198,15 @@ impl TimelineModel {
         Ok((TimelineModel { saved }, report))
     }
 
-    /// Load a model [`TimelineModel::save`] wrote.
+    /// Load a model [`TimelineModel::save`] wrote, on the CPU.
     pub fn load(dir: impl AsRef<Path>) -> Result<TimelineModel> {
+        Self::load_on(dir, &Placement::Cpu)
+    }
+
+    /// Load a model [`TimelineModel::save`] wrote, on `placement`.
+    pub fn load_on(dir: impl AsRef<Path>, placement: &Placement) -> Result<TimelineModel> {
         Ok(TimelineModel {
-            saved: Saved::load(dir.as_ref()).map_err(Error::Backend)?,
+            saved: Saved::load(dir.as_ref(), placement).map_err(Error::Backend)?,
         })
     }
 
@@ -495,10 +501,15 @@ impl TimelineEnsemble {
         Ok((TimelineEnsemble { inner }, reports))
     }
 
-    /// Load an ensemble [`TimelineEnsemble::save`] wrote, verifying every
-    /// member's weights against the recorded digest.
+    /// Load an ensemble [`TimelineEnsemble::save`] wrote, on the CPU, verifying
+    /// every member's weights against the recorded digest.
     pub fn load(dir: impl AsRef<Path>) -> Result<TimelineEnsemble> {
-        Ok(TimelineEnsemble { inner: Ensemble::load(dir.as_ref()).map_err(Error::Backend)? })
+        Self::load_on(dir, &Placement::Cpu)
+    }
+
+    /// [`TimelineEnsemble::load`] on `placement`.
+    pub fn load_on(dir: impl AsRef<Path>, placement: &Placement) -> Result<TimelineEnsemble> {
+        Ok(TimelineEnsemble { inner: Ensemble::load(dir.as_ref(), placement).map_err(Error::Backend)? })
     }
 
     /// Write the ensemble into `dir`, atomically. An existing ensemble

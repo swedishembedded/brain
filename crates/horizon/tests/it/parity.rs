@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Martin Schröder <info@swedishembedded.com>
 
-//! The device the environment selects (`BRAIN_BACKEND`) computes what the CPU
-//! backend computes: the same loss and every parameter's gradient, on one
-//! batch, for the set encoder and both visit backbones. Gradient checks hold
-//! each backend to finite differences of itself; this holds the backends to
-//! each other, so a kernel that is wrong in the same way as its own
-//! derivative on one device (a transpilation fault, a missing barrier) is
-//! still caught. On a machine whose selected device is the CPU it compares
-//! the CPU with itself.
+//! A GPU computes what the CPU backend computes: the same loss and every
+//! parameter's gradient, on one batch, for the set encoder and both visit
+//! backbones. Gradient checks hold each backend to finite differences of
+//! itself; this holds the backends to each other, so a kernel that is wrong in
+//! the same way as its own derivative on one device (a transpilation fault, a
+//! missing barrier) is still caught. It asks for a GPU by name, so it runs
+//! only when asked (`--ignored`) and fails, naming the missing adapter, on a
+//! machine without one.
 
 use data::rng::Rng;
 use gpu_core::Gpu;
@@ -51,7 +51,7 @@ fn models(visits: u32, backbone: Backbone) -> (Horizon, Horizon) {
     let hb = assemble(&cfg, &refs, 32, 0.4, &mut Rng::new(data::rng::random_seed()));
     let init = horizon::init_weights(&cfg, 3);
     let cpu = Horizon::new_on(Gpu::new_cpu(PIPELINES), cfg.clone(), 32, &init);
-    let dev = Horizon::new(cfg, 32, &init);
+    let dev = Horizon::new(cfg, 32, &init, &horizon::placement::Placement::Device("gpu".into()));
     for m in [&cpu, &dev] {
         m.set_batch(&hb);
         m.zero_grads();
@@ -60,10 +60,8 @@ fn models(visits: u32, backbone: Backbone) -> (Horizon, Horizon) {
 }
 
 #[test]
-fn the_selected_device_matches_the_cpu() {
-    if brain_testutil::gpu_tests_skipped() {
-        return;
-    }
+#[ignore = "opens a GPU: run with --ignored on a machine with a free one"]
+fn a_gpu_matches_the_cpu() {
     for (visits, backbone) in [
         (0, Backbone::State),
         (3, Backbone::State),

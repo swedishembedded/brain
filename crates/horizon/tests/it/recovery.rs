@@ -72,7 +72,7 @@ fn recovers(additive: bool) {
     let enc_test: Vec<Encoded> = test.iter().map(|s| encode(s, &vocab, &cfg)).collect();
     let enc_held: Vec<Encoded> = held_out.iter().map(|s| encode(s, &vocab, &cfg)).collect();
     let b = 256;
-    let model = Horizon::new(cfg.clone(), b, &horizon::init_weights(&cfg, 7));
+    let model = Horizon::new(cfg.clone(), b, &horizon::init_weights(&cfg, 7), &horizon::placement::Placement::Cpu);
     // Early stopping on the held-out event NLL, keeping the best model: the
     // procedure a real run uses, without which the model memorises training
     // subjects and its predictions on new ones drift low.

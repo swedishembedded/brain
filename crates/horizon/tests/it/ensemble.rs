@@ -101,7 +101,7 @@ fn a_seeded_ensemble_saves_loads_and_predicts_identically() {
     let path = dir.join("ensemble");
     ensemble.save(&path, false).unwrap();
     assert!(ensemble.save(&path, false).unwrap_err().contains("already exists"));
-    let loaded = Ensemble::load(&path).unwrap();
+    let loaded = Ensemble::load(&path, &horizon::placement::Placement::Cpu).unwrap();
     assert_eq!(loaded.manifest(), ensemble.manifest());
     let (before, after) = (predict(&ensemble, &request(&test)).unwrap(), predict(&loaded, &request(&test)).unwrap());
     assert_eq!(lines(&before), lines(&after), "a saved and loaded ensemble predicts identically");
@@ -134,7 +134,7 @@ fn a_seeded_ensemble_saves_loads_and_predicts_identically() {
         .run(&request(&test).set("weights", json!(path.to_string_lossy())), &mut |_| {})
         .unwrap();
     assert_eq!(lines(&served), lines(&before));
-    assert!(matches!(Loaded::load(&path).unwrap(), Loaded::Ensemble(_)));
+    assert!(matches!(Loaded::load(&path, &horizon::placement::Placement::Cpu).unwrap(), Loaded::Ensemble(_)));
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -151,14 +151,14 @@ fn a_member_that_is_not_the_one_trained_is_refused() {
     ensemble.save(&path, false).unwrap();
     // Swap member 1's weights for member 0's: a valid model, the wrong one.
     std::fs::copy(path.join("members/0/model.safetensors"), path.join("members/1/model.safetensors")).unwrap();
-    let err = Ensemble::load(&path).err().expect("refused");
+    let err = Ensemble::load(&path, &horizon::placement::Placement::Cpu).err().expect("refused");
     assert!(err.contains("member 1") && err.contains("manifest records"), "{err}");
 
     // A manifest cannot point outside the ensemble.
     ensemble.save(&path, true).unwrap();
     let text = std::fs::read_to_string(path.join(MANIFEST_FILE)).unwrap();
     std::fs::write(path.join(MANIFEST_FILE), text.replace("members/1", "../elsewhere")).unwrap();
-    assert!(Ensemble::load(&path).err().unwrap().contains("expected"));
+    assert!(Ensemble::load(&path, &horizon::placement::Placement::Cpu).err().unwrap().contains("expected"));
 
     // Only an ensemble directory is replaced.
     let other = dir.join("other");
@@ -188,7 +188,7 @@ fn a_bootstrap_ensemble_records_the_groups_each_member_drew() {
     assert_ne!(draws[0], draws[1]);
     let dir = scratch("bootstrap");
     ensemble.save(&dir.join("e"), false).unwrap();
-    assert_eq!(Ensemble::load(&dir.join("e")).unwrap().manifest(), manifest);
+    assert_eq!(Ensemble::load(&dir.join("e"), &horizon::placement::Placement::Cpu).unwrap().manifest(), manifest);
     std::fs::remove_dir_all(&dir).ok();
 }
 
