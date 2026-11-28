@@ -236,15 +236,9 @@ fn bad_requests_fail_alone_with_the_field_named() {
     assert!(session.run_batch("extract", &[boxy]).pop().unwrap().is_err());
 }
 
-/// Device memory this process holds, in MiB, as the driver reports it (`nvidia-smi` lists compute processes).
+/// Device memory this process holds, in MiB, as the driver reports it.
 fn process_device_mib() -> Option<u64> {
-    let out = std::process::Command::new("nvidia-smi").args(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"]).output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let pid = std::process::id().to_string();
-    text.lines().find_map(|l| {
-        let (p, mib) = l.split_once(',')?;
-        (p.trim() == pid).then(|| mib.trim().parse().ok()).flatten()
-    })
+    brain_testutil::device::driver_process_mib()
 }
 
 /// Dropping the session (what unloading an instance does) hands the weights and the batch buffers back to the card.
@@ -259,7 +253,7 @@ fn dropping_the_session_releases_device_memory() {
     let Some((rgb, _, _)) = cats() else { return };
     let _exclusive = gpu_core::testgpu::exclusive();
     let context = gpu_core::Gpu::new(&Device::kernels());
-    if context.kind() != "cuda" || process_device_mib().is_none() && std::process::Command::new("nvidia-smi").output().is_err() {
+    if context.kind() != "cuda" {
         brain_testutil::skip_unavailable("serving unload: needs the CUDA backend and nvidia-smi");
         return;
     }

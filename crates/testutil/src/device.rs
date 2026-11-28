@@ -109,3 +109,48 @@ macro_rules! configure_test_binary {
         };
     };
 }
+
+/// Device memory in use on `card` (the canonical index `gpu<card>`, which is also the NVIDIA driver's PCI-ordered
+/// index), in MiB, as the driver reports it; `None` without `nvidia-smi` or for a card it does not list. For a test
+/// that measures what it allocated on a card the harness named: it never looks at another card.
+pub fn driver_used_mib(card: u32) -> Option<u64> {
+    driver_query(card, "memory.used")
+}
+
+fn driver_query(card: u32, field: &str) -> Option<u64> {
+    let out = std::process::Command::new("nvidia-smi")
+        .args([format!("--query-gpu={field}").as_str(), "--format=csv,noheader,nounits", "-i", &card.to_string()])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+/// Free device memory on `card`, in MiB, as the driver reports it; `None` as [`driver_used_mib`].
+pub fn driver_free_mib(card: u32) -> Option<u64> {
+    driver_query(card, "memory.free")
+}
+
+/// Device memory this process holds across the cards, in MiB, as the driver lists its compute processes; `None`
+/// without `nvidia-smi` or when it lists no allocation of this process.
+pub fn driver_process_mib() -> Option<u64> {
+    let out = std::process::Command::new("nvidia-smi")
+        .args(["--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()?;
+    let pid = std::process::id().to_string();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| {
+            let (p, mib) = l.split_once(',')?;
+            (p.trim() == pid).then(|| mib.trim().parse::<u64>().ok()).flatten()
+        })
+        .reduce(|a, b| a + b)
+}
+
+/// The cards the harness named, by index: the ones a memory measurement may read.
+pub fn cards() -> Vec<u32> {
+    device().set.gpus.clone()
+}

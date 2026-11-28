@@ -294,7 +294,7 @@ fn build_and_forward(cfg: &WanConfig, src: &dyn checkpoint::TensorSource, f: u32
     (out, block_taps)
 }
 
-/// Real device memory (`nvidia-smi`) on EVERY GPU index the box has, queried
+/// Real device memory (`nvidia-smi`) on every card the harness named, queried
 /// externally rather than trusting any in-process accounting.
 ///
 /// NOT indexed by the `gpu<i>` index alone: brain's own device registry order
@@ -305,17 +305,9 @@ fn build_and_forward(cfg: &WanConfig, src: &dyn checkpoint::TensorSource, f: u32
 /// actually changed (`dominant_delta`) is the same fix that test applies,
 /// not a new pattern invented here.
 fn gpu_mem_all_used_mib() -> Vec<(u32, u64)> {
-    (0..8u32)
-        .filter_map(|i| {
-            let out = std::process::Command::new("nvidia-smi")
-                .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits", "-i", &i.to_string()])
-                .output()
-                .ok()?;
-            if !out.status.success() {
-                return None;
-            }
-            String::from_utf8_lossy(&out.stdout).trim().parse().ok().map(|m| (i, m))
-        })
+    brain_testutil::device::cards()
+        .into_iter()
+        .filter_map(|i| brain_testutil::device::driver_used_mib(i).map(|m| (i, m)))
         .collect()
 }
 

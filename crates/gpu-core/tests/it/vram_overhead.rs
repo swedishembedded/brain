@@ -86,31 +86,21 @@
 //!   5. Same probe, wgpu vs. brain's native Vulkan backend — the one that
 //!      actually resolved the question (see "Result" above).
 
-use std::process::Command;
 use std::time::Duration;
 
 use gpu_core::{BufUsage, Gpu};
 
 const KERNELS: &[(&str, &str)] = &[];
-/// This box has two P40s; a probe checks every index present so it never
-/// silently reads a delta of zero because a backend enumerated cards in a
-/// different order than `nvidia-smi` (which is exactly how probe 5's finding
-/// was made: brain's native Vulkan backend put its buffer on index 1).
-const GPU_INDICES: &[u32] = &[0, 1];
-
-fn nvidia_smi_used_mib(index: u32) -> Option<u64> {
-    let out = Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.used", "--format=csv,noheader,nounits", "-i", &index.to_string()])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
-}
-
+/// A probe checks every card the harness named, so it never silently reads a
+/// delta of zero because a backend enumerated cards in a different order than
+/// `nvidia-smi` (which is exactly how probe 5's finding was made: brain's
+/// native Vulkan backend put its buffer on index 1). Run it with
+/// `BRAIN_TEST_DEVICE` naming every card it may read (e.g. `gpu0,gpu1:vulkan`).
 fn nvidia_smi_all_used_mib() -> Vec<(u32, u64)> {
-    GPU_INDICES.iter().filter_map(|&i| nvidia_smi_used_mib(i).map(|m| (i, m))).collect()
+    brain_testutil::device::cards()
+        .into_iter()
+        .filter_map(|i| brain_testutil::device::driver_used_mib(i).map(|m| (i, m)))
+        .collect()
 }
 
 /// Settle time for the driver's memory accounting to catch up with an
@@ -303,10 +293,7 @@ fn print_row(p: &Probe) {
 #[test]
 #[ignore]
 fn measure_storage_buffer_resident_overhead() {
-    if Command::new("nvidia-smi").arg("-L").output().map(|o| !o.status.success()).unwrap_or(true) {
-        brain_testutil::skip_unavailable("nvidia-smi not available");
-        return;
-    }
+    let _ = brain_testutil::device::gpu();
     let Some(card) = gpu_core::testgpu::cards().first().map(|d| d.index) else {
         brain_testutil::skip_unavailable("no card selected (BRAIN_DEVICE)");
         return;

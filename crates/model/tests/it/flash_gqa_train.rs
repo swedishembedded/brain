@@ -355,9 +355,10 @@ struct PeakMemory {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+/// Memory in use on the card the harness named, which the test asks for explicitly.
 fn card_used_mib() -> u64 {
-    let out = std::process::Command::new("nvidia-smi").args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"]).output().expect("nvidia-smi must run for the memory check");
-    String::from_utf8_lossy(&out.stdout).trim().parse().expect("nvidia-smi memory.used")
+    let card = *brain_testutil::device::gpu().set.gpus.first().expect("the harness named a card");
+    brain_testutil::device::driver_used_mib(card).expect("nvidia-smi reports the card's memory for the memory check")
 }
 
 impl PeakMemory {
@@ -422,7 +423,7 @@ fn timed_layer(g: &Gpu, shape: &GqaMixerShape, x: &MixerInputs, flash: bool, rea
 /// alone at 16384 (finite, memory linear in T) and 32768, printing ms per
 /// forward+backward layer so a step time can be predicted.
 #[test]
-#[ignore = "needs a CUDA device and ~20 GiB of it; run through `gpu` with BRAIN_BACKEND=cuda"]
+#[ignore = "needs a CUDA device and ~20 GiB of it; run with BRAIN_TEST_DEVICE=gpu0:cuda"]
 fn real_width_flash_mixer_on_cuda() {
     let g = Gpu::new(KERNELS);
     assert_eq!(gpu_core::backend_name(), "cuda", "this test measures the CUDA backend; set BRAIN_BACKEND=cuda");

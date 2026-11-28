@@ -255,13 +255,11 @@ fn median_group(instance: &mut Box<dyn Instance>, n: usize) -> Duration {
     took[n / 2]
 }
 
-/// Device memory in use across every card, in MiB, as the driver reports
-/// it (`None` without `nvidia-smi`). The difference across a build is what
-/// that build holds, while nothing else allocates on the cards.
+/// Device memory in use across the cards the harness named, in MiB, as the
+/// driver reports it (`None` without `nvidia-smi`). The difference across a
+/// build is what that build holds, while nothing else allocates on the cards.
 fn cards_used_mib() -> Option<u64> {
-    let out = std::process::Command::new("nvidia-smi").args(["--query-gpu=memory.used", "--format=csv,noheader,nounits"]).output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    text.lines().map(|l| l.trim().parse::<u64>().ok()).sum()
+    brain_testutil::device::cards().into_iter().map(brain_testutil::device::driver_used_mib).sum()
 }
 
 /// Resident host memory of `pid`, in MiB.

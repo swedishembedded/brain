@@ -56,15 +56,13 @@ fn env_usize(k: &str, def: usize) -> usize {
     std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(def)
 }
 
-/// Per-card `used MiB` from nvidia-smi (best-effort; empty on failure).
+/// `used MiB` of each card the harness named, from the driver (best-effort; empty without one).
 fn gpu_mem() -> String {
-    std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=index,memory.used", "--format=csv,noheader"])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.replace('\n', " | "))
-        .unwrap_or_default()
+    brain_testutil::device::cards()
+        .into_iter()
+        .filter_map(|c| brain_testutil::device::driver_used_mib(c).map(|m| format!("gpu{c} {m} MiB")))
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 fn argmax(s: &[f32]) -> usize {

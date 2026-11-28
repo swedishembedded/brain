@@ -38,22 +38,9 @@ fn mib(b: u64) -> f64 {
 /// already living there.
 fn card_with_room(want_mib: u64) -> Option<String> {
     // Only a card the harness named (BRAIN_TEST_DEVICE): the others belong to someone else on a shared node.
-    if !brain_testutil::device::device().is_gpu() {
-        return None;
-    }
-    let out = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=index,memory.free", "--format=csv,noheader,nounits"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| {
-            let mut it = l.split(',').map(str::trim);
-            Some((it.next()?.parse::<u32>().ok()?, it.next()?.parse::<u64>().ok()?))
-        })
+    brain_testutil::device::cards()
+        .into_iter()
+        .filter_map(|c| brain_testutil::device::driver_free_mib(c).map(|free| (c, free)))
         .max_by_key(|&(_, free)| free)
         .filter(|&(_, free)| free > want_mib)
         .map(|(i, _)| format!("gpu{i}"))
