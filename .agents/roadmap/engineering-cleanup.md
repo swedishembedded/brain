@@ -175,19 +175,23 @@ independently. EC-4 is incremental, by class. EC-5 and EC-6 any time.
   - `scripts/test/ripple-gpu.sh cargo` with `DEVICE=gpu0`;
   - `make test/gpu/ripple/...`;
   - `QWEN_SERVING_PERF_DEVICE=gpu0 scripts/gates/qwen-serving-perf-gate.sh` and the forecast perf gate on a GPU.
-- **Left, not done:**
-  - Tests that pick a card from nvidia-smi themselves, outside the harness's selection: `cli` (`worker_hosted_lfm`),
-    `gpu-core` (`vram_overhead`), `model` (`flash_gqa_train`), `mirage` (`serving`), `qwen3` (`integration_qwen3`),
-    `wan` (`gguf_direct_real`).
-  - Tests that still set `BRAIN_DEVICE=cpu`, now a no-op that follows the harness: `fastvlm` (`parity`,
-    `train_smoke`), `qwen3vl` (`parity`, `train_smoke`), `catalog` (`resident_llm`), `deepseek2ocr`/`deepseekocr2`
-    (`real_vision`), `sam1` (`parity`), `clip` (`deepseek_ocr_real`). Each should build on the CPU explicitly, or
-    ask the harness.
-  - `vae`'s `footprint::the_encode_estimate_brackets_what_the_encode_really_allocates` over-reports at 512x512 (1883
-    against 1192 MiB). It failed before this change too; it now runs only on a card the harness names.
-  - `horizon`'s `lifecycle::train_eval_calibrate_predict_through_the_capability_layer` and
-    `recovery::a_trained_model_recovers_the_true_cumulative_incidence` failed once each under a loaded
-    full-package run and passed alone twice: random-seeded training outcomes.
+- **Leftovers closed (2026-11-28).**
+  - The tests that measured device memory with nvidia-smi now read only the cards the harness named
+    (`brain_testutil::device::{cards, driver_used_mib, driver_free_mib, driver_process_mib}`). The ones that need a
+    card ask for it (`device::gpu()`).
+  - The tests that set the dead `BRAIN_DEVICE=cpu` build in `gpu_core::backend_scope(Backend::Cpu)` instead. That
+    removes nine allowlisted environment accesses. The env-writes allowlist does not list test code, so it was
+    already two entries and did not shrink.
+  - `horizon`'s recovery and lifecycle training tests run at fixed, reasoned seeds. Twelve runs, four at a time on
+    the CPU, gave identical numbers and all passed.
+  - The VAE encode over-estimate (1883 against 1192 MiB at 512x512) was not an estimator error. With the cards
+    hidden, the footprint test had picked a card from nvidia-smi itself and built the CPU graph. That graph keeps
+    about four buffers a level; the module's own note says it is a smaller graph than the GPU one, which the
+    constants are calibrated on (5.8 to 6.0 a level). The test now runs only on a card the harness names.
+- **The card run must check:** `BRAIN_TEST_DEVICE=gpu0:cuda cargo test --release -p brain-vae --test it footprint --
+  --include-ignored`. The encode bracket from 512x512 to 1280x960 must hold `real <= pred <= 1.5 * real`.
+- **Still to do:** test docs that still say `BRAIN_DEVICE=gpuN BRAIN_BACKEND=cuda` in prose (about 50 lines under
+  `crates/*/tests`) should say `BRAIN_TEST_DEVICE=gpuN:cuda`.
 
 ## EC-5 The training-records contract, published by version (S, open)
 
